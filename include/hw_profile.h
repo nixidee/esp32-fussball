@@ -116,6 +116,19 @@ inline constexpr bool usesReservedPin(const UsedPins& used,
   return false;
 }
 
+// True if a used GPIO is not in the board's list of usable (header) pins.
+inline constexpr bool usesPinOutside(const UsedPins& used,
+                                     std::span<const int> allowed) {
+  for (std::size_t i = 0; i < used.size; ++i) {
+    bool found = false;
+    for (int a : allowed) {
+      if (used.pin[i] == a) found = true;
+    }
+    if (!found) return true;
+  }
+  return false;
+}
+
 // mask: bit n set = GPIO n usable (SOC_GPIO_VALID_*_MASK of the chip).
 inline constexpr bool isGpioIn(int pin, uint64_t mask) {
   return pin >= 0 && pin < 64 && ((mask >> pin) & 1U) != 0;

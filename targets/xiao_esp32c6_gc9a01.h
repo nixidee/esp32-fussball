@@ -33,4 +33,10 @@ inline constexpr TargetProfile kTarget{
     .inputs = kXiaoEsp32C6Gc9a01Inputs,
 };
 
+// Board-usable pin rule for this board (the generic checks in hw_target.h
+// only know chip-valid and reserved pins).
+static_assert(!usesPinOutside(usedPins(kTarget), kXiaoEsp32C6HeaderPins),
+              "display wiring or an input uses a GPIO that is not on the XIAO "
+              "ESP32-C6 header (D0-D10)");
+
 }  // namespace hw

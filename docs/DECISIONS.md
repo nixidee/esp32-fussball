@@ -41,8 +41,8 @@ insufficient, the XIAO ESP32-S3 is the fallback board.
 **Alternatives:** LovyanGFX (C6 not listed as supported in its README, 2026-10-08); own band
 renderer (re-implements compositing, fonts, JPEG).
 **Consequences:** display drivers are swappable per display profile.
-**Refinement:** ADR-013 adds the accepted port-patch and failure-lifetime
-contract; the existing port remains part of the display stack.
+**Refinement:** ADR-015 (superseding ADR-013) adds the failure-lifetime and
+recovery contract; the existing port remains part of the display stack, unpatched.
 
 ## ADR-004 — Hardware profiles: board + display + target · Accepted 2026-10-08
 **Decision:** compile-time profiles in `boards/`, `displays/`,
@@ -203,9 +203,10 @@ fragmentation/largest blocks, flash and relevant storage quotas under allowed
 concurrent workloads. "No log history" does not mean "zero connection RAM".
 Concrete limits are established by the affected module's design and tests.
 
-## ADR-013 — Reproducibly maintained display-port patch · Accepted 2026-10-08
+## ADR-013 — Reproducibly maintained display-port patch · Superseded by ADR-015
 
-Extends ADR-003. Patch implementation and fault verification are pending.
+Accepted 2026-10-08, superseded 2026-10-09 before any patch was implemented.
+Extends ADR-003.
 
 **Context:** asynchronous display transfers keep DMA (direct memory access)
 readers alive after submission. Errors, partial submission and teardown need
@@ -247,3 +248,36 @@ same explicit identity and correction contracts.
 capacity tests. No mapping representation, conflict algorithm or concrete
 capacity is selected by this decision. Views continue to receive only the
 canonical model.
+
+## ADR-015 — Display failure handling without port patch · Accepted 2026-10-09
+
+Supersedes ADR-013. Extends ADR-003. Design details and fault verification are
+pending; this records the direction, not a completed fix.
+
+**Context:** the pinned `esp_lvgl_port` does not complete LVGL's flush on a
+failed draw and leaks its draw buffers when display creation fails. ESP-IDF SPI
+panel IO waits without timeout for bus acquisition and transfer completion, so
+a hang cannot be bounded from inside a callback. A port patch would only be
+required to reinitialize the display locally without restarting.
+
+**Decision:** keep the managed port unchanged. Hybrid recovery: known errors
+with no transfer in flight are handled locally; hangs and unclear states end in
+a task-watchdog panic restart, bounded against boot loops. The own GC9A01 driver
+handles failed draws: a following command waits until earlier transfers have
+finished, then LVGL is told the flush is complete, the error is counted and the
+area is redrawn. Before adding the display to the port, the firmware checks
+that enough DMA-capable memory is free; if the port still fails, the device
+restarts in a controlled way. LVGL pool exhaustion is caught by its allocation
+assertion and also leads to a controlled restart. Exact deadlines, the
+repeated-failure bound and the required ESP-IDF/LVGL settings are decided in the
+display failure design before implementation.
+
+**Alternatives:** maintained port patch with local reinitialization (more
+maintenance; still needs bounded SPI waits); own LVGL glue replacing the port
+(full control; larger change of ADR-003).
+
+**Consequences:** no third-party source is modified or mirrored. Port-internal
+allocation failures are not retried locally; leaked memory is reclaimed by the
+restart. Task-watchdog panic applies to every watched task, not only the
+display. Costs (driver state, watchdog entry, assertion code) are measured in
+the implementing build. An upstream bug report for the port is recommended.

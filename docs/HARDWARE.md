@@ -39,11 +39,15 @@ Hardware facts are kept separate and combined per target (compile-time
   ESP-IDF); no GPIO used twice; no reserved GPIO used. Verified 2026-10-08
   with deliberate wrong assignments (duplicate, reserved, non-existent GPIO,
   missing SCLK) — each fails the build with its message.
-- The current guards check chip-valid pins and the board's reserved list;
-  they do not yet prove that every allowed pin is usable on the board header.
-  A board-usable-pin rule is planned before integration acceptance. On the
-  XIAO C6 it must reject flash GPIO24–30 even though the SoC masks permit them.
-  The confirmed wiring below does not use those GPIOs and is not being remapped.
+- Board-usable pins: chip masks also accept GPIOs the board does not expose.
+  A board header may therefore list its usable pins, and its target asserts
+  that display wiring and inputs use only those (`hw::usesPinOutside`).
+  XIAO ESP32-C6: `kXiaoEsp32C6HeaderPins` = header map D0–D10 (GPIO0, 1, 2,
+  16–23); this rejects flash GPIO24–30, JTAG pads 6/7 and GPIO10/11 (absent in
+  the fitted QFN32 package). Verified 2026-10-09: GPIO24, 6 and 10 as input
+  each fail the build; the valid wiring builds with unchanged size. Antenna
+  GPIO3/14 are board capabilities, not wiring. Other boards do not have such a
+  list yet; each gets one when its profile is (re)activated.
 - `app_main` logs the selected profile at boot.
 
 New target: board/display header if new, target header, sdkconfig file,

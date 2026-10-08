@@ -90,24 +90,29 @@
   to be designed; current external LVGL calls hold the mutex.
 
 ## Display fault handling (planned before integration acceptance)
-- Keep the current display stack. A limited, reproducibly maintained patch
-  of the pinned `esp_lvgl_port` will cover its flush-error and low-memory
-  paths; generated managed-component files are not the source of the patch.
-  Patch storage and the exact recovery mechanism must be decided before
-  implementing it.
+- Keep the current display stack, with `esp_lvgl_port` unchanged (ADR-015).
+  The own GC9A01 driver handles failed draws: wait for earlier transfers via
+  a following command, then report the flush complete to LVGL, count the error
+  and redraw. A DMA-memory check precedes display creation; port or LVGL pool
+  allocation failures lead to a controlled restart. Hangs and unclear states
+  end in a task-watchdog panic restart, bounded against boot loops. Exact
+  deadlines and settings are fixed in the design before implementation.
 - Every submitted colour transfer needs a bounded completion/error contract.
   SPI panel IO can split a large colour transfer into smaller transactions;
   this does not make the caller's buffer safe to free on an error. In
   particular, partial submission may leave DMA reading it. Completion must
   be confirmed before releasing/reusing buffers, cleaning up or reinitializing.
-- Initialization needs resource ownership and reverse-order cleanup for
-  every failure stage, including the port, display context, both draw buffers
-  and boot objects. Failed command/submission and missing/late callbacks must
-  lead to a defined recoverable state without keeping LVGL's mutex forever.
+- Own initialization code needs resource ownership and reverse-order cleanup
+  for every failure stage (panel IO, panel, boot objects). Allocation failures
+  inside the port or LVGL (display context, draw buffers) are not retried
+  locally; they end in the controlled restart. Failed command/submission and missing/late callbacks must
+  lead to a defined recoverable state or the bounded restart, without keeping
+  LVGL's mutex forever.
 - Validate profile geometry, SPI mode/clock and bitmap ranges before using
   them; keep controller software state consistent with successful writes.
-  Fault-injection acceptance covers each allocation stage, partial transfers
-  and safe retry. These are required repairs, not claimed device results.
+  Fault-injection acceptance covers each allocation stage, partial transfers,
+  local retry where allowed and the restart path otherwise. These are
+  required repairs, not claimed device results.
 
 ## Memory strategy (C6 has no PSRAM)
 - Fixed-capacity model containers, allocated once.

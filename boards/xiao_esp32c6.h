@@ -15,6 +15,12 @@ namespace hw {
 // 4, 5, 8, 9: strapping; 12, 13: USB D-/D+ (console, USB-Serial/JTAG).
 inline constexpr int kXiaoEsp32C6Reserved[] = {3, 14, 15, 4, 5, 8, 9, 12, 13};
 
+// GPIOs on the header pads D0-D10 (docs/HARDWARE.md → Header map). Display
+// wiring and inputs must use these: the SoC masks also accept flash GPIO24-30,
+// JTAG pads 6/7 and GPIO10/11, which the fitted QFN32 package lacks.
+inline constexpr int kXiaoEsp32C6HeaderPins[] = {0,  1,  2,  21, 22, 23,
+                                                 16, 17, 19, 20, 18};
+
 inline constexpr BoardProfile kBoard{
     .name = "Seeed XIAO ESP32-C6",
     .reserved_pins = kXiaoEsp32C6Reserved,
