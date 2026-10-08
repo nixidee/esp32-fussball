@@ -5,6 +5,9 @@ idf_component_register(
     "boot_screen.cpp"
   INCLUDE_DIRS
     "include"
+  PRIV_INCLUDE_DIRS
+    "../../include"
   PRIV_REQUIRES
+    geometry
     lvgl__lvgl
 )

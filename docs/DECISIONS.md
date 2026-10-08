@@ -41,6 +41,8 @@ insufficient, the XIAO ESP32-S3 is the fallback board.
 **Alternatives:** LovyanGFX (C6 not listed as supported in its README, 2026-10-08); own band
 renderer (re-implements compositing, fonts, JPEG).
 **Consequences:** display drivers are swappable per display profile.
+**Refinement:** ADR-013 adds the accepted port-patch and failure-lifetime
+contract; the existing port remains part of the display stack.
 
 ## ADR-004 — Hardware profiles: board + display + target · Accepted 2026-10-08
 **Decision:** compile-time profiles in `boards/`, `displays/`,
@@ -55,6 +57,9 @@ capability flags; OpenLigaDB default; API-Football and ESPN optional; routing
 per competition (P9). Club selected per provider for the start; the
 structure allows adding a canonical club mapping later with small changes.
 **Consequences:** presenters/views never depend on a provider.
+**Refinement:** ADR-014 supersedes the assurance that canonical club mapping
+can be added with small changes. Cross-provider identity is a design gate,
+not an assumed low-cost extension.
 
 ## ADR-006 — Web UI embedded in firmware · Accepted 2026-10-08
 **Context:** separate filesystem uploads can leave UI and firmware out of sync.
@@ -66,6 +71,8 @@ uploaded via the Web UI; default images are updated only over USB
 mismatch).
 **Consequences:** larger app image (matters on the C6; to be measured); one
 OTA updates firmware and UI together.
+**Refinement:** ADR-011 defines the shared-filesystem and development USB
+replacement policy; ADR-012 bounds the planned debug transport.
 
 ## ADR-007 — Settings: single config header + device persistence · Accepted 2026-10-08
 **Decision:** `include/app_config.h` holds every default, limit and
@@ -82,6 +89,9 @@ Requirements (2026-10-08):
 - `include/secrets.h` is **optional**: the build never fails without it.
   Missing values fall back to the defaults in `app_config.h` (no WiFi →
   setup AP; no club/league → default image).
+
+**Refinement:** ADR-011 adds whole-model consistency and trial-OTA storage
+compatibility. These are requirements for the planned settings service.
 
 ## ADR-008 — Image pipeline: browser composes, device stores · Accepted 2026-10-08
 **Decision:** the browser renders the final image at device
@@ -129,3 +139,111 @@ file in the project root (target facts spread over two places).
 `sdkconfig.defaults` changes → after editing a target file delete
 `sdkconfig.<env>`. Verified 2026-10-08: generated sdkconfig of both envs
 identical before and after the move.
+
+## ADR-011 — Shared storage, consistent settings and local OTA acceptance · Accepted 2026-10-08
+
+Extends ADR-006 and ADR-007. These service contracts are planned, not
+implemented by this documentation change.
+
+**Context:** both OTA app slots share NVS and LittleFS. Rolling back firmware
+does not revert settings or image files. NVS persistence for individual keys
+does not by itself guarantee one consistent complete settings model. USB
+`uploadfs` replaces a filesystem image rather than merging individual files.
+
+**Decision:** NVS remains the settings store. Saves publish a complete,
+validated settings generation; interruption must yield either the previous
+complete model or the new complete model. Reset clears all persisted settings,
+including obsolete migration state, and optionally deletes user images only
+when explicitly selected. A filesystem mount fault never triggers automatic
+formatting.
+
+Routine firmware OTA preserves NVS and LittleFS images. During a trial boot,
+settings and files readable by the previous firmware remain available until
+the new image is accepted. Migration, commit, retention and cleanup mechanisms
+must be decided before the affected implementation.
+
+The OTA candidate carries explicit target/profile and partition-layout
+compatibility metadata, because `esp_app_desc_t` has no target-profile field.
+A dedicated custom descriptor is proposed; its representation remains a design
+decision. Acceptance follows a bounded local boot health check: router, provider
+and SNTP availability are not prerequisites. Define the descriptor, local
+checks, deadline and explicit invalidation/reset path before implementing OTA,
+including recovery when no previous bootable image exists.
+
+USB `uploadfs` is development-only and may replace user images. No
+backup/restore tooling or separate image storage is added for that operation.
+User image updates during normal use remain file-level Web UI uploads.
+
+**Consequences:** transaction staging, schema compatibility, custom metadata,
+validation and temporary image replacement space have resource costs that
+must be measured. The design must pass power-loss, reset, failed trial and
+older-firmware boot tests. No concrete buffer/quota/deadline values are
+selected here. Product contracts are detailed in [CONFIGURATION.md](CONFIGURATION.md),
+[NETWORK.md](NETWORK.md) and [WEB_UI.md](WEB_UI.md).
+
+## ADR-012 — Bounded allocations and debug transport · Accepted 2026-10-08
+
+Clarifies the resource discipline for ADR-003, ADR-006 and ADR-009. The debug
+transport remains planned; only compile-time console status logging exists.
+
+**Context:** TLS, parsing, rendering and socket libraries may allocate memory
+during operations. A browser stream needs connection state and temporary
+formatting buffers even without retaining logs.
+
+**Decision:** bounded, measured library allocations are permitted within the
+approved peak budget. Avoidable allocation churn and unbounded growth are
+not permitted. The browser debug stream retains no log history on the device;
+inactive and connected transport overhead are bounded and measured. Select
+the protocol, client and message limits, and slow-client drop/disconnect
+behaviour before implementation. Streaming must not block firmware tasks;
+debug output remains switchable and secrets are redacted.
+
+**Consequences:** budgets account for static memory, peak heap, stack,
+fragmentation/largest blocks, flash and relevant storage quotas under allowed
+concurrent workloads. "No log history" does not mean "zero connection RAM".
+Concrete limits are established by the affected module's design and tests.
+
+## ADR-013 — Reproducibly maintained display-port patch · Accepted 2026-10-08
+
+Extends ADR-003. Patch implementation and fault verification are pending.
+
+**Context:** asynchronous display transfers keep DMA (direct memory access)
+readers alive after submission. Errors, partial submission and teardown need
+an explicit transfer-lifetime contract so a buffer cannot be reused or freed
+while the driver may still read it.
+
+**Decision:** retain `esp_lvgl_port` and apply a bounded, reproducibly
+maintained patch for the required failure paths. Patch artifacts live outside
+generated `managed_components`; regeneration must not silently remove them.
+Decide exact patch placement, application/verification mechanics and recovery
+before implementation. Define transfer ownership, completion/error propagation,
+quiescence before cleanup and safe reinitialization; verify these before the
+first network/image integration budget check.
+
+**Consequences:** the patch becomes maintained project material, with an
+upstream compatibility check whenever the component changes. Fault tests cover
+failed/partial transfer submission, missing or delayed completion, relevant
+allocation failures, cleanup and retry. Bookkeeping and handling costs are
+assessed before coding and compared in the required build; this decision does
+not introduce a replacement library or a new version.
+
+## ADR-014 — Provider identity before cross-source routing · Accepted 2026-10-08
+
+Refines ADR-005 and supersedes its statement that canonical club mapping can
+later be added with small changes. Provider-scoped initial club selection and
+the canonical data model remain accepted.
+
+**Context:** providers use different identifiers and may disagree on names,
+competition structure or match/event corrections. Similar names alone cannot
+establish that two records describe the same entity.
+
+**Decision:** before mixing sources, design the identity mappings for teams,
+competitions, seasons and matches, data provenance, conflict precedence and
+their storage/lookup costs. Name similarity may suggest a candidate for
+selection but never silently merges identities. Event enrichment must use the
+same explicit identity and correction contracts.
+
+**Consequences:** cross-source routing is gated on the mapping design and its
+capacity tests. No mapping representation, conflict algorithm or concrete
+capacity is selected by this decision. Views continue to receive only the
+canonical model.

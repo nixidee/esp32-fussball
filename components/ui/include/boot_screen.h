@@ -8,6 +8,10 @@
 
 #pragma once
 
+namespace geometry {
+class SafeArea;
+}
+
 namespace ui {
 
 struct BootScreenModel {
@@ -17,7 +21,11 @@ struct BootScreenModel {
 };
 
 // Replaces the content of the active LVGL screen. The caller holds the
-// display lock.
-void showBootScreen(const BootScreenModel& model);
+// display lock. Content is fitted to the supplied geometry; diagnostic rings
+// retain their physical-display contract. Returns false if the complete text
+// cannot fit or an object cannot be created. Internal LVGL allocation recovery
+// is handled separately from this view's geometry contract.
+bool showBootScreen(const BootScreenModel& model,
+                    const geometry::SafeArea& safe_area);
 
 }  // namespace ui

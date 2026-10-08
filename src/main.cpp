@@ -17,6 +17,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "hw_target.h"
+#include "safe_area.h"
 #include "sdkconfig.h"
 
 namespace {
@@ -104,9 +105,20 @@ void showBootScreen() {
       .detail = detail,
       .version = esp_app_get_description()->version,
   };
+  const uint16_t shorter_side =
+      hw::kDisplay.width < hw::kDisplay.height ? hw::kDisplay.width
+                                               : hw::kDisplay.height;
+  const geometry::SafeArea safe_area{
+      hw::kDisplay.width, hw::kDisplay.height, hw::kDisplay.shape,
+      static_cast<uint16_t>(shorter_side / cfg::kContentMarginDivisor)};
   if (!display::lock(0)) return;
-  ui::showBootScreen(model);
+  const bool rendered = ui::showBootScreen(model, safe_area);
   display::unlock();
+  if (!rendered) {
+    ESP_LOGE(kTag, "boot screen failed: content did not fit or an LVGL object "
+                  "could not be created");
+    return;
+  }
   ESP_LOGI(kTag,
            "boot screen: expect a red outer ring, a green inner ring, white "
            "text and the version in blue");

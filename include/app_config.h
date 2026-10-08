@@ -2,7 +2,7 @@
 // and enum lives here, nowhere else. Hardware facts live in the hardware
 // profiles (boards/, displays/, targets/), secrets in include/secrets.h.
 //
-// Currently only the debug group; the full settings model (types, limits,
+// Currently boot-layout and debug defaults; the full settings model (types, limits,
 // schema version) follows.
 
 #pragma once
@@ -10,6 +10,13 @@
 #include <cstdint>
 
 namespace cfg {
+
+// ---- Boot layout -----------------------------------------------------------
+// Relative to the shorter display side; these are compile-time defaults.
+inline constexpr uint16_t kContentMarginDivisor = 60;  // 240 px: 4 px
+inline constexpr int32_t kBootRingWidthDivisor = 120;  // 240 px: 2 px
+inline constexpr int32_t kBootRingGapDivisor = 40;     // 240 px: 6 px
+inline constexpr int32_t kBootTextWidthPercent = 70;
 
 // ---- Debug -----------------------------------------------------------------
 // Periodic status log (free heap, largest block, low-water mark, LVGL pool).

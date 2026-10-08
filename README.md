@@ -6,8 +6,11 @@ Configured through a built-in web interface.
 
 > **Project status: early scaffold (phase P1).** The XIAO ESP32-C6 target
 > shows an LVGL boot test screen and logs touch input changes; the Waveshare
-> target only prints a boot log (paused until the C6 is done). Planned
-> features are described in [docs/](docs/).
+> target was last accepted for boot logging before display integration and is
+> paused until the C6 is done. Pure SafeArea geometry has native host tests;
+> display failure-path repair comes next, followed by staged memory/flash checks.
+> Planned features are described
+> in [docs/](docs/); a successful boot screen does not certify the complete C6 app.
 
 ---
 
@@ -20,7 +23,7 @@ environments below.
 |---|---|---|
 | `xiao_esp32c6_gc9a01` | Seeed XIAO ESP32-C6 + 1.28" GC9A01 round display | boot test screen (LVGL) and touch input log confirmed on the device; boot log lines are not visible over USB (input logs are); default env |
 | `waveshare_esp32s3_lcd128` | Waveshare ESP32-S3-LCD-1.28 | paused; last build and boot log before the display code (P1.2); not built with the display code yet; if the first log lines are missing after upload, press RST |
-| `native` | Host computer, unit tests only | planned |
+| `native` | Host computer, unit tests only | SafeArea geometry suite; C++20, verified on macOS with Apple clang 21.0.0 |
 
 | Task | Command |
 |---|---|
@@ -33,8 +36,19 @@ environments below.
 | Erase flash completely | `pio run -e <env> -t erase` |
 | Clean build files | `pio run -e <env> -t clean` |
 | Run host unit tests | `pio test -e native` |
+| Run only the SafeArea suite | `pio test -e native -f test_safe_area` |
+
+Upload, erase, filesystem and monitor commands apply to firmware environments.
+Native tests use Native 1.2.1 and Unity's exact `v2.7.0` Git tag, checked against
+official releases on 2026-10-09. Unity's tag retains stale 2.6.0 package metadata,
+so PlatformIO may display that version and download an unused registry copy;
+the suite checks that the compiled header is actually 2.7.0. Other host operating
+systems are not yet verified.
 
 Firmware updates over WiFi via the web interface (Update tab) are planned.
+Routine firmware OTA will preserve images in LittleFS. USB `uploadfs` is for
+initial setup/development: it replaces the filesystem image and may erase
+uploaded user images; no preservation workflow is provided.
 
 Build configuration files:
 - `platformio.ini` — one environment per hardware target.
@@ -46,6 +60,8 @@ Build configuration files:
 - `partitions/*.csv` — flash layout per flash size.
 - `components/*/idf_component.yml` — exact versions of external ESP-IDF
   components (LVGL, esp_lvgl_port), resolved into `dependencies.lock`.
+- `scripts/native_sources.py` — explicit pure-component selection for host
+  tests; firmware and tests compile the same geometry sources without copies.
 - `boards/`, `displays/`, `targets/<target>.h` — hardware profiles (pins,
   display, inputs); the env's `build_flags` selects the target. Wrong pin
   assignments fail the build. Details: [docs/HARDWARE.md](docs/HARDWARE.md).
@@ -59,13 +75,27 @@ Build configuration files:
    defaults and everything is set up in the Web UI. See
    [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 3. Connect the board via USB.
-4. Upload firmware and filesystem:
+4. For initial setup/development, upload firmware and filesystem:
    `pio run -e <env> -t upload` and `pio run -e <env> -t uploadfs`.
+   The filesystem step replaces its contents, including uploaded user images.
+   Routine updates will use firmware OTA without a filesystem upload.
 5. Without WiFi credentials the device opens the setup network
    `Fussball-XXXX`. Connect with your phone; the configuration page opens
    (or browse to `http://192.168.4.1`).
 6. With WiFi the device shows its IP address for 60 s. Open it in a browser
    (or `http://fussball.local`).
+
+## Development milestones
+
+The active target is the XIAO ESP32-C6. After host geometry tests, the display
+port receives a reproducible, bounded fault-path repair and board-pin guards.
+The integration budget then measures WiFi/TLS, filtered JSON, JPEG rendering
+and the Web server together. Further checks cover the complete data model,
+images/Web/debug and the supported maximum load before release. Concrete limits
+and resource reserves are decided before each dependent implementation.
+
+Waveshare verification resumes after the C6 work. The external-antenna driver
+is deferred until before the WiFi manager; current firmware does not control it.
 
 ## What it shows
 | Screen | When |

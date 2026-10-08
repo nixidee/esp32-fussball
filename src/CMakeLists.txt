@@ -12,6 +12,7 @@ idf_component_register(
     esp_driver_gpio
     esp_hw_support
     freertos
+    geometry
     heap
     log
     ui

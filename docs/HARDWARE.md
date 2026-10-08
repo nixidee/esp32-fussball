@@ -9,12 +9,12 @@
 | Profile (env, planned) | Board | Display | Status |
 |---|---|---|---|
 | `xiao_esp32c6_gc9a01` | Seeed XIAO ESP32-C6 | 1.28" GC9A01 240×240 round (external module, no BL pin) | first target; display and touch inputs verified on the device |
-| `waveshare_esp32s3_lcd128` | Waveshare ESP32-S3-LCD-1.28 (non-touch) | built-in GC9A01A 240×240 round | boot log verified; display code not built for it yet; pins from an earlier project on this board; no inputs |
+| `waveshare_esp32s3_lcd128` | Waveshare ESP32-S3-LCD-1.28 (non-touch) | built-in GC9A01A 240×240 round | paused; boot log verified; display code not built for it yet; pins from an earlier project on this board; no inputs |
 | `xiao_esp32s3_gc9a01` | Seeed XIAO ESP32-S3 | 1.28" GC9A01 240×240 round | later (fallback if C6 RAM is insufficient) |
 
 ## Hardware profile system (ADR-004, implemented)
 Hardware facts are kept separate and combined per target (compile-time
-`constexpr` data, no RAM):
+`constexpr` facts; retained strings or lookup data may occupy flash):
 - `include/hw_profile.h` — profile types (`BoardProfile`, `DisplayProfile`,
   `DisplayWiring`, `InputPin`, `TargetProfile`) and the check functions.
   `hw::kNoPin` (-1) marks an unconnected signal.
@@ -39,10 +39,20 @@ Hardware facts are kept separate and combined per target (compile-time
   ESP-IDF); no GPIO used twice; no reserved GPIO used. Verified 2026-10-08
   with deliberate wrong assignments (duplicate, reserved, non-existent GPIO,
   missing SCLK) — each fails the build with its message.
+- The current guards check chip-valid pins and the board's reserved list;
+  they do not yet prove that every allowed pin is usable on the board header.
+  A board-usable-pin rule is planned before integration acceptance. On the
+  XIAO C6 it must reject flash GPIO24–30 even though the SoC masks permit them.
+  The confirmed wiring below does not use those GPIOs and is not being remapped.
 - `app_main` logs the selected profile at boot.
 
 New target: board/display header if new, target header, sdkconfig file,
 `#elif` line in `hw_target.h`, env in `platformio.ini`.
+A new controller additionally requires a driver. Each new resolution needs
+separate draw/DMA-buffer, font, scene and asset measurements before acceptance;
+adding a profile does not establish that it fits the existing memory budget.
+For example, the current two partial RGB565 buffer formula needs 19,200 B at
+240×240 but 70,832 B at 466×466, all internal DMA-capable RAM.
 
 ## Seeed XIAO ESP32-C6
 - ESP32-C6 (RISC-V, single core 160 MHz), 512 KB SRAM, **no PSRAM**, 4 MB flash.
@@ -90,8 +100,11 @@ always on at full brightness and cannot be dimmed or switched off by the
 firmware on this target. Night mode here is software-only (dark UI), see
 [UI.md](UI.md) → “Night mode”.
 SPI clock on the C6: 40 MHz works (LVGL boot screen verified on the device
-2026-10-08). Runtime after display + LVGL init (status log 2026-10-08):
+2026-10-08). Recorded runtime after display + LVGL init (device status log
+2026-10-08):
 internal heap free 399 488 B, largest block 376 832 B (no PSRAM). Touch inputs: active high, momentary — confirmed on the device.
+This is an idle boot-screen observation, not a new measurement or a WiFi/TLS,
+production-screen or long-run acceptance result.
 Backlight driver: a target with a BL pin gets a plain on/off GPIO (off
 during panel init, on after the panel is cleared to black); PWM dimming
 (LEDC) is not implemented yet. The C6 target has no BL pin → no-op.
@@ -108,9 +121,9 @@ work like buttons on any free pad.
 Action per input: see [UI.md](UI.md). Free pads left: D0, D6, D7 (D6/D7 = UART0 TX/RX).
 
 Modules: TTP223B single-channel (2.5–5.5 V, power-saving after 12 s idle),
-jumpers A/B in factory state (expected: momentary, active high — to be
-tested on hardware). **Power them from 3V3** — the output follows the supply
-voltage; 5 V on a C6 GPIO damages the chip.
+jumpers A/B in factory state; momentary, active-high behaviour and all three
+inputs were confirmed on the device. **Power them from 3V3** — the output
+follows the supply voltage; 5 V on a C6 GPIO damages the chip.
 
 ### External antenna
 The XIAO ESP32-C6 has an on-board ceramic antenna and a U.FL connector. An RF
@@ -125,7 +138,9 @@ changeable in the Web UI (WiFi settings). Use only with an antenna connected.
 
 Status: **planned, not implemented yet**. The profile
 fields exist in `boards/xiao_esp32c6.h`; the firmware currently does not
-touch GPIO3/14.
+touch GPIO3/14. The driver is deferred during display development and must be
+implemented before the production WiFi manager. The earlier diagnostic WiFi
+budget may run without it, with the undriven antenna state recorded as unverified.
 
 ## Waveshare ESP32-S3-LCD-1.28 (non-touch)
 - ESP32-S3R2: 2 MB PSRAM, 16 MB flash; USB-C via CH343 USB-UART.

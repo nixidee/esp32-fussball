@@ -1,6 +1,6 @@
 # Web UI
 
-> Status: **planned** (P3.6, P7, P8).
+> Status: **planned**, not implemented.
 
 Modern, simple, dark design with tabs. Served by the device (embedded in the
 firmware, no internet/CDN needed). Reachable in normal WiFi mode
@@ -14,7 +14,7 @@ firmware, no internet/CDN needed). Reachable in normal WiFi mode
 | **Images** | Crest, slideshow (up to 5 images initially, limited by free space), backgrounds per screen; editor; reset to default |
 | **Settings** | Groups: Data/API, WiFi, Display, Overlays, Time, System |
 | **Update** | Firmware upload (OTA), current version and profile |
-| **Debug** (planned) | Live debug output from the device's debug helper (P2.8): shown only while the tab is open, no log buffer on the device |
+| **Debug** (planned) | Live debug output while the tab is open, without retained device log history; bounded connection/formatting overhead is measured before release |
 
 ## Image editor (P7.4)
 - Upload an image; resize, move, set transparency.
@@ -28,6 +28,44 @@ firmware, no internet/CDN needed). Reachable in normal WiFi mode
 - Crest source: own images first. Loading the provider's crest in
   the browser (render to display size, then upload) follows soon after.
 - Default images are updated only over USB (`uploadfs`), not via the Web UI.
+
+## Image storage and updates
+
+Default and user images share LittleFS. The maximum image count is subject to
+the measured per-resolution quota, including defaults, metadata, filesystem
+overhead and temporary space for replacement. Five images are an initial UI
+limit, not a promise that five raw full-screen images fit every target.
+
+Uploads validate total bytes, dimensions and the supported format before an
+image becomes selectable. An interrupted or invalid replacement preserves
+the previous usable file. Image readers and update/delete operations need an
+explicit lifetime protocol: an image being read by LVGL cannot be replaced
+or deleted until its reader has finished. Specify the mechanism, reserve and
+cost before implementation. Test full storage, interrupted uploads, corrupt
+files and concurrent readers. A failed mount is reported, without automatic
+formatting.
+
+USB `uploadfs` is a **development-only filesystem-image replacement**. It may
+erase images previously uploaded through the Web UI; no backup/restore tools
+or separate image partition are planned for this operation. Routine firmware
+OTA preserves the shared LittleFS images. Trial firmware must also retain
+files readable by the previous image until acceptance, as described in
+[CONFIGURATION.md](CONFIGURATION.md).
+
+## Live debug output
+
+Only compile-time console status logging exists today. The planned browser
+stream retains no log history on the device, but still needs socket/protocol
+state and transient formatting buffers while connected. Measure both inactive
+and active overhead, including heap peaks, stack, fragmentation and flash;
+choose transport, client count and size limits before implementation.
+
+A slow client must have bounded backpressure with explicit drop/disconnect
+behaviour; it cannot block firmware tasks or create an unbounded queue.
+Redact secrets from all output, keep each debug output switchable and stop
+streaming when the tab disconnects. Required tests cover inactive/active
+budgets, a slow client, reconnects and operation alongside allowed provider,
+image-upload and OTA workloads.
 
 ## API
 The UI uses the REST API described in [NETWORK.md](NETWORK.md). Defaults and
