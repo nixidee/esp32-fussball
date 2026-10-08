@@ -4,8 +4,10 @@ Football information for **one club** on small (round) ESP32 displays: live
 scores, conference view of all running matches, league table and club crest.
 Configured through a built-in web interface.
 
-> **Project status: early scaffold (phase P1).** The firmware only prints a
-> boot log (incl. the selected hardware profile) so far. Planned features are described in [docs/](docs/).
+> **Project status: early scaffold (phase P1).** The XIAO ESP32-C6 target
+> shows an LVGL boot test screen and logs touch input changes; the Waveshare
+> target only prints a boot log (paused until the C6 is done). Planned
+> features are described in [docs/](docs/).
 
 ---
 
@@ -16,8 +18,8 @@ environments below.
 
 | Environment (`<env>`) | Hardware | Status |
 |---|---|---|
-| `xiao_esp32c6_gc9a01` | Seeed XIAO ESP32-C6 + 1.28" GC9A01 round display | builds (boot log only); default env |
-| `waveshare_esp32s3_lcd128` | Waveshare ESP32-S3-LCD-1.28 | builds, boot log confirmed (P1.2); if the first log lines are missing after upload, press RST |
+| `xiao_esp32c6_gc9a01` | Seeed XIAO ESP32-C6 + 1.28" GC9A01 round display | boot test screen (LVGL) and touch input log confirmed on the device; boot log lines are not visible over USB (input logs are); default env |
+| `waveshare_esp32s3_lcd128` | Waveshare ESP32-S3-LCD-1.28 | paused; last build and boot log before the display code (P1.2); not built with the display code yet; if the first log lines are missing after upload, press RST |
 | `native` | Host computer, unit tests only | planned |
 
 | Task | Command |
@@ -42,6 +44,8 @@ Build configuration files:
   changing a defaults file, delete `sdkconfig.<env>`**, otherwise the old
   values stay in effect.
 - `partitions/*.csv` — flash layout per flash size.
+- `components/*/idf_component.yml` — exact versions of external ESP-IDF
+  components (LVGL, esp_lvgl_port), resolved into `dependencies.lock`.
 - `boards/`, `displays/`, `targets/<target>.h` — hardware profiles (pins,
   display, inputs); the env's `build_flags` selects the target. Wrong pin
   assignments fail the build. Details: [docs/HARDWARE.md](docs/HARDWARE.md).
@@ -82,7 +86,7 @@ Pinouts and wiring: [docs/HARDWARE.md](docs/HARDWARE.md).
 
 | Board | Display | Notes |
 |---|---|---|
-| Seeed XIAO ESP32-C6 | 1.28" GC9A01 240×240 round (external, no backlight pin) | wiring confirmed, firmware test in P1; 3 touch modules; optional external antenna |
+| Seeed XIAO ESP32-C6 | 1.28" GC9A01 240×240 round (external, no backlight pin) | display and touch confirmed on the device (P1.4); 3 touch modules; optional external antenna |
 | Waveshare ESP32-S3-LCD-1.28 | built-in 240×240 round | 16 MB flash, 2 MB PSRAM; no inputs (BOOT button not reachable in the housing) |
 | Seeed XIAO ESP32-S3 | 1.28" GC9A01 240×240 round (external) | later |
 

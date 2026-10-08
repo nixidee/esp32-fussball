@@ -1,0 +1,12 @@
+# Target xiao_esp32c6_gc9a01 (Seeed XIAO ESP32-C6 + GC9A01): ESP-IDF settings
+# that depend on the board. 4 MB flash, no PSRAM.
+# Listed per env in platformio.ini (board_build.cmake_extra_args).
+
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+# Must match board_build.partitions in platformio.ini.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/4mb_ota_littlefs.csv"
+
+# Console on the USB-C port (USB-Serial-JTAG) only. UART0 (D6/D7) stays free
+# and no RAM is spent on a second console channel.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y

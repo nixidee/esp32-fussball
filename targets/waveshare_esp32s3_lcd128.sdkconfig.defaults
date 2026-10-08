@@ -1,0 +1,19 @@
+# Target waveshare_esp32s3_lcd128 (Waveshare ESP32-S3-LCD-1.28, ESP32-S3R2):
+# ESP-IDF settings that depend on the board. 16 MB flash, 2 MB quad-SPI PSRAM
+# in the chip package.
+# Listed per env in platformio.ini (board_build.cmake_extra_args).
+
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+# Must match board_build.partitions in platformio.ini.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/16mb_ota_littlefs.csv"
+
+# PSRAM: added to the heap; malloc() may return PSRAM for large blocks
+# (IDF default SPIRAM_USE_MALLOC). DMA buffers must request internal RAM.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+
+# Console on UART0: the USB-C port is wired to a CH343 USB-UART bridge.
+# Earlier projects on this board saw web server hangs with the USB console.
+# No secondary console channel.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y

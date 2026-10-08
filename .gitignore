@@ -88,12 +88,6 @@ fabric.properties
 # Android studio 3.1+ serialized cache file
 .idea/caches/build_file_checksums.ser
 
-aidocs
-
-agents.md
-### Project: esp32-fussball
-# AI agent instruction files (kept local by owner decision, see aidocs/OPEN_QUESTIONS.md OQ-01).
-# Explicit uppercase variants so case-sensitive file systems (Linux) match too.
 /AGENTS.md
 /CLAUDE.md
 /CLAUDE.local.md
