@@ -305,6 +305,54 @@ void testExhaustiveSmallGeometryAgainstIndependentOracle() {
   }
 }
 
+// Margin rule shorterSide / divisor through the profile factory, including
+// the documented 240/360/466 px values, a landscape rectangle and divisor 0.
+void testDisplayFactoryMarginRule() {
+  struct Case {
+    uint16_t width;
+    uint16_t height;
+    DisplayShape shape;
+    uint16_t expected_margin;
+  };
+  constexpr std::array<Case, 5> kCases = {{
+      {240, 240, DisplayShape::kRound, 4},
+      {360, 360, DisplayShape::kRound, 6},
+      {466, 466, DisplayShape::kRound, 7},
+      {320, 240, DisplayShape::kRect, 4},
+      {59, 100, DisplayShape::kRect, 0},
+  }};
+  for (const Case& c : kCases) {
+    const hw::DisplayProfile display{.name = "test",
+                                     .controller = hw::DisplayController::kGc9a01,
+                                     .shape = c.shape,
+                                     .width = c.width,
+                                     .height = c.height,
+                                     .spi_mode = 0,
+                                     .bgr_order = false,
+                                     .invert_colors = false};
+    const SafeArea area = SafeArea::forDisplay(display, 60);
+    TEST_ASSERT_EQUAL_UINT16(c.width, area.width());
+    TEST_ASSERT_EQUAL_UINT16(c.height, area.height());
+    TEST_ASSERT_EQUAL_UINT16(std::min(c.width, c.height), area.shorterSide());
+    TEST_ASSERT_EQUAL_UINT16(c.expected_margin, area.margin());
+    TEST_ASSERT_TRUE(area.isValid());
+  }
+
+  const hw::DisplayProfile round240{.name = "test",
+                                    .controller = hw::DisplayController::kGc9a01,
+                                    .shape = DisplayShape::kRound,
+                                    .width = 240,
+                                    .height = 240,
+                                    .spi_mode = 0,
+                                    .bgr_order = false,
+                                    .invert_colors = false};
+  TEST_ASSERT_FALSE(SafeArea::forDisplay(round240, 0).isValid());
+  TEST_ASSERT_EQUAL_UINT16(240, SafeArea::forDisplay(round240, 1).margin());
+  TEST_ASSERT_FALSE(SafeArea::forDisplay(round240, 1).isValid());
+  TEST_ASSERT_EQUAL_UINT16(80, SafeArea::forDisplay(round240, 3).margin());
+  TEST_ASSERT_TRUE(SafeArea::forDisplay(round240, 3).isValid());
+}
+
 }  // namespace
 
 void setUp() {}
@@ -321,5 +369,6 @@ int main() {
   RUN_TEST(testMalformedAndOverflowProneInputs);
   RUN_TEST(testMaximumDimensions);
   RUN_TEST(testExhaustiveSmallGeometryAgainstIndependentOracle);
+  RUN_TEST(testDisplayFactoryMarginRule);
   return UNITY_END();
 }

@@ -48,6 +48,15 @@ SafeArea::SafeArea(uint16_t width, uint16_t height, hw::DisplayShape shape,
                    uint16_t margin) noexcept
     : width_(width), height_(height), margin_(margin), shape_(shape) {}
 
+SafeArea SafeArea::forDisplay(const hw::DisplayProfile& display,
+                              uint16_t margin_divisor) noexcept {
+  const uint16_t shorter = std::min(display.width, display.height);
+  // A margin of the full shorter side leaves no interior: isValid() is false.
+  const uint16_t margin =
+      margin_divisor == 0 ? shorter : shorter / margin_divisor;
+  return SafeArea{display.width, display.height, display.shape, margin};
+}
+
 bool SafeArea::isValid() const noexcept {
   return (shape_ == hw::DisplayShape::kRound ||
           shape_ == hw::DisplayShape::kRect) &&

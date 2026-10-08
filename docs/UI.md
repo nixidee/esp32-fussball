@@ -94,7 +94,9 @@ Decided 2026-10-08.
 - Content radius is `r − margin`; usable width at row `y` is
   `w(y) = 2·√((r − margin)² − (y − cy)²)` where the radicand is nonnegative.
 - Safe margin scales with the shorter display side using the default in
-  `app_config.h` (currently `/60`: 4 px at 240 px).
+  `app_config.h` (currently `/60`: 4 px at 240 px). The rule is applied in one
+  place, `geometry::SafeArea::forDisplay(display profile, divisor)`; views take
+  the display size from that SafeArea, not from a second source.
 - Layout uses rows: each text row gets its width from the chord at its top
   and bottom edge (the smaller one).
 - Implemented SafeArea uses integer outer pixel boundaries and checks all

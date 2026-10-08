@@ -57,9 +57,8 @@ bool showBootScreen(const BootScreenModel& model,
   lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
   lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
-  const int32_t width = lv_display_get_horizontal_resolution(nullptr);
-  const int32_t height = lv_display_get_vertical_resolution(nullptr);
-  const int32_t size = std::min(width, height);
+  // Display size from the same profile as the content geometry.
+  const int32_t size = safe_area.shorterSide();
   const int32_t ring_width =
       std::max<int32_t>(1, size / cfg::kBootRingWidthDivisor);
   const int32_t ring_gap =

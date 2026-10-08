@@ -105,12 +105,8 @@ void showBootScreen() {
       .detail = detail,
       .version = esp_app_get_description()->version,
   };
-  const uint16_t shorter_side =
-      hw::kDisplay.width < hw::kDisplay.height ? hw::kDisplay.width
-                                               : hw::kDisplay.height;
-  const geometry::SafeArea safe_area{
-      hw::kDisplay.width, hw::kDisplay.height, hw::kDisplay.shape,
-      static_cast<uint16_t>(shorter_side / cfg::kContentMarginDivisor)};
+  const auto safe_area = geometry::SafeArea::forDisplay(
+      hw::kDisplay, cfg::kContentMarginDivisor);
   if (!display::lock(0)) return;
   const bool rendered = ui::showBootScreen(model, safe_area);
   display::unlock();

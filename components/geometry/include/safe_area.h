@@ -32,6 +32,19 @@ class SafeArea {
   SafeArea(uint16_t width, uint16_t height, hw::DisplayShape shape,
            uint16_t margin) noexcept;
 
+  // Content area of a display profile with the margin rule
+  // shorterSide / margin_divisor (integer division). A zero divisor yields
+  // invalid geometry instead of dividing by zero.
+  static SafeArea forDisplay(const hw::DisplayProfile& display,
+                             uint16_t margin_divisor) noexcept;
+
+  uint16_t width() const noexcept { return width_; }
+  uint16_t height() const noexcept { return height_; }
+  uint16_t shorterSide() const noexcept {
+    return width_ < height_ ? width_ : height_;
+  }
+  uint16_t margin() const noexcept { return margin_; }
+
   // Requires positive dimensions, a known shape and a remaining interior.
   // Valid continuous geometry need not contain a nonempty whole-pixel span:
   // for example, a 1 x 1 circle with zero margin has no such rectangle.
