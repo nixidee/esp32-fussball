@@ -48,6 +48,25 @@ enum class DisplayFault : uint8_t {
 };
 inline constexpr DisplayFault kDisplayFault = DisplayFault::kNone;
 
+// ---- Event bus (docs/ARCHITECTURE.md) --------------------------------------
+// Queue slots shared by UI actions; a UI action posted while all are taken
+// is dropped and counted. State events have one reserved slot per kind on
+// top (queue: 4 state kinds + these slots, 16 B per entry).
+inline constexpr std::size_t kEventUiActionSlots = 4;
+// Fixed subscriber table (no heap per subscriber).
+inline constexpr std::size_t kEventMaxSubscribers = 8;
+// Bus task: runs the subscriber callbacks, which only signal their own task.
+// Above the LVGL task (4) so a long render does not delay notifications.
+inline constexpr uint32_t kEventTaskPriority = 5;
+inline constexpr uint32_t kEventTaskStackBytes = 2304;
+
+// Device test of the event bus. Must be kNone in every normal build.
+enum class EventTest : uint8_t {
+  kNone,
+  kFlood,  // floods UI actions and settings events at a slow subscriber
+};
+inline constexpr EventTest kEventTest = EventTest::kNone;
+
 // ---- Settings record -------------------------------------------------------
 // Format version of the stored record (append-only, ADR-018): increase only
 // when a field is reordered, removed or changes meaning or type. A new

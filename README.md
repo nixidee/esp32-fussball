@@ -14,8 +14,9 @@ Configured through a built-in web interface.
 > server fit the ESP32-C6 with reserves; this is integration evidence, not a
 > certification of the finished application. The build regenerates and
 > verifies its ESP-IDF configuration. Settings are stored in NVS (one checked
-> record, `secrets.h` presets; host-tested, device tests pending); WiFi and
-> the other core services come next.
+> record, `secrets.h` presets; host-tested, device tests pending). An event
+> bus notifies services of changes (host-tested, device test pending); WiFi
+> and the other core services come next.
 > Planned features are described
 > in [docs/](docs/); a successful boot screen does not certify the complete C6 app.
 
@@ -30,7 +31,7 @@ environments below.
 |---|---|---|
 | `xiao_esp32c6_gc9a01` | Seeed XIAO ESP32-C6 + 1.28" GC9A01 round display | boot test screen (LVGL) and touch input log confirmed on the device; boot log lines are not visible over USB (input logs are); default env |
 | `waveshare_esp32s3_lcd128` | Waveshare ESP32-S3-LCD-1.28 | paused; last build and boot log before the display code (P1.2); not built with the display code yet; if the first log lines are missing after upload, press RST |
-| `native` | Host computer, unit tests only | SafeArea geometry and settings suites; C++20, verified on macOS with Apple clang 21.0.0 |
+| `native` | Host computer, unit tests only | SafeArea geometry, settings and event admission suites; C++20, verified on macOS with Apple clang 21.0.0 |
 
 | Task | Command |
 |---|---|
@@ -45,6 +46,7 @@ environments below.
 | Run host unit tests | `pio test -e native` |
 | Run only the SafeArea suite | `pio test -e native -f test_safe_area` |
 | Run only the settings suite | `pio test -e native -f test_settings` |
+| Run only the event admission suite | `pio test -e native -f test_events` |
 | Set up host tools (once) | see “Code formatting” below |
 | Check formatting of changed lines | `.venv-tools/bin/python scripts/check_format.py` |
 
@@ -81,7 +83,8 @@ Build configuration files:
   a lockfile only when a manifest changes; review and commit both together.
   The first build of a new chip target creates its lockfile.
 - `scripts/native_sources.py` — explicit pure-component selection for host
-  tests; firmware and tests compile the same geometry and settings sources
+  tests; firmware and tests compile the same geometry, settings and events
+  sources
   without copies.
 - `.clang-format`, `requirements-tools.txt`, `scripts/check_format.py` — code
   style and its check (see “Code formatting”).

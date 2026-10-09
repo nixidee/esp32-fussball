@@ -433,3 +433,46 @@ reserved space. Older firmware that saves after a rollback writes its shorter
 record, so newer fields return to defaults afterwards. Cost estimate
 (unmeasured): about 100–200 B flash for length handling, no additional RAM.
 Tests cover shorter and longer records of the same version.
+
+## ADR-019 — Event bus and logging levels · Accepted 2026-10-09
+
+Implements the event-bus part of ADR-016 (service design directions).
+
+**Context:** services need to learn about changes (settings, network state,
+new data, OTA) without polling each other, and the UI needs a path for input
+actions. RAM is the tightest resource on the ESP32-C6 (no PSRAM), and an
+event system that allocates per post or grows under load would add heap
+churn and unbounded latency. Log output had no common rules yet.
+
+**Decision:**
+- An own `esp_event` loop with a dedicated task (`events`, priority 5, stack
+  2304 B), separate from the ESP-IDF default loop that WiFi uses.
+- Events are notifications with at most 4 B payload, kept inside the queue
+  entry, so no post allocates heap. State events coalesce while one is
+  queued; UI actions have a bounded number of queue slots (4) and are
+  dropped and counted when they are full. The queue is sized so that every
+  state event always finds room. Commands that need a result are direct
+  function calls, never events.
+- The settings store posts "settings changed" after every save or reset;
+  this replaces polling of the settings generation.
+- Logging: one tag per module (device tests `<module>_test`); E = a function
+  is lost or defaults apply, W = degraded but self-corrected, I = state
+  changes and boot facts (no periodic output except the switchable status
+  log), D/V = development only; no secrets in logs; repeated errors are
+  throttled. Development builds keep INFO as default and maximum level;
+  no separate log build variant now. The product log level is decided with
+  the release configuration.
+
+**Alternatives considered:** the ESP-IDF default loop (no extra task, ≈ 2.3 KB
+less RAM, but a slow subscriber delays WiFi events and the queue is shared);
+direct callbacks without a queue (no task, but subscribers run in the
+poster's task and context); events with copied payloads (simpler receivers,
+heap allocation per post and stale copies); a separate debug build variant
+with verbose logging (more build configurations to maintain).
+
+**Consequences:** receivers fetch current state themselves after a
+notification. A keypress can be lost under overload; this is counted and
+logged. All callbacks share the `events` task stack and must stay short.
+Measured cost (`xiao_esp32c6_gc9a01`): firmware +5,568 B, of which the
+`esp_event` library ≈ 3.1 KB; static RAM +116 B. Heap at boot (task stack,
+queue, loop records) ≈ 3 KB estimated, device measurement pending.

@@ -20,7 +20,9 @@ void init();
 // stack).
 Model current();
 
-// Increases with every successful save or reset.
+// Increases with every successful save or reset, which also posts
+// events::Event::kSettingsChanged (event_bus.h). Work started under one
+// generation can compare it later to detect a change.
 uint32_t generation();
 
 // Validates and stores the complete model, then makes it current.

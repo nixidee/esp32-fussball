@@ -66,16 +66,18 @@
 | Navigation controller | Apply `UiAction` to screen stack / scroll state | Input hardware |
 | Overlay manager | Show/hide overlays by priority and timeout, place them inside the round area | Know overlay content logic |
 
-## Threading and data ownership (planned)
+## Threading and data ownership
+### Rules (planned unless marked implemented)
 - **UI task**: owns LVGL exclusively. Other tasks never call LVGL; they post
   events. Views update only in this task.
 - **Network/data task(s)**: HTTP requests and parsing.
 - **HTTP server task**: from `esp_http_server`; hands work to other tasks via
   events/queues for anything slow.
-- Communication via event bus (`esp_event`) and bounded queues. Each queue
-  needs a capacity, post/allocation-failure handling and a coalescing or
-  rejection policy. Commands requiring acknowledgement must receive an
-  explicit result when overloaded; they must not disappear silently.
+- Communication via the event bus (implemented, below) and bounded queues.
+  Each queue needs a capacity, post/allocation-failure handling and a
+  coalescing or rejection policy. Commands requiring acknowledgement are
+  direct calls with a result, never events; when overloaded they must return
+  an explicit error and must not disappear silently.
 - The repository has a single writer. Immutable snapshots need an explicit
   reader lifetime before their storage can be reused: two buffers alone do
   not protect a slow UI or Web reader. Readers take short protected copies of
@@ -86,18 +88,84 @@
   borrow storage from a discarded parser document. Each request carries a
   settings generation so an old club/provider request cannot publish into
   the new selection after a configuration change.
-- **Current state (interim):** LVGL runs in the `esp_lvgl_port` task
-  (priority 4, stack 7168 B, port defaults). The boot test screen is created
-  once from `app_main` while holding `display::lock()` (recursive mutex of
-  `esp_lvgl_port`). Exclusive UI-task ownership and its event protocol remain
-  to be designed; current external LVGL calls hold the mutex.
+- **Current state (interim):** LVGL runs in the `esp_lvgl_port` task. The
+  boot test screen is created once from `app_main` while holding
+  `display::lock()` (recursive mutex of `esp_lvgl_port`). Exclusive UI-task
+  ownership and its event protocol remain to be designed; until then every
+  LVGL call outside the LVGL task holds that mutex.
 - **Settings (implemented):** the current settings live in static RAM behind
   a mutex; `settings::current()` returns a copy (≈ 240 B on the reader's
-  stack) and `settings::generation()` increases with every save or reset, so
-  a reader re-reads only after a change. Saves and resets are serialised by a
-  second mutex and run in the caller's task (NVS flash writes block that task
-  for milliseconds). The change event for other services follows with the
-  event bus.
+  stack) and `settings::generation()` increases with every save or reset.
+  Each save or reset also posts the event `kSettingsChanged`, so a service
+  re-reads only after a change. Saves and resets are serialised by a second
+  mutex and run in the caller's task (NVS flash writes block that task for
+  milliseconds).
+
+### Task model (ESP32-C6, single core)
+Values checked in the ESP-IDF 6.1.0 sources and the generated sdkconfig of
+`xiao_esp32c6_gc9a01`. A higher number means higher priority (maximum 24).
+Planned tasks get their values when they are introduced, after measurement.
+
+| Task | Priority | Stack | Created by | Status |
+|---|---|---|---|---|
+| `esp_timer` | 22 | 3584 B | ESP-IDF (high-resolution timer callbacks) | running |
+| `sys_evt` | 20 | 2304 B | ESP-IDF default event loop (queue 32) | created with WiFi |
+| `events` | 5 | 2304 B | event bus (`app_config.h`) | running |
+| `taskLVGL` | 4 | 7168 B | `esp_lvgl_port` defaults, internal RAM | running |
+| `main` | 1 | 3584 B | ESP-IDF, runs `app_main` and the diagnostic loop | running |
+| `Tmr Svc` | 1 | 2048 B | FreeRTOS software timers | running |
+| `IDLE` | 0 | 1536 B | FreeRTOS | running |
+| network/data, HTTP server | – | – | planned | – |
+
+The `events` task runs above the LVGL task so that a state change reaches
+its subscribers before the next render. Its callbacks must therefore be
+short (see below), or they delay rendering.
+
+### Event bus (implemented, device test pending)
+`components/core/event_bus.*`; the pure catalog and admission logic is
+`components/events` (host-tested). Design decision: ADR-019.
+
+- **Own loop:** a separate `esp_event` loop with its own task (`events`),
+  not the ESP-IDF default loop. The default loop stays reserved for WiFi and
+  IP events, so a slow subscriber here cannot delay the network stack.
+- **Notifications only:** an event says *that* something changed, never
+  *what*. The payload is at most 4 B (`uint32_t`), stored inside the queue
+  entry; no post allocates heap. The receiver fetches the current state with
+  a short copy from its owner (for example `settings::current()`).
+- **Catalog** (`event_admission.h`): state events `kSettingsChanged`,
+  `kNetworkState`, `kDataUpdated`, `kOtaState`; the action event `kUiAction`
+  with the action code as payload. Only `kSettingsChanged` is posted today.
+- **State events coalesce:** while one is queued, further posts of the same
+  kind are absorbed (`post` returns `ESP_OK`). The pending mark is cleared
+  just before the subscribers run, so a change made during a callback is
+  queued again and never lost.
+- **UI actions are bounded:** at most `kEventUiActionSlots` (4) are queued.
+  A further post is dropped, counted and answered with `ESP_ERR_TIMEOUT`;
+  the first drop of a burst logs one warning. Dropping a keypress under
+  overload is preferred to a growing backlog of stale input.
+- **Queue length** = number of state kinds + UI slots (8). A state event
+  always finds room, even with all UI slots taken; a failed post can only
+  come from a defect and is logged and counted.
+- **Subscribers:** fixed table of `kEventMaxSubscribers` (8) entries, no
+  unsubscribe; `subscribe` returns `ESP_ERR_NO_MEM` when it is full. All
+  callbacks run one after another in the `events` task on its 2304 B stack:
+  they must not block, must not call LVGL and must not do heavy work (hand
+  that to the owning task instead).
+- **Boot order:** `events::init()` runs before the settings store. A failure
+  is a memory budget error at boot and restarts the device in a controlled
+  way.
+- **Memory:** static ≈ 120 B (`.bss`); heap at init: task stack 2304 B plus
+  the queue (8 × 16 B) and the loop and handler records — the boot log line
+  `after event bus init` shows the real figure.
+- **Diagnostics:** the status log prints the minimum free stack of the
+  `events` task and the counters for dropped UI actions and failed posts.
+- **Device test** (`cfg::kEventTest = EventTest::kFlood` in `app_config.h`,
+  back to `kNone` afterwards): posts 20 UI actions to a subscriber that
+  blocks 50 ms each, then 5 settings events. Expected:
+  `PASS: UI actions 5 delivered, 15 dropped; settings events 5 posted,
+  1 delivered; failed posts 0`. The test accepts every result within the
+  bounds (at most slots + 1 delivered, at least one drop, coalesced settings
+  events, no failed post).
 
 ## Display fault handling (implemented, device fault tests pending)
 - `esp_lvgl_port` stays unchanged (ADR-015). All handling lives in
@@ -240,7 +308,10 @@ components/            ESP-IDF components = modules (core, net, web, data,
   display/             SPI bus, panel IO, GC9A01 driver, esp_lvgl_port setup;
                        idf_component.yml pins lvgl + esp_lvgl_port
   core/                settings store on NVS (load, save, reset, presets,
-                       device tests); later file service, time, events, health
+                       device tests), event bus (own esp_event loop and
+                       task); later file service, time, health
+  events/              pure C++ event catalog and queue admission
+                       (coalescing, UI slots); no ESP-IDF includes, host-tested
   geometry/            pure C++ SafeArea content bounds; no ESP-IDF/LVGL includes
   settings/            pure C++ settings model, limits, record codec (CRC32);
                        no ESP-IDF includes, host-tested

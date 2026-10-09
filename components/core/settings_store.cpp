@@ -6,6 +6,7 @@
 
 #include "app_config.h"
 #include "esp_log.h"
+#include "event_bus.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "nvs.h"
@@ -72,6 +73,7 @@ void setCurrent(const Model& model, Source from) {
   source = from;
   xSemaphoreGive(model_mutex);
   generation_counter.fetch_add(1, std::memory_order_release);
+  events::post(events::Event::kSettingsChanged);
 }
 
 void logRejectedPresets(FieldMask rejected) {

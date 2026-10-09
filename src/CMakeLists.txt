@@ -12,6 +12,7 @@ idf_component_register(
     esp_app_format
     esp_driver_gpio
     esp_hw_support
+    events
     freertos
     geometry
     heap

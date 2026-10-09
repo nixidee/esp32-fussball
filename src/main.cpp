@@ -1,8 +1,9 @@
 // Firmware entry point. Boot log: version, chip, memory baseline and the
-// selected hardware profile. Settings load, display bring-up with the boot
-// test screen, an input level log and the periodic status log.
+// selected hardware profile. Event bus and settings load, display bring-up
+// with the boot test screen, an input level log and the periodic status log.
 
 #include <array>
+#include <atomic>
 #include <cstdio>
 
 #include "app_config.h"
@@ -14,6 +15,7 @@
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "event_bus.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "hw_target.h"
@@ -166,12 +168,20 @@ void logStatus() {
   // ESP-IDF counts task stacks in bytes.
   ESP_LOGI(kTag, "main task stack: min free %u B",
            static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+  events::logStatus();
 }
 
 struct StatusLogSettings {
   bool enabled;
   TickType_t period;
 };
+
+// Set in the event bus task, consumed by the diagnostic loop.
+std::atomic<bool> settings_changed{false};
+
+void onSettingsChanged(events::Event, uint32_t, void*) {
+  settings_changed.store(true, std::memory_order_release);
+}
 
 StatusLogSettings statusLogSettings() {
   const settings::Model model = settings::current();
@@ -185,14 +195,15 @@ void runDiagnosticLoop() {
   InputStates active{};
   initInputs(active);
 
-  uint32_t settings_seen = settings::generation();
+  // Subscribe before the first read so that no change is missed.
+  ESP_ERROR_CHECK(events::subscribe(events::Event::kSettingsChanged,
+                                    onSettingsChanged, nullptr));
   StatusLogSettings status = statusLogSettings();
   TickType_t last_status = xTaskGetTickCount();
   while (true) {
     vTaskDelay(pdMS_TO_TICKS(kInputPollMs));
     logInputChanges(active);
-    if (settings::generation() != settings_seen) {
-      settings_seen = settings::generation();
+    if (settings_changed.exchange(false, std::memory_order_acq_rel)) {
       status = statusLogSettings();
     }
     if (status.enabled && xTaskGetTickCount() - last_status >= status.period) {
@@ -207,6 +218,11 @@ void runDiagnosticLoop() {
 extern "C" void app_main() {
   logBootInfo();
   logHardwareProfile();
+
+  // A failure here is a memory budget error at boot: controlled restart.
+  ESP_ERROR_CHECK(events::init());
+  logHeap("after event bus init");
+  events::runDeviceTest();
 
   settings::init();
   settings::runDeviceTest();
