@@ -1,6 +1,6 @@
 // Firmware entry point. Boot log: version, chip, memory baseline and the
-// selected hardware profile. Display bring-up with the boot test screen, an
-// input level log and the periodic status log.
+// selected hardware profile. Settings load, display bring-up with the boot
+// test screen, an input level log and the periodic status log.
 
 #include <array>
 #include <cstdio>
@@ -19,6 +19,7 @@
 #include "hw_target.h"
 #include "safe_area.h"
 #include "sdkconfig.h"
+#include "settings_store.h"
 
 namespace {
 
@@ -162,6 +163,20 @@ void logInputChanges(InputStates& active) {
 void logStatus() {
   logHeap("status");
   display::logMemory();
+  // ESP-IDF counts task stacks in bytes.
+  ESP_LOGI(kTag, "main task stack: min free %u B",
+           static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+}
+
+struct StatusLogSettings {
+  bool enabled;
+  TickType_t period;
+};
+
+StatusLogSettings statusLogSettings() {
+  const settings::Model model = settings::current();
+  return {model.debug_status_log,
+          pdMS_TO_TICKS(uint32_t{model.debug_status_interval_s} * 1000)};
 }
 
 // Never returns. Input polling is replaced by the input driver, the status
@@ -170,14 +185,17 @@ void runDiagnosticLoop() {
   InputStates active{};
   initInputs(active);
 
-  const TickType_t status_period =
-      pdMS_TO_TICKS(cfg::kDebugStatusIntervalS * 1000);
+  uint32_t settings_seen = settings::generation();
+  StatusLogSettings status = statusLogSettings();
   TickType_t last_status = xTaskGetTickCount();
   while (true) {
     vTaskDelay(pdMS_TO_TICKS(kInputPollMs));
     logInputChanges(active);
-    if (cfg::kDebugStatusLog &&
-        xTaskGetTickCount() - last_status >= status_period) {
+    if (settings::generation() != settings_seen) {
+      settings_seen = settings::generation();
+      status = statusLogSettings();
+    }
+    if (status.enabled && xTaskGetTickCount() - last_status >= status.period) {
       last_status = xTaskGetTickCount();
       logStatus();
     }
@@ -189,6 +207,10 @@ void runDiagnosticLoop() {
 extern "C" void app_main() {
   logBootInfo();
   logHardwareProfile();
+
+  settings::init();
+  settings::runDeviceTest();
+  logHeap("after settings init");
 
   const esp_err_t err = display::init(hw::kDisplay, hw::kTarget.wiring);
   if (err == ESP_OK) {

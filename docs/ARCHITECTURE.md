@@ -2,9 +2,10 @@
 
 > Status: **partly implemented**: hardware profiles, display port with fault
 > handling (`components/display`), boot test screen (`components/ui`), pure
-> SafeArea geometry (`components/geometry`) with native tests, and
-> `include/app_config.h` (boot-layout, display-failure and debug defaults).
-> Everything else is planned.
+> SafeArea geometry (`components/geometry`) with native tests, the settings
+> model and record format (`components/settings`, native tests), the NVS
+> settings store (`components/core`) and `include/app_config.h` (defaults and
+> limits). Everything else is planned.
 > Decisions in [DECISIONS.md](DECISIONS.md). Planned contracts below do not
 > describe implemented services or a completed resource acceptance.
 
@@ -90,6 +91,13 @@
   once from `app_main` while holding `display::lock()` (recursive mutex of
   `esp_lvgl_port`). Exclusive UI-task ownership and its event protocol remain
   to be designed; current external LVGL calls hold the mutex.
+- **Settings (implemented):** the current settings live in static RAM behind
+  a mutex; `settings::current()` returns a copy (≈ 240 B on the reader's
+  stack) and `settings::generation()` increases with every save or reset, so
+  a reader re-reads only after a change. Saves and resets are serialised by a
+  second mutex and run in the caller's task (NVS flash writes block that task
+  for milliseconds). The change event for other services follows with the
+  event bus.
 
 ## Display fault handling (implemented, device fault tests pending)
 - `esp_lvgl_port` stays unchanged (ADR-015). All handling lives in
@@ -223,15 +231,19 @@ boards/ displays/ targets/   hardware profiles; targets/<target>.sdkconfig.defau
                        = board-dependent ESP-IDF settings (ADR-010)
 include/hw_profile.h   hardware profile types + compile-time pin checks
 include/hw_target.h    selects the target (build flag), runs the checks
-include/app_config.h   single software configuration (defaults, limits);
-                       currently boot-layout/debug defaults; full schema planned
+include/app_config.h   single software configuration (defaults, limits,
+                       settings record version); grows with each feature
 include/secrets.h      local secrets + personal presets (git-ignored)
 src/                   entry point, app wiring
 components/            ESP-IDF components = modules (core, net, web, data,
                        providers/*, ui, input). Existing:
   display/             SPI bus, panel IO, GC9A01 driver, esp_lvgl_port setup;
                        idf_component.yml pins lvgl + esp_lvgl_port
+  core/                settings store on NVS (load, save, reset, presets,
+                       device tests); later file service, time, events, health
   geometry/            pure C++ SafeArea content bounds; no ESP-IDF/LVGL includes
+  settings/            pure C++ settings model, limits, record codec (CRC32);
+                       no ESP-IDF includes, host-tested
   ui/                  views (boot test screen); render a model, no logic
 web/                   Web UI sources (embedded at build time)
 assets/src/            high-res default images (sources)

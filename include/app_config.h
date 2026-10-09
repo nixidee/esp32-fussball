@@ -2,11 +2,12 @@
 // and enum lives here, nowhere else. Hardware facts live in the hardware
 // profiles (boards/, displays/, targets/), secrets in include/secrets.h.
 //
-// Currently boot-layout, display failure and debug defaults; the full settings
-// model (types, limits, schema version) follows.
+// Runtime settings: defaults and limits here, model and record layout in
+// components/settings, storage in components/core (docs/CONFIGURATION.md).
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace cfg {
@@ -47,11 +48,62 @@ enum class DisplayFault : uint8_t {
 };
 inline constexpr DisplayFault kDisplayFault = DisplayFault::kNone;
 
-// ---- Debug -----------------------------------------------------------------
-// Periodic status log (free heap, largest block, low-water mark, LVGL pool).
-// Sent to the console today; routed through the planned debug helper later
-// and then switchable at runtime as a debug setting.
-inline constexpr bool kDebugStatusLog = true;
-inline constexpr uint32_t kDebugStatusIntervalS = 30;
+// ---- Settings record -------------------------------------------------------
+// Format version of the stored record (append-only, ADR-018): increase only
+// when a field is reordered, removed or changes meaning or type. A new
+// setting is appended and keeps the version.
+inline constexpr uint16_t kSettingsFormatVersion = 1;
+// Longest stored record that is read (newer firmware may have appended
+// fields); a longer one counts as damaged.
+inline constexpr std::size_t kSettingsMaxRecordBytes = 1024;
+// NVS namespace and key, at most 15 characters each.
+inline constexpr char kSettingsNvsNamespace[] = "settings";
+inline constexpr char kSettingsNvsKey[] = "record";
+
+// ---- Settings: WiFi station (one network, docs/NETWORK.md) -----------------
+// SSID: 1..32 arbitrary bytes; empty = no network configured (setup AP).
+inline constexpr std::size_t kWifiSsidMaxBytes = 32;
+// Password: empty (open network), a passphrase of printable ASCII characters
+// or a raw key of exactly kWifiPskHexChars hexadecimal characters. Default
+// empty. Other lengths are rejected, never truncated.
+inline constexpr std::size_t kWifiPassphraseMinChars = 8;
+inline constexpr std::size_t kWifiPassphraseMaxChars = 63;
+inline constexpr std::size_t kWifiPskHexChars = 64;
+
+// ---- Settings: setup access point and hostname ------------------------------
+// AP password: empty (open AP, default) or a WPA2 passphrase with the
+// kWifiPassphrase* limits above.
+// mDNS hostname: 1..63 letters, digits or hyphens, no leading/trailing hyphen.
+inline constexpr std::size_t kHostnameMaxChars = 63;
+inline constexpr char kHostnameDefault[] = "fussball";
+
+// ---- Settings: board --------------------------------------------------------
+// External antenna (only boards with an antenna switch use it).
+inline constexpr bool kExternalAntennaDefault = false;
+
+// ---- Settings: debug --------------------------------------------------------
+// Periodic status log (free heap, largest block, low-water mark, LVGL pool,
+// main task stack). Sent to the console; routed through the planned debug
+// helper later.
+inline constexpr bool kDebugStatusLogDefault = true;
+inline constexpr uint16_t kDebugStatusIntervalDefaultS = 30;
+inline constexpr uint16_t kDebugStatusIntervalMinS = 5;
+inline constexpr uint16_t kDebugStatusIntervalMaxS = 3600;
+
+// Device tests of the settings store. Must be kNone in every normal build;
+// any other value compiles one test into the boot sequence. A test that
+// stores a prepared record takes effect at the next boot (press RST).
+enum class SettingsTest : uint8_t {
+  kNone,
+  kSaveSample,      // saves a sample model; the next boot loads it
+  kReset,           // erases the stored settings at every boot
+  kCorruptRecord,   // stores the sample with a wrong check value
+  kUnknownVersion,  // stores the sample with format version + 1
+  kShorterRecord,   // stores the sample without its last field
+  kLongerRecord,    // stores the sample with an unknown trailing field
+  kNvsFull,         // fills NVS; a save must then fail and change nothing
+  kSaveLoop,        // saves two models alternately until power is cut
+};
+inline constexpr SettingsTest kSettingsTest = SettingsTest::kNone;
 
 }  // namespace cfg

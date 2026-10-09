@@ -4,7 +4,7 @@ Football information for **one club** on small (round) ESP32 displays: live
 scores, conference view of all running matches, league table and club crest.
 Configured through a built-in web interface.
 
-> **Project status: early scaffold (phase P1).** The XIAO ESP32-C6 target
+> **Project status: early scaffold (phase P2, core services).** The XIAO ESP32-C6 target
 > shows an LVGL boot test screen and logs touch input changes; the Waveshare
 > target was last accepted for boot logging before display integration and is
 > paused until the C6 is done. Pure SafeArea geometry has native host tests;
@@ -13,7 +13,9 @@ Configured through a built-in web interface.
 > WiFi, HTTPS to OpenLigaDB, JSON parsing, a JPEG background and a small HTTP
 > server fit the ESP32-C6 with reserves; this is integration evidence, not a
 > certification of the finished application. The build regenerates and
-> verifies its ESP-IDF configuration; core services come next.
+> verifies its ESP-IDF configuration. Settings are stored in NVS (one checked
+> record, `secrets.h` presets; host-tested, device tests pending); WiFi and
+> the other core services come next.
 > Planned features are described
 > in [docs/](docs/); a successful boot screen does not certify the complete C6 app.
 
@@ -28,7 +30,7 @@ environments below.
 |---|---|---|
 | `xiao_esp32c6_gc9a01` | Seeed XIAO ESP32-C6 + 1.28" GC9A01 round display | boot test screen (LVGL) and touch input log confirmed on the device; boot log lines are not visible over USB (input logs are); default env |
 | `waveshare_esp32s3_lcd128` | Waveshare ESP32-S3-LCD-1.28 | paused; last build and boot log before the display code (P1.2); not built with the display code yet; if the first log lines are missing after upload, press RST |
-| `native` | Host computer, unit tests only | SafeArea geometry suite; C++20, verified on macOS with Apple clang 21.0.0 |
+| `native` | Host computer, unit tests only | SafeArea geometry and settings suites; C++20, verified on macOS with Apple clang 21.0.0 |
 
 | Task | Command |
 |---|---|
@@ -42,6 +44,7 @@ environments below.
 | Clean build files | `pio run -e <env> -t clean` |
 | Run host unit tests | `pio test -e native` |
 | Run only the SafeArea suite | `pio test -e native -f test_safe_area` |
+| Run only the settings suite | `pio test -e native -f test_settings` |
 | Set up host tools (once) | see “Code formatting” below |
 | Check formatting of changed lines | `.venv-tools/bin/python scripts/check_format.py` |
 
@@ -78,7 +81,8 @@ Build configuration files:
   a lockfile only when a manifest changes; review and commit both together.
   The first build of a new chip target creates its lockfile.
 - `scripts/native_sources.py` — explicit pure-component selection for host
-  tests; firmware and tests compile the same geometry sources without copies.
+  tests; firmware and tests compile the same geometry and settings sources
+  without copies.
 - `.clang-format`, `requirements-tools.txt`, `scripts/check_format.py` — code
   style and its check (see “Code formatting”).
 - `boards/`, `displays/`, `targets/<target>.h` — hardware profiles (pins,
@@ -119,8 +123,10 @@ argument to check a range, e.g. `scripts/check_format.py main`.
 ## Quick start (planned)
 1. Install [PlatformIO](https://platformio.org/install) (VS Code extension or CLI).
 2. Optional: copy `include/secrets.h.example` to `include/secrets.h` and fill
-   in your WiFi, club and API keys. Without it the firmware builds with
-   defaults and everything is set up in the Web UI. See
+   in your WiFi, club and API keys (the template marks which keys are used
+   today; the WiFi keys are `SECRET_WIFI_SSID` / `SECRET_WIFI_PASSWORD`).
+   Without it the firmware builds with defaults and everything is set up in
+   the Web UI. See
    [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 3. Connect the board via USB.
 4. For initial setup/development, upload firmware and filesystem:
