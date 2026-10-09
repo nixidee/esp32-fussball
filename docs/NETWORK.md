@@ -86,6 +86,8 @@ in `secrets.h` and the Web UI.
 - Request size limits per endpoint; input validation server-side.
 - Optional admin password (default off); when set it also protects OTA.
 
+All network services follow one coordinated, bounded operation policy
+(admission of competing operations, deadlines, cancellation and limits; ADR-016).
 Before implementation, specify and measure endpoint body/string/nesting/entity
 limits, operation deadlines, retry/redirect bounds and concurrent connections.
 Limits cover total elapsed time and all incoming bytes, including fields a
@@ -106,8 +108,8 @@ values are decided before implementing the affected service.
 - Checks before activation: image validity and size, chip type, project name,
   version policy, **target profile and partition-layout compatibility**.
   ESP-IDF's `esp_app_desc_t` has no target-profile field. Explicit compatibility
-  metadata is required; a dedicated custom image descriptor is the proposed
-  representation. Choose its representation, layout and compatibility rules
+  metadata is required; a dedicated, versioned custom image descriptor is the
+  chosen representation (ADR-016). Choose its layout and compatibility rules
   before implementation, then measure the cost.
 - The trial image confirms itself only after a bounded **local boot health
   check**. Router access, an IP lease, SNTP or a successful provider request
@@ -118,15 +120,17 @@ values are decided before implementing the affected service.
   rollback is not a timer that rescues firmware which hangs forever without
   resetting. Define recovery if no previous bootable image exists.
 - NVS and LittleFS are shared by both app slots. Firmware rollback does not
-  revert their contents. Trial firmware preserves settings and files readable
-  by the previous image until acceptance; see [CONFIGURATION.md](CONFIGURATION.md).
+  revert their contents. Trial firmware preserves image files readable by the
+  previous image until acceptance. Settings are kept only while the settings
+  format version is unchanged; see [CONFIGURATION.md](CONFIGURATION.md).
 - Available in STA and AP mode.
 - Password: optional (admin password, see above).
 - Routine firmware OTA updates firmware and its embedded Web UI, preserving
-  NVS settings and LittleFS images. USB `uploadfs` is a development operation
+  LittleFS images and settings of an unchanged settings format. USB `uploadfs` is a development operation
   that replaces the filesystem image and may erase user images; the image
   storage/update policy is in [WEB_UI.md](WEB_UI.md).
 
 Acceptance covers wrong-chip/profile/layout images, malformed or truncated
 uploads, power loss, local healthy boot without a router/provider, failed boot
-and rollback to an older image after a trial schema change.
+and rollback to an older image; after a settings format change the older
+image starts with defaults.

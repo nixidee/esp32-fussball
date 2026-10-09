@@ -126,8 +126,9 @@ The repository publishes an immutable snapshot: own club, active competitions,
 own match (if any), relevant fixtures, table of the own league, freshness/errors
 per source. One writer owns publication. A reader's references remain valid for
 its entire declared lifetime; a buffer cannot be reused merely because it is
-no longer the newest snapshot. Copy-versus-lease synchronization, maximum reader
-lifetime and storage cost are decided before implementing the repository.
+no longer the newest snapshot. Readers take short protected copies of the data
+they need (no leases on snapshot slots); copy sizes and lock times are measured
+when the repository is implemented.
 
 Requests and their results carry the settings generation (club, competition,
 provider selection). Results for an old generation cannot publish into a new

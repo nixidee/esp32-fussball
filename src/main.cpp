@@ -20,10 +20,6 @@
 #include "safe_area.h"
 #include "sdkconfig.h"
 
-#ifdef CONFIG_FUSSBALL_BUDGET_PROBE
-#include "budget_probe.h"
-#endif
-
 namespace {
 
 constexpr const char* kTag = "boot";
@@ -204,10 +200,6 @@ extern "C" void app_main() {
              esp_err_to_name(err));
   }
   logHeap("after display init");
-
-#ifdef CONFIG_FUSSBALL_BUDGET_PROBE
-  if (err == ESP_OK) probe::start();
-#endif
 
   runDiagnosticLoop();
 }

@@ -77,9 +77,10 @@
   explicit result when overloaded; they must not disappear silently.
 - The repository has a single writer. Immutable snapshots need an explicit
   reader lifetime before their storage can be reused: two buffers alone do
-  not protect a slow UI or Web reader. The choice between short protected
-  copies of view models and reader leases on snapshot slots is still open;
-  its RAM cost and writer-progress limits must be measured before use.
+  not protect a slow UI or Web reader. Readers take short protected copies of
+  the data they need (ADR-017); the display task is the reader of live data,
+  Web handlers only read small status/debug data. Copy sizes and lock times
+  are measured when the repository is implemented.
 - Model references and strings must outlive every reader and must never
   borrow storage from a discarded parser document. Each request carries a
   settings generation so an old club/provider request cannot publish into
@@ -148,11 +149,13 @@ filtered JSON, JPEG and HTTP server), complete data model and production views,
 images/Web/debug operations, then supported maximum load and long-run operation.
 Passing the first stage does not certify the complete application.
 
-Before each stage, define capacities, overflow behaviour, allowed concurrency
-or serialization, and explicit reserves. Account for linked code/data SRAM,
+Heavy operations (TLS fetch with parsing, JPEG decoding, upload handling) run
+one at a time by default; overlaps are allowed only where measured and bounded
+(ADR-017). Before each stage, define capacities, overflow behaviour and
+explicit reserves. Account for linked code/data SRAM,
 LVGL pool (without counting it twice), DMA buffers, all task stacks, snapshot
 storage and reader copies/leases, strings/events, queues, parser and TLS peaks,
-view models, JPEG/layers, embedded Web assets, NVS generations, and filesystem
+view models, JPEG/layers, embedded Web assets, the NVS settings record, and filesystem
 metadata/upload staging. Measure total free memory, largest free blocks, low-water marks,
 stack usage and LVGL peaks/fragmentation with the permitted overlapping work.
 Compare image occupancy and resource growth with the previous measured stage.
@@ -163,7 +166,8 @@ conversion required by TJPGD when drawing to RGB565. Decoder output format does
 not require a permanent full-screen RGB888 framebuffer. Measure actual decode
 time, working memory, LVGL peak and flash growth using baseline JPEG assets.
 
-First measurement (XIAO ESP32-C6, 2026-10-09, temporary diagnostic build): the
+First measurement (XIAO ESP32-C6, 2026-10-09, temporary diagnostic build that
+was removed afterwards and remains in the Git history): the
 baseline stage fits the current partitions with reserves (WiFi, TLS with the
 full IDF certificate bundle, filtered JSON, LittleFS, JPEG scene and a small
 HTTP server: 78 % of an OTA slot, largest free heap block ≥ 180 KB, minimum-ever

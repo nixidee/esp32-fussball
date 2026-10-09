@@ -40,8 +40,10 @@ Uploads validate total bytes, dimensions and the supported format before an
 image becomes selectable. An interrupted or invalid replacement preserves
 the previous usable file. Image readers and update/delete operations need an
 explicit lifetime protocol: an image being read by LVGL cannot be replaced
-or deleted until its reader has finished. Specify the mechanism, reserve and
-cost before implementation. Test full storage, interrupted uploads, corrupt
+or deleted until its reader has finished. The chosen mechanism writes the new
+image to one bounded temporary file inside a reserved part of the filesystem
+and publishes it only when no reader uses the old file (ADR-016). Specify the
+reserve, quotas and cost before implementation. Test full storage, interrupted uploads, corrupt
 files and concurrent readers. A failed mount is reported, without automatic
 formatting.
 
@@ -55,10 +57,10 @@ files readable by the previous image until acceptance, as described in
 ## Live debug output
 
 Only compile-time console status logging exists today. The planned browser
-stream retains no log history on the device, but still needs socket/protocol
+output is a live push stream (ADR-016). It retains no log history on the device, but still needs socket/protocol
 state and transient formatting buffers while connected. Measure both inactive
 and active overhead, including heap peaks, stack, fragmentation and flash;
-choose transport, client count and size limits before implementation.
+choose the protocol, client count and size limits before implementation.
 
 A slow client must have bounded backpressure with explicit drop/disconnect
 behaviour; it cannot block firmware tasks or create an unbounded queue.

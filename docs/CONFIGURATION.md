@@ -44,35 +44,39 @@ values fall back to their defaults in `app_config.h`:
 It only makes the first setup more comfortable.
 
 ## Factory reset
-Planned reset erases the complete stored settings model, including obsolete
-keys and migration generations, then restarts with `secrets.h` values and
-defaults. No stale setting may reappear after reset or schema migration.
+Planned reset erases the complete stored settings record (the whole settings
+namespace), then restarts with `secrets.h` values and defaults. No stale
+setting may reappear after a reset or a settings format change.
 Deletion of user images is an explicit optional reset choice. A mount fault
 must never be interpreted as permission to format LittleFS or discard images.
 Reset is triggered from the Web UI (System); a device trigger must also remain
 possible, with its exact input gesture to be specified before implementation.
 
-## Consistent saves, migration and OTA
+## Storage, consistent saves and firmware updates
 
-A saved settings model must appear as one complete, validated generation:
-after a failed write or power loss, boot loads the previous complete model or
-the new complete model, never a mixture. NVS's per-key persistence does not
-alone provide this whole-model contract. Choose the transaction, versioning,
-capacity and recovery mechanism before implementing the store; keep software
-defaults and limits in `app_config.h`.
+Settings survive every restart and power loss. The complete settings model is
+stored as **one NVS record** (a "blob") with a small header: format version,
+length and a CRC32 check value. ESP-IDF's NVS writes a changed blob completely
+before it removes the old one and discards incomplete blobs at start-up, so
+after a power loss the device finds either the old or the new complete model,
+never a mixture. Software defaults and limits stay in `app_config.h`.
 
-Both firmware slots share NVS and LittleFS. A trial OTA image must retain
-settings and files readable by the previous firmware until the local boot
-health check accepts the new image. Any migration must support booting the
-previous image after a rejected trial; firmware rollback does not restore
-shared storage. An accepted migration removes obsolete active values without
-letting them leak into the current model. Retention/cleanup details and their
-flash, heap and quota costs are decided before the store and OTA modules.
+At start-up the record is loaded and checked (version, length, check value,
+limits). A missing, damaged or unknown record means: `secrets.h` values and
+defaults. Saving writes the whole record at once.
+
+Firmware updates do **not** guarantee that settings are kept. Settings are
+carried over when the new firmware uses the same settings format version;
+after a format change, and after a rollback to older firmware, the device
+starts with `secrets.h` values and defaults and must be configured again
+(without WiFi credentials in `secrets.h` this means the setup access point).
+The version in the header allows a migration to be added later without
+changing the stored format. Image files on LittleFS are a separate matter and
+are kept by routine firmware updates (see [WEB_UI.md](WEB_UI.md)).
 
 Save and reset report failure rather than claiming success after a partial
-operation. Required tests include interruption at each write/commit stage,
-invalid or full NVS, corrupt/unknown schema, reset, and older-firmware boot
-after a trial migration.
+operation. Required tests include interruption of a save, a damaged or full
+NVS, an unknown format version, and reset.
 
 ## Settings groups (planned)
 | Group | Examples |

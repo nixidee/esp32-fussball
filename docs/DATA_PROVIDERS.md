@@ -93,6 +93,8 @@ string lengths, entity counts and parser storage. Competition/team selection
 responses are budgeted independently of a match round or table; one measured
 round does not establish their maximum size.
 
+Provider requests follow the device-wide coordinated operation policy
+(ADR-016) together with the Web server and other network services.
 Requests also need bounded redirects, retries, total elapsed time and concurrent
 sockets. The total deadline includes slow partial reads and retries. Network
 loss, cancellation and a settings change terminate or invalidate pending work.
@@ -110,9 +112,11 @@ their only software source is `include/app_config.h`.
 Per-competition routing is supported by the design, but mixing fields from two
 sources requires mappings for competitions, seasons, teams and fixtures, with
 defined mapping ownership and memory cost. Every combined field must retain
-source provenance and follow an explicit conflict-precedence rule. Decide the
-mapping scheme, richer-event requirements and budget before optional provider
-routing is implemented.
+source provenance and follow an explicit conflict-precedence rule. The chosen
+scheme is explicit, verified mappings only for competitions that are actually
+combined (ADR-016); until then each provider is used on its own. Decide the
+mapping representation, richer-event requirements and budget before optional
+provider routing is implemented.
 
 ## Resource and acceptance requirements
 Endpoint filters, bounded parse documents, model fields, mappings and selection

@@ -8,7 +8,11 @@ Configured through a built-in web interface.
 > shows an LVGL boot test screen and logs touch input changes; the Waveshare
 > target was last accepted for boot logging before display integration and is
 > paused until the C6 is done. Pure SafeArea geometry has native host tests;
-> display failure-path repair comes next, followed by staged memory/flash checks.
+> display failure handling is implemented and was verified on the device. A
+> temporary diagnostic build (since removed, kept in the Git history) showed that
+> WiFi, HTTPS to OpenLigaDB, JSON parsing, a JPEG background and a small HTTP
+> server fit the ESP32-C6 with reserves; this is integration evidence, not a
+> certification of the finished application. Build reproducibility comes next.
 > Planned features are described
 > in [docs/](docs/); a successful boot screen does not certify the complete C6 app.
 
@@ -22,7 +26,6 @@ environments below.
 | Environment (`<env>`) | Hardware | Status |
 |---|---|---|
 | `xiao_esp32c6_gc9a01` | Seeed XIAO ESP32-C6 + 1.28" GC9A01 round display | boot test screen (LVGL) and touch input log confirmed on the device; boot log lines are not visible over USB (input logs are); default env |
-| `xiao_esp32c6_gc9a01_budget` | same hardware as `xiao_esp32c6_gc9a01` | temporary diagnostic build for the resource measurements (WiFi station, HTTPS requests to OpenLigaDB, LittleFS with a JPEG scene from `data/`, small HTTP test server with `GET /`, `GET /status`, `POST /upload`); reads the optional `SECRET_WIFI_SSID_1` / `SECRET_WIFI_PASSWORD_1` from `include/secrets.h` and builds without it; load the scene with `pio run -e xiao_esp32c6_gc9a01_budget -t uploadfs`; will be removed after the measurements, not a product build |
 | `waveshare_esp32s3_lcd128` | Waveshare ESP32-S3-LCD-1.28 | paused; last build and boot log before the display code (P1.2); not built with the display code yet; if the first log lines are missing after upload, press RST |
 | `native` | Host computer, unit tests only | SafeArea geometry suite; C++20, verified on macOS with Apple clang 21.0.0 |
 

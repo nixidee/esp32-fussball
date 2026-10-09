@@ -92,6 +92,8 @@ Requirements (2026-10-08):
 
 **Refinement:** ADR-011 adds whole-model consistency and trial-OTA storage
 compatibility. These are requirements for the planned settings service.
+ADR-017 replaces the settings part of the trial-OTA compatibility with a
+simpler rule (settings kept only for an unchanged settings format).
 
 ## ADR-008 — Image pipeline: browser composes, device stores · Accepted 2026-10-08
 **Decision:** the browser renders the final image at device
@@ -186,6 +188,12 @@ older-firmware boot tests. No concrete buffer/quota/deadline values are
 selected here. Product contracts are detailed in [CONFIGURATION.md](CONFIGURATION.md),
 [NETWORK.md](NETWORK.md) and [WEB_UI.md](WEB_UI.md).
 
+**Refinement:** ADR-016 selects a dedicated versioned OTA descriptor and the
+image replacement direction.
+ADR-017 supersedes the settings part of this ADR (old-readable settings during
+a trial boot, migrations that support booting the previous image); the rules
+for image files are unchanged.
+
 ## ADR-012 — Bounded allocations and debug transport · Accepted 2026-10-08
 
 Clarifies the resource discipline for ADR-003, ADR-006 and ADR-009. The debug
@@ -207,6 +215,8 @@ debug output remains switchable and secrets are redacted.
 fragmentation/largest blocks, flash and relevant storage quotas under allowed
 concurrent workloads. "No log history" does not mean "zero connection RAM".
 Concrete limits are established by the affected module's design and tests.
+
+**Refinement:** ADR-016 selects a live push stream for the debug transport.
 
 ## ADR-013 — Reproducibly maintained display-port patch · Superseded by ADR-015
 
@@ -254,6 +264,9 @@ capacity tests. No mapping representation, conflict algorithm or concrete
 capacity is selected by this decision. Views continue to receive only the
 canonical model.
 
+**Refinement:** ADR-016 selects explicit verified mappings for competitions
+that are actually combined.
+
 ## ADR-015 — Display failure handling without port patch · Accepted 2026-10-09
 
 Supersedes ADR-013. Extends ADR-003. Design details and fault verification are
@@ -286,3 +299,96 @@ allocation failures are not retried locally; leaked memory is reclaimed by the
 restart. Task-watchdog panic applies to every watched task, not only the
 display. Costs (driver state, watchdog entry, assertion code) are measured in
 the implementing build. An upstream bug report for the port is recommended.
+
+## ADR-016 — Service design directions · Accepted 2026-10-09
+
+Refines ADR-006, ADR-008, ADR-011, ADR-012 and ADR-014. Selects the design
+direction for planned services; concrete layouts, limits and values are still
+designed, measured and approved before each service is implemented.
+
+**Decisions:**
+- **OTA identity:** a dedicated, versioned image descriptor carries the target
+  profile and partition-layout identity and is checked before activation.
+  The trial image confirms itself after a bounded local health check that
+  needs no router, provider or SNTP.
+- **Network operations:** all network services follow one coordinated, bounded
+  operation policy (admission of competing operations, deadlines, cancellation,
+  socket, body and parser limits) instead of independent per-service limits.
+  Passwords stay optional; when set, they protect mutations and OTA
+  consistently; a GET request never performs a mutation.
+- **Relevant fixtures:** round identity plus a bounded date horizon, with
+  explicit unknown/stale rules. Horizon values are set from real provider
+  samples.
+- **Image replacement:** a new image is written to one bounded temporary file
+  inside a reserved part of the filesystem and is published only when no
+  reader uses the old file; deletion follows the same reader rule.
+- **Browser debug output:** a live push stream with bounded sending and
+  explicit drop/disconnect behaviour; protocol and limits are chosen from
+  measurements.
+- **Mixed providers:** explicit, verified mappings (competition, season, team,
+  fixture) with provenance and field precedence, only for competitions that
+  are actually combined. Until then each provider is used on its own.
+- **Reproducible configuration:** generated configuration and the component
+  lockfile are regenerated and checked deterministically per target, so stale
+  `sdkconfig.<env>` files or lock drift are detected instead of accepted.
+
+**Alternatives considered:** OTA identity encoded in existing version/project
+fields (field limits, mixed meaning); per-service network limits with a global
+admission check (more cross-service acceptance work); a smaller fixture
+selection with targeted catch-up queries (more selection logic); versioned
+image file generations (more metadata); browser polling of a current debug
+record (less immediate, repeated HTTP cost); provider-scoped data without
+mappings (no combination); manual documented regeneration (operator burden).
+
+**Consequences:** each direction still needs its design with measured
+static RAM, heap peak, stack, flash and storage costs. The concurrency rule,
+snapshot ownership, settings persistence and formatter policy are decided in
+ADR-017.
+
+## ADR-017 — Settings record, snapshot copies, serialized heavy work, formatter · Accepted 2026-10-09
+
+Supersedes the settings part of ADR-011; refines ADR-007 and ADR-016.
+
+**Context:** firmware updates are frequent during development and rare in
+normal use. A settings store that keeps old-readable generations through every
+OTA trial costs NVS space, code and test effort. Only the display shows live
+scores and tables; the Web UI does not offer them to the user.
+
+**Decisions:**
+- **Settings persistence:** settings survive every restart and power loss.
+  The whole settings model is one NVS blob with a header (format version,
+  length, CRC32). NVS writes a changed blob completely before removing the old
+  one and discards incomplete blobs at start-up (verified in the ESP-IDF 6.1.0
+  source), so a save is all-or-nothing without own transaction code. Reset
+  erases the whole settings namespace. Settings are **not** guaranteed across
+  firmware updates: they are kept for an unchanged format version; a format
+  change or a rollback to older firmware starts with `secrets.h` values and
+  defaults. The version field allows a migration to be added later.
+- **Snapshot ownership:** one writer publishes the football data. Readers take
+  short protected copies of what they need; the lock is held only while
+  copying. The display task is the reader of live data; Web handlers read only
+  small status/debug data, and selection lists (competitions, teams) come from
+  their own bounded requests. No reader leases on snapshot slots.
+- **Concurrency:** heavy operations (TLS fetch with parsing, JPEG decoding,
+  upload handling) run one at a time by default while display, input and
+  status stay responsive. An overlap is allowed only where it has been measured
+  and bounded (Web server request handling while the display works). The
+  integration-stage reserves stay in force for the next stage: largest free
+  block at least 32 KB, minimum free heap at least 40 KB, at least 25 % free in
+  every task stack, application slot at most 85 % full.
+- **Formatting:** clang-format in one pinned version (23.1.3, latest stable on
+  2026-10-09), a project style file matching the existing code, and a
+  check-only command for project sources. No mass reformatting. Host tooling
+  only; no firmware cost.
+
+**Alternatives considered:** versioned settings generations or a generation
+manifest (consistent across OTA trials, more NVS/code/tests); reader leases on
+several snapshot slots (no copying, but more full snapshot buffers and a
+writer that can be blocked by a slow reader); permitting bounded overlaps of
+heavy work in general (more peak memory); a style file without a pinned tool or
+no formatter (drift not detected).
+
+**Consequences:** after a settings format change the device must be
+configured again (setup access point if `secrets.h` has no WiFi credentials).
+Snapshot copy and settings record sizes, NVS use and formatter setup are
+measured or verified when the modules are implemented.
