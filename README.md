@@ -20,7 +20,9 @@ Configured through a built-in web interface.
 > service now applies the selected zone, tracks wall-clock validity, emits
 > change notifications and provides monotonic time and civil night windows.
 > Its host tests and offline C6 device test passed; SNTP and its network
-> device test follow with the WiFi manager. Health and WiFi come next.
+> device test follow with the WiFi manager. Console health diagnostics, bounded
+> task snapshots, heap phase meters and app-loop supervision are implemented;
+> extended C6 acceptance is still pending. WiFi comes next.
 > Planned features are described
 > in [docs/](docs/); a successful boot screen does not certify the complete C6 app.
 
@@ -35,7 +37,7 @@ environments below.
 |---|---|---|
 | `xiao_esp32c6_gc9a01` | Seeed XIAO ESP32-C6 + 1.28" GC9A01 round display | boot test screen (LVGL) and touch input log confirmed on the device; the boot log is visible only if the chip is reset while the monitor is open (press RST; the USB serial port re-connects after the reset); default env |
 | `waveshare_esp32s3_lcd128` | Waveshare ESP32-S3-LCD-1.28 | paused; last build and boot log before the display code (P1.2); not built with the display code yet; if the first log lines are missing after upload, press RST |
-| `native` | Host computer, unit tests only | SafeArea geometry, settings, event admission, file name and timekeeping suites; C++20, verified on macOS with Apple clang 21.0.0 |
+| `native` | Host computer, unit tests only | SafeArea geometry, settings, event admission, file name, timekeeping and heap-meter suites; C++20, verified on macOS with Apple clang 21.0.0 |
 
 | Task | Command |
 |---|---|
@@ -53,6 +55,7 @@ environments below.
 | Run only the event admission suite | `pio test -e native -f test_events` |
 | Run only the file name suite | `pio test -e native -f test_files` |
 | Run only the timekeeping suite | `pio test -e native -f test_timekeeping` |
+| Run only the heap-meter suite | `pio test -e native -f test_health` |
 | Set up host tools (once) | see “Code formatting” below |
 | Check formatting of changed lines | `.venv-tools/bin/python scripts/check_format.py` |
 
@@ -90,7 +93,11 @@ Build configuration files:
   The first build of a new chip target creates its lockfile.
 - `scripts/native_sources.py` — explicit pure-component selection for host
   tests; firmware and tests compile the same geometry, settings, events,
-  files and timekeeping sources without copies.
+  files, timekeeping and heap-meter sources without copies.
+- `scripts/heap_monitor_patch.py` / `.cmake` — apply the project's bounded
+  heap-monitor allocation-failure correction to a build-local ESP-IDF source
+  copy. The shared SDK stays unchanged; an unexpected SDK version or source
+  hash stops the build and requires review (see ADR-021).
 - `.clang-format`, `requirements-tools.txt`, `scripts/check_format.py` — code
   style and its check (see “Code formatting”).
 - `boards/`, `displays/`, `targets/<target>.h` — hardware profiles (pins,

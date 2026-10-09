@@ -10,3 +10,5 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 idf_build_set_property(DEPENDENCIES_LOCK
   "${CMAKE_CURRENT_LIST_DIR}/dependencies.lock.${IDF_TARGET}")
 project(esp32_fussball)
+
+include("${CMAKE_CURRENT_LIST_DIR}/scripts/heap_monitor_patch.cmake")

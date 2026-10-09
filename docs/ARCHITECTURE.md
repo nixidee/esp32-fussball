@@ -4,11 +4,11 @@
 > handling (`components/display`), boot test screen (`components/ui`), pure
 > SafeArea geometry (`components/geometry`) with native tests, the settings
 > model and record format (`components/settings`, native tests), the NVS
-> settings store, event bus, LittleFS file service and time service
-> (`components/core`), pure event admission, file rules and civil-time helpers,
-> and `include/app_config.h` (defaults and limits). The time service works
+> settings store, event bus, LittleFS file service, time and health services
+> (`components/core`), pure event admission, file rules, civil-time helpers
+> and the heap-meter coordinator, plus `include/app_config.h` (defaults and limits). The time service works
 > without networking; SNTP and its network acceptance follow with WiFi.
-> Other services remain planned.
+> Extended health acceptance is pending. Other services remain planned.
 > Decisions in [DECISIONS.md](DECISIONS.md). Planned contracts below do not
 > describe implemented services or a completed resource acceptance.
 
@@ -111,14 +111,21 @@ Planned tasks get their values when they are introduced, after measurement.
 
 | Task | Priority | Stack | Created by | Status |
 |---|---|---|---|---|
-| `esp_timer` | 22 | 3584 B | ESP-IDF (high-resolution timer callbacks) | running |
-| `sys_evt` | 20 | 2304 B | ESP-IDF default event loop (queue 32) | created with WiFi |
+| `esp_timer` | 22 | 4096 B | ESP-IDF (high-resolution timer callbacks) | running |
+| `sys_evt` | 20 | 2816 B | ESP-IDF default event loop (queue 32) | created with WiFi |
 | `events` | 5 | 2304 B | event bus (`app_config.h`) | running |
 | `taskLVGL` | 4 | 7168 B | `esp_lvgl_port` defaults, internal RAM | running |
-| `main` | 1 | 3584 B | ESP-IDF, runs `app_main` and the diagnostic loop | running |
+| `main` | 1 | 4096 B | ESP-IDF, runs `app_main`, time and health polling | running |
 | `Tmr Svc` | 1 | 2048 B | FreeRTOS software timers | running |
 | `IDLE` | 0 | 1536 B | FreeRTOS | running |
 | network/data, HTTP server | – | – | planned | – |
+
+The table gives allocated stack bytes. With the current Picolibc build,
+`esp_task.h` adds `TASK_EXTRA_STACK_SIZE` (512 B) to the configured main,
+high-resolution timer and default event-loop stacks. Their configured sizes
+are 3584, 3584 and 2304 B respectively. `CONFIG_LWIP_TCPIP_CORE_LOCKING` is
+off, so the default event loop has no additional 2048 B core-lock allowance.
+These values correct the documentation; no stack configuration was increased.
 
 The `events` task runs above the LVGL task so that a state change reaches
 its subscribers before the next render. Its callbacks must therefore be
@@ -158,11 +165,12 @@ short (see below), or they delay rendering.
 - **Boot order:** `events::init()` runs before the settings store. A failure
   is a memory budget error at boot and restarts the device in a controlled
   way.
-- **Memory:** static ≈ 120 B (`.bss`). Before adding the time event, heap at
-  init was 2,808 B on the XIAO ESP32-C6 (2304 B task stack, queue of
-  8 × 16 B, loop and handler records). The current queue adds one 16 B
-  entry: normal init now uses 2,824 B, verified on the C6. The boot log line
-  `after event bus init` shows this usage.
+- **Memory:** before the health/FreeRTOS trace extension, static use was
+  approximately 120 B (`.bss`) and the nine-entry queue's init used 2,824 B
+  of heap on the C6. The earlier eight-entry queue used 2,808 B (2304 B task
+  stack, 8 × 16 B entries, loop and handler records). Trace adds control-object
+  storage as listed below; these earlier measurements are historical. The
+  boot log line `after event bus init` measures the current init cost.
   The earlier flood test used at most 364 B of the `events` stack
   (1,940 B free); subscriber stack usage is checked when services are added.
 - **Diagnostics:** the status log prints the minimum free stack of the
@@ -255,17 +263,96 @@ C-library APIs and `esp_timer_get_time()` for monotonic milliseconds.
   selector: [NETWORK.md](NETWORK.md#time). SNTP wiring and network tests are
   deferred to P3.1; night-mode rendering remains planned.
 
-The normal C6 build after this step is 512,800 B (`firmware.bin`), an
-increase of 12,256 B over the previous 500,544 B file-service build. The
-target size report is 512,170 B flash and 47,136 B RAM (+352 B RAM); DIRAM
-is 92,010 B (+348 B). This includes the settings extension, fifth event
+Before the health/FreeRTOS trace extension, the time-foundation C6 build
+was 512,800 B (`firmware.bin`), an increase of 12,256 B over the previous
+500,544 B file-service build. Its target size report was 512,170 B flash
+and 47,136 B RAM (+352 B RAM); DIRAM was 92,010 B (+348 B). This included
+the settings extension, fifth event
 kind and time service; no new task is created. The time diagnostic and its
 fixtures are removed from normal builds by the `kNone` selector. Cycling all
 zones in that diagnostic retains 648 B of heap; that measurement is distinct
-from normal single-zone initialisation (52 B measured). Normal heap after
-time init is 418,456 B; after display init and at 30 s it is 389,380 B
-with a 368,640 B largest block. Main/events stack minimum free is
-2,464/1,940 B in this normal run.
+from normal single-zone initialisation (52 B measured). In that historical
+build, heap after time init was 418,456 B; after display init and at 30 s
+it was 389,380 B with a 368,640 B largest block. Main/events stack minimum
+free was 2,464/1,940 B in that run.
+
+## Health service (implemented; extended device acceptance pending)
+
+`components/core/health_service.*` runs in the existing app task; the pure
+`health_meter.*` coordinator also has native tests. Design: ADR-021.
+
+- **Console:** the existing stored `debug_status_log` and
+  `debug_status_interval_s` fields control periodic reports (on, 30 s by
+  default; 5–3600 s). A settings callback raises an atomic flag; the app task
+  copies settings and applies them. Monotonic deadlines schedule reports.
+  Disabling these reports preserves boot/state/error logs and supervision.
+- **Report:** internal 8-bit heap free/largest/minimum values, all-task stack
+  low-water marks, LVGL memory when its short lock can be acquired, and event,
+  file and time status. Snapshot pause and complete report durations are
+  recorded, including the final console write. Console output can delay the
+  app loop; its measured duration is part of the acceptance budget.
+- **Task snapshot:** two fixed tables hold at most 16 tasks (960 B together
+  on the C6). The scheduler stays suspended while collecting task data and
+  copying names into owned rows; formatting happens after it resumes. An
+  incomplete or over-capacity scan produces no rows and logs the limit,
+  never a partial or stale list. On multicore targets only copied numeric
+  IDs and watermarks are exposed; names stay empty. S3 acceptance is pending.
+  FreeRTOS trace is enabled for this API; CPU runtime statistics and the
+  FreeRTOS text-formatting helpers remain disabled.
+- **App-loop watchdog:** after startup work and boot diagnostics finish,
+  `app_loop` is registered with the existing 5 s task watchdog. Each completed
+  polling iteration feeds it after status work, including with the console
+  disabled. A separate timer cannot hide a blocked app loop. Existing IDLE
+  and LVGL supervision and the RTC abnormal-reset/headless policy are
+  unchanged. This heartbeat does not prove event-subscriber progress.
+- **Heap ownership:** only the shared coordinator calls the SDK's global
+  local-minimum start/stop functions. A noncopyable RAII meter makes one
+  atomic acquisition attempt without waiting or retrying. Nested/contending
+  meters capture point values and elapsed time only; they never start or
+  stop the owner's interval. `finish()` is idempotent. A start failure frees
+  ownership; the owner reads the final minimum before stopping and releases
+  ownership only after a successful stop. Stop failure quarantines the
+  monitor until restart, leaving subsequent meters point-only.
+- **Minimum scope:** observations explicitly distinguish lifetime, interval
+  (with monotonic interval-start time) and unavailable. Lifecycle/generation
+  checks around the sample and atomic timestamp publication prevent a
+  transition from being labelled as a stable interval. Unavailable minima
+  are zero with that explicit scope; free/largest/time remain available.
+  The SDK sums per-region low-water marks: this is a conservative bound,
+  not a simultaneous total or a measurement attributable to one caller.
+  An owned interval includes allocations by every concurrent task.
+- **SDK correction:** `scripts/heap_monitor_patch.py` and `.cmake` replace
+  only the heap source in the build with a local corrected copy. Exact
+  ESP-IDF 6.1.0 and original-source hash checks fail closed on upgrades; the
+  shared installed SDK is untouched. Failed monitor bookkeeping allocation
+  returns `ESP_ERR_NO_MEM` before resetting heap minima, rather than asserting.
+  Abort-on-allocation-failure must stay disabled. This corrects that one SDK
+  path and does not promise recovery from every firmware allocation failure.
+
+There is no new normal-runtime task or task stack, settings field, NVS format
+or partition change. The fixed task tables need no heap allocation; the C6
+coordinator object is 28 B; a phase-meter object occupies 96 B on its
+caller's stack, in addition to temporary call frames.
+Starting an SDK interval allocates one 4 B minimum value per registered heap
+plus allocator overhead; the watchdog user also needs an SDK allocation.
+Enabling trace affects every applicable FreeRTOS control object, including
+objects allocated by libraries:
+
+| Control object (C6) | Additional bytes per object |
+|---|---:|
+| Task / static task | 8 |
+| Queue or semaphore / static equivalent | 8 |
+| Event group | 4 |
+| Software timer | 4 |
+| Stream or message buffer | 4 |
+
+These are structure costs, not a complete firmware resource acceptance. The
+whole build and permitted workloads still need peak heap, fragmentation,
+stack, scheduler-pause and console-latency checks. `cfg::kHealthTest` is
+`kNone` in normal builds; diagnostic workers and fault injection are test-only.
+The browser transport remains planned: selected application diagnostics,
+live only, bounded and nonblocking for producers. No console hook or network
+transport is installed now; see [WEB_UI.md](WEB_UI.md#live-debug-output).
 
 ## Display fault handling (implemented, device fault tests pending)
 - `esp_lvgl_port` stays unchanged (ADR-015). All handling lives in
@@ -410,8 +497,9 @@ components/            ESP-IDF components = modules (core, net, web, data,
   core/                settings store on NVS (load, save, reset, presets,
                        device tests), event bus (own esp_event loop and
                        task), file service (LittleFS mount, device tests),
-                       time service (validity, TZ, clocks, device tests);
-                       idf_component.yml pins joltwallet/littlefs; later health
+                       time service (validity, TZ, clocks, device tests),
+                       health console/watchdog and pure heap-meter coordinator;
+                       idf_component.yml pins joltwallet/littlefs
   events/              pure C++ event catalog and queue admission
                        (coalescing, UI slots); no ESP-IDF includes, host-tested
   files/               pure C++ file name rule, path building, erased-flash
@@ -427,6 +515,7 @@ assets/src/            high-res default images (sources)
 data/                  generated LittleFS image content
 test/                  native host tests + fixtures
 scripts/               native build source selection, sdkconfig regeneration
-                       and verification, format check (implemented)
+                       and verification, guarded build-local SDK heap patch,
+                       format check (implemented)
 tools/                 build scripts (web embed, asset conversion, boundary test)
 ```

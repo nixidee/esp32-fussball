@@ -192,13 +192,26 @@ inline constexpr char kNtpServerDefault[] = "pool.ntp.org";
 inline constexpr bool kExternalAntennaDefault = false;
 
 // ---- Settings: debug --------------------------------------------------------
-// Periodic status log (free heap, largest block, low-water mark, LVGL pool,
-// main task stack). Sent to the console; routed through the planned debug
-// helper later.
+// Periodic console health status (heap, LVGL, every task's free stack,
+// event/file/time status). The app-loop watchdog stays active when disabled.
 inline constexpr bool kDebugStatusLogDefault = true;
 inline constexpr uint16_t kDebugStatusIntervalDefaultS = 30;
 inline constexpr uint16_t kDebugStatusIntervalMinS = 5;
 inline constexpr uint16_t kDebugStatusIntervalMaxS = 3600;
+
+// ---- Health diagnostics ---------------------------------------------------
+// Fixed all-task snapshot capacity; overflow produces no partial/stale rows.
+inline constexpr std::size_t kHealthMaxTasks = 16;
+inline constexpr std::size_t kHealthTaskNameBytes = 16;
+// Only the busy-LVGL device test creates a temporary, statically allocated
+// task.
+inline constexpr uint32_t kHealthTestTaskStackBytes = 1536;
+enum class HealthTest : uint8_t {
+  kNone,
+  kMetersAndStatus,  // snapshots, overlap, allocation failure/retry, on/off
+  kAppStallOnce,  // one bounded blocked-app TWDT reset, then automatic resume
+};
+inline constexpr HealthTest kHealthTest = HealthTest::kNone;
 
 // Device tests of the settings store. Must be kNone in every normal build;
 // any other value compiles one test into the boot sequence. A test that

@@ -14,7 +14,7 @@ firmware, no internet/CDN needed). Reachable in normal WiFi mode
 | **Images** | Crest, slideshow (up to 5 images initially, limited by free space), backgrounds per screen; editor; reset to default |
 | **Settings** | Groups: Data/API, WiFi, Display, Overlays, Time, System |
 | **Update** | Firmware upload (OTA), current version and profile |
-| **Debug** (planned) | Live debug output while the tab is open, without retained device log history; bounded connection/formatting overhead is measured before release |
+| **Debug** (planned) | Selected live application diagnostics while the tab is open, without retained history; bounded connection/formatting overhead is measured before transport implementation |
 
 ## Image editor (P7.4)
 - Upload an image; resize, move, set transparency.
@@ -56,18 +56,25 @@ files readable by the previous image until acceptance, as described in
 
 ## Live debug output
 
-Only compile-time console status logging exists today. The planned browser
-output is a live push stream (ADR-016). It retains no log history on the device, but still needs socket/protocol
-state and transient formatting buffers while connected. Measure both inactive
-and active overhead, including heap peaks, stack, fragmentation and flash;
-choose the protocol, client count and size limits before implementation.
+Console health reports exist today and use the stored `debug_status_log`
+and `debug_status_interval_s` settings. Browser output is a separate planned
+live push stream of controlled application diagnostics: selected module
+status, state changes and errors (ADR-021, refining ADR-016). It does not
+mirror arbitrary SDK/vendor console text. Producers omit or redact secrets
+before enqueueing a record. No log hook or network transport is installed
+by the health service now; transport follows in P8.7.
 
-A slow client must have bounded backpressure with explicit drop/disconnect
-behaviour; it cannot block firmware tasks or create an unbounded queue.
-Redact secrets from all output, keep each debug output switchable and stop
-streaming when the tab disconnects. Required tests cover inactive/active
-budgets, a slow client, reconnects and operation alongside allowed provider,
-image-upload and OTA workloads.
+The device retains no log history and offers no replay after reconnecting.
+Socket/protocol state and transient formatting/sending buffers must still
+be bounded. Choose the protocol, client count, message size, rate and explicit
+drop/disconnect policy before transport implementation, using measurements
+of both inactive and active heap peaks, stack, fragmentation and flash.
+
+A producer must never block on a browser, including a slow or disconnected
+client; no queue may grow without a bound. Keep live output switchable and
+stop streaming when the tab disconnects. Required acceptance covers inactive
+and active budgets, slow/disconnected clients, reconnects and operation
+alongside allowed provider, image-upload and OTA workloads.
 
 ## API
 The UI uses the REST API described in [NETWORK.md](NETWORK.md). Defaults and

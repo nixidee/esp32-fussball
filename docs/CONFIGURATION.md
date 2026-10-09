@@ -154,6 +154,19 @@ fields use the initial values (`secrets.h` over defaults).
 
 Values that do not fit are rejected, never truncated.
 
+### Console health diagnostics
+
+The health service uses the existing periodic-status switch and interval;
+no new settings field or record version is needed. Reports run in the app
+task on monotonic deadlines and include heap, task-stack, LVGL, event, file
+and time status. A settings-change notification flags the app task to apply
+the new values; the event callback does not print or perform this work.
+
+Turning periodic status off keeps boot, state-change, warning and error logs.
+It also keeps the independent 5 s app-loop watchdog active. These fields
+control console status only; the planned browser's live diagnostic controls
+and transport are described in [WEB_UI.md](WEB_UI.md#live-debug-output).
+
 ### Start-up and errors
 
 - No stored record: initial values (`secrets.h` over defaults), logged.
@@ -232,7 +245,7 @@ layout. The earlier measured settings-store heap cost at boot was 2,168 B.
 | Display | brightness (only targets with a backlight pin), rotation, night mode window (default 23:00–07:00) |
 | Time | time-zone location label mapped to a POSIX rule, NTP server; clock use is defined in [NETWORK.md](NETWORK.md) |
 | System | optional admin password (also protects OTA; default off), factory reset |
-| Debug | switches per debug output, e.g. periodic status log (stored, default on, interval 30 s) |
+| Debug | periodic console status (implemented; stored, default on, interval 30 s); browser live-output controls planned |
 
 Each setting has a type, default, min/max (or allowed values) and a schema
 version — all in `app_config.h`. The Web UI reads the schema from the device,

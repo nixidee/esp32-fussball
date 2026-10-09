@@ -15,3 +15,12 @@ for component in pure_components:
         str(Path(env.subst("$BUILD_DIR")) / "pure" / component),
         str(component_root),
     )
+
+# Pure coordinator in the core service; the remaining core files require IDF.
+core_root = project_root / "components" / "core"
+env.Append(CPPPATH=[str(core_root / "include")])
+env.BuildSources(
+    str(Path(env.subst("$BUILD_DIR")) / "pure" / "health"),
+    str(core_root),
+    src_filter="+<health_meter.cpp>",
+)

@@ -22,6 +22,14 @@ CONFIG_ESP_TASK_WDT_EN=y
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=5
 CONFIG_ESP_TASK_WDT_PANIC=y
 
+
+# All-task stack snapshots use raw status records, not CPU statistics or text
+# formatting. A failed local heap-monitor allocation must return an error.
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+# CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS is not set
+# CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS is not set
+# CONFIG_HEAP_ABORT_WHEN_ALLOCATION_FAILS is not set
+
 # ---- LVGL 9.6 (trimmed config for the C6) ----
 # Unlisted LVGL options keep their Kconfig defaults.
 

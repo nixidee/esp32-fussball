@@ -200,7 +200,8 @@ for image files are unchanged.
 ## ADR-012 — Bounded allocations and debug transport · Accepted 2026-10-08
 
 Clarifies the resource discipline for ADR-003, ADR-006 and ADR-009. The debug
-transport remains planned; only compile-time console status logging exists.
+transport remains planned; console status logging is controlled by stored
+`debug_status_log` and `debug_status_interval_s` settings.
 
 **Context:** TLS, parsing, rendering and socket libraries may allocate memory
 during operations. A browser stream needs connection state and temporary
@@ -545,3 +546,59 @@ without images until the reset is triggered. The quota, the replacement
 reserve and the reader-aware publish/delete protocol (ADR-016) are still to
 be implemented before images use the service: the quota and reserve with
 the image storage format, the replacement protocol with the image upload.
+
+## ADR-021 — Health diagnostics, heap ownership and browser scope · Accepted 2026-10-09
+
+Refines ADR-012, ADR-016 and ADR-019. This accepts the design; extended
+health device/resource acceptance remains pending.
+
+**Context:** runtime status needs bounded all-task snapshots and reliable heap
+minimum labels. ESP-IDF's local heap monitor is global: overlapping starts
+reset the active interval, and its bookkeeping allocation asserts on failure
+in the pinned SDK. App-loop progress must be supervised even when periodic
+console output is disabled. Browser diagnostics need a defined source scope
+before introducing network buffers or a console hook.
+
+**Decision:**
+- Run health reporting in the existing app task and reuse the stored console
+  switch/interval. Fixed tables cover at most 16 tasks; copy names under the
+  single-core scheduler pause and format afterwards. Overflow produces no
+  partial/stale rows. Enable FreeRTOS trace without CPU runtime statistics
+  or its text-formatting helpers.
+- Register `app_loop` with the existing 5 s task watchdog after startup and
+  feed it after each completed polling iteration, independently of console
+  settings. Preserve IDLE/LVGL supervision and the existing abnormal-reset
+  headless policy; this does not supervise event-subscriber liveness.
+- Give one atomic coordinator exclusive ownership of the SDK heap interval.
+  RAII meters acquire once without retry or waiting; contenders capture only
+  points/timing. Read the final minimum before stop, release only after
+  successful stop, and quarantine on stop failure. Failed start releases the
+  gate. Observations validate lifecycle/generation and carry explicit
+  lifetime/interval/unavailable scope and interval-start time. SDK region
+  minima describe all concurrent allocations and are not caller attribution.
+- Correct only the monitor's allocation-failure path in a project-maintained,
+  build-local source copy for exact ESP-IDF 6.1.0. Verify the original source
+  hash and stop the build on mismatch; leave the shared SDK untouched. Return
+  `ESP_ERR_NO_MEM` before resetting minima; allocation aborts stay disabled.
+- Browser output is controlled application status/state/error records,
+  live only, with secrets omitted/redacted before enqueueing. No retained
+  history or arbitrary SDK/vendor console mirroring. Producers never block;
+  bounded drop/disconnect behaviour is explicit. Transport is deferred to
+  P8.7; protocol and inactive/active/client/message/rate budgets require
+  measurement before implementation. No hook or network stack is added now.
+
+**Alternatives considered:** retaining the SDK allocation panic (a diagnostic
+can restart an otherwise running device); deferring local intervals until a
+later SDK (no phase minimum now); mirroring the entire console to browsers
+(uncontrolled source/formatting and secret-exposure scope); a dedicated health
+task (another task stack and supervision context).
+
+**Consequences:** no new settings layout, partition or normal-runtime task.
+The C6 task tables occupy 960 B; trace also expands task, queue/semaphore,
+event-group, timer and stream/message-buffer control objects, as listed in
+[ARCHITECTURE.md](ARCHITECTURE.md#health-service-implemented-extended-device-acceptance-pending).
+Phase meters add caller-stack storage and the SDK's bounded interval
+allocation. SDK upgrades require review of the guarded correction. The fix
+covers this monitor allocation only, not general firmware OOM recovery.
+Extended device checks and the complete resource budget remain acceptance
+work; browser transport has its own later acceptance.

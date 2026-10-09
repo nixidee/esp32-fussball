@@ -20,6 +20,7 @@
 #include "file_service.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "health_service.h"
 #include "hw_target.h"
 #include "safe_area.h"
 #include "sdkconfig.h"
@@ -40,8 +41,9 @@ void logHeap(const char* when) {
   // Internal 8-bit capable heap: the budget that matters on boards without
   // PSRAM. "largest block" shows fragmentation, "min free" the low-water mark.
   constexpr uint32_t kCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
-  ESP_LOGI(kTag, "heap %s: free %u B, largest block %u B, min free %u B", when,
-           static_cast<unsigned>(heap_caps_get_free_size(kCaps)),
+  ESP_LOGI(kTag,
+           "heap %s: free %u B, largest block %u B, min free %u B (lifetime)",
+           when, static_cast<unsigned>(heap_caps_get_free_size(kCaps)),
            static_cast<unsigned>(heap_caps_get_largest_free_block(kCaps)),
            static_cast<unsigned>(heap_caps_get_minimum_free_size(kCaps)));
 }
@@ -165,22 +167,6 @@ void logInputChanges(InputStates& active) {
   }
 }
 
-void logStatus() {
-  logHeap("status");
-  display::logMemory();
-  // ESP-IDF counts task stacks in bytes.
-  ESP_LOGI(kTag, "main task stack: min free %u B",
-           static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
-  events::logStatus();
-  files::logStatus();
-  timekeeping::logStatus();
-}
-
-struct StatusLogSettings {
-  bool enabled;
-  TickType_t period;
-};
-
 // Set in the event bus task, consumed by the diagnostic loop.
 std::atomic<bool> settings_changed{false};
 
@@ -188,14 +174,8 @@ void onSettingsChanged(events::Event, uint32_t, void*) {
   settings_changed.store(true, std::memory_order_release);
 }
 
-StatusLogSettings statusLogSettings() {
-  const settings::Model model = settings::current();
-  return {model.debug_status_log,
-          pdMS_TO_TICKS(uint32_t{model.debug_status_interval_s} * 1000)};
-}
-
-// Never returns. Input polling is replaced by the input driver, the status
-// log moves to the planned debug helper.
+// Never returns. Input polling is replaced by the input driver later;
+// health owns periodic diagnostics and app-loop supervision.
 void runDiagnosticLoop() {
   InputStates active{};
   initInputs(active);
@@ -204,19 +184,17 @@ void runDiagnosticLoop() {
   ESP_ERROR_CHECK(events::subscribe(events::Event::kSettingsChanged,
                                     onSettingsChanged, nullptr));
   timekeeping::applySettings();
-  StatusLogSettings status = statusLogSettings();
-  TickType_t last_status = xTaskGetTickCount();
+  health::init();
+  health::runDeviceTest();
+  ESP_ERROR_CHECK(health::startLoopWatchdog());
   while (true) {
     vTaskDelay(pdMS_TO_TICKS(kInputPollMs));
     logInputChanges(active);
     if (settings_changed.exchange(false, std::memory_order_acq_rel)) {
-      status = statusLogSettings();
       timekeeping::applySettings();
+      health::applySettings();
     }
-    if (status.enabled && xTaskGetTickCount() - last_status >= status.period) {
-      last_status = xTaskGetTickCount();
-      logStatus();
-    }
+    health::poll();
   }
 }
 
