@@ -1,9 +1,10 @@
 # Architecture
 
-> Status: **partly implemented**: hardware profiles, display port
-> (`components/display`), boot test screen (`components/ui`),
-> pure SafeArea geometry (`components/geometry`) with native tests, and
-> `include/app_config.h` (boot-layout/debug defaults). Everything else is planned.
+> Status: **partly implemented**: hardware profiles, display port with fault
+> handling (`components/display`), boot test screen (`components/ui`), pure
+> SafeArea geometry (`components/geometry`) with native tests, and
+> `include/app_config.h` (boot-layout, display-failure and debug defaults).
+> Everything else is planned.
 > Decisions in [DECISIONS.md](DECISIONS.md). Planned contracts below do not
 > describe implemented services or a completed resource acceptance.
 
@@ -89,30 +90,40 @@
   `esp_lvgl_port`). Exclusive UI-task ownership and its event protocol remain
   to be designed; current external LVGL calls hold the mutex.
 
-## Display fault handling (planned before integration acceptance)
-- Keep the current display stack, with `esp_lvgl_port` unchanged (ADR-015).
-  The own GC9A01 driver handles failed draws: wait for earlier transfers via
-  a following command, then report the flush complete to LVGL, count the error
-  and redraw. A DMA-memory check precedes display creation; port or LVGL pool
-  allocation failures lead to a controlled restart. Hangs and unclear states
-  end in a task-watchdog panic restart, bounded against boot loops. Exact
-  deadlines and settings are fixed in the design before implementation.
-- Every submitted colour transfer needs a bounded completion/error contract.
-  SPI panel IO can split a large colour transfer into smaller transactions;
-  this does not make the caller's buffer safe to free on an error. In
-  particular, partial submission may leave DMA reading it. Completion must
-  be confirmed before releasing/reusing buffers, cleaning up or reinitializing.
-- Own initialization code needs resource ownership and reverse-order cleanup
-  for every failure stage (panel IO, panel, boot objects). Allocation failures
-  inside the port or LVGL (display context, draw buffers) are not retried
-  locally; they end in the controlled restart. Failed command/submission and missing/late callbacks must
-  lead to a defined recoverable state or the bounded restart, without keeping
-  LVGL's mutex forever.
-- Validate profile geometry, SPI mode/clock and bitmap ranges before using
-  them; keep controller software state consistent with successful writes.
-  Fault-injection acceptance covers each allocation stage, partial transfers,
-  local retry where allowed and the restart path otherwise. These are
-  required repairs, not claimed device results.
+## Display fault handling (implemented, device fault tests pending)
+- `esp_lvgl_port` stays unchanged (ADR-015). All handling lives in
+  `components/display` (own GC9A01 driver and `display_port.cpp`); limits in
+  `include/app_config.h`.
+- Failed draw: the driver sends a `NOP`. The SPI panel IO collects every
+  queued transfer before a parameter command, so afterwards the LVGL buffer
+  is free. The port then reports the flush complete to LVGL, and the screen
+  is redrawn by the supervision timer (≤ 500 ms). After 3 consecutive failed
+  draws the device restarts. If the drain fails too, the buffer state is
+  unknown, so the device restarts immediately.
+- LVGL supervision: an LVGL timer (500 ms) feeds a task-watchdog user. A
+  stuck flush, a blocked transfer, a long-held LVGL lock or an LVGL assert
+  stops it, and the task watchdog (5 s, panic enabled in `sdkconfig.defaults`)
+  restarts the device. Never hold the LVGL lock for long work.
+- Allocation: the port's heap allocations (context, two DMA draw buffers) are
+  probed with identical size, alignment and caps before
+  `lvgl_port_add_disp`; a shortage restarts the device. An LVGL pool shortage
+  ends in the LVGL malloc assert (`CONFIG_LV_USE_ASSERT_MALLOC`) and then in
+  the watchdog restart.
+- Init failures (SPI bus, panel IO, panel, clear, LVGL, supervision) restart
+  the device after switching the backlight off. The reset releases every
+  resource, so there is no reverse-order cleanup. A clear buffer whose
+  transfer state is unknown is not freed.
+- Controlled restarts use `esp_system_abort` with the reason in the panic
+  output. A reset record in RTC no-init memory counts consecutive abnormal
+  resets (panic and watchdogs). After 3 of them the display is not
+  initialised and the device runs headless until a power cycle or a normal
+  restart. After 60 s of stable display operation the count resets.
+- Profile resolution, SPI mode and clock are checked at compile time
+  (`include/hw_target.h`).
+- Fault injection: `cfg::kDisplayFault` compiles one test fault in (it must be
+  `kNone` in normal builds). A multi-chunk partial transfer is not injectable
+  without changing ESP-IDF. It cannot occur with the current sizing (one
+  flush = one SPI transaction), and it uses the same drain path.
 
 ## Memory strategy (C6 has no PSRAM)
 - Fixed-capacity model containers, allocated once.
@@ -151,6 +162,26 @@ JPEG integration must include its filesystem adapter and the RGB888 input
 conversion required by TJPGD when drawing to RGB565. Decoder output format does
 not require a permanent full-screen RGB888 framebuffer. Measure actual decode
 time, working memory, LVGL peak and flash growth using baseline JPEG assets.
+
+First measurement (XIAO ESP32-C6, 2026-10-09, temporary diagnostic build): the
+baseline stage fits the current partitions with reserves (WiFi, TLS with the
+full IDF certificate bundle, filtered JSON, LittleFS, JPEG scene and a small
+HTTP server: 78 % of an OTA slot, largest free heap block ≥ 180 KB, minimum-ever
+free heap ≥ 170 KB with TLS running while the scene redraws). Three findings
+shape the image design:
+- The C6 ROM linker script defines `jd_prepare` and `jd_decomp` (an older
+  TJpgDec with a different layout) and they override LVGL's TJPGD. LVGL's
+  functions must be renamed at build level (compile definitions for the LVGL
+  component), otherwise the first JPEG draw crashes.
+- LVGL's TJPGD decoder re-decodes the image from the top for every draw task
+  (one per draw-buffer stripe): about 105 ms per 240×240 pass on the C6, so a
+  full-screen redraw over 12 stripes takes 1.1–1.25 s. Text-only refreshes of a
+  JPEG background cost 0.2–0.3 s. Fewer, larger stripes, a pre-rendered layer or
+  uncompressed RGB565 images trade this against RAM or flash.
+- LittleFS cannot replace a file that is open, and a draw task keeps the JPEG
+  open while it decodes. An image upload must swap the file under the LVGL lock
+  (temporary file, then rename), otherwise a replacement during a redraw fails.
+This is integration evidence only, not the supported-maximum envelope.
 
 ## Scalability rules
 - No absolute pixel values in views: positions/sizes from layout tokens

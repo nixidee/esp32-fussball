@@ -104,6 +104,11 @@ decoded completely into RAM by LVGL (LVGL 9 docs) → not used for full-screen
 images on boards without PSRAM. Decided 2026-10-08: images at display size;
 uncompressed RGB565 or baseline JPEG are both acceptable. Default images
 generated per resolution by a build script from high-res sources.
+Measured 2026-10-09 on the ESP32-C6 (see ARCHITECTURE, staged resource
+acceptance): LVGL TJPGD works with a build-level symbol rename, decodes a
+240×240 baseline JPEG in ≈105 ms per pass and repeats the pass for every draw
+stripe (full redraw 1.1–1.25 s); raw RGB565 avoids that cost at 115,200 B per
+image. The format choice stays open between these two.
 **Consequences:** no heavy image processing on the device; per-resolution
 asset sets.
 

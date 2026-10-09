@@ -7,11 +7,13 @@
 #include <new>
 #include <type_traits>
 
+#include "app_config.h"
 #include "driver/gpio.h"
 #include "esp_check.h"
 #include "esp_lcd_panel_commands.h"
 #include "esp_lcd_panel_interface.h"
 #include "esp_lcd_panel_io.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -35,6 +37,9 @@ struct Panel {
   int x_gap;
   int y_gap;
   uint8_t madctl;  // last value written to MADCTL
+  DrawObserver observer;
+  void* observer_ctx;
+  bool fault_injected;  // fault injection only (cfg::kDisplayFault)
 };
 
 static_assert(std::is_standard_layout_v<Panel> && offsetof(Panel, base) == 0,
@@ -152,9 +157,34 @@ esp_err_t panelInit(esp_lcd_panel_t* panel) {
   return writeMadctl(p);
 }
 
-esp_err_t panelDrawBitmap(esp_lcd_panel_t* panel, int x_start, int y_start,
-                          int x_end, int y_end, const void* color_data) {
-  Panel* p = toPanel(panel);
+using cfg::DisplayFault;
+
+// Test faults act only while an observer is installed, i.e. after the
+// display is registered with LVGL (not during the clear to black).
+template <DisplayFault kFault>
+bool injectFault([[maybe_unused]] Panel* p,
+                 [[maybe_unused]] const char* what) {
+  if constexpr (cfg::kDisplayFault != kFault) {
+    return false;
+  } else {
+    if (p->observer == nullptr) return false;
+    if constexpr (kFault == DisplayFault::kDrawFailOnce) {
+      if (p->fault_injected) return false;
+      p->fault_injected = true;
+    }
+    ESP_LOGW(kTag, "fault injection: %s", what);
+    return true;
+  }
+}
+
+esp_err_t submitDraw(Panel* p, int x_start, int y_start, int x_end, int y_end,
+                     const void* color_data) {
+  if (injectFault<DisplayFault::kDrawFailOnce>(p, "draw fails once") ||
+      injectFault<DisplayFault::kDrawFailAlways>(p, "draw fails") ||
+      injectFault<DisplayFault::kDrainFail>(p, "draw fails")) {
+    return ESP_FAIL;
+  }
+
   x_start += p->x_gap;
   x_end += p->x_gap;
   y_start += p->y_gap;
@@ -175,7 +205,36 @@ esp_err_t panelDrawBitmap(esp_lcd_panel_t* panel, int x_start, int y_start,
   const std::size_t size = static_cast<std::size_t>(x_end - x_start) *
                            static_cast<std::size_t>(y_end - y_start) *
                            kBytesPerPixel;
+  if (injectFault<DisplayFault::kLostCompletion>(p, "colour data not sent")) {
+    return ESP_OK;
+  }
   return esp_lcd_panel_io_tx_color(p->io, LCD_CMD_RAMWR, color_data, size);
+}
+
+// A parameter transfer on the SPI panel IO first collects every queued
+// transaction (it waits without timeout), so after a successful NOP no
+// transfer reads the colour buffer any more.
+esp_err_t drainQueue(Panel* p) {
+  if (injectFault<DisplayFault::kDrainFail>(p, "drain fails")) return ESP_FAIL;
+  return txCommand(p, LCD_CMD_NOP);
+}
+
+void report(Panel* p, DrawResult result) {
+  if (p->observer != nullptr) p->observer(result, p->observer_ctx);
+}
+
+esp_err_t panelDrawBitmap(esp_lcd_panel_t* panel, int x_start, int y_start,
+                          int x_end, int y_end, const void* color_data) {
+  Panel* p = toPanel(panel);
+  const esp_err_t err =
+      submitDraw(p, x_start, y_start, x_end, y_end, color_data);
+  if (err == ESP_OK) {
+    report(p, DrawResult::kSubmitted);
+    return ESP_OK;
+  }
+  report(p, drainQueue(p) == ESP_OK ? DrawResult::kFailedBufferFree
+                                    : DrawResult::kFailedBufferUnknown);
+  return err;
 }
 
 esp_err_t panelInvertColor(esp_lcd_panel_t* panel, bool invert) {
@@ -252,6 +311,13 @@ esp_err_t newGc9a01Panel(esp_lcd_panel_io_handle_t io,
   p->base.disp_sleep = panelSleep;
   *ret_panel = &p->base;
   return ESP_OK;
+}
+
+void setGc9a01DrawObserver(esp_lcd_panel_handle_t panel, DrawObserver observer,
+                           void* ctx) {
+  Panel* p = toPanel(panel);
+  p->observer = observer;
+  p->observer_ctx = ctx;
 }
 
 }  // namespace display

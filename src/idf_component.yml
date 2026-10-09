@@ -1,0 +1,14 @@
+# Dependencies of the application component. ArduinoJson (OQ-14, ADR-009) and
+# joltwallet/littlefs (OQ-14) are only needed by the P1.8 budget probe for now;
+# they are resolved only when the probe is enabled, so the normal build is
+# unchanged. Exact versions, latest stable releases in the ESP Component
+# Registry as of 2026-10-09.
+dependencies:
+  bblanchon/arduinojson:
+    version: "7.4.3"
+    rules:
+      - if: "$CONFIG{FUSSBALL_BUDGET_PROBE} == True"
+  joltwallet/littlefs:
+    version: "1.22.3"
+    rules:
+      - if: "$CONFIG{FUSSBALL_BUDGET_PROBE} == True"

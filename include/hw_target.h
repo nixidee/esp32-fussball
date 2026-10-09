@@ -34,5 +34,9 @@ static_assert(!hasDuplicatePin(usedPins(kTarget)),
 static_assert(!usesReservedPin(usedPins(kTarget), kBoard.reserved_pins),
               "a GPIO reserved by the board is used for display wiring or an "
               "input");
+static_assert(kDisplay.width > 0 && kDisplay.height > 0,
+              "display resolution must be positive");
+static_assert(kDisplay.spi_mode <= 3, "SPI mode must be 0..3");
+static_assert(kTarget.wiring.spi_clock_hz > 0, "SPI clock must be positive");
 
 }  // namespace hw

@@ -13,17 +13,27 @@
 
 namespace display {
 
-// Call once at boot. On success the panel shows black and LVGL is running.
-// On failure the display stays unusable until the next restart.
+// Call once at boot. On success the panel shows black, LVGL is running and
+// supervised. Profile and wiring must have static storage duration.
+//
+// Failure handling: a bring-up failure, repeated or undrainable draw failures
+// and an LVGL stall (task watchdog) restart the device with the reason in the
+// panic output. After cfg::kAbnormalResetLimit consecutive abnormal resets
+// init() leaves the hardware untouched and returns ESP_ERR_INVALID_STATE
+// (headless) until a power cycle or a normal restart. ESP_ERR_INVALID_STATE
+// also means "already initialised".
 esp_err_t init(const hw::DisplayProfile& profile,
                const hw::DisplayWiring& wiring);
 
-// Takes the LVGL lock. timeout_ms 0 waits forever. Returns false on timeout.
+// Takes the LVGL lock. timeout_ms 0 waits forever; never hold the lock for
+// long work (the LVGL supervision restarts the device after the task
+// watchdog timeout). Returns false on timeout.
 bool lock(uint32_t timeout_ms);
 void unlock();
 
-// Logs the LVGL memory pool usage (takes the lock itself). Does nothing if
-// init() has not succeeded.
+// Logs the LVGL memory pool usage (takes the lock itself with a short
+// timeout and skips the log if LVGL is busy). Does nothing if init() has not
+// succeeded.
 void logMemory();
 
 }  // namespace display

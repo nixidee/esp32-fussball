@@ -22,6 +22,7 @@ environments below.
 | Environment (`<env>`) | Hardware | Status |
 |---|---|---|
 | `xiao_esp32c6_gc9a01` | Seeed XIAO ESP32-C6 + 1.28" GC9A01 round display | boot test screen (LVGL) and touch input log confirmed on the device; boot log lines are not visible over USB (input logs are); default env |
+| `xiao_esp32c6_gc9a01_budget` | same hardware as `xiao_esp32c6_gc9a01` | temporary diagnostic build for the resource measurements (WiFi station, HTTPS requests to OpenLigaDB, LittleFS with a JPEG scene from `data/`, small HTTP test server with `GET /`, `GET /status`, `POST /upload`); reads the optional `SECRET_WIFI_SSID_1` / `SECRET_WIFI_PASSWORD_1` from `include/secrets.h` and builds without it; load the scene with `pio run -e xiao_esp32c6_gc9a01_budget -t uploadfs`; will be removed after the measurements, not a product build |
 | `waveshare_esp32s3_lcd128` | Waveshare ESP32-S3-LCD-1.28 | paused; last build and boot log before the display code (P1.2); not built with the display code yet; if the first log lines are missing after upload, press RST |
 | `native` | Host computer, unit tests only | SafeArea geometry suite; C++20, verified on macOS with Apple clang 21.0.0 |
 
@@ -87,12 +88,14 @@ Build configuration files:
 
 ## Development milestones
 
-The active target is the XIAO ESP32-C6. After host geometry tests, the display
-port receives a reproducible, bounded fault-path repair and board-pin guards.
-The integration budget then measures WiFi/TLS, filtered JSON, JPEG rendering
-and the Web server together. Further checks cover the complete data model,
-images/Web/debug and the supported maximum load before release. Concrete limits
-and resource reserves are decided before each dependent implementation.
+The active target is the XIAO ESP32-C6. Host geometry tests, the bounded
+display fault-path repair and the board-pin guards are done. A temporary
+diagnostic build has measured WiFi/TLS, filtered JSON, JPEG rendering and a
+small HTTP server together on the C6: they fit the current partition layout
+with reserves, and loading OpenLigaDB data over HTTPS works. Further checks
+cover the complete data model, images/Web/debug and the supported maximum load
+before release. Concrete limits and resource reserves are decided before each
+dependent implementation.
 
 Waveshare verification resumes after the C6 work. The external-antenna driver
 is deferred until before the WiFi manager; current firmware does not control it.

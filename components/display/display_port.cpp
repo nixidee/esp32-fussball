@@ -1,12 +1,17 @@
-// Display port: SPI bus, panel controller, esp_lvgl_port. See display_port.h.
+// Display port: SPI bus, panel controller, esp_lvgl_port and the display
+// failure handling (draw failures, LVGL supervision, controlled restart,
+// abnormal-reset bound). See display_port.h.
 
 #include "display_port.h"
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdlib>
 
+#include "app_config.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
+#include "esp_attr.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_lcd_io_spi.h"
@@ -14,8 +19,13 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_log.h"
 #include "esp_lvgl_port.h"
+#include "esp_system.h"
+#include "esp_task_wdt.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "gc9a01_panel.h"
 #include "lvgl.h"
+#include "sdkconfig.h"
 
 namespace display {
 namespace {
@@ -33,15 +43,96 @@ constexpr uint32_t kDrawBufferFraction = 12;
 constexpr std::size_t kTransQueueDepth = 10;
 // Rows per transfer when the panel is cleared to black before DISPON.
 constexpr uint32_t kClearRows = 8;
+// Upper bound of esp_lvgl_port's private per-display context (plain malloc
+// in lvgl_port_add_disp), used by the allocation pre-check.
+constexpr std::size_t kPortContextBytes = 256;
+
+using cfg::DisplayFault;
+
+// Why the display restarted the device. Kept across the reset.
+enum class FailReason : uint32_t {
+  kNone,
+  kInit,
+  kPortMemory,
+  kDrawFailures,
+  kDrawStateUnknown,
+};
+
+const char* reasonText(FailReason reason) {
+  switch (reason) {
+    case FailReason::kNone: return "none recorded (watchdog or other panic)";
+    case FailReason::kInit: return "display init failed";
+    case FailReason::kPortMemory: return "no memory for the LVGL display";
+    case FailReason::kDrawFailures: return "repeated draw failures";
+    case FailReason::kDrawStateUnknown: return "draw queue not drainable";
+  }
+  return "unknown";
+}
+
+// Survives panic, watchdog and software resets; random after power-on,
+// hence the magic. LP RAM, not part of the internal heap.
+struct ResetRecord {
+  uint32_t magic;
+  uint32_t abnormal_resets;  // consecutive
+  FailReason last_failure;
+};
+constexpr uint32_t kResetRecordMagic = 0x44495350;  // "DISP"
+RTC_NOINIT_ATTR ResetRecord g_reset_record;
 
 esp_lcd_panel_io_handle_t g_io = nullptr;
 esp_lcd_panel_handle_t g_panel = nullptr;
 lv_display_t* g_display = nullptr;
+const hw::DisplayWiring* g_wiring = nullptr;
+esp_task_wdt_user_handle_t g_wdt_user = nullptr;
+// Only touched in the LVGL task (draw observer, supervision timer).
+uint32_t g_draw_failures = 0;
+bool g_redraw_pending = false;
+bool g_stable = false;
+uint32_t g_init_tick = 0;
 
 void setBacklight(const hw::DisplayWiring& wiring, bool on) {
   if (wiring.backlight == hw::kNoPin) return;
   gpio_set_level(static_cast<gpio_num_t>(wiring.backlight),
                  on == wiring.backlight_active_high ? 1 : 0);
+}
+
+// Controlled restart: safe state, reason kept for the next boot, panic output
+// with backtrace. The reset releases every resource, so nothing is cleaned up.
+[[noreturn]] void failRestart(FailReason reason) {
+  g_reset_record.last_failure = reason;
+  if (g_wiring != nullptr) setBacklight(*g_wiring, false);
+  esp_system_abort(reasonText(reason));
+}
+
+bool isAbnormalReset(esp_reset_reason_t reason) {
+  return reason == ESP_RST_PANIC || reason == ESP_RST_INT_WDT ||
+         reason == ESP_RST_TASK_WDT || reason == ESP_RST_WDT;
+}
+
+// Counts consecutive abnormal resets. Returns false once the bound is
+// reached: the display then stays off until a power cycle or a normal
+// (software) restart.
+bool resetHistoryAllowsDisplay() {
+  const esp_reset_reason_t reason = esp_reset_reason();
+  ResetRecord& record = g_reset_record;
+  if (record.magic != kResetRecordMagic || !isAbnormalReset(reason)) {
+    record = {kResetRecordMagic, 0, FailReason::kNone};
+    return true;
+  }
+  if (record.abnormal_resets < cfg::kAbnormalResetLimit) {
+    ++record.abnormal_resets;
+  }
+  ESP_LOGW(kTag,
+           "abnormal reset %u of %u (reset reason %d), display failure: %s",
+           static_cast<unsigned>(record.abnormal_resets),
+           static_cast<unsigned>(cfg::kAbnormalResetLimit),
+           static_cast<int>(reason), reasonText(record.last_failure));
+  record.last_failure = FailReason::kNone;
+  if (record.abnormal_resets < cfg::kAbnormalResetLimit) return true;
+  ESP_LOGE(kTag, "display disabled after %u abnormal resets in a row; power "
+                 "cycle or restart to try again",
+           static_cast<unsigned>(record.abnormal_resets));
+  return false;
 }
 
 esp_err_t initBacklight(const hw::DisplayWiring& wiring) {
@@ -71,7 +162,9 @@ esp_err_t clearToBlack(const hw::DisplayProfile& profile) {
   // DISPON is a parameter transfer; the SPI panel IO waits for all queued
   // colour transfers before sending it, so the buffer is free afterwards.
   if (err == ESP_OK) err = esp_lcd_panel_disp_on_off(g_panel, true);
-  heap_caps_free(black);
+  // On an error a transfer may still read the buffer: it is not freed, the
+  // caller restarts the device.
+  if (err == ESP_OK) heap_caps_free(black);
   return err;
 }
 
@@ -123,6 +216,98 @@ esp_err_t initPanel(const hw::DisplayProfile& profile,
   return clearToBlack(profile);
 }
 
+// Allocates and frees what lvgl_port_add_disp takes from the heap, in the
+// same order, size, alignment and caps (context, draw buffer 1 and 2). The
+// port does not handle a failed context allocation safely, so a shortage is
+// caught here. The allocator hands out the same blocks again; only IDF system
+// tasks could allocate in between.
+bool portMemoryAvailable(std::size_t buffer_bytes) {
+  if constexpr (cfg::kDisplayFault == DisplayFault::kPortMemory) {
+    ESP_LOGW(kTag, "fault injection: port allocation pre-check fails");
+    buffer_bytes = heap_caps_get_total_size(MALLOC_CAP_DMA) + 1;
+  }
+  void* context = std::malloc(kPortContextBytes);
+  void* buffer1 = heap_caps_aligned_alloc(CONFIG_LV_DRAW_BUF_ALIGN,
+                                          buffer_bytes, MALLOC_CAP_DMA);
+  void* buffer2 = heap_caps_aligned_alloc(CONFIG_LV_DRAW_BUF_ALIGN,
+                                          buffer_bytes, MALLOC_CAP_DMA);
+  const bool available =
+      context != nullptr && buffer1 != nullptr && buffer2 != nullptr;
+  heap_caps_free(buffer2);
+  heap_caps_free(buffer1);
+  std::free(context);
+  return available;
+}
+
+// Runs in the LVGL task inside the flush callback (via draw_bitmap).
+void onDrawResult(DrawResult result, void* ctx) {
+  switch (result) {
+    case DrawResult::kSubmitted:
+      g_draw_failures = 0;
+      return;
+    case DrawResult::kFailedBufferUnknown:
+      failRestart(FailReason::kDrawStateUnknown);
+    case DrawResult::kFailedBufferFree:
+      // No completion will come for this area: end LVGL's flush wait here
+      // and redraw the screen from the supervision timer (invalidating is
+      // not allowed while rendering).
+      lv_display_flush_ready(static_cast<lv_display_t*>(ctx));
+      g_redraw_pending = true;
+      if (++g_draw_failures >= cfg::kDisplayDrawFailureLimit) {
+        failRestart(FailReason::kDrawFailures);
+      }
+      ESP_LOGW(kTag, "draw failed (%u in a row), screen will be redrawn",
+               static_cast<unsigned>(g_draw_failures));
+      return;
+  }
+}
+
+// LVGL timer, so it runs only while the LVGL task makes progress: a stuck
+// flush, a blocked transfer, a long-held lock or an LVGL assert stop it and
+// the task watchdog restarts the device.
+void superviseLvgl(lv_timer_t*) {
+  esp_task_wdt_reset_user(g_wdt_user);
+  if (g_redraw_pending) {
+    g_redraw_pending = false;
+    lv_obj_t* screen = lv_screen_active();
+    if (screen != nullptr) lv_obj_invalidate(screen);
+  }
+  if (!g_stable &&
+      lv_tick_elaps(g_init_tick) >= cfg::kDisplayStablePeriodS * 1000) {
+    g_stable = true;
+    g_reset_record.abnormal_resets = 0;
+    ESP_LOGI(kTag, "display stable for %u s, abnormal reset count cleared",
+             static_cast<unsigned>(cfg::kDisplayStablePeriodS));
+  }
+}
+
+esp_err_t startSupervision() {
+  ESP_RETURN_ON_ERROR(esp_task_wdt_add_user("lvgl", &g_wdt_user), kTag,
+                      "task watchdog user failed");
+  ESP_RETURN_ON_FALSE(lvgl_port_lock(0), ESP_ERR_TIMEOUT, kTag,
+                      "LVGL lock failed");
+  setGc9a01DrawObserver(g_panel, onDrawResult, g_display);
+  g_init_tick = lv_tick_get();
+  // An allocation failure here ends in the LVGL malloc assert.
+  lv_timer_create(superviseLvgl, cfg::kDisplaySupervisionPeriodMs, nullptr);
+  lvgl_port_unlock();
+  return ESP_OK;
+}
+
+// Test faults that act after a successful init (cfg::kDisplayFault).
+void injectRuntimeFault() {
+  if constexpr (cfg::kDisplayFault == DisplayFault::kLvglPoolExhausted) {
+    ESP_LOGW(kTag, "fault injection: filling the LVGL pool");
+    lvgl_port_lock(0);
+    while (true) lv_obj_create(lv_screen_active());
+  } else if constexpr (cfg::kDisplayFault == DisplayFault::kLockStall) {
+    ESP_LOGW(kTag, "fault injection: holding the LVGL lock for 10 s");
+    lvgl_port_lock(0);
+    vTaskDelay(pdMS_TO_TICKS(10'000));
+    lvgl_port_unlock();
+  }
+}
+
 esp_err_t initLvgl(const hw::DisplayProfile& profile,
                    uint32_t buffer_pixels) {
   // Defaults of esp_lvgl_port 2.9.0: task priority 4, stack 7168 B in
@@ -141,6 +326,11 @@ esp_err_t initLvgl(const hw::DisplayProfile& profile,
   disp.flags.buff_dma = 1;
   // LVGL renders little-endian RGB565, the panel expects big-endian.
   disp.flags.swap_bytes = 1;
+  if (!portMemoryAvailable(std::size_t{buffer_pixels} * kBytesPerPixel)) {
+    ESP_LOGE(kTag, "not enough DMA memory for 2 x %u B draw buffers",
+             static_cast<unsigned>(buffer_pixels * kBytesPerPixel));
+    failRestart(FailReason::kPortMemory);
+  }
   g_display = lvgl_port_add_disp(&disp);
   ESP_RETURN_ON_FALSE(g_display != nullptr, ESP_ERR_NO_MEM, kTag,
                       "LVGL display registration failed");
@@ -153,24 +343,30 @@ esp_err_t init(const hw::DisplayProfile& profile,
                const hw::DisplayWiring& wiring) {
   ESP_RETURN_ON_FALSE(g_display == nullptr, ESP_ERR_INVALID_STATE, kTag,
                       "already initialised");
+  if (!resetHistoryAllowsDisplay()) return ESP_ERR_INVALID_STATE;
+  g_wiring = &wiring;
 
   const uint32_t rows =
       std::max<uint32_t>(1, profile.height / kDrawBufferFraction);
   const uint32_t buffer_pixels = uint32_t{profile.width} * rows;
   const std::size_t buffer_bytes = buffer_pixels * kBytesPerPixel;
 
-  ESP_RETURN_ON_ERROR(initBacklight(wiring), kTag, "backlight init failed");
-  ESP_RETURN_ON_ERROR(initPanel(profile, wiring, buffer_bytes), kTag,
-                      "panel bring-up failed");
+  if (initBacklight(wiring) != ESP_OK ||
+      initPanel(profile, wiring, buffer_bytes) != ESP_OK) {
+    failRestart(FailReason::kInit);
+  }
   setBacklight(wiring, true);
-  ESP_RETURN_ON_ERROR(initLvgl(profile, buffer_pixels), kTag,
-                      "LVGL bring-up failed");
+  if (initLvgl(profile, buffer_pixels) != ESP_OK ||
+      startSupervision() != ESP_OK) {
+    failRestart(FailReason::kInit);
+  }
 
   ESP_LOGI(kTag, "ready: %ux%u, draw buffers 2 x %u B (%u rows), SPI %u Hz",
            static_cast<unsigned>(profile.width),
            static_cast<unsigned>(profile.height),
            static_cast<unsigned>(buffer_bytes), static_cast<unsigned>(rows),
            static_cast<unsigned>(wiring.spi_clock_hz));
+  injectRuntimeFault();
   return ESP_OK;
 }
 
@@ -182,7 +378,10 @@ void logMemory() {
   // Without a registered display the LVGL port may not exist; locking it
   // would hit its assert.
   if (g_display == nullptr) return;
-  if (!lock(0)) return;
+  if (!lock(cfg::kStatusLockTimeoutMs)) {
+    ESP_LOGW(kTag, "LVGL busy, pool usage not logged");
+    return;
+  }
   lv_mem_monitor_t mon;
   lv_mem_monitor(&mon);
   unlock();

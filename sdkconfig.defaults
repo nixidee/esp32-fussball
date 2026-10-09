@@ -14,6 +14,10 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
+# Task watchdog (5 s) restarts the device instead of only printing. The
+# display supervision relies on it (docs/ARCHITECTURE.md, display failures).
+CONFIG_ESP_TASK_WDT_PANIC=y
+
 # ---- LVGL 9.6 (trimmed config for the C6) ----
 # Unlisted LVGL options keep their Kconfig defaults.
 
@@ -38,6 +42,9 @@ CONFIG_LV_MEM_SIZE=32768
 CONFIG_LV_USE_LOG=y
 CONFIG_LV_LOG_LEVEL_WARN=y
 CONFIG_LV_LOG_PRINTF=y
+# A failed LVGL allocation logs file and line and stops; the task watchdog
+# then restarts the device instead of LVGL running on with missing objects.
+CONFIG_LV_USE_ASSERT_MALLOC=y
 
 # Themes: only the default theme. Widgets: only what the screens need
 # (label, image, line, arc); the default theme links every enabled widget.

@@ -1,0 +1,14 @@
+# Additional settings of the diagnostic environment xiao_esp32c6_gc9a01_budget
+# (P1.8 integration budget probe). Listed after the shared and the target
+# defaults in platformio.ini. The probe and this file are removed after the
+# measurements.
+CONFIG_FUSSBALL_BUDGET_PROBE=y
+
+# JPEG scene from LittleFS (stage 2): TJPGD decodes while LVGL renders (no
+# full-image buffer), its output format is RGB888; LVGL reads files through
+# the POSIX adapter, drive letter 65 = 'A', working directory /littlefs/.
+CONFIG_LV_USE_TJPGD=y
+CONFIG_LV_DRAW_SW_SUPPORT_RGB888=y
+CONFIG_LV_USE_FS_POSIX=y
+CONFIG_LV_FS_POSIX_LETTER=65
+CONFIG_LV_FS_POSIX_PATH="/littlefs/"

@@ -20,6 +20,10 @@
 #include "safe_area.h"
 #include "sdkconfig.h"
 
+#ifdef CONFIG_FUSSBALL_BUDGET_PROBE
+#include "budget_probe.h"
+#endif
+
 namespace {
 
 constexpr const char* kTag = "boot";
@@ -107,7 +111,10 @@ void showBootScreen() {
   };
   const auto safe_area = geometry::SafeArea::forDisplay(
       hw::kDisplay, cfg::kContentMarginDivisor);
-  if (!display::lock(0)) return;
+  if (!display::lock(cfg::kBootScreenLockTimeoutMs)) {
+    ESP_LOGE(kTag, "boot screen skipped: LVGL lock timeout");
+    return;
+  }
   const bool rendered = ui::showBootScreen(model, safe_area);
   display::unlock();
   if (!rendered) {
@@ -193,9 +200,14 @@ extern "C" void app_main() {
     vTaskDelay(pdMS_TO_TICKS(kFirstRenderWaitMs));
     display::logMemory();
   } else {
-    ESP_LOGE(kTag, "display init failed: %s", esp_err_to_name(err));
+    ESP_LOGE(kTag, "display not started (%s), running headless",
+             esp_err_to_name(err));
   }
   logHeap("after display init");
+
+#ifdef CONFIG_FUSSBALL_BUDGET_PROBE
+  if (err == ESP_OK) probe::start();
+#endif
 
   runDiagnosticLoop();
 }
