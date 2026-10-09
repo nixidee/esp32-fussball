@@ -51,7 +51,8 @@ Hardware facts are kept separate and combined per target (compile-time
 - `app_main` logs the selected profile at boot.
 
 New target: board/display header if new, target header, sdkconfig file,
-`#elif` line in `hw_target.h`, env in `platformio.ini`.
+`#elif` line in `hw_target.h`, env in `platformio.ini`. The first build for a
+new chip creates `dependencies.lock.<chip>`; commit it with the target.
 A new controller additionally requires a driver. Each new resolution needs
 separate draw/DMA-buffer, font, scene and asset measurements before acceptance;
 adding a profile does not establish that it fits the existing memory budget.

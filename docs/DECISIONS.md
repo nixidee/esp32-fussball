@@ -146,6 +146,9 @@ file in the project root (target facts spread over two places).
 `sdkconfig.defaults` changes → after editing a target file delete
 `sdkconfig.<env>`. Verified 2026-10-08: generated sdkconfig of both envs
 identical before and after the move.
+**Refinement:** ADR-016 (build configuration part) replaces the manual
+deletion: the build regenerates `sdkconfig.<env>` when an input changes and
+verifies it against the defaults files (implemented 2026-10-09).
 
 ## ADR-011 — Shared storage, consistent settings and local OTA acceptance · Accepted 2026-10-08
 
@@ -299,6 +302,15 @@ allocation failures are not retried locally; leaked memory is reclaimed by the
 restart. Task-watchdog panic applies to every watched task, not only the
 display. Costs (driver state, watchdog entry, assertion code) are measured in
 the implementing build. An upstream bug report for the port is recommended.
+
+**Clarification (2026-10-09):** the memory check is best effort. It allocates
+and frees blocks like the port's (an upper-bound size for the port context, the
+draw buffers with their size, alignment and capabilities) and reserves nothing.
+If the port's context allocation still fails, `esp_lvgl_port` 2.9.0 does not
+handle it safely and the device ends in a panic restart rather than the
+controlled restart. "The area is redrawn" means the screen is invalidated at the
+next run of the periodic supervision timer and redrawn by LVGL afterwards; there
+is no fixed recovery deadline (see `docs/ARCHITECTURE.md`).
 
 ## ADR-016 — Service design directions · Accepted 2026-10-09
 

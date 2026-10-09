@@ -12,7 +12,8 @@ Configured through a built-in web interface.
 > temporary diagnostic build (since removed, kept in the Git history) showed that
 > WiFi, HTTPS to OpenLigaDB, JSON parsing, a JPEG background and a small HTTP
 > server fit the ESP32-C6 with reserves; this is integration evidence, not a
-> certification of the finished application. Build reproducibility comes next.
+> certification of the finished application. The build regenerates and
+> verifies its ESP-IDF configuration; core services come next.
 > Planned features are described
 > in [docs/](docs/); a successful boot screen does not certify the complete C6 app.
 
@@ -41,6 +42,8 @@ environments below.
 | Clean build files | `pio run -e <env> -t clean` |
 | Run host unit tests | `pio test -e native` |
 | Run only the SafeArea suite | `pio test -e native -f test_safe_area` |
+| Set up host tools (once) | see “Code formatting” below |
+| Check formatting of changed lines | `.venv-tools/bin/python scripts/check_format.py` |
 
 Upload, erase, filesystem and monitor commands apply to firmware environments.
 Native tests use Native 1.2.1 and Unity's exact `v2.7.0` Git tag, checked against
@@ -58,17 +61,58 @@ Build configuration files:
 - `platformio.ini` — one environment per hardware target.
 - `sdkconfig.defaults` (all targets) and `targets/<target>.sdkconfig.defaults`
   (board-dependent: flash size, PSRAM, console, partition file) — ESP-IDF
-  settings. The generated `sdkconfig.<env>` is a build artefact: **after
-  changing a defaults file, delete `sdkconfig.<env>`**, otherwise the old
-  values stay in effect.
+  settings. The generated `sdkconfig.<env>` is a git-ignored build artefact.
+  `scripts/sdkconfig_guard.py` regenerates it when a configuration input
+  changes (defaults files, partition CSV, component manifests, lockfile,
+  platform/ESP-IDF version). `scripts/sdkconfig_verify.py` then stops the
+  build if any setting of the defaults files is missing from or differs in
+  the generated file, uses a deprecated option name, or if
+  `board_build.partitions` differs from `CONFIG_PARTITION_TABLE_CUSTOM_FILENAME`.
+  Settings changed in `menuconfig` are temporary: put permanent ones into a
+  defaults file. After a failed check the next build regenerates the file.
 - `partitions/*.csv` — flash layout per flash size.
 - `components/*/idf_component.yml` — exact versions of external ESP-IDF
-  components (LVGL, esp_lvgl_port), resolved into `dependencies.lock`.
+  components (LVGL, esp_lvgl_port), resolved into one lockfile per chip target,
+  `dependencies.lock.<chip>` (e.g. `dependencies.lock.esp32c6`), set in the
+  root `CMakeLists.txt`. Lockfiles are tracked. The component manager changes
+  a lockfile only when a manifest changes; review and commit both together.
+  The first build of a new chip target creates its lockfile.
 - `scripts/native_sources.py` — explicit pure-component selection for host
   tests; firmware and tests compile the same geometry sources without copies.
+- `.clang-format`, `requirements-tools.txt`, `scripts/check_format.py` — code
+  style and its check (see “Code formatting”).
 - `boards/`, `displays/`, `targets/<target>.h` — hardware profiles (pins,
   display, inputs); the env's `build_flags` selects the target. Wrong pin
   assignments fail the build. Details: [docs/HARDWARE.md](docs/HARDWARE.md).
+
+### Code formatting
+
+C/C++ code follows `.clang-format` (Google style, 80 columns). The check
+covers only lines changed against a Git commit (default `HEAD`, i.e.
+uncommitted changes); existing code is reformatted only when it is touched.
+It never rewrites files. New files are checked once Git knows them
+(`git add`, or `git add -N`).
+
+The pinned clang-format version (`requirements-tools.txt`) is installed into a
+project-local, git-ignored Python environment `.venv-tools/`, created once with
+the Python that comes with PlatformIO (macOS/Linux paths; on Windows use
+`.venv-tools\Scripts\python.exe`):
+
+```bash
+~/.platformio/penv/bin/python -m venv .venv-tools
+```
+
+```bash
+.venv-tools/bin/python -m pip install -r requirements-tools.txt
+```
+
+```bash
+.venv-tools/bin/python scripts/check_format.py
+```
+
+Exit code 0 means formatted, 1 means deviations (printed as a diff), 2 means a
+tool setup problem (wrong Python or clang-format version). Pass a commit as
+argument to check a range, e.g. `scripts/check_format.py main`.
 
 ---
 

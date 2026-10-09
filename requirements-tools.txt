@@ -1,0 +1,4 @@
+# Host-only development tools (not part of the firmware). Exact versions,
+# latest stable releases on PyPI as of 2026-10-09. Install: README.md,
+# "Code formatting".
+clang-format==23.1.3

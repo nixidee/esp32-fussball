@@ -97,17 +97,28 @@
   `include/app_config.h`.
 - Failed draw: the driver sends a `NOP`. The SPI panel IO collects every
   queued transfer before a parameter command, so afterwards the LVGL buffer
-  is free. The port then reports the flush complete to LVGL, and the screen
-  is redrawn by the supervision timer (≤ 500 ms). After 3 consecutive failed
+  is free. The port then reports the flush complete to LVGL and marks the
+  screen for a redraw (invalidating is not allowed while LVGL renders). The
+  supervision timer, nominally every 500 ms in the LVGL task, invalidates the
+  screen on its next run; it can run later while the LVGL task is rendering,
+  waiting for transfers or held off by the LVGL lock. The failed area is
+  correct again only after that redraw has been rendered and sent, which
+  takes as long as a full redraw (with a JPEG background 1.1–1.25 s, see
+  below). There is no fixed recovery deadline. After 3 consecutive failed
   draws the device restarts. If the drain fails too, the buffer state is
   unknown, so the device restarts immediately.
 - LVGL supervision: an LVGL timer (500 ms) feeds a task-watchdog user. A
   stuck flush, a blocked transfer, a long-held LVGL lock or an LVGL assert
   stops it, and the task watchdog (5 s, panic enabled in `sdkconfig.defaults`)
   restarts the device. Never hold the LVGL lock for long work.
-- Allocation: the port's heap allocations (context, two DMA draw buffers) are
-  probed with identical size, alignment and caps before
-  `lvgl_port_add_disp`; a shortage restarts the device. An LVGL pool shortage
+- Allocation: before `lvgl_port_add_disp`, the port's heap allocations are
+  probed (allocated and freed again): its context with an upper-bound size
+  (256 B) and the two DMA draw buffers with their size, alignment and caps.
+  A shortage restarts the device in a controlled way. The probe is best
+  effort: it reserves nothing, so another task can allocate in between. If
+  the port's context allocation still fails, `esp_lvgl_port` 2.9.0 does not
+  handle that safely (its error path dereferences the missing context) and
+  the device ends in a panic restart. An LVGL pool shortage
   ends in the LVGL malloc assert (`CONFIG_LV_USE_ASSERT_MALLOC`) and then in
   the watchdog restart.
 - Init failures (SPI bus, panel IO, panel, clear, LVGL, supervision) restart
@@ -205,6 +216,8 @@ This is integration evidence only, not the supported-maximum envelope.
 ```
 platformio.ini
 sdkconfig.defaults     ESP-IDF settings shared by all targets
+dependencies.lock.<chip>  resolved component versions per chip target (tracked)
+.clang-format          code style; requirements-tools.txt pins host tools
 partitions/            partition tables per flash size
 boards/ displays/ targets/   hardware profiles; targets/<target>.sdkconfig.defaults
                        = board-dependent ESP-IDF settings (ADR-010)
@@ -224,6 +237,7 @@ web/                   Web UI sources (embedded at build time)
 assets/src/            high-res default images (sources)
 data/                  generated LittleFS image content
 test/                  native host tests + fixtures
-scripts/               native build source selection (implemented)
+scripts/               native build source selection, sdkconfig regeneration
+                       and verification, format check (implemented)
 tools/                 build scripts (web embed, asset conversion, boundary test)
 ```

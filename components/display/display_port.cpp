@@ -43,8 +43,9 @@ constexpr uint32_t kDrawBufferFraction = 12;
 constexpr std::size_t kTransQueueDepth = 10;
 // Rows per transfer when the panel is cleared to black before DISPON.
 constexpr uint32_t kClearRows = 8;
-// Upper bound of esp_lvgl_port's private per-display context (plain malloc
-// in lvgl_port_add_disp), used by the allocation pre-check.
+// Upper bound, with margin, of esp_lvgl_port 2.9.0's private per-display
+// context (plain malloc in lvgl_port_add_disp; about 60 B on 32-bit targets),
+// used by the best-effort allocation probe.
 constexpr std::size_t kPortContextBytes = 256;
 
 using cfg::DisplayFault;
@@ -216,11 +217,12 @@ esp_err_t initPanel(const hw::DisplayProfile& profile,
   return clearToBlack(profile);
 }
 
-// Allocates and frees what lvgl_port_add_disp takes from the heap, in the
-// same order, size, alignment and caps (context, draw buffer 1 and 2). The
-// port does not handle a failed context allocation safely, so a shortage is
-// caught here. The allocator hands out the same blocks again; only IDF system
-// tasks could allocate in between.
+// Best-effort probe of what lvgl_port_add_disp takes from the heap, in its
+// order: the context with an upper-bound size, then draw buffers 1 and 2 with
+// their size, alignment and caps. The blocks are freed again, so nothing is
+// reserved; another task can allocate before the port does. The port does
+// not handle a failed context allocation safely (panic restart), so a shortage
+// known here is turned into a controlled restart instead.
 bool portMemoryAvailable(std::size_t buffer_bytes) {
   if constexpr (cfg::kDisplayFault == DisplayFault::kPortMemory) {
     ESP_LOGW(kTag, "fault injection: port allocation pre-check fails");

@@ -5,4 +5,8 @@ cmake_minimum_required(VERSION 3.22)
 set(PROJECT_VER "0.0.0-dev")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+# One component lockfile per chip target (resolved versions differ per target
+# and must not overwrite each other); all lockfiles are tracked in Git.
+idf_build_set_property(DEPENDENCIES_LOCK
+  "${CMAKE_CURRENT_LIST_DIR}/dependencies.lock.${IDF_TARGET}")
 project(esp32_fussball)

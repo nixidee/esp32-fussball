@@ -1,8 +1,9 @@
 # Intentional settings shared by all targets. Board-dependent settings live in
 # targets/<target>.sdkconfig.defaults (ADR-010); both are listed per env in
 # platformio.ini.
-# Generated sdkconfig.<env> files are build artefacts (git-ignored); after
-# changing a defaults file, delete sdkconfig.<env> so the change is applied.
+# Generated sdkconfig.<env> files are build artefacts (git-ignored). The build
+# regenerates them when a defaults file changes and stops if a setting below
+# is missing from or differs in the generated file (scripts/sdkconfig_guard.py).
 
 # -Os: smaller and usually fast enough; flash is the tight resource.
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
@@ -16,6 +17,9 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
 # Task watchdog (5 s) restarts the device instead of only printing. The
 # display supervision relies on it (docs/ARCHITECTURE.md, display failures).
+# Set explicitly, not left to IDF defaults, so the build check covers them.
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=5
 CONFIG_ESP_TASK_WDT_PANIC=y
 
 # ---- LVGL 9.6 (trimmed config for the C6) ----

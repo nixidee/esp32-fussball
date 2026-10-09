@@ -99,6 +99,8 @@ fabric.properties
 # PlatformIO / ESP-IDF build output and generated files
 .pio/
 managed_components/
+# Project-local host tool environment (requirements-tools.txt)
+.venv-tools/
 sdkconfig.*
 !sdkconfig.defaults*
 # Firmware artefacts outside .pio/ (not *.bin globally: LittleFS assets may be .bin)
