@@ -198,6 +198,12 @@ is the settings line of that boot log.
 | `kNvsFull` | same boot: "PASS: save failed …, settings unchanged", fill data removed |
 | `kSaveLoop` | saves interval 100 s and 200 s alternately every 100 ms (2,000 times); after a power cut at any moment the next boot loads 100 or 200 s, never a damaged record |
 
+All values passed on the XIAO ESP32-C6 (2026-10-09). `kSaveLoop` was
+interrupted 30 times with the reset button (every next boot loaded 100 or
+200 s) and ran once to completion (about 225 s); interruption by removing
+the supply has not been tested yet. Measured heap cost of the settings
+store at boot: 2,168 B.
+
 ## Settings groups (planned)
 | Group | Examples |
 |---|---|

@@ -67,6 +67,23 @@ enum class EventTest : uint8_t {
 };
 inline constexpr EventTest kEventTest = EventTest::kNone;
 
+// ---- File service (docs/ARCHITECTURE.md) -----------------------------------
+// The first data partition of subtype littlefs is mounted here.
+inline constexpr char kFsBasePath[] = "/fs";
+// Flat file names: 1..kFileNameMaxChars of a-z, 0-9, '_', '-', '.', not
+// starting with '.' (reserved for the service's own temporary files).
+inline constexpr std::size_t kFileNameMaxChars = 31;
+
+// Device tests of the file service. Must be kNone in every normal build.
+// They destroy the filesystem content: never run them on owner data.
+enum class FileTest : uint8_t {
+  kNone,
+  kCorrupt,  // damages a mounted filesystem; the next boot must keep it
+  kErase,    // erases the partition; the next boot must initialise it
+  kFormat,   // writes and reads a file, formats, the file must be gone
+};
+inline constexpr FileTest kFileTest = FileTest::kNone;
+
 // ---- Settings record -------------------------------------------------------
 // Format version of the stored record (append-only, ADR-018): increase only
 // when a field is reordered, removed or changes meaning or type. A new

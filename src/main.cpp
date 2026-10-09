@@ -1,6 +1,7 @@
 // Firmware entry point. Boot log: version, chip, memory baseline and the
-// selected hardware profile. Event bus and settings load, display bring-up
-// with the boot test screen, an input level log and the periodic status log.
+// selected hardware profile. Event bus, settings load and file service
+// mount, display bring-up with the boot test screen, an input level log and
+// the periodic status log.
 
 #include <array>
 #include <atomic>
@@ -16,6 +17,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "event_bus.h"
+#include "file_service.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "hw_target.h"
@@ -169,6 +171,7 @@ void logStatus() {
   ESP_LOGI(kTag, "main task stack: min free %u B",
            static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
   events::logStatus();
+  files::logStatus();
 }
 
 struct StatusLogSettings {
@@ -227,6 +230,10 @@ extern "C" void app_main() {
   settings::init();
   settings::runDeviceTest();
   logHeap("after settings init");
+
+  files::init();
+  files::runDeviceTest();
+  logHeap("after file service init");
 
   const esp_err_t err = display::init(hw::kDisplay, hw::kTarget.wiring);
   if (err == ESP_OK) {

@@ -475,4 +475,42 @@ notification. A keypress can be lost under overload; this is counted and
 logged. All callbacks share the `events` task stack and must stay short.
 Measured cost (`xiao_esp32c6_gc9a01`): firmware +5,568 B, of which the
 `esp_event` library ≈ 3.1 KB; static RAM +116 B. Heap at boot (task stack,
-queue, loop records) ≈ 3 KB estimated, device measurement pending.
+queue, loop records) 2,808 B measured on the device; the flood test passed.
+
+## ADR-020 — File service on LittleFS · Accepted 2026-10-09
+
+Implements the filesystem part of ADR-011 (no automatic formatting).
+Implemented and device-tested; library, mount policy, name rule and the
+deferral of quota and replacement protocol confirmed by the owner.
+
+**Context:** images live in a LittleFS partition shared by both OTA slots.
+A mount can fail because storage was never used (erased flash) or because
+the content is damaged. Formatting on every failed mount, the usual library
+default, would silently destroy images after a fault that might be
+transient or recoverable.
+
+**Decision:**
+- Library `joltwallet/littlefs` from the ESP Component Registry (the
+  LittleFS port that ESP-IDF itself does not ship), pinned to an exact
+  version. It was already used by the integration probe on the C6.
+- Mount with `format_if_mount_failed` off. On a failed mount the whole
+  partition is read: only completely erased storage is initialised; any
+  other content is kept and reported unavailable until the explicit reset.
+- Flat file names, 1–31 characters of `a–z 0–9 _ - .`, no leading dot (dot
+  names are reserved for the service's temporary files).
+
+**Alternatives considered:** `format_if_mount_failed` on (simplest, but
+destroys damaged content without asking); never initialising automatically
+(a freshly erased device would need a manual reset before first use);
+SPIFFS from ESP-IDF (no directories, slower mount and weaker power-loss
+behaviour than LittleFS); FAT with wear levelling (larger overhead, a
+power cut during a write can damage the file table); directories and free-form names
+(more validation, more attack surface for Web uploads, not needed for a few
+images).
+
+**Consequences:** flash +42 KB (library ≈ 31.8 KB), heap 1.7 KB while
+mounted plus ≈ 0.9 KB per open file. A damaged filesystem leaves the device
+without images until the reset is triggered. The quota, the replacement
+reserve and the reader-aware publish/delete protocol (ADR-016) are still to
+be implemented before images use the service: the quota and reserve with
+the image storage format, the replacement protocol with the image upload.

@@ -14,9 +14,10 @@ Configured through a built-in web interface.
 > server fit the ESP32-C6 with reserves; this is integration evidence, not a
 > certification of the finished application. The build regenerates and
 > verifies its ESP-IDF configuration. Settings are stored in NVS (one checked
-> record, `secrets.h` presets; host-tested, device tests pending). An event
-> bus notifies services of changes (host-tested, device test pending); WiFi
-> and the other core services come next.
+> record, `secrets.h` presets), an event bus notifies services of changes,
+> and a file service mounts LittleFS without ever formatting existing
+> content; all three are host- and device-tested on the C6. Time, health
+> and WiFi come next.
 > Planned features are described
 > in [docs/](docs/); a successful boot screen does not certify the complete C6 app.
 
@@ -29,9 +30,9 @@ environments below.
 
 | Environment (`<env>`) | Hardware | Status |
 |---|---|---|
-| `xiao_esp32c6_gc9a01` | Seeed XIAO ESP32-C6 + 1.28" GC9A01 round display | boot test screen (LVGL) and touch input log confirmed on the device; boot log lines are not visible over USB (input logs are); default env |
+| `xiao_esp32c6_gc9a01` | Seeed XIAO ESP32-C6 + 1.28" GC9A01 round display | boot test screen (LVGL) and touch input log confirmed on the device; the boot log is visible only if the chip is reset while the monitor is open (press RST; the USB serial port re-connects after the reset); default env |
 | `waveshare_esp32s3_lcd128` | Waveshare ESP32-S3-LCD-1.28 | paused; last build and boot log before the display code (P1.2); not built with the display code yet; if the first log lines are missing after upload, press RST |
-| `native` | Host computer, unit tests only | SafeArea geometry, settings and event admission suites; C++20, verified on macOS with Apple clang 21.0.0 |
+| `native` | Host computer, unit tests only | SafeArea geometry, settings, event admission and file name suites; C++20, verified on macOS with Apple clang 21.0.0 |
 
 | Task | Command |
 |---|---|
@@ -47,6 +48,7 @@ environments below.
 | Run only the SafeArea suite | `pio test -e native -f test_safe_area` |
 | Run only the settings suite | `pio test -e native -f test_settings` |
 | Run only the event admission suite | `pio test -e native -f test_events` |
+| Run only the file name suite | `pio test -e native -f test_files` |
 | Set up host tools (once) | see “Code formatting” below |
 | Check formatting of changed lines | `.venv-tools/bin/python scripts/check_format.py` |
 
@@ -77,15 +79,14 @@ Build configuration files:
   defaults file. After a failed check the next build regenerates the file.
 - `partitions/*.csv` — flash layout per flash size.
 - `components/*/idf_component.yml` — exact versions of external ESP-IDF
-  components (LVGL, esp_lvgl_port), resolved into one lockfile per chip target,
+  components (LVGL, esp_lvgl_port, LittleFS), resolved into one lockfile per chip target,
   `dependencies.lock.<chip>` (e.g. `dependencies.lock.esp32c6`), set in the
   root `CMakeLists.txt`. Lockfiles are tracked. The component manager changes
   a lockfile only when a manifest changes; review and commit both together.
   The first build of a new chip target creates its lockfile.
 - `scripts/native_sources.py` — explicit pure-component selection for host
-  tests; firmware and tests compile the same geometry, settings and events
-  sources
-  without copies.
+  tests; firmware and tests compile the same geometry, settings, events and
+  files sources without copies.
 - `.clang-format`, `requirements-tools.txt`, `scripts/check_format.py` — code
   style and its check (see “Code formatting”).
 - `boards/`, `displays/`, `targets/<target>.h` — hardware profiles (pins,

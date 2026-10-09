@@ -121,7 +121,7 @@ The `events` task runs above the LVGL task so that a state change reaches
 its subscribers before the next render. Its callbacks must therefore be
 short (see below), or they delay rendering.
 
-### Event bus (implemented, device test pending)
+### Event bus (implemented, device-tested)
 `components/core/event_bus.*`; the pure catalog and admission logic is
 `components/events` (host-tested). Design decision: ADR-019.
 
@@ -154,9 +154,10 @@ short (see below), or they delay rendering.
 - **Boot order:** `events::init()` runs before the settings store. A failure
   is a memory budget error at boot and restarts the device in a controlled
   way.
-- **Memory:** static ≈ 120 B (`.bss`); heap at init: task stack 2304 B plus
-  the queue (8 × 16 B) and the loop and handler records — the boot log line
-  `after event bus init` shows the real figure.
+- **Memory:** static ≈ 120 B (`.bss`); heap at init 2,808 B measured on the
+  XIAO ESP32-C6 (task stack 2304 B, the queue of 8 × 16 B, loop and handler
+  records); the boot log line `after event bus init` shows it. The `events`
+  task used at most 364 B of its stack during the flood test (1,940 B free).
 - **Diagnostics:** the status log prints the minimum free stack of the
   `events` task and the counters for dropped UI actions and failed posts.
 - **Device test** (`cfg::kEventTest = EventTest::kFlood` in `app_config.h`,
@@ -165,7 +166,64 @@ short (see below), or they delay rendering.
   `PASS: UI actions 5 delivered, 15 dropped; settings events 5 posted,
   1 delivered; failed posts 0`. The test accepts every result within the
   bounds (at most slots + 1 delivered, at least one drop, coalesced settings
-  events, no failed post).
+  events, no failed post). Passed on the XIAO ESP32-C6 with exactly this
+  line (2026-10-09).
+
+## File service (implemented, device-tested)
+`components/core/file_service.*` (namespace `files`); name rules, path
+building and the erased-flash check are the pure component `components/files`
+(host-tested). Library: `joltwallet/littlefs` (version pinned in
+`components/core/idf_component.yml`).
+
+- **Partition:** the first data partition of subtype `littlefs` (both
+  partition tables have exactly one), mounted at `cfg::kFsBasePath` (`/fs`).
+  The partition is found by type, so its label is not repeated in the code.
+- **Mount never formats.** `format_if_mount_failed` is off. When the mount
+  fails, the service reads the whole partition:
+  - every byte erased (`0xFF`): storage that was never used, for example
+    after a full flash erase. It is initialised (formatted and mounted) with
+    a warning in the log (`initialised and mounted`);
+  - anything else: the content is kept unchanged, the state is
+    `kUnavailable`, an error is logged. Only the explicit reset
+    (`files::format()`) erases it. A damaged filesystem therefore never
+    destroys images that might still be recovered, and a mount fault never
+    counts as permission to format.
+  The check stops at the first programmed byte; a fully erased 448 KB
+  partition takes 133 ms on the XIAO ESP32-C6 (only on this path).
+- **API:** `init()` (once at boot, after the settings store; never fails),
+  `state()` (`kMounted`, `kUnavailable`, `kNotStarted`), `usage()`,
+  `format()` and `logStatus()` (part of the periodic status log). Files are
+  accessed with the standard POSIX/stdio functions on paths from
+  `files::buildPath()`.
+- **Names:** flat, 1–31 characters of `a–z 0–9 _ - .`, not starting with a
+  dot. No directories, no `..`, no upper case. Names starting with a dot are
+  reserved for the service's own temporary files (replacement protocol,
+  planned). Longest path: `/fs/` + 31 characters (36 B with terminator).
+- **Not yet implemented (needed before images use the service):** the
+  storage quota and the reserve for one temporary replacement file, and the
+  reader-aware publish/delete protocol (ADR-016, see
+  [WEB_UI.md](WEB_UI.md) "Image storage and updates"). Until then
+  `format()` must only be called when no file is open: the library releases
+  open file descriptors during a format without notice.
+- **Memory (XIAO ESP32-C6, 2026-10-09):** flash +42,048 B in total
+  (`firmware.bin`; the LittleFS library 31,818 B, the rest the service and
+  the newlib/VFS file functions it pulls in); static RAM +240 B (DIRAM
+  +466 B). Heap: mount 1,660 B (peak 2,004 B); an open file 936 B more
+  (LittleFS file cache 512 B plus records); after the first file access
+  264 B stay allocated (not attributed; constant over repeated boots and a
+  format). A failed mount leaves 88 B allocated.
+- **Device tests** (`cfg::kFileTest` in `app_config.h`, back to `kNone`
+  afterwards; they destroy the filesystem content, never run them on owner
+  data). Each spans two boots; press RST in between:
+  - `kCorrupt`: overwrites both superblock copies (blocks 0 and 1). Next
+    boot: `PASS: damaged filesystem kept, initialised at boot: no`.
+  - `kErase`: erases the partition. Next boot: `PASS: erased partition
+    initialised, 8192 of 458752 B used`.
+  - `kFormat`: writes and verifies a 4 KB file. Next boot: the file is read
+    back, the filesystem formatted, the file must be gone:
+    `PASS: file after restart intact; format ESP_OK; file gone; ...`.
+  A populated filesystem (an image written by an earlier build) mounted
+  unchanged. All passed on the XIAO ESP32-C6 (2026-10-09).
 
 ## Display fault handling (implemented, device fault tests pending)
 - `esp_lvgl_port` stays unchanged (ADR-015). All handling lives in
@@ -309,9 +367,13 @@ components/            ESP-IDF components = modules (core, net, web, data,
                        idf_component.yml pins lvgl + esp_lvgl_port
   core/                settings store on NVS (load, save, reset, presets,
                        device tests), event bus (own esp_event loop and
-                       task); later file service, time, health
+                       task), file service (LittleFS mount, device tests);
+                       idf_component.yml pins joltwallet/littlefs; later
+                       time, health
   events/              pure C++ event catalog and queue admission
                        (coalescing, UI slots); no ESP-IDF includes, host-tested
+  files/               pure C++ file name rule, path building, erased-flash
+                       check; no ESP-IDF includes, host-tested
   geometry/            pure C++ SafeArea content bounds; no ESP-IDF/LVGL includes
   settings/            pure C++ settings model, limits, record codec (CRC32);
                        no ESP-IDF includes, host-tested

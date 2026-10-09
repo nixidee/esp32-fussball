@@ -5,7 +5,7 @@ from pathlib import Path
 Import("env")
 
 project_root = Path(env.subst("$PROJECT_DIR"))
-pure_components = ("events", "geometry", "settings")
+pure_components = ("events", "files", "geometry", "settings")
 
 env.Append(CPPPATH=[str(project_root / "include")])
 for component in pure_components:
