@@ -26,6 +26,8 @@ constexpr char kFillNamespace[] = "fill_test";
 constexpr uint32_t kSaveLoopPeriodMs = 100;
 constexpr uint32_t kSaveLoopCount = 2000;
 constexpr uint16_t kSampleIntervalS = 10;
+constexpr char kSampleTimeZone[] = "Europe/London";
+constexpr char kSampleNtpServer[] = "de.pool.ntp.org";
 constexpr uint16_t kLoopIntervalsS[] = {100, 200};
 
 // Current settings with the non-secret fields changed, so a stored WiFi
@@ -36,6 +38,8 @@ Model sampleModel() {
   model.external_antenna = !cfg::kExternalAntennaDefault;
   model.debug_status_log = true;
   model.debug_status_interval_s = kSampleIntervalS;
+  model.time_zone.assign(kSampleTimeZone);
+  model.ntp_server.assign(kSampleNtpServer);
   return model;
 }
 
@@ -72,8 +76,9 @@ void storePrepared(SettingsTest test) {
       seal(record, cfg::kSettingsFormatVersion + 1);
       return storeRaw(record, "sample with format version + 1");
     case SettingsTest::kShorterRecord: {
-      // Without debug_status_interval_s (the last field, 2 bytes).
-      const auto shorter = record.first(kRecordBytes - 2);
+      // Without ntp_server (the last field: length byte and text).
+      const auto shorter =
+          record.first(kRecordBytes - (1 + cfg::kNtpServerMaxChars));
       seal(shorter);
       return storeRaw(shorter, "sample without its last field");
     }

@@ -52,8 +52,10 @@ enum class Field : uint8_t {
   kExternalAntenna,
   kDebugStatusLog,
   kDebugStatusIntervalS,
+  kTimeZone,
+  kNtpServer,
 };
-inline constexpr std::size_t kFieldCount = 7;
+inline constexpr std::size_t kFieldCount = 9;
 
 const char* fieldName(Field field) noexcept;
 
@@ -65,6 +67,8 @@ struct Model {
   bool external_antenna = false;
   bool debug_status_log = false;
   uint16_t debug_status_interval_s = 0;
+  Bytes<cfg::kTimeZoneLabelMaxChars> time_zone;  // label of cfg::kTimeZones
+  Bytes<cfg::kNtpServerMaxChars> ntp_server;
 
   bool operator==(const Model& other) const noexcept = default;
 };
@@ -74,6 +78,8 @@ bool isValidWifiPassword(std::string_view value) noexcept;
 bool isValidApPassword(std::string_view value) noexcept;
 bool isValidHostname(std::string_view value) noexcept;
 bool isValidStatusInterval(uint16_t seconds) noexcept;
+bool isValidTimeZone(std::string_view label) noexcept;
+bool isValidNtpServer(std::string_view value) noexcept;
 
 // True if every field is within its limits; otherwise *invalid (if given)
 // names the first rejected field.
@@ -85,6 +91,7 @@ struct Presets {
   std::string_view wifi_password;
   std::string_view ap_password;
   std::string_view hostname;
+  std::string_view time_zone;
 };
 
 // Bit (1 << Field) per preset that was set but violates its limits.

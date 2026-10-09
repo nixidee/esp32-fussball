@@ -16,6 +16,7 @@ const char* eventName(Event event) {
     case Event::kNetworkState: return "network state";
     case Event::kDataUpdated: return "data updated";
     case Event::kOtaState: return "OTA state";
+    case Event::kTimeChanged: return "time changed";
     case Event::kUiAction: return "UI action";
   }
   return "unknown";

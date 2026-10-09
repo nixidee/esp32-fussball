@@ -51,7 +51,7 @@ inline constexpr DisplayFault kDisplayFault = DisplayFault::kNone;
 // ---- Event bus (docs/ARCHITECTURE.md) --------------------------------------
 // Queue slots shared by UI actions; a UI action posted while all are taken
 // is dropped and counted. State events have one reserved slot per kind on
-// top (queue: 4 state kinds + these slots, 16 B per entry).
+// top (queue: 5 state kinds + these slots, 16 B per entry).
 inline constexpr std::size_t kEventUiActionSlots = 4;
 // Fixed subscriber table (no heap per subscriber).
 inline constexpr std::size_t kEventMaxSubscribers = 8;
@@ -84,6 +84,72 @@ enum class FileTest : uint8_t {
 };
 inline constexpr FileTest kFileTest = FileTest::kNone;
 
+// ---- Time (docs/NETWORK.md "Time") -----------------------------------------
+// Selectable time zones: location label (shown and stored) and the POSIX TZ
+// rule handed to the C library. Rules derive from IANA tzdata 2026c footers
+// (Dublin uses equivalent civil offsets with positive summer DST), verified
+// against 2026e for 2026-2028. They describe current rules only (past changes
+// are not covered, which is irrelevant for live data). Labels are stored as
+// text, so entries may be added or reordered; removing one makes a stored label
+// invalid (initial value applies).
+struct TimeZone {
+  const char* label;
+  const char* rule;
+};
+inline constexpr TimeZone kTimeZones[] = {
+    {"Africa/Cairo", "EET-2EEST,M4.5.5/0,M10.5.4/24"},
+    {"Africa/Johannesburg", "SAST-2"},
+    {"Africa/Lagos", "WAT-1"},
+    {"America/Anchorage", "AKST9AKDT,M3.2.0,M11.1.0"},
+    {"America/Chicago", "CST6CDT,M3.2.0,M11.1.0"},
+    {"America/Denver", "MST7MDT,M3.2.0,M11.1.0"},
+    {"America/Los_Angeles", "PST8PDT,M3.2.0,M11.1.0"},
+    {"America/Mexico_City", "CST6"},
+    {"America/New_York", "EST5EDT,M3.2.0,M11.1.0"},
+    {"America/Phoenix", "MST7"},
+    {"America/Sao_Paulo", "<-03>3"},
+    {"Asia/Bangkok", "<+07>-7"},
+    {"Asia/Dubai", "<+04>-4"},
+    {"Asia/Kolkata", "IST-5:30"},
+    {"Asia/Shanghai", "CST-8"},
+    {"Asia/Singapore", "<+08>-8"},
+    {"Asia/Tokyo", "JST-9"},
+    {"Australia/Perth", "AWST-8"},
+    {"Australia/Sydney", "AEST-10AEDT,M10.1.0,M4.1.0/3"},
+    {"Europe/Amsterdam", "CET-1CEST,M3.5.0,M10.5.0/3"},
+    {"Europe/Athens", "EET-2EEST,M3.5.0/3,M10.5.0/4"},
+    {"Europe/Berlin", "CET-1CEST,M3.5.0,M10.5.0/3"},
+    {"Europe/Dublin", "GMT0IST,M3.5.0/1,M10.5.0"},
+    {"Europe/Helsinki", "EET-2EEST,M3.5.0/3,M10.5.0/4"},
+    {"Europe/Istanbul", "<+03>-3"},
+    {"Europe/Kyiv", "EET-2EEST,M3.5.0/3,M10.5.0/4"},
+    {"Europe/Lisbon", "WET0WEST,M3.5.0/1,M10.5.0"},
+    {"Europe/London", "GMT0BST,M3.5.0/1,M10.5.0"},
+    {"Europe/Madrid", "CET-1CEST,M3.5.0,M10.5.0/3"},
+    {"Europe/Moscow", "MSK-3"},
+    {"Europe/Paris", "CET-1CEST,M3.5.0,M10.5.0/3"},
+    {"Europe/Prague", "CET-1CEST,M3.5.0,M10.5.0/3"},
+    {"Europe/Rome", "CET-1CEST,M3.5.0,M10.5.0/3"},
+    {"Europe/Stockholm", "CET-1CEST,M3.5.0,M10.5.0/3"},
+    {"Europe/Vienna", "CET-1CEST,M3.5.0,M10.5.0/3"},
+    {"Europe/Warsaw", "CET-1CEST,M3.5.0,M10.5.0/3"},
+    {"Europe/Zurich", "CET-1CEST,M3.5.0,M10.5.0/3"},
+    {"Pacific/Auckland", "NZST-12NZDT,M9.5.0,M4.1.0/3"},
+    {"Pacific/Honolulu", "HST10"},
+    {"UTC", "UTC0"},
+};
+inline constexpr std::size_t kTimeZoneLabelMaxChars = 32;
+inline constexpr char kTimeZoneDefault[] = "Europe/Berlin";
+// A wall-clock change larger than this is logged as a jump (warning).
+inline constexpr int64_t kTimeJumpLogThresholdS = 2;
+
+// Device test of the time service. Must be kNone in every normal build.
+enum class TimeTest : uint8_t {
+  kNone,
+  kRulesAndJumps,  // all zone rules, DST, midnight window, clock jumps
+};
+inline constexpr TimeTest kTimeTest = TimeTest::kNone;
+
 // ---- Settings record -------------------------------------------------------
 // Format version of the stored record (append-only, ADR-018): increase only
 // when a field is reordered, removed or changes meaning or type. A new
@@ -112,6 +178,14 @@ inline constexpr std::size_t kWifiPskHexChars = 64;
 // mDNS hostname: 1..63 letters, digits or hyphens, no leading/trailing hyphen.
 inline constexpr std::size_t kHostnameMaxChars = 63;
 inline constexpr char kHostnameDefault[] = "fussball";
+
+// ---- Settings: time ---------------------------------------------------------
+// Time zone: one label of kTimeZones; default kTimeZoneDefault (above).
+// NTP server (used from P3.1): 1..63 characters, dot-separated labels of
+// letters, digits or hyphens, no empty label, no hyphen at a label's start
+// or end (a DNS name; an IPv4 address also fits).
+inline constexpr std::size_t kNtpServerMaxChars = 63;
+inline constexpr char kNtpServerDefault[] = "pool.ntp.org";
 
 // ---- Settings: board --------------------------------------------------------
 // External antenna (only boards with an antenna switch use it).

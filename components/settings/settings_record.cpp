@@ -141,6 +141,8 @@ void encode(const Model& model, std::span<uint8_t, kRecordBytes> out) noexcept {
   writer.flag(model.external_antenna);
   writer.flag(model.debug_status_log);
   writer.u16(model.debug_status_interval_s);
+  writer.text(model.time_zone);
+  writer.text(model.ntp_server);
   seal(out);
 }
 
@@ -172,6 +174,8 @@ DecodeResult decode(std::span<const uint8_t> record, Model& model,
   reader.flag(Field::kExternalAntenna, candidate.external_antenna);
   reader.flag(Field::kDebugStatusLog, candidate.debug_status_log);
   reader.u16(candidate.debug_status_interval_s);
+  reader.text(Field::kTimeZone, candidate.time_zone);
+  reader.text(Field::kNtpServer, candidate.ntp_server);
 
   DecodeResult result = reader.result();
   Field bad = reader.invalidField();

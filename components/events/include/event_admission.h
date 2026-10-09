@@ -24,10 +24,11 @@ enum class Event : uint8_t {
   kNetworkState,     // producer: WiFi manager (P3)
   kDataUpdated,      // producer: repository (P4)
   kOtaState,         // producer: OTA (P3.7)
+  kTimeChanged,      // read timekeeping::status() / localNow()
   kUiAction,         // payload: action code (input mapper, P5.4)
 };
 
-inline constexpr std::size_t kStateEventCount = 4;
+inline constexpr std::size_t kStateEventCount = 5;
 inline constexpr std::size_t kEventCount = kStateEventCount + 1;
 static_assert(static_cast<std::size_t>(Event::kUiAction) == kStateEventCount,
               "state events must precede the UI action");

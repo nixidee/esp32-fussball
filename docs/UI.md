@@ -157,6 +157,11 @@ Later overlays (backlog): goal popup, error/status hints.
 
 ## Night mode (planned)
 Decided 2026-10-08. Active in a configurable night window (default
-23:00–07:00), only when the time is valid (SNTP). Dark UI on every target;
-targets with a backlight pin additionally dim or switch off the backlight. The XIAO C6
-display module has no backlight pin, so there the backlight stays on.
+23:00–07:00), only when the time service reports a valid clock. The clock
+starts invalid on every boot; SNTP will provide normal synchronisation with
+the WiFi manager. The local civil window calculation is implemented and
+offline device-tested, including midnight and both daylight-saving changes;
+night-mode rendering and its runtime settings remain planned. Dark UI on
+every target; targets with a backlight pin additionally dim or switch off
+the backlight. The XIAO C6 display module has no backlight pin, so there the
+backlight stays on.

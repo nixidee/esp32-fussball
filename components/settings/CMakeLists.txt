@@ -1,5 +1,6 @@
 # Pure settings model and record format (docs/CONFIGURATION.md); no ESP-IDF
-# includes, host-tested. app_config.h is a public dependency.
+# includes, host-tested. app_config.h is a public dependency; the time-zone
+# label check uses components/timekeeping.
 idf_component_register(
   SRCS
     "settings_model.cpp"
@@ -7,4 +8,6 @@ idf_component_register(
   INCLUDE_DIRS
     "include"
     "../../include"
+  REQUIRES
+    timekeeping
 )

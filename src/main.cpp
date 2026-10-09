@@ -1,7 +1,7 @@
 // Firmware entry point. Boot log: version, chip, memory baseline and the
-// selected hardware profile. Event bus, settings load and file service
-// mount, display bring-up with the boot test screen, an input level log and
-// the periodic status log.
+// selected hardware profile. Event bus, settings load, file service mount
+// and time zone, display bring-up with the boot test screen, an input level log
+// and the periodic status log.
 
 #include <array>
 #include <atomic>
@@ -24,6 +24,7 @@
 #include "safe_area.h"
 #include "sdkconfig.h"
 #include "settings_store.h"
+#include "time_service.h"
 
 namespace {
 
@@ -172,6 +173,7 @@ void logStatus() {
            static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
   events::logStatus();
   files::logStatus();
+  timekeeping::logStatus();
 }
 
 struct StatusLogSettings {
@@ -201,6 +203,7 @@ void runDiagnosticLoop() {
   // Subscribe before the first read so that no change is missed.
   ESP_ERROR_CHECK(events::subscribe(events::Event::kSettingsChanged,
                                     onSettingsChanged, nullptr));
+  timekeeping::applySettings();
   StatusLogSettings status = statusLogSettings();
   TickType_t last_status = xTaskGetTickCount();
   while (true) {
@@ -208,6 +211,7 @@ void runDiagnosticLoop() {
     logInputChanges(active);
     if (settings_changed.exchange(false, std::memory_order_acq_rel)) {
       status = statusLogSettings();
+      timekeeping::applySettings();
     }
     if (status.enabled && xTaskGetTickCount() - last_status >= status.period) {
       last_status = xTaskGetTickCount();
@@ -234,6 +238,10 @@ extern "C" void app_main() {
   files::init();
   files::runDeviceTest();
   logHeap("after file service init");
+
+  timekeeping::init();
+  timekeeping::runDeviceTest();
+  logHeap("after time service init");
 
   const esp_err_t err = display::init(hw::kDisplay, hw::kTarget.wiring);
   if (err == ESP_OK) {

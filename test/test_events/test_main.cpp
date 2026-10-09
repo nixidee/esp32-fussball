@@ -19,7 +19,8 @@ using events::kQueueLength;
 using events::kStateEventCount;
 
 constexpr Event kStateEvents[] = {Event::kSettingsChanged, Event::kNetworkState,
-                                  Event::kDataUpdated, Event::kOtaState};
+                                  Event::kDataUpdated, Event::kOtaState,
+                                  Event::kTimeChanged};
 
 void testCatalog() {
   TEST_ASSERT_EQUAL_UINT(kStateEventCount, std::size(kStateEvents));
@@ -33,8 +34,8 @@ void testCatalog() {
 
 void testEventNamesAreDistinct() {
   constexpr Event kAll[] = {Event::kSettingsChanged, Event::kNetworkState,
-                            Event::kDataUpdated, Event::kOtaState,
-                            Event::kUiAction};
+                            Event::kDataUpdated,     Event::kOtaState,
+                            Event::kTimeChanged,     Event::kUiAction};
   for (std::size_t i = 0; i < std::size(kAll); ++i) {
     TEST_ASSERT_NOT_EQUAL(0,
                           std::strcmp("unknown", events::eventName(kAll[i])));
@@ -67,6 +68,7 @@ void testStateEventsAreIndependent() {
   TEST_ASSERT_TRUE(admission.admit(Event::kNetworkState));
   TEST_ASSERT_FALSE(admission.admit(Event::kDataUpdated));
   TEST_ASSERT_FALSE(admission.admit(Event::kOtaState));
+  TEST_ASSERT_FALSE(admission.admit(Event::kTimeChanged));
 }
 
 void testUiSlotsAreBounded() {

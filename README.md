@@ -16,8 +16,11 @@ Configured through a built-in web interface.
 > verifies its ESP-IDF configuration. Settings are stored in NVS (one checked
 > record, `secrets.h` presets), an event bus notifies services of changes,
 > and a file service mounts LittleFS without ever formatting existing
-> content; all three are host- and device-tested on the C6. Time, health
-> and WiFi come next.
+> content; those services were host- and device-tested on the C6. The time
+> service now applies the selected zone, tracks wall-clock validity, emits
+> change notifications and provides monotonic time and civil night windows.
+> Its host tests and offline C6 device test passed; SNTP and its network
+> device test follow with the WiFi manager. Health and WiFi come next.
 > Planned features are described
 > in [docs/](docs/); a successful boot screen does not certify the complete C6 app.
 
@@ -32,7 +35,7 @@ environments below.
 |---|---|---|
 | `xiao_esp32c6_gc9a01` | Seeed XIAO ESP32-C6 + 1.28" GC9A01 round display | boot test screen (LVGL) and touch input log confirmed on the device; the boot log is visible only if the chip is reset while the monitor is open (press RST; the USB serial port re-connects after the reset); default env |
 | `waveshare_esp32s3_lcd128` | Waveshare ESP32-S3-LCD-1.28 | paused; last build and boot log before the display code (P1.2); not built with the display code yet; if the first log lines are missing after upload, press RST |
-| `native` | Host computer, unit tests only | SafeArea geometry, settings, event admission and file name suites; C++20, verified on macOS with Apple clang 21.0.0 |
+| `native` | Host computer, unit tests only | SafeArea geometry, settings, event admission, file name and timekeeping suites; C++20, verified on macOS with Apple clang 21.0.0 |
 
 | Task | Command |
 |---|---|
@@ -49,6 +52,7 @@ environments below.
 | Run only the settings suite | `pio test -e native -f test_settings` |
 | Run only the event admission suite | `pio test -e native -f test_events` |
 | Run only the file name suite | `pio test -e native -f test_files` |
+| Run only the timekeeping suite | `pio test -e native -f test_timekeeping` |
 | Set up host tools (once) | see “Code formatting” below |
 | Check formatting of changed lines | `.venv-tools/bin/python scripts/check_format.py` |
 
@@ -85,8 +89,8 @@ Build configuration files:
   a lockfile only when a manifest changes; review and commit both together.
   The first build of a new chip target creates its lockfile.
 - `scripts/native_sources.py` — explicit pure-component selection for host
-  tests; firmware and tests compile the same geometry, settings, events and
-  files sources without copies.
+  tests; firmware and tests compile the same geometry, settings, events,
+  files and timekeeping sources without copies.
 - `.clang-format`, `requirements-tools.txt`, `scripts/check_format.py` — code
   style and its check (see “Code formatting”).
 - `boards/`, `displays/`, `targets/<target>.h` — hardware profiles (pins,
@@ -192,7 +196,7 @@ Comparison and limits: [docs/DATA_PROVIDERS.md](docs/DATA_PROVIDERS.md).
 | [docs/HARDWARE.md](docs/HARDWARE.md) | Boards, displays, pinouts, profile system |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Config file, `secrets.h`, settings, factory reset |
 | [docs/UI.md](docs/UI.md) | Screens, navigation, round display rules, overlays |
-| [docs/NETWORK.md](docs/NETWORK.md) | WiFi behaviour, setup AP, REST API, OTA |
+| [docs/NETWORK.md](docs/NETWORK.md) | WiFi behaviour, setup AP, time service, REST API, OTA |
 | [docs/WEB_UI.md](docs/WEB_UI.md) | Web interface tabs, image editor |
 | [docs/DATA_PROVIDERS.md](docs/DATA_PROVIDERS.md) | Data APIs compared |
 | [docs/DATA_MODEL.md](docs/DATA_MODEL.md) | Provider-independent data model |

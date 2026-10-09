@@ -67,19 +67,69 @@ Component `espressif/mdns` (accepted 2026-10-08). Hostname default `fussball`
 Precedence as in [CONFIGURATION.md](CONFIGURATION.md).
 
 ## Time
-SNTP starts after the first connection. The settings UI presents a location
-label such as the default `Europe/Berlin`; the time service maps supported
-labels to POSIX `TZ` rules. ESP-IDF receives the POSIX rule, not an IANA label
-that would require an installed time-zone database. The zone is overridable
-in `secrets.h` and the Web UI.
 
-- Fixture times use UTC. Local civil time is used for display and night-mode
-  windows, including windows that cross midnight.
-- Retry delays, freshness durations, input/overlay timeouts and operation
-  deadlines use a monotonic clock, independent of SNTP corrections.
-- Date-dependent logic waits for valid wall-clock time. Invalid time, forward
-  and backward SNTP corrections, daylight-saving changes and midnight-crossing
-  night windows are required test cases.
+The time service is implemented without networking. SNTP connection and its
+network device test are deferred to the WiFi manager (P3.1), where SNTP will
+start after the first connection and use the stored NTP server (default
+`pool.ntp.org`). No provisional WiFi stack or extra time task is introduced.
+
+The settings store holds a location label (default `Europe/Berlin`), mapped
+to one of 40 compiled POSIX `TZ` rules in `cfg::kTimeZones`. The list covers
+Europe, the Americas, Africa, Asia, Australia and the Pacific, plus `UTC`.
+Labels are stored as text, so reordering the list cannot change a saved
+zone. `SECRET_TIME_ZONE` provides the optional location preset; the future
+Web UI will use these same labels. See [CONFIGURATION.md](CONFIGURATION.md)
+for limits and the migration from `SECRET_TIMEZONE`.
+
+The service uses standard C-library `setenv("TZ", ...)`, `tzset()` and
+`localtime_r()`; the current ESP-IDF firmware uses Picolibc. Only this
+service may apply `TZ`, because it is global to the firmware. A mutex
+serialises zone changes and conversions. The recurring rules derive from
+IANA tzdata 2026c footers and were checked against 2026e for 2026–2028;
+Dublin uses an equivalent positive-summer convention. No historical
+time-zone database is installed, so past rule changes are not reproduced.
+
+- Fixture instants are UTC. `toLocal()` converts known instants even while
+  the device clock is invalid; `utcNow()` and `localNow()` refuse an invalid
+  clock. Local civil time is used for display and night-mode windows.
+- The clock is valid only after a time source sets it in the current boot.
+  A reboot starts invalid even if hardware retained its raw clock value.
+  Normal firmware currently has no synchronisation source: until SNTP is
+  connected, date-dependent screens and night mode wait for valid time.
+- `setTime()` sets UTC through `settimeofday()`, records the source and
+  monotonic set time, and posts `kTimeChanged`. Applying a different zone
+  also posts that notification. Subscribers fetch current state; events
+  coalesce. The first set is logged; corrections larger than two seconds
+  produce a jump warning.
+- `monotonicMs()` uses `esp_timer_get_time()` for delays, retries, deadlines,
+  freshness and input/overlay timeouts. Wall-clock corrections do not move
+  it. Civil windows include the start minute and exclude the end; a start
+  after the end crosses midnight, and equal endpoints mean an empty window.
+  A skipped or repeated daylight-saving hour follows the local clock.
+
+### Offline device test
+
+Set `cfg::kTimeTest = TimeTest::kRulesAndJumps` in `app_config.h` for one
+diagnostic build, then restore `kNone` and upload normal firmware. This test
+uses no network and does not alter stored settings, but leaves the wall
+clock valid at its synthetic 2030 test time until the next boot.
+
+The test passed on the XIAO ESP32-C6 on 2026-10-09: invalid clock at boot;
+112 rule cases covering all 40 zones and their 2026–2027 transitions;
+12 actual `setTime()`/`localNow()` night-window fixtures covering the
+23:00–07:00 boundaries, midnight and both daylight-saving changes; a 2030
+baseline followed by a confirmed backward jump to 2020 and forward jump to
+2030; and event delivery, validity/source/set counters and monotonic-clock
+continuity for every set. Expected result: `PASS: boot invalid, 112 rule
+cases, 12 window cases, 2 jumps`. There are 15 clock sets in total. Rule
+checks took 25 ms. Heap moved from 418,456 B to 417,808 B while cycling every
+zone (648 B diagnostic cost), which is separate from normal single-zone
+boot usage.
+
+Host tests exercise the pure helpers and rules through macOS's C library;
+the device test verifies the firmware's Picolibc and actual clock APIs.
+SNTP reception, reconnect behaviour and network-origin corrections remain
+for P3.1; the offline test does not claim that acceptance.
 
 ## Web server and REST API (P3.5)
 - `esp_http_server`; Web UI embedded in the firmware (gzip).

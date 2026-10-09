@@ -343,6 +343,16 @@ designed, measured and approved before each service is implemented.
 - **Reproducible configuration:** generated configuration and the component
   lockfile are regenerated and checked deterministically per target, so stale
   `sdkconfig.<env>` files or lock drift are detected instead of accepted.
+- **Time service (refinement accepted 2026-10-09):** implement per-boot
+  wall-clock validity, notifications, zone application, monotonic durations
+  and civil windows without networking. SNTP wiring and its network device
+  test move together to P3.1. Use standard C-library time conversion with
+  the firmware's existing Picolibc; only the time service sets global `TZ`.
+  A compiled worldwide list of 40 location labels maps to recurring POSIX
+  rules; Berlin stays the default. No new task or provisional WiFi stack.
+  Host tests use macOS's library; offline device tests set the real clock
+  and verify the firmware library, validity, notifications, both jump
+  directions, daylight-saving changes and midnight windows.
 
 **Alternatives considered:** OTA identity encoded in existing version/project
 fields (field limits, mixed meaning); per-service network limits with a global
@@ -351,6 +361,11 @@ selection with targeted catch-up queries (more selection logic); versioned
 image file generations (more metadata); browser polling of a current debug
 record (less immediate, repeated HTTP cost); provider-scoped data without
 mappings (no combination); manual documented regeneration (operator burden).
+For the time refinement: provisional WiFi/SNTP now (network integration
+twice), deferring all time work (blocks pure service acceptance), a custom
+POSIX-rule calculator (more maintained date arithmetic), a short European
+list (less coverage), and free-form user POSIX rules (extra validation and
+error-prone configuration).
 
 **Consequences:** each direction still needs its design with measured
 static RAM, heap peak, stack, flash and storage costs. The concurrency rule,
@@ -434,6 +449,17 @@ record, so newer fields return to defaults afterwards. Cost estimate
 (unmeasured): about 100–200 B flash for length handling, no additional RAM.
 Tests cover shorter and longer records of the same version.
 
+**Time-fields extension accepted 2026-10-09:** append a location label
+(maximum 32 characters) and NTP server (maximum 63, default `pool.ntp.org`)
+to format 1 now; the latter is used when SNTP is connected in P3.1. Store
+the zone as text, so list reordering cannot change saved values. The record
+grows from 238 to 335 bytes; the C6 model from 230 to 328 bytes including
+alignment. Earlier records remain valid. The optional preset becomes
+`SECRET_TIME_ZONE`; the old `SECRET_TIMEZONE` name fails with a migration
+message. Renaming the key preserves its value, so an earlier POSIX value
+must separately be replaced with a supported location label. An invalid
+preset is logged by field name and the default applies.
+
 ## ADR-019 — Event bus and logging levels · Accepted 2026-10-09
 
 Implements the event-bus part of ADR-016 (service design directions).
@@ -454,7 +480,10 @@ churn and unbounded latency. Log output had no common rules yet.
   state event always finds room. Commands that need a result are direct
   function calls, never events.
 - The settings store posts "settings changed" after every save or reset;
-  this replaces polling of the settings generation.
+  this replaces polling of the settings generation. The time service posts
+  `kTimeChanged` after applying a different zone or successfully setting
+  the clock. This fifth state kind adds one queue entry (16 B), bringing
+  the queue to nine entries while keeping the same task and UI slots.
 - Logging: one tag per module (device tests `<module>_test`); E = a function
   is lost or defaults apply, W = degraded but self-corrected, I = state
   changes and boot facts (no periodic output except the switchable status
@@ -475,7 +504,9 @@ notification. A keypress can be lost under overload; this is counted and
 logged. All callbacks share the `events` task stack and must stay short.
 Measured cost (`xiao_esp32c6_gc9a01`): firmware +5,568 B, of which the
 `esp_event` library ≈ 3.1 KB; static RAM +116 B. Heap at boot (task stack,
-queue, loop records) 2,808 B measured on the device; the flood test passed.
+queue, loop records) 2,808 B measured on the device before the time event
+was added; the flood test passed. Current boot logs measure the extended
+queue; the offline time test also verifies real subscriber delivery.
 
 ## ADR-020 — File service on LittleFS · Accepted 2026-10-09
 

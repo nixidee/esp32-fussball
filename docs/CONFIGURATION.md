@@ -1,7 +1,8 @@
 # Configuration
 
 > Status: **partly implemented.** The settings store (one NVS record with
-> format 1: WiFi, setup AP password, hostname, external antenna, status log)
+> format 1: WiFi, setup AP password, hostname, external antenna, status log,
+> time zone and NTP server)
 > and the `secrets.h` presets work; nothing uses the WiFi values yet, the Web
 > UI and the reset trigger are planned. Further settings are appended to the
 > record by the features that need them. NVS was selected in ADR-007; the
@@ -53,7 +54,12 @@ It only makes the first setup more comfortable.
 
 The WiFi keys are `SECRET_WIFI_SSID` and `SECRET_WIFI_PASSWORD`. The former
 names `SECRET_WIFI_SSID_1` / `SECRET_WIFI_PASSWORD_1` stop the build with a
-message asking to rename them.
+message asking to rename them. The time-zone key is `SECRET_TIME_ZONE` and
+must contain one supported location label, such as `Europe/Berlin`, rather
+than a POSIX rule. The former `SECRET_TIMEZONE` name stops the build with a
+rename message. Renaming the key does not convert an existing POSIX value;
+replace that value with a supported location label. An invalid preset logs
+the field name and keeps the Berlin default.
 
 ## Factory reset
 Reset erases the complete stored settings record (the whole NVS namespace
@@ -106,13 +112,13 @@ version, and reset.
 ### Record format 1
 
 NVS namespace `settings`, key `record`; all numbers little-endian. The
-record is 238 bytes; at most 1,024 bytes are read (a longer record counts as
+record is 335 bytes; at most 1,024 bytes are read (a longer record counts as
 damaged).
 
 | Offset | Size | Content |
 |---|---|---|
 | 0 | 2 | format version (1) |
-| 2 | 2 | payload length (230) |
+| 2 | 2 | payload length (327) |
 | 4 | 4 | CRC32 (IEEE, as zlib) over bytes 0–3 and the payload |
 | 8 | 1 + 32 | WiFi SSID: length byte, then the bytes |
 | 41 | 1 + 64 | WiFi password |
@@ -121,12 +127,16 @@ damaged).
 | 234 | 1 | external antenna (0/1) |
 | 235 | 1 | periodic status log (0/1) |
 | 236 | 2 | status log interval in seconds |
+| 238 | 1 + 32 | time-zone location label |
+| 271 | 1 + 63 | NTP server |
 
 Unused bytes after a text are written as zero and ignored when read. The
 checks run in this order: size, length field, check value, version, then
 every field against its limits. A record that ends inside a field, or in
 which one value violates its limits, is rejected as a whole; a record that
-ends exactly between fields is accepted.
+ends exactly between fields is accepted. Appending time zone and NTP server
+keeps format version 1: an earlier 238-byte record remains valid and its new
+fields use the initial values (`secrets.h` over defaults).
 
 ### Limits of format 1
 
@@ -139,6 +149,8 @@ ends exactly between fields is accepted.
 | External antenna | off | on/off (used only on boards with an antenna switch) |
 | Periodic status log | on | on/off |
 | Status log interval | 30 s | 5–3,600 s |
+| Time zone | `Europe/Berlin` | one of the 40 location labels in `cfg::kTimeZones`, case-sensitive; at most 32 characters |
+| NTP server | `pool.ntp.org` | 1–63 letters, digits, hyphens and separating dots; no empty label or hyphen at a label's start/end; a DNS name or IPv4 address |
 
 Values that do not fit are rejected, never truncated.
 
@@ -165,44 +177,50 @@ the passwords appear only as "set"/"empty" (and the SSID length).
 
 ### Memory
 
-The current settings (≈ 240 bytes) live in static RAM behind a mutex;
-readers get a copy on their own stack. Saving allocates the 238-byte record
-temporarily on the heap, loading at most 1,024 bytes. NVS itself keeps its
-page and entry index on the heap; the boot log lines "heap at boot" and
-"heap after settings init" show the amount.
+The current settings occupy 328 bytes on the ESP32-C6 (verified in the
+target linker map) and live in static RAM behind a mutex; readers get a copy
+on their own stack. The time fields add 98 bytes per model, including one
+alignment byte, and 97 bytes to the explicit record. Saving allocates the
+335-byte record temporarily on the heap, loading at most 1,024 bytes. NVS
+itself keeps its page and entry index on the heap; the boot log lines "heap
+at boot" and "heap after settings init" show the amount.
 
 Space in the NVS partition (20 KB = 5 pages of 126 entries of 32 bytes; one
-page stays free for compaction): the 238-byte record takes about 10 entries
-(blob index, data header, 8 data entries), about 20 while a save writes the
-new copy before the old one is released. That is about 4 % of the roughly
-500 usable entries; the WiFi driver uses the same partition. Estimated from
-the NVS entry format; the `kNvsFull` test logs the real entry counts.
+page stays free for compaction): the 335-byte record takes about 13 entries
+(blob index, data header, 11 data entries), about 26 while a save writes the
+new copy before the old one is released. That is about 5 % of the roughly
+500 usable entries; the WiFi driver uses the same partition. The earlier
+238-byte record needed about 10 entries, so this extension adds about three
+entries per stored copy. These counts are estimates from the NVS entry
+format; the `kNvsFull` test logs the actual entry counts.
 
 ### Device tests
 
 `cfg::kSettingsTest` in `app_config.h` compiles one store test into the boot
 sequence (it must be `kNone` in every normal build). The tests that store a
-prepared record change only the hostname (`fussball-test`), the external
-antenna (on), the status log (on) and its interval (10 s); WiFi values are
-kept. A prepared record takes effect at the next boot (press RST); the result
+prepared record change the hostname (`fussball-test`), the external antenna
+(on), the status log (on), its interval (10 s), the time zone
+(`Europe/London`) and the NTP server (`de.pool.ntp.org`); WiFi values are kept. A prepared record takes effect at the next boot (press RST); the result
 is the settings line of that boot log.
 
 | Value | Expected at the next boot |
 |---|---|
-| `kSaveSample` | "stored settings loaded", hostname `fussball-test`, interval 10 s |
+| `kSaveSample` | "stored settings loaded", hostname `fussball-test`, interval 10 s, zone `Europe/London`, NTP `de.pool.ntp.org` |
 | `kReset` | "settings reset" in the same boot; next boot "no stored settings" |
 | `kCorruptRecord` | "stored settings damaged (… check value mismatch)", initial values |
 | `kUnknownVersion` | "stored settings damaged (… unknown format version)", initial values |
-| `kShorterRecord` | loaded; hostname `fussball-test`, interval = initial value (30 s) |
+| `kShorterRecord` | loaded; hostname `fussball-test`, interval 10 s, zone `Europe/London`; omitted NTP field uses `pool.ntp.org` |
 | `kLongerRecord` | loaded; all sample values, the unknown tail is ignored |
 | `kNvsFull` | same boot: "PASS: save failed …, settings unchanged", fill data removed |
 | `kSaveLoop` | saves interval 100 s and 200 s alternately every 100 ms (2,000 times); after a power cut at any moment the next boot loads 100 or 200 s, never a damaged record |
 
-All values passed on the XIAO ESP32-C6 (2026-10-09). `kSaveLoop` was
-interrupted 30 times with the reset button (every next boot loaded 100 or
-200 s) and ran once to completion (about 225 s); interruption by removing
-the supply has not been tested yet. Measured heap cost of the settings
-store at boot: 2,168 B.
+All store test selectors passed on the XIAO ESP32-C6 on 2026-10-09 with the
+earlier 238-byte layout. `kSaveLoop` was interrupted 30 times with the reset
+button (every next boot loaded 100 or 200 s) and ran once to completion
+(about 225 s); interruption by removing the supply has not been tested yet.
+The 335-byte layout and compatibility with the earlier records pass the host
+tests; the store's save/reboot tests have not been repeated for the new
+layout. The earlier measured settings-store heap cost at boot was 2,168 B.
 
 ## Settings groups (planned)
 | Group | Examples |

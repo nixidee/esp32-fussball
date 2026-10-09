@@ -8,6 +8,7 @@
 //   ap_password    u8 length + 63 bytes     hostname       u8 length + 63 bytes
 //   external_antenna u8 (0/1)   debug_status_log u8 (0/1)
 //   debug_status_interval_s u16
+//   time_zone      u8 length + 32 bytes     ntp_server     u8 length + 63 bytes
 // Unused bytes after a text are written as zero and ignored when read.
 
 #pragma once
@@ -25,7 +26,9 @@ inline constexpr std::size_t kPayloadBytes =
     (1 + decltype(Model::wifi_ssid)::kCapacity) +
     (1 + decltype(Model::wifi_password)::kCapacity) +
     (1 + decltype(Model::ap_password)::kCapacity) +
-    (1 + decltype(Model::hostname)::kCapacity) + 1 + 1 + 2;
+    (1 + decltype(Model::hostname)::kCapacity) + 1 + 1 + 2 +
+    (1 + decltype(Model::time_zone)::kCapacity) +
+    (1 + decltype(Model::ntp_server)::kCapacity);
 inline constexpr std::size_t kRecordBytes = kHeaderBytes + kPayloadBytes;
 static_assert(kRecordBytes <= cfg::kSettingsMaxRecordBytes);
 

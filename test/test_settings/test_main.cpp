@@ -37,7 +37,9 @@ constexpr std::size_t kHostnameAt = 170;
 constexpr std::size_t kAntennaAt = 234;
 constexpr std::size_t kStatusLogAt = 235;
 constexpr std::size_t kIntervalAt = 236;
-constexpr std::size_t kFormat1Bytes = 238;
+constexpr std::size_t kTimeZoneAt = 238;
+constexpr std::size_t kNtpServerAt = 271;
+constexpr std::size_t kFormat1Bytes = 335;
 
 Model defaults() { return initialValues({}); }
 
@@ -50,6 +52,8 @@ Model sample() {
   model.external_antenna = true;
   model.debug_status_log = false;
   model.debug_status_interval_s = 600;
+  model.time_zone.assign("America/New_York");
+  model.ntp_server.assign("time.example.org");
   return model;
 }
 
@@ -106,6 +110,8 @@ void testDefaults() {
   TEST_ASSERT_FALSE(model.external_antenna);
   TEST_ASSERT_TRUE(model.debug_status_log);
   TEST_ASSERT_EQUAL_UINT16(30, model.debug_status_interval_s);
+  TEST_ASSERT_TRUE(model.time_zone.view() == "Europe/Berlin");
+  TEST_ASSERT_TRUE(model.ntp_server.view() == "pool.ntp.org");
   TEST_ASSERT_TRUE(settings::validate(model));
 }
 
@@ -119,12 +125,14 @@ void testFormat1Layout() {
   model.external_antenna = true;
   model.debug_status_log = false;
   model.debug_status_interval_s = 0x0123;  // 291 s, little-endian 23 01
+  model.time_zone.assign("UTC");
+  model.ntp_server.assign("a.b");
   const Record record = encoded(model);
 
   TEST_ASSERT_EQUAL_HEX8(0x01, record[0]);  // version 1
   TEST_ASSERT_EQUAL_HEX8(0x00, record[1]);
-  TEST_ASSERT_EQUAL_HEX8(230, record[2]);  // payload length 230
-  TEST_ASSERT_EQUAL_HEX8(0x00, record[3]);
+  TEST_ASSERT_EQUAL_HEX8(0x47, record[2]);  // payload length 327 = 0x0147
+  TEST_ASSERT_EQUAL_HEX8(0x01, record[3]);
 
   TEST_ASSERT_EQUAL_HEX8(2, record[kSsidAt]);
   TEST_ASSERT_EQUAL_HEX8('A', record[kSsidAt + 1]);
@@ -137,11 +145,22 @@ void testFormat1Layout() {
   TEST_ASSERT_EQUAL_HEX8(0, record[kStatusLogAt]);
   TEST_ASSERT_EQUAL_HEX8(0x23, record[kIntervalAt]);
   TEST_ASSERT_EQUAL_HEX8(0x01, record[kIntervalAt + 1]);
+  TEST_ASSERT_EQUAL_HEX8(3, record[kTimeZoneAt]);
+  TEST_ASSERT_EQUAL_HEX8('U', record[kTimeZoneAt + 1]);
+  TEST_ASSERT_EQUAL_HEX8('C', record[kTimeZoneAt + 3]);
+  TEST_ASSERT_EQUAL_HEX8(3, record[kNtpServerAt]);
+  TEST_ASSERT_EQUAL_HEX8('a', record[kNtpServerAt + 1]);
+  TEST_ASSERT_EQUAL_HEX8('.', record[kNtpServerAt + 2]);
+  TEST_ASSERT_EQUAL_HEX8('b', record[kNtpServerAt + 3]);
 
   // Unused text bytes are zero.
   for (std::size_t i = kSsidAt + 3; i < kPasswordAt; ++i)
     TEST_ASSERT_EQUAL_HEX8(0, record[i]);
   for (std::size_t i = kHostnameAt + 2; i < kAntennaAt; ++i)
+    TEST_ASSERT_EQUAL_HEX8(0, record[i]);
+  for (std::size_t i = kTimeZoneAt + 4; i < kNtpServerAt; ++i)
+    TEST_ASSERT_EQUAL_HEX8(0, record[i]);
+  for (std::size_t i = kNtpServerAt + 4; i < kFormat1Bytes; ++i)
     TEST_ASSERT_EQUAL_HEX8(0, record[i]);
 
   // CRC over header bytes 0..3 followed by the payload.
@@ -164,6 +183,8 @@ void testRoundTrip() {
   full.ap_password.assign(std::string(63, '~'));
   full.hostname.assign("a" + std::string(61, '-') + "z");
   full.debug_status_interval_s = 3600;
+  full.time_zone.assign("America/Los_Angeles");
+  full.ntp_server.assign(std::string(63, 'n'));
   Model loaded_full = defaults();
   TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(encoded(full), loaded_full));
   TEST_ASSERT_TRUE(loaded_full == full);
@@ -173,14 +194,34 @@ void testShorterRecordKeepsInitialValues() {
   const Model stored = sample();
   Record record = encoded(stored);
 
-  // Without the last field (interval).
+  // Without the last field (ntp_server).
+  const auto without_ntp = std::span(record).first(kNtpServerAt);
+  settings::seal(without_ntp);
+  Model loaded = defaults();
+  TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(without_ntp, loaded));
+  TEST_ASSERT_TRUE(loaded.time_zone == stored.time_zone);
+  TEST_ASSERT_TRUE(loaded.ntp_server.view() == "pool.ntp.org");
+
+  // A record of the firmware before the time fields (238 B).
+  record = encoded(stored);
+  const auto before_time = std::span(record).first(kTimeZoneAt);
+  settings::seal(before_time);
+  loaded = defaults();
+  TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(before_time, loaded));
+  TEST_ASSERT_EQUAL_UINT16(600, loaded.debug_status_interval_s);
+  TEST_ASSERT_TRUE(loaded.time_zone.view() == "Europe/Berlin");
+  TEST_ASSERT_TRUE(loaded.ntp_server.view() == "pool.ntp.org");
+
+  // Without the interval and every later field.
+  record = encoded(stored);
   const auto without_interval = std::span(record).first(kIntervalAt);
   settings::seal(without_interval);
-  Model loaded = defaults();
+  loaded = defaults();
   TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(without_interval, loaded));
   TEST_ASSERT_TRUE(loaded.hostname == stored.hostname);
   TEST_ASSERT_TRUE(loaded.external_antenna);
   TEST_ASSERT_EQUAL_UINT16(30, loaded.debug_status_interval_s);
+  TEST_ASSERT_TRUE(loaded.time_zone.view() == "Europe/Berlin");
 
   // Header only: every field keeps its initial value.
   record = encoded(stored);
@@ -194,7 +235,8 @@ void testShorterRecordKeepsInitialValues() {
 void testPartialFieldIsRejected() {
   const Model original = sample();
   for (const std::size_t size :
-       {kSsidAt + 1, kPasswordAt - 1, kHostnameAt + 10, kIntervalAt + 1}) {
+       {kSsidAt + 1, kPasswordAt - 1, kHostnameAt + 10, kIntervalAt + 1,
+        kTimeZoneAt + 5, kNtpServerAt + 1, kFormat1Bytes - 1}) {
     Record record = encoded(original);
     const auto cut = std::span(record).first(size);
     settings::seal(cut);
@@ -282,6 +324,13 @@ void testInvalidStoredValuesRejectWholeRecord() {
       {kHostnameAt, 64, Field::kHostname},      // length over capacity
       {kAntennaAt, 2, Field::kExternalAntenna},
       {kStatusLogAt, 2, Field::kDebugStatusLog},
+      {kTimeZoneAt, 0, Field::kTimeZone},          // empty
+      {kTimeZoneAt, 33, Field::kTimeZone},         // length over capacity
+      {kTimeZoneAt + 1, 'a', Field::kTimeZone},    // "america/New_York"
+      {kNtpServerAt, 0, Field::kNtpServer},        // empty
+      {kNtpServerAt, 64, Field::kNtpServer},       // length over capacity
+      {kNtpServerAt + 1, '-', Field::kNtpServer},  // "-ime.example.org"
+      {kNtpServerAt + 6, '.', Field::kNtpServer},  // "time..xample.org"
   };
   for (const Case& c : cases) {
     const Record record = withByte(original, c.at, c.value);
@@ -367,6 +416,38 @@ void testStatusIntervalLimits() {
   TEST_ASSERT_FALSE(isValidStatusInterval(0xFFFF));
 }
 
+void testTimeZoneLimits() {
+  using settings::isValidTimeZone;
+  TEST_ASSERT_TRUE(isValidTimeZone("Europe/Berlin"));
+  TEST_ASSERT_TRUE(isValidTimeZone("UTC"));
+  TEST_ASSERT_FALSE(isValidTimeZone(""));
+  TEST_ASSERT_FALSE(isValidTimeZone("europe/berlin"));
+  TEST_ASSERT_FALSE(isValidTimeZone("CET-1CEST,M3.5.0,M10.5.0/3"));
+  TEST_ASSERT_FALSE(isValidTimeZone("Mars/Olympus_Mons"));
+}
+
+void testNtpServerLimits() {
+  using settings::isValidNtpServer;
+  TEST_ASSERT_TRUE(isValidNtpServer("pool.ntp.org"));
+  TEST_ASSERT_TRUE(isValidNtpServer("de.pool.ntp.org"));
+  TEST_ASSERT_TRUE(isValidNtpServer("fritz-box"));
+  TEST_ASSERT_TRUE(isValidNtpServer("192.168.178.1"));
+  TEST_ASSERT_TRUE(isValidNtpServer("a"));
+  TEST_ASSERT_TRUE(isValidNtpServer(std::string(63, 'n')));
+  TEST_ASSERT_TRUE(
+      isValidNtpServer(std::string(30, 'a') + "." + std::string(32, 'b')));
+  TEST_ASSERT_FALSE(isValidNtpServer(""));
+  TEST_ASSERT_FALSE(isValidNtpServer(std::string(64, 'n')));
+  TEST_ASSERT_FALSE(isValidNtpServer(".pool.ntp.org"));
+  TEST_ASSERT_FALSE(isValidNtpServer("pool.ntp.org."));
+  TEST_ASSERT_FALSE(isValidNtpServer("pool..ntp.org"));
+  TEST_ASSERT_FALSE(isValidNtpServer("-pool.ntp.org"));
+  TEST_ASSERT_FALSE(isValidNtpServer("pool-.ntp.org"));
+  TEST_ASSERT_FALSE(isValidNtpServer("pool.ntp_1.org"));
+  TEST_ASSERT_FALSE(isValidNtpServer("pool ntp.org"));
+  TEST_ASSERT_FALSE(isValidNtpServer("ntp.org:123"));
+}
+
 void testSsidCapacity() {
   Model model = defaults();
   TEST_ASSERT_TRUE(model.wifi_ssid.assign(std::string(1, 'x')));
@@ -401,6 +482,7 @@ void testPresetsOverrideDefaults() {
       .wifi_password = "preset-pass",
       .ap_password = "ap-preset",
       .hostname = "preset-host",
+      .time_zone = "Asia/Tokyo",
   };
   FieldMask rejected = 0xFFFF;
   const Model model = initialValues(presets, &rejected);
@@ -409,6 +491,7 @@ void testPresetsOverrideDefaults() {
   TEST_ASSERT_TRUE(model.wifi_password.view() == "preset-pass");
   TEST_ASSERT_TRUE(model.ap_password.view() == "ap-preset");
   TEST_ASSERT_TRUE(model.hostname.view() == "preset-host");
+  TEST_ASSERT_TRUE(model.time_zone.view() == "Asia/Tokyo");
   TEST_ASSERT_EQUAL_UINT16(30, model.debug_status_interval_s);
 }
 
@@ -418,12 +501,15 @@ void testInvalidPresetsKeepDefaults() {
       .wifi_password = "short",
       .ap_password = "tiny",
       .hostname = "bad_host",
+      // A POSIX rule as in the earlier SECRET_TIMEZONE: not a label.
+      .time_zone = "CET-1CEST,M3.5.0,M10.5.0/3",
   };
   FieldMask rejected = 0;
   const Model model = initialValues(presets, &rejected);
   TEST_ASSERT_EQUAL_UINT32(
       fieldBit(Field::kWifiSsid) | fieldBit(Field::kWifiPassword) |
-          fieldBit(Field::kApPassword) | fieldBit(Field::kHostname),
+          fieldBit(Field::kApPassword) | fieldBit(Field::kHostname) |
+          fieldBit(Field::kTimeZone),
       rejected);
   TEST_ASSERT_TRUE(model == defaults());
   TEST_ASSERT_TRUE(settings::validate(model));
@@ -458,6 +544,8 @@ int main() {
   RUN_TEST(testApPasswordLimits);
   RUN_TEST(testHostnameLimits);
   RUN_TEST(testStatusIntervalLimits);
+  RUN_TEST(testTimeZoneLimits);
+  RUN_TEST(testNtpServerLimits);
   RUN_TEST(testSsidCapacity);
   RUN_TEST(testValidateNamesFirstInvalidField);
   RUN_TEST(testPresetsOverrideDefaults);

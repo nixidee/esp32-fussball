@@ -21,6 +21,11 @@
 // Renamed keys (see include/secrets.h.example).
 #error "secrets.h: rename SECRET_WIFI_*_1 to SECRET_WIFI_SSID/_PASSWORD"
 #endif
+#ifdef SECRET_TIMEZONE
+// Renamed key with a new value type (POSIX rule -> location label).
+#error \
+    "secrets.h: rename SECRET_TIMEZONE to SECRET_TIME_ZONE, value: a label such as \"Europe/Berlin\""
+#endif
 #ifndef SECRET_WIFI_SSID
 #define SECRET_WIFI_SSID ""
 #endif
@@ -32,6 +37,9 @@
 #endif
 #ifndef SECRET_HOSTNAME
 #define SECRET_HOSTNAME ""
+#endif
+#ifndef SECRET_TIME_ZONE
+#define SECRET_TIME_ZONE ""
 #endif
 
 namespace settings {
@@ -64,6 +72,7 @@ Presets presets() {
       .wifi_password = SECRET_WIFI_PASSWORD,
       .ap_password = SECRET_AP_PASSWORD,
       .hostname = SECRET_HOSTNAME,
+      .time_zone = SECRET_TIME_ZONE,
   };
 }
 
@@ -285,18 +294,21 @@ void logCurrent(const char* when) {
   const Source from = source;
   xSemaphoreGive(model_mutex);
 
-  ESP_LOGI(kTag,
-           "%s (%s): wifi ssid %s (%u B), wifi password %s, ap password %s, "
-           "hostname %.*s, external antenna %s, status log %s every %u s",
-           when, from == Source::kStored ? "stored" : "initial values",
-           setText(model.wifi_ssid.length),
-           static_cast<unsigned>(model.wifi_ssid.length),
-           setText(model.wifi_password.length),
-           setText(model.ap_password.length),
-           static_cast<int>(model.hostname.length), model.hostname.data.data(),
-           model.external_antenna ? "on" : "off",
-           model.debug_status_log ? "on" : "off",
-           static_cast<unsigned>(model.debug_status_interval_s));
+  ESP_LOGI(
+      kTag,
+      "%s (%s): wifi ssid %s (%u B), wifi password %s, ap password %s, "
+      "hostname %.*s, external antenna %s, status log %s every %u s, "
+      "time zone %.*s, ntp server %.*s",
+      when, from == Source::kStored ? "stored" : "initial values",
+      setText(model.wifi_ssid.length),
+      static_cast<unsigned>(model.wifi_ssid.length),
+      setText(model.wifi_password.length), setText(model.ap_password.length),
+      static_cast<int>(model.hostname.length), model.hostname.data.data(),
+      model.external_antenna ? "on" : "off",
+      model.debug_status_log ? "on" : "off",
+      static_cast<unsigned>(model.debug_status_interval_s),
+      static_cast<int>(model.time_zone.length), model.time_zone.data.data(),
+      static_cast<int>(model.ntp_server.length), model.ntp_server.data.data());
 }
 
 }  // namespace settings

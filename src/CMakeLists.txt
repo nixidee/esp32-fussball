@@ -19,5 +19,6 @@ idf_component_register(
     heap
     log
     settings
+    timekeeping
     ui
 )

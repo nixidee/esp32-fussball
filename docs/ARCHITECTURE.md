@@ -4,8 +4,11 @@
 > handling (`components/display`), boot test screen (`components/ui`), pure
 > SafeArea geometry (`components/geometry`) with native tests, the settings
 > model and record format (`components/settings`, native tests), the NVS
-> settings store (`components/core`) and `include/app_config.h` (defaults and
-> limits). Everything else is planned.
+> settings store, event bus, LittleFS file service and time service
+> (`components/core`), pure event admission, file rules and civil-time helpers,
+> and `include/app_config.h` (defaults and limits). The time service works
+> without networking; SNTP and its network acceptance follow with WiFi.
+> Other services remain planned.
 > Decisions in [DECISIONS.md](DECISIONS.md). Planned contracts below do not
 > describe implemented services or a completed resource acceptance.
 
@@ -94,7 +97,7 @@
   ownership and its event protocol remain to be designed; until then every
   LVGL call outside the LVGL task holds that mutex.
 - **Settings (implemented):** the current settings live in static RAM behind
-  a mutex; `settings::current()` returns a copy (≈ 240 B on the reader's
+  a mutex; `settings::current()` returns a copy (328 B on the C6 reader's
   stack) and `settings::generation()` increases with every save or reset.
   Each save or reset also posts the event `kSettingsChanged`, so a service
   re-reads only after a change. Saves and resets are serialised by a second
@@ -133,8 +136,9 @@ short (see below), or they delay rendering.
   entry; no post allocates heap. The receiver fetches the current state with
   a short copy from its owner (for example `settings::current()`).
 - **Catalog** (`event_admission.h`): state events `kSettingsChanged`,
-  `kNetworkState`, `kDataUpdated`, `kOtaState`; the action event `kUiAction`
-  with the action code as payload. Only `kSettingsChanged` is posted today.
+  `kNetworkState`, `kDataUpdated`, `kOtaState`, `kTimeChanged`; the action
+  event `kUiAction` with the action code as payload. Settings and time changes
+  are posted today.
 - **State events coalesce:** while one is queued, further posts of the same
   kind are absorbed (`post` returns `ESP_OK`). The pending mark is cleared
   just before the subscribers run, so a change made during a callback is
@@ -143,7 +147,7 @@ short (see below), or they delay rendering.
   A further post is dropped, counted and answered with `ESP_ERR_TIMEOUT`;
   the first drop of a burst logs one warning. Dropping a keypress under
   overload is preferred to a growing backlog of stale input.
-- **Queue length** = number of state kinds + UI slots (8). A state event
+- **Queue length** = number of state kinds + UI slots (9). A state event
   always finds room, even with all UI slots taken; a failed post can only
   come from a defect and is logged and counted.
 - **Subscribers:** fixed table of `kEventMaxSubscribers` (8) entries, no
@@ -154,10 +158,13 @@ short (see below), or they delay rendering.
 - **Boot order:** `events::init()` runs before the settings store. A failure
   is a memory budget error at boot and restarts the device in a controlled
   way.
-- **Memory:** static ≈ 120 B (`.bss`); heap at init 2,808 B measured on the
-  XIAO ESP32-C6 (task stack 2304 B, the queue of 8 × 16 B, loop and handler
-  records); the boot log line `after event bus init` shows it. The `events`
-  task used at most 364 B of its stack during the flood test (1,940 B free).
+- **Memory:** static ≈ 120 B (`.bss`). Before adding the time event, heap at
+  init was 2,808 B on the XIAO ESP32-C6 (2304 B task stack, queue of
+  8 × 16 B, loop and handler records). The current queue adds one 16 B
+  entry: normal init now uses 2,824 B, verified on the C6. The boot log line
+  `after event bus init` shows this usage.
+  The earlier flood test used at most 364 B of the `events` stack
+  (1,940 B free); subscriber stack usage is checked when services are added.
 - **Diagnostics:** the status log prints the minimum free stack of the
   `events` task and the counters for dropped UI actions and failed posts.
 - **Device test** (`cfg::kEventTest = EventTest::kFlood` in `app_config.h`,
@@ -207,7 +214,7 @@ building and the erased-flash check are the pure component `components/files`
   open file descriptors during a format without notice.
 - **Memory (XIAO ESP32-C6, 2026-10-09):** flash +42,048 B in total
   (`firmware.bin`; the LittleFS library 31,818 B, the rest the service and
-  the newlib/VFS file functions it pulls in); static RAM +240 B (DIRAM
+  the C-library/VFS file functions it pulls in); static RAM +240 B (DIRAM
   +466 B). Heap: mount 1,660 B (peak 2,004 B); an open file 936 B more
   (LittleFS file cache 512 B plus records); after the first file access
   264 B stay allocated (not attributed; constant over repeated boots and a
@@ -224,6 +231,41 @@ building and the erased-flash check are the pure component `components/files`
     `PASS: file after restart intact; format ESP_OK; file gone; ...`.
   A populated filesystem (an image written by an earlier build) mounted
   unchanged. All passed on the XIAO ESP32-C6 (2026-10-09).
+
+## Time service (implemented, offline device-tested)
+
+`components/core/time_service.*` owns wall-clock validity and the global
+time zone; `components/timekeeping` provides the pure label lookup and
+local daily-window predicate. It uses the firmware's Picolibc via standard
+C-library APIs and `esp_timer_get_time()` for monotonic milliseconds.
+
+- Initialised after the event bus and settings store; no dedicated task.
+- A static mutex serialises `TZ` changes, conversion and validity state.
+  Only the service may set `TZ`; callers use its conversion APIs.
+- Validity begins false on every boot. A successful `setTime()` records the
+  source, monotonic set time and set count, then posts `kTimeChanged`.
+  Zone changes post the same event; subscribers fetch the current state.
+- A settings event callback only raises an atomic flag. The app task copies
+  the settings (328 B), parses/applies a changed zone and updates diagnostics;
+  this work runs outside the `events` task.
+- Civil windows follow local time, including midnight and skipped/repeated
+  daylight-saving hours. Delays and deadlines use monotonic time.
+- The C6 offline test passed 112 zone-rule cases, 12 real-clock window cases,
+  backward/forward jumps and notification/validity checks. Details and test
+  selector: [NETWORK.md](NETWORK.md#time). SNTP wiring and network tests are
+  deferred to P3.1; night-mode rendering remains planned.
+
+The normal C6 build after this step is 512,800 B (`firmware.bin`), an
+increase of 12,256 B over the previous 500,544 B file-service build. The
+target size report is 512,170 B flash and 47,136 B RAM (+352 B RAM); DIRAM
+is 92,010 B (+348 B). This includes the settings extension, fifth event
+kind and time service; no new task is created. The time diagnostic and its
+fixtures are removed from normal builds by the `kNone` selector. Cycling all
+zones in that diagnostic retains 648 B of heap; that measurement is distinct
+from normal single-zone initialisation (52 B measured). Normal heap after
+time init is 418,456 B; after display init and at 30 s it is 389,380 B
+with a 368,640 B largest block. Main/events stack minimum free is
+2,464/1,940 B in this normal run.
 
 ## Display fault handling (implemented, device fault tests pending)
 - `esp_lvgl_port` stays unchanged (ADR-015). All handling lives in
@@ -367,15 +409,17 @@ components/            ESP-IDF components = modules (core, net, web, data,
                        idf_component.yml pins lvgl + esp_lvgl_port
   core/                settings store on NVS (load, save, reset, presets,
                        device tests), event bus (own esp_event loop and
-                       task), file service (LittleFS mount, device tests);
-                       idf_component.yml pins joltwallet/littlefs; later
-                       time, health
+                       task), file service (LittleFS mount, device tests),
+                       time service (validity, TZ, clocks, device tests);
+                       idf_component.yml pins joltwallet/littlefs; later health
   events/              pure C++ event catalog and queue admission
                        (coalescing, UI slots); no ESP-IDF includes, host-tested
   files/               pure C++ file name rule, path building, erased-flash
                        check; no ESP-IDF includes, host-tested
   geometry/            pure C++ SafeArea content bounds; no ESP-IDF/LVGL includes
   settings/            pure C++ settings model, limits, record codec (CRC32);
+                       no ESP-IDF includes, host-tested
+  timekeeping/         pure C++ time-zone lookup and civil daily windows;
                        no ESP-IDF includes, host-tested
   ui/                  views (boot test screen); render a model, no logic
 web/                   Web UI sources (embedded at build time)
