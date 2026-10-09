@@ -392,3 +392,32 @@ no formatter (drift not detected).
 configured again (setup access point if `secrets.h` has no WiFi credentials).
 Snapshot copy and settings record sizes, NVS use and formatter setup are
 measured or verified when the modules are implemented.
+
+**Refinement:** ADR-018 makes the settings record append-only; adding settings
+is not a format change.
+
+## ADR-018 — Append-only settings record · Accepted 2026-10-09
+
+Refines ADR-017 (settings persistence).
+
+**Context:** under ADR-017 every change of the settings format resets all
+settings, including WiFi credentials. During development new settings are
+added often, so the device would fall back to the setup access point after
+many updates.
+
+**Decision:** the settings record has a fixed, explicitly defined field layout
+and is extended only at its end. For the same format version, a shorter record
+is read and the missing fields take their defaults; a longer record is read
+and its unknown tail is ignored. The format version increases only when a
+field is reordered, removed or changes meaning or type; then ADR-017's reset to
+`secrets.h` values and defaults applies.
+
+**Alternatives considered:** a version increase for every new field (simplest
+rule, settings lost on every extension); a migration routine per version (keeps
+settings across all changes, more code and tests).
+
+**Consequences:** fields are never reordered or reused; obsolete fields stay as
+reserved space. Older firmware that saves after a rollback writes its shorter
+record, so newer fields return to defaults afterwards. Cost estimate
+(unmeasured): about 100–200 B flash for length handling, no additional RAM.
+Tests cover shorter and longer records of the same version.

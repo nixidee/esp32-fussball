@@ -19,8 +19,8 @@ firmware, no internet/CDN needed). Reachable in normal WiFi mode
 ## Image editor (P7.4)
 - Upload an image; resize, move, set transparency.
 - Round mask shows the visible area.
-- Option to overlay demo text (static demo data or live data) to judge
-  readability on data screens.
+- Option to overlay demo text (built-in static demo data; the Web UI shows no
+  live scores or tables) to judge readability on data screens.
 - The browser produces the final image at device resolution and in the
   device's storage format; the device does no heavy image processing.
 - Every pre-installed image can be reset to its default.

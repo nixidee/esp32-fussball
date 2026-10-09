@@ -65,9 +65,17 @@ At start-up the record is loaded and checked (version, length, check value,
 limits). A missing, damaged or unknown record means: `secrets.h` values and
 defaults. Saving writes the whole record at once.
 
+The record is **append-only**: a new setting is added at the end of a fixed,
+explicitly defined layout (not a compiler-dependent structure image). A shorter
+record of the same format version is accepted and the missing new fields get
+their defaults; a longer record (written by newer firmware, e.g. before a
+rollback) is accepted and the unknown tail is ignored. Only reordering,
+removing or changing the meaning or type of an existing field increases the
+format version.
+
 Firmware updates do **not** guarantee that settings are kept. Settings are
-carried over when the new firmware uses the same settings format version;
-after a format change, and after a rollback to older firmware, the device
+carried over when the new firmware uses the same settings format version
+(adding settings does not change it); after a format change, and after a rollback to older firmware, the device
 starts with `secrets.h` values and defaults and must be configured again
 (without WiFi credentials in `secrets.h` this means the setup access point).
 The version in the header allows a migration to be added later without
@@ -76,7 +84,8 @@ are kept by routine firmware updates (see [WEB_UI.md](WEB_UI.md)).
 
 Save and reset report failure rather than claiming success after a partial
 operation. Required tests include interruption of a save, a damaged or full
-NVS, an unknown format version, and reset.
+NVS, an unknown format version, shorter and longer records of the same
+version, and reset.
 
 ## Settings groups (planned)
 | Group | Examples |

@@ -44,6 +44,9 @@ so it can be host-tested.
   period — an open AP costs performance). The new IP is shown on the
   display (IP badge).
 - **One network** is stored (no list of networks).
+- **Credentials:** SSID 1–32 bytes, copied by length (a full 32-byte SSID is
+  valid). Password empty (open network), an 8–63-character passphrase or 64
+  hexadecimal characters (raw key). Other lengths are rejected, never truncated.
 - Board-specific: Waveshare uses `WIFI_PS_NONE` (known quirk from earlier projects on this board, see [HARDWARE.md](HARDWARE.md)).
 - Board-specific: XIAO C6 antenna selection (internal/external) is applied
   before WiFi starts; see [HARDWARE.md](HARDWARE.md) → “External antenna”.
