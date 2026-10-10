@@ -1,167 +1,149 @@
-# UI — screens, navigation, overlays
+# UI — screens, navigation and overlays
 
-> Status: football screens, navigation and overlays are **planned**. The
-> implemented C6 bring-up screen shows diagnostic rings, target/display text
-> and firmware version; its three digital inputs currently log level changes.
-> View sizes and the normal matchday window were confirmed 2026-10-08; final
-> layout values still need the 240 px layout test.
+All four football screens, navigation, overlays and night rendering are
+implemented in 0.1.0-dev. Current C6 source compiles. Font/layout polish,
+rendered boundary checks and physical input/display acceptance remain open.
+The earlier boot-screen and geometry acceptance covers that earlier workload.
 
-## Screens
-| Screen | Content | Notes |
-|---|---|---|
-| **LiveSingle** | Match minute (top), score very large (centre), team names below, recent highlights below that | Highlights depend on provider capabilities (goals only with OpenLigaDB) |
-| **LiveMulti** (conference) | Own match centred and larger, other matches above and below | Max matches N (default 5), sorted by most recent score change |
-| **Table** | Rows around the own club, window shifted at table edges | Window size default 5; side buttons scroll |
-| **Crest / Slideshow** | Club crest (default) or up to 5 user images | Images change within this screen |
+## Screens and automatic selection
 
-Each screen: separate background image (optional) and colours, configured in
-the Web UI (Screens tab).
-
-## Screen-mode resolver (pure logic, planned)
-Inputs: current time, matchday window state, own match state, relevant
-matches (leagues and cups), settings, number of inputs.
-There is **no timed cycling between screens** (decided 2026-10-08). The device
-always shows the default screen of the current situation; only the slideshow
-changes images within its own screen.
-
-| Situation | User choice (setting) | Default |
-|---|---|---|
-| No relevant matchday | Table, Slideshow (images) | **Table** |
-| Matchday of a relevant competition (league round, DFB-Pokal), own club not playing | LiveMulti (other matches), Table, Slideshow | **LiveMulti** |
-| Own club plays | LiveSingle (own match), LiveMulti (own match + others), Table, Slideshow (e.g. only the crest) | **LiveSingle** |
-
-Normal matchday window: from 30 min before the first relevant kickoff
-until 30 min after the last relevant match has finished; relevant = the own
-club's competitions; both times configurable. Exceptional fixtures use the
-bounded date horizon and state policy specified in [DATA_MODEL.md](DATA_MODEL.md):
-earlier-round catch-up matches, delays, postponements, abandoned matches,
-missing final states and season transitions need explicit handling before
-resolver implementation. A missing final state must not keep the window open
-indefinitely or be replaced with an invented final result. This exceptional
-policy remains to be finalized; it does not change the normal window.
-
-**No club / league configured** (no `secrets.h` values, nothing set in the
-Web UI): the device shows a default image instead of football data
-(decided 2026-10-08).
-
-### Manual override and return to default
-With inputs the user can switch away from the default screen. After a
-configurable time without input (default 60 s) the device returns to the
-default screen; the user can disable the return. Applies to every input
-configuration (1, 2 or 3 inputs; decided 2026-10-08). With 0 inputs the device
-always shows the default screen.
-
-## Input and navigation (planned)
-```
-Drivers (digital inputs now: buttons or touch modules; touch screen, encoder later)
-  → raw events (short press, long press, double press; gestures later)
-  → InputMapper (by device input config + settings)
-  → UiAction: NEXT_SCREEN, PREV_SCREEN, SCROLL_UP, SCROLL_DOWN, SELECT, BACK
-  → NavigationController (screen list from resolver, scroll state)
-```
-Planned raw events per input: short press, long press, double press
-(more combinations only if needed).
-
-| Input config | Mapping |
+| Screen | Content |
 |---|---|
-| 3 inputs | input 1: NEXT_SCREEN; input 2: SCROLL_UP; input 3: SCROLL_DOWN |
-| 2 inputs | input 1: NEXT_SCREEN; input 2 scrolls, see “Scrolling with one scroll input” |
-| 1 input (no such target planned) | short: NEXT_SCREEN (manual override, see above); long: defined when a 1-input target exists |
-| 0 inputs (e.g. Waveshare: BOOT button not reachable in the housing) | no navigation; default screen of the current situation |
-| touch screen (later) | swipe left/right: screens; swipe up/down: scroll; tap: SELECT |
+| Own match | principal score, supplied/estimated minute or kickoff, teams, separate shootout tally, bounded recent events |
+| Conference | tracked club centred with a larger row; up to five fixtures of the selected competition, sorted by recent score change |
+| Table | up to nine rows around the club, shifted at edges; all 32 accepted rows reachable by scrolling |
+| Crest / slideshow | uploaded crest or stock image; up to five uploaded slides rotate within this screen |
 
-Views never read inputs directly.
-The target's input order and wiring are documented in [HARDWARE.md](HARDWARE.md).
+Each screen has an enable switch, colour/text/accent, background switch and
+text-scale setting. No view fetches data or reads GPIO. The controller copies
+canonical data into a fixed view model, then the view renders it.
 
-### Scrolling with one scroll input (2-input config)
-Decided 2026-10-08.
-- When a screen is entered, the scroll direction is **down**.
-- **Holding** the scroll input (long press) scrolls in the current direction.
-  A short tap does not scroll.
-- **Every release flips the direction** — after a hold and after a short
-  tap. So: hold = down, release, hold = up, release, hold = down, …
-- To scroll up first, tap once briefly, release, then hold.
-- After a configurable time without input (default 20 s) the direction
-  resets to down, as if the screen were new.
-- No double press is needed for this.
-- While held, scrolling runs **continuously at a fixed rate** (decided
-  2026-10-08). The rate is a setting: sensible default in `app_config.h`
-  (chosen and tried on the device when input navigation is implemented),
-  changeable in the Web UI.
-
-## Round display rules
-- Circle centre `(cx, cy)`, radius `r` (120 for 240×240).
-- Content radius is `r − margin`; usable width at row `y` is
-  `w(y) = 2·√((r − margin)² − (y − cy)²)` where the radicand is nonnegative.
-- Safe margin scales with the shorter display side using the default in
-  `app_config.h` (currently `/60`: 4 px at 240 px). The rule is applied in one
-  place, `geometry::SafeArea::forDisplay(display profile, divisor)`; views take
-  the display size from that SafeArea, not from a second source.
-- Layout uses rows: each text row gets its width from the chord at its top
-  and bottom edge (the smaller one).
-- Implemented SafeArea uses integer outer pixel boundaries and checks all
-  corners over the complete content height. Odd and non-square profiles are
-  supported without floating-point arithmetic, heap allocation or a lookup
-  table. Rectangular profiles use the inset rectangle.
-- The boot view preserves its preferred text width when it fits. After LVGL
-  layout/wrapping it reduces width to fit the complete measured text band.
-  If no complete text layout fits, it keeps diagnostics and reports failure
-  instead of silently truncating text. Native geometry checks do not replace
-  visual device or rendered-pixel acceptance.
-- Little space: avoid long names; use short names/codes depending on space.
-- **Element classes:** readable/interactive content must fit the geometric
-  safe area. Backgrounds and clipping containers may cover the full rectangular
-  framebuffer; their rectangular bounding boxes are not content failures.
-  Decoration is checked against its intended visible mask. Diagnostics have
-  explicit test contracts: the accepted boot screen's red edge ring and green
-  inner ring remain, including the edge ring's intentional use of the boundary.
-- **Round-boundary acceptance:** test every screen on every round profile.
-  Geometric tests check content at its full vertical extent; rendered pixel-mask
-  tests check visibility and clipping, including decoration. Root/background/ring
-  boxes are not required to fit wholly inside the safe circle. Correct the test
-  contract instead of removing the accepted diagnostic rings to make it pass.
-
-## Scaling
-- Size classes by shorter side: S ≤ 260 px, M ≤ 400 px, L > 400 px
-  (proposal). Fonts and spacing come from tokens per size class.
-- No absolute pixel positions in views; relative to SafeArea.
-- Rectangular displays use the same tokens with shape = rect.
-- New resolutions need their own rendering, DMA-buffer and asset budgets;
-  scaling geometry alone does not establish resource feasibility.
-
-## Text and fonts (planned)
-Production font roles and glyph subsets must be selected before football-screen
-acceptance. The current built-in Montserrat 14 boot font does not establish
-support for German umlauts or all names. Test real club/player names, umlauts,
-long names, UTF-8 truncation at character boundaries and the chosen fallback
-glyphs. Presenters select the bounded text/short-name fallback; views render it.
-Measure actual font flash growth and text/LVGL memory peaks for each role and
-size class before accepting the font set.
-
-## Overlays (planned)
-Overlay manager: layered above screens, priorities, timeouts, placement
-inside the round area via chord width.
-
-### IP badge (first overlay)
-| Property | Value |
+| Situation | Default |
 |---|---|
-| Look | small rounded box, slight transparency, IP address (AP mode: SSID + IP) |
-| Position | top or bottom (setting); placed at the row where its width fits the chord |
-| STA mode default | shown for 60 s after boot/restart, then hidden; range 1–4000 s, or permanent |
-| AP mode default | permanent; user can disable “permanent in AP mode” and set 60–4000 s |
+| No configured competition | stock image |
+| Outside relevant windows | Table |
+| Relevant matchday | Conference |
+| Own fixture window | Own match |
 
-These planned defaults and limits belong in `include/app_config.h` when the
-settings schema is implemented, not in views.
+Defaults are configurable. Disabled or unavailable screens are skipped.
+With zero inputs the current situation's default remains selected; there is
+no automatic cycling between screens. Manual navigation returns after
+60 seconds without input by default; 0 disables the return.
 
-Later overlays (backlog): goal popup, error/status hints.
+Round windows span the first through last relevant fixture, including gaps.
+Own cup/catch-up windows are independent. A conference chooses the active
+own fixture's competition, otherwise the first active configured competition.
+Its bounded nearby fixtures and own fixture stay together. Exceptional/stale
+limits are documented in [DATA_MODEL.md](DATA_MODEL.md); a missing final
+status cannot leave a window open indefinitely.
 
-## Night mode (planned)
-Decided 2026-10-08. Active in a configurable night window (default
-23:00–07:00), only when the time service reports a valid clock. The clock
-starts invalid on every boot; SNTP will provide normal synchronisation with
-the WiFi manager. The local civil window calculation is implemented and
-offline device-tested, including midnight and both daylight-saving changes;
-night-mode rendering and its runtime settings remain planned. Dark UI on
-every target; targets with a backlight pin additionally dim or switch off
-the backlight. The XIAO C6 display module has no backlight pin, so there the
-backlight stays on.
+## Presenter and event display
+
+Missing values use `--` rather than fabricated zero. Supplied minutes are plain;
+estimates show `~`. Half-time, full-time and shootout have explicit labels.
+A separate shootout tally does not change ordinary goals. Kickoff is converted
+to selected local civil time; retries and freshness use monotonic time.
+
+The event pool retains up to 12 records per match and 32 across the snapshot.
+The Own match highlight band rotates through that bounded list every five
+seconds. It displays the event type and player; supplied substitution in/out
+names can appear together. A one-line rotating band keeps every retained
+highlight accessible without a larger object tree. Removed records are
+excluded; truncation and reconciliation behaviour is defined in the model.
+
+Conference uses recent principal-value changes, rather than repeated initial
+fetches or source-tag changes. The table defaults to five rows around the own
+club and clamps scrolling at either end. Long names use UTF-8-safe prefixes and
+LVGL ellipsis. Empty fixture/table, no configuration, no WiFi, no valid time,
+provider error, stale data and demo status have explicit text.
+
+## Inputs
+
+The target declares pin order and active level in its hardware profile.
+The current C6 has three TTP223B digital inputs (see [HARDWARE.md](HARDWARE.md)).
+
+```
+digital levels → debounce / duration → raw short, long, double, release, repeat
+              → input-count mapping → semantic action → navigation
+```
+
+Pure `InputPolicy` uses 40 ms debounce, 600 ms long press and 300 ms double
+press. Repetition defaults to 250 ms and is configurable. Screen input short
+press waits for the double-press window; scroll inputs do not need that delay.
+
+| Inputs | Behaviour |
+|---|---|
+| 3 | first: short next, double previous, long default; second up; third down, including hold/repeat |
+| 2 | first selects screens; second hold scrolls, every release flips direction; short tap only flips |
+| 1 | short next, double previous, long default |
+| 0 | current automatic default only |
+
+Two-input scroll direction starts down and resets after 20 seconds without
+scroll activity; 0 disables that reset. Every accepted row remains reachable.
+
+Actions cross the event bus and a four-entry static controller queue. Callbacks
+do not block or call LVGL. Overflow is counted/logged and drops excess input
+rather than accumulating stale actions. Touch screens and encoders remain
+future hardware input types.
+
+Holding all three current C6 inputs for eight seconds shows a countdown and
+resets settings/restarts. Release cancels it; it does not erase images.
+The gesture is unavailable during an OTA trial.
+
+## SafeArea and scaling
+
+All positions derive from the profile and `geometry::SafeArea`. At a round
+display row, width comes from the circle chord at both vertical band edges;
+the smaller span is used. The content margin scales with the shorter side
+(default /60, or four pixels at 240 pixels). Rectangular displays use the
+inset rectangle. No display resolution or pin appears in a view.
+
+The existing integer SafeArea checks the complete band, including odd and
+non-square profiles. Text bands use fixed relative placement and bounded
+font roles. Background/clipping containers can cover the framebuffer; they
+are not readable-content boundary failures. Decoration is checked against its
+visible mask. The accepted diagnostic boot rings keep their explicit edge
+exception and remain the initial bring-up screen.
+
+The product keeps one persistent LVGL object tree: one image and 16 text
+objects, reused across screens. Unchanged text is not rewritten. Image source
+revision forces reopening after a replacement. No full-image cache or new
+framebuffer is added.
+
+## Fonts and readability
+
+Montserrat weight 500 is included under SIL Open Font License 1.1.
+The pinned source and regeneration instructions are in `assets/fonts/`.
+Committed 4-bit glyph subsets provide Latin text at 10, 14 and 18 pixels and
+a number-only score role at 28 pixels. Text subsets contain 228 glyphs,
+including German umlauts/ß and common Latin player-name accents; the score
+subset has 14 characters. Unsupported glyphs use `?`.
+
+Default body role is 14 for the small class (shorter side ≤260), otherwise 18.
+Medium and large currently share the 18 role; geometry still scales separately.
+Text scale selects among compiled roles and clamps to the available band;
+it does not rasterize arbitrary font sizes on the device. Large-profile font
+polish and actual names/boundary acceptance are still required. Bitmap payloads
+are 5938/10960/17846/1969 bytes; descriptors/maps add flash beyond those numbers.
+
+## Overlays and night mode
+
+The IP badge is above screen content, top or bottom by setting. Setup shows
+SSID and 192.168.4.1 and is permanent by default. Station IP is shown for
+60 seconds after successful connection, including recovery. Duration 0 means
+permanent. Reset countdown has higher priority and replaces the IP badge.
+Each complete two-line band is fitted to the SafeArea chord.
+
+Night mode defaults to 23:00–07:00 local civil time and waits for valid time.
+The existing time service handles midnight and daylight-saving transitions.
+Night rendering darkens the background and image opacity. A profile with a
+backlight pin additionally uses PWM brightness; the current C6 has no such pin,
+so its physical backlight remains on. S3 dimming/network behaviour is untested.
+
+## Acceptance boundary
+
+C6 firmware build and fixed sizes are verified. Visual alignment, real names,
+text scaling, overlay overlap, all input counts, bottom-row reachability,
+JPEG redraw responsiveness, night brightness and the full rendered safe-area
+matrix remain polish/testing. No screenshot is represented as device evidence,
+and the boundary harness has not been implemented/run for these new screens.

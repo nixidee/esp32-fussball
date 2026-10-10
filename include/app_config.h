@@ -151,13 +151,16 @@ enum class TimeTest : uint8_t {
 inline constexpr TimeTest kTimeTest = TimeTest::kNone;
 
 // ---- Settings record -------------------------------------------------------
-// Format version of the stored record (append-only, ADR-018): increase only
-// when a field is reordered, removed or changes meaning or type. A new
-// setting is appended and keeps the version.
-inline constexpr uint16_t kSettingsFormatVersion = 1;
+// Format 2 crosses the legacy reader's 1 KB ceiling. Field offsets stay
+// append-only; valid format-1 core records load without rewriting NVS.
+// Future appends retain the version only within the existing reader ceiling.
+inline constexpr uint16_t kSettingsFormatVersion = 2;
+inline constexpr uint16_t kSettingsLegacyFormatVersion = 1;
+inline constexpr std::size_t kSettingsLegacyMaxRecordBytes = 1024;
+inline constexpr std::size_t kSettingsLegacyCoreRecordBytes = 335;
 // Longest stored record that is read (newer firmware may have appended
 // fields); a longer one counts as damaged.
-inline constexpr std::size_t kSettingsMaxRecordBytes = 1024;
+inline constexpr std::size_t kSettingsMaxRecordBytes = 2048;
 // NVS namespace and key, at most 15 characters each.
 inline constexpr char kSettingsNvsNamespace[] = "settings";
 inline constexpr char kSettingsNvsKey[] = "record";
@@ -228,5 +231,139 @@ enum class SettingsTest : uint8_t {
   kSaveLoop,        // saves two models alternately until power is cut
 };
 inline constexpr SettingsTest kSettingsTest = SettingsTest::kNone;
+
+// ---- Product services: fixed bounds and defaults ----------------------------
+enum class Provider : uint8_t {
+  kOpenLigaDb,
+  kApiFootball,
+  kEspn,
+  kFootballData
+};
+enum class Screen : uint8_t { kLiveSingle, kLiveMulti, kTable, kCrest };
+inline constexpr Provider kProviderDefault = Provider::kOpenLigaDb;
+inline constexpr Screen kIdleScreenDefault = Screen::kTable,
+                        kMatchdayScreenDefault = Screen::kLiveMulti,
+                        kOwnMatchScreenDefault = Screen::kLiveSingle;
+inline constexpr bool kRouteEnabledDefault = false,
+                      kFixtureMappingEnabledDefault = false,
+                      kFixtureMappingSwappedDefault = false,
+                      kScreenEnabledDefault = true, kBackgroundsDefault = true,
+                      kEspnOptInDefault = false, kDemoDefault = false,
+                      kNightEnabledDefault = true,
+                      kIpBadgeApPermanentDefault = true,
+                      kIpBadgeBottomDefault = false,
+                      kBrowserDebugDefault = false;
+inline constexpr uint8_t kLanguageDefault = 0, kRotationDefault = 0;
+inline constexpr std::size_t kRouteCount = 3;  // league plus two optional cups
+inline constexpr std::size_t kScreenCount = 4;
+inline constexpr std::size_t kIdBytes = 32;
+inline constexpr std::size_t kNameBytes = 64;
+inline constexpr std::size_t kMatches = 32;
+inline constexpr std::size_t kTableRows = 32;
+inline constexpr std::size_t kMatchEvents = 12;
+inline constexpr std::size_t kSnapshotEvents = 32;
+inline constexpr std::size_t kSelectionEntries = 64;
+inline constexpr std::size_t kJsonHeapBytes = 24576;
+inline constexpr std::size_t kProviderBodyBytes = 262144;
+inline constexpr std::size_t kSelectionBodyBytes = 1048576;
+inline constexpr uint8_t kJsonDepth = 16;
+inline constexpr uint32_t kOperationDeadlineMs = 30000;
+inline constexpr uint32_t kSocketTimeoutMs = 1000;
+inline constexpr std::size_t kProviderHostBytes = 64;
+inline constexpr uint32_t kProviderStackBytes = 10240;
+inline constexpr uint32_t kHttpStackBytes = 10240;
+inline constexpr uint32_t kDnsStackBytes = 2048;
+inline constexpr uint8_t kHttpSockets = 4;
+inline constexpr std::size_t kApiBodyBytes = 8192;
+inline constexpr uint32_t kWifiScanDeadlineMs = 15000;
+inline constexpr uint32_t kWifiIpDeadlineMs = 30000;
+inline constexpr uint32_t kWifiMissingScanMs = 20000;
+inline constexpr uint32_t kWifiFallbackMs = 300000;
+inline constexpr uint32_t kWifiAuthRetryMs[] = {10000, 30000, 60000};
+inline constexpr uint32_t kAntennaSettleMs = 100;
+inline constexpr uint16_t kPollIdleS = 21600;
+inline constexpr uint16_t kPollPrematchS = 300;
+inline constexpr uint16_t kPollLiveS = 60;
+inline constexpr uint16_t kPollPostmatchS = 300;
+inline constexpr uint16_t kProviderBudgetDefault = 100;
+inline constexpr uint32_t kProviderMinIntervalMs[] = {30000, 6000, 30000, 6000};
+inline constexpr uint16_t kFixtureHorizonDays = 7;
+inline constexpr uint16_t kConferenceHorizonHours = 36;
+inline constexpr uint16_t kUnknownMatchEndMinutes = 240;
+inline constexpr uint16_t kDataStaleS = 900;
+inline constexpr uint16_t kMatchWindowDefaultMinutes = 30;
+inline constexpr uint16_t kManualReturnDefaultS = 60;
+inline constexpr uint16_t kScrollResetDefaultS = 20;
+inline constexpr uint16_t kScrollRepeatDefaultMs = 250;
+inline constexpr uint16_t kInputDebounceMs = 40;
+inline constexpr uint16_t kInputLongMs = 600;
+inline constexpr uint16_t kInputDoubleMs = 300;
+inline constexpr uint16_t kFactoryResetHoldMs = 8000;
+inline constexpr uint8_t kVisibleMatchesDefault = 5;
+inline constexpr uint8_t kTableWindowDefault = 5;
+inline constexpr uint16_t kSlideshowDefaultS = 15;
+inline constexpr uint16_t kNightStartDefaultMinutes = 23 * 60;
+inline constexpr uint16_t kNightEndDefaultMinutes = 7 * 60;
+inline constexpr uint16_t kIpBadgeDefaultS = 60;
+inline constexpr uint32_t kThemeBackgroundDefault = 0x101820;
+inline constexpr uint32_t kThemeTextDefault = 0xffffff;
+inline constexpr uint32_t kThemeAccentDefault = 0x49cba0;
+inline constexpr uint8_t kBrightnessDefault = 100;
+inline constexpr uint8_t kNightBrightnessDefault = 10;
+inline constexpr uint32_t kBacklightPwmHz = 5000;
+inline constexpr uint32_t kDebugTaskStackBytes = 4096;
+inline constexpr uint32_t kOtaLocalHealthMs = 10000;
+inline constexpr uint32_t kSessionLifetimeMs = 900000;
+inline constexpr std::size_t kImageCount =
+    10;  // crest, five slides, four backgrounds
+inline constexpr std::size_t kImageMaxBytes = 32768;
+inline constexpr std::size_t kImageTotalBytes = 327680;
+inline constexpr std::size_t kImageReserveBytes = 40960;
+inline constexpr uint16_t kDebugStreamPeriodMs = 1000;
+inline constexpr uint16_t kAppPollMs = 20;
+inline constexpr uint16_t kUiRefreshMs = 500;
+inline constexpr uint16_t kHighlightRotateMs = 5000;
+
+// Validation and schema share these bounds. Browser controls read the schema.
+struct Range {
+  uint16_t min, max;
+  constexpr bool contains(uint16_t n) const { return n >= min && n <= max; }
+};
+inline constexpr Range kBrightnessRange{0, 100}, kRotationRange{0, 3};
+inline constexpr Range kVisibleMatchesRange{1, 5}, kTableWindowRange{1, 9};
+inline constexpr Range kReturnTimeRange{0, 4000}, kScrollRepeatRange{100, 2000};
+inline constexpr Range kSlideshowRange{3, 3600}, kDayMinutesRange{0, 1439};
+inline constexpr Range kMatchWindowRange{0, 180},
+    kProviderBudgetRange{1, 10000};
+inline constexpr Range kTextScaleRange{70, 130};
+inline constexpr uint8_t kTextScaleDefault = 100;
+inline constexpr uint16_t kProviderDefaultBudget = 10000;
+inline constexpr std::size_t kProviderHeaderBytes = 8192;
+inline constexpr std::size_t kProviderWireOverheadBytes = 32768;
+inline constexpr uint16_t kProviderWaitSliceMs = 100;
+inline constexpr uint16_t kProviderErrorRetryS = 60, kProviderRateRetryS = 300;
+inline constexpr uint16_t kCatchupRefreshS = 300;
+inline constexpr uint16_t kNetworkPublishMs = 1000;
+inline constexpr uint8_t kScanEntries = 16, kApClients = 2, kApChannel = 1;
+inline constexpr uint8_t kApIp[] = {192, 168, 4, 1};
+inline constexpr char kApNamePrefix[] = "Fussball";
+inline constexpr char kImageNames[][12] = {
+    "crest",  "slide1",      "slide2",     "slide3", "slide4",
+    "slide5", "live_single", "live_multi", "table",  "slideshow"};
+inline constexpr char kDefaultImageFiles[][32] = {
+    "default_crest.jpg",      "default_crest.jpg",
+    "default_crest.jpg",      "default_crest.jpg",
+    "default_crest.jpg",      "default_crest.jpg",
+    "default_background.jpg", "default_background.jpg",
+    "default_background.jpg", "default_crest.jpg"};
+inline constexpr std::size_t kFixtureMappings = 8;
+inline constexpr std::size_t kProviderCount = 4;
+inline constexpr char kBudgetNvsNamespace[] = "provider_budget",
+                      kBudgetNvsKey[] = "credits";
+inline constexpr uint32_t kBudgetRecordMagic = 0x46554231;
+inline constexpr uint8_t kBudgetReservationRequests = 8;
+inline constexpr char kSelectionCountryDefault[] = "Germany";
+inline constexpr uint32_t kNightBackground = 0x030609;
+inline constexpr uint16_t kSizeClassSmallMax = 260, kSizeClassMediumMax = 400;
 
 }  // namespace cfg

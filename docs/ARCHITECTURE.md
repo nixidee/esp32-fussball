@@ -1,16 +1,12 @@
 # Architecture
 
-> Status: **partly implemented**: hardware profiles, display port with fault
-> handling (`components/display`), boot test screen (`components/ui`), pure
-> SafeArea geometry (`components/geometry`) with native tests, the settings
-> model and record format (`components/settings`, native tests), the NVS
-> settings store, event bus, LittleFS file service, time and health services
-> (`components/core`), pure event admission, file rules, civil-time helpers
-> and the heap-meter coordinator, plus `include/app_config.h` (defaults and limits). The time service works
-> without networking; SNTP and its network acceptance follow with WiFi.
-> Extended health acceptance is pending. Other services remain planned.
-> Decisions in [DECISIONS.md](DECISIONS.md). Planned contracts below do not
-> describe implemented services or a completed resource acceptance.
+> Status: the C6 implementation candidate contains core, network, all four
+> providers, fixed snapshot storage, device screens/input, images, embedded Web,
+> live debug and OTA. The current C6 firmware/filesystem build passes; the new
+> runtime services have no device/browser/maximum-load acceptance yet.
+> Earlier core-service evidence below is historical and scoped accordingly.
+> Current ownership and resource costs are described here; decision history
+> remains in [DECISIONS.md](DECISIONS.md).
 
 ## Goals
 - Show football data for one club on small displays (first: 240×240 round).
@@ -70,66 +66,77 @@
 | Overlay manager | Show/hide overlays by priority and timeout, place them inside the round area | Know overlay content logic |
 
 ## Threading and data ownership
-### Rules (planned unless marked implemented)
-- **UI task**: owns LVGL exclusively. Other tasks never call LVGL; they post
-  events. Views update only in this task.
-- **Network/data task(s)**: HTTP requests and parsing.
-- **HTTP server task**: from `esp_http_server`; hands work to other tasks via
-  events/queues for anything slow.
-- Communication via the event bus (implemented, below) and bounded queues.
-  Each queue needs a capacity, post/allocation-failure handling and a
-  coalescing or rejection policy. Commands requiring acknowledgement are
-  direct calls with a result, never events; when overloaded they must return
-  an explicit error and must not disappear silently.
-- The repository has a single writer. Immutable snapshots need an explicit
-  reader lifetime before their storage can be reused: two buffers alone do
-  not protect a slow UI or Web reader. Readers take short protected copies of
-  the data they need (ADR-017); the display task is the reader of live data,
-  Web handlers only read small status/debug data. Copy sizes and lock times
-  are measured when the repository is implemented.
-- Model references and strings must outlive every reader and must never
-  borrow storage from a discarded parser document. Each request carries a
-  settings generation so an old club/provider request cannot publish into
-  the new selection after a configuration change.
-- **Current state (interim):** LVGL runs in the `esp_lvgl_port` task. The
-  boot test screen is created once from `app_main` while holding
-  `display::lock()` (recursive mutex of `esp_lvgl_port`). Exclusive UI-task
-  ownership and its event protocol remain to be designed; until then every
-  LVGL call outside the LVGL task holds that mutex.
-- **Settings (implemented):** the current settings live in static RAM behind
-  a mutex; `settings::current()` returns a copy (328 B on the C6 reader's
-  stack) and `settings::generation()` increases with every save or reset.
-  Each save or reset also posts the event `kSettingsChanged`, so a service
-  re-reads only after a change. Saves and resets are serialised by a second
-  mutex and run in the caller's task (NVS flash writes block that task for
-  milliseconds).
+### Current ownership
+
+- The application loop polls input, health, network policy, screen presentation
+  and OTA health every 20 ms. It builds a fixed view model and calls the view
+  under `display::lock()`. LVGL's own worker renders under the same recursive
+  lock. Views only render supplied data; provider and navigation logic stay
+  outside the view.
+- HTTP image publication/deletion is the one explicit cross-task LVGL
+  operation: it acquires that lock, drops a cache entry and swaps/removes a
+  file after the old reader has finished. Validation and upload run outside
+  the lock. No event callback calls LVGL.
+- This keeps the existing app/LVGL tasks rather than adding a separate UI
+  task. It replaces the earlier provisional exclusive-UI-task plan; one
+  persistent scene of 17 objects is reused across modes.
+- One provider worker owns all fetches, parsing, route composition and
+  publication. Two snapshots and one reusable route scratch are static
+  storage. Publication swaps the index under a mutex; `football::read()`
+  holds that mutex while the presenter builds its bounded owned view model.
+  Status readers copy only bounded status. A caller may not retain model
+  references after its reader callback returns. Reader lock duration is
+  still to be measured.
+- Parser strings are copied into canonical fixed records before the document
+  is released. Every request carries settings generation and network epoch;
+  obsolete results cannot publish. Missing and estimated values retain
+  explicit provenance.
+- The HTTP worker performs strict settings mutations and bounded streaming
+  uploads. Scan/selection/refresh requests signal their owning service.
+  The static debug worker permits one fixed in-flight message. Heavy admission
+  serializes provider TLS/JSON with image mutation and OTA.
+- Settings live behind a mutex. `settings::current()` returns a 1,736-byte
+  owned copy on the C6. NVS saves/reset use a second mutex and execute in the
+  caller task. They post coalesced `kSettingsChanged` notifications.
+- State notifications and semantic input actions use the existing bounded
+  event bus. UI's controller action queue also has four fixed entries and
+  reports overflow. Direct commands return errors rather than disappearing.
+- DNS name resolution uses one static token-protected job dispatched to the
+  existing lwIP thread. DNS callbacks never borrow caller stack/TLS storage.
 
 ### Task model (ESP32-C6, single core)
-Values checked in the ESP-IDF 6.1.0 sources and the generated sdkconfig of
-`xiao_esp32c6_gc9a01`. A higher number means higher priority (maximum 24).
-Planned tasks get their values when they are introduced, after measurement.
 
-| Task | Priority | Stack | Created by | Status |
-|---|---|---|---|---|
-| `esp_timer` | 22 | 4096 B | ESP-IDF (high-resolution timer callbacks) | running |
-| `sys_evt` | 20 | 2816 B | ESP-IDF default event loop (queue 32) | created with WiFi |
-| `events` | 5 | 2304 B | event bus (`app_config.h`) | running |
-| `taskLVGL` | 4 | 7168 B | `esp_lvgl_port` defaults, internal RAM | running |
-| `main` | 1 | 4096 B | ESP-IDF, runs `app_main`, time and health polling | running |
-| `Tmr Svc` | 1 | 2048 B | FreeRTOS software timers | running |
-| `IDLE` | 0 | 1536 B | FreeRTOS | running |
-| network/data, HTTP server | – | – | planned | – |
+These are allocated/configured candidate sizes, checked against source and
+the generated C6 sdkconfig. The candidate has no measured stack high-water
+marks. Previously measured boot/core marks below do not apply to the new load.
 
-The table gives allocated stack bytes. With the current Picolibc build,
-`esp_task.h` adds `TASK_EXTRA_STACK_SIZE` (512 B) to the configured main,
-high-resolution timer and default event-loop stacks. Their configured sizes
-are 3584, 3584 and 2304 B respectively. `CONFIG_LWIP_TCPIP_CORE_LOCKING` is
-off, so the default event loop has no additional 2048 B core-lock allowance.
-These values correct the documentation; no stack configuration was increased.
+| Task | Priority | Allocated stack | Owner |
+|---|---|---|---|
+| `esp_timer` | 22 | 4,096 B | SDK timer callbacks |
+| `sys_evt` | 20 | 2,816 B | SDK WiFi/IP event loop |
+| `events` | 5 | 2,304 B | Application notifications |
+| HTTP server | 5 | 10,240 B | REST/upload worker |
+| `taskLVGL` | 4 | 7,168 B | Existing LVGL port |
+| `provider` | 3 | 10,240 B, static | Fetch/parser/composition |
+| `portal_dns` | 2 | 2,048 B, static | Captive DNS |
+| `web_debug` | 2 | 4,096 B, static | Controlled live stream |
+| `main` | 1 | 8,704 B | App/service loop |
+| mDNS | 1 | 4,096 B | Managed component |
+| `Tmr Svc` | 1 | 2,048 B | FreeRTOS timers |
+| `IDLE` | 0 | 1,536 B | FreeRTOS |
 
-The `events` task runs above the LVGL task so that a state change reaches
-its subscribers before the next render. Its callbacks must therefore be
-short (see below), or they delay rendering.
+SDK WiFi and TCP/IP workers also consume memory. TCP/IP is configured with
+3,072 B plus the Picolibc 512 B allowance. Picolibc adds that same 512 B to
+configured main/timer/default-event-loop values: 8,192/3,584/2,304 B.
+Static worker stacks are already included in the linker static total and must
+not be counted again as an additional heap charge. Dynamic stacks, SDK worker
+control objects and queues remain runtime charges.
+
+The earlier normal core image measured free stack main 2,480/4,096 B,
+LVGL 3,428/7,168 B, events 1,940/2,304 B, timer 3,816/4,096 B, idle
+1,300/1,536 B and timer-service 1,764/2,048 B. Only that historical load met
+the 25% free-stack target. The current 16-task health snapshot cap must also
+be exercised with all services running.
 
 ### Event bus (implemented, device-tested)
 `components/core/event_bus.*`; the pure catalog and admission logic is
@@ -144,8 +151,8 @@ short (see below), or they delay rendering.
   a short copy from its owner (for example `settings::current()`).
 - **Catalog** (`event_admission.h`): state events `kSettingsChanged`,
   `kNetworkState`, `kDataUpdated`, `kOtaState`, `kTimeChanged`; the action
-  event `kUiAction` with the action code as payload. Settings and time changes
-  are posted today.
+  event `kUiAction` with the action code as payload. Core, network, data,
+  OTA and input services now use this catalog.
 - **State events coalesce:** while one is queued, further posts of the same
   kind are absorbed (`post` returns `ESP_OK`). The pending mark is cleared
   just before the subscribers run, so a change made during a callback is
@@ -212,14 +219,12 @@ building and the erased-flash check are the pure component `components/files`
   `files::buildPath()`.
 - **Names:** flat, 1–31 characters of `a–z 0–9 _ - .`, not starting with a
   dot. No directories, no `..`, no upper case. Names starting with a dot are
-  reserved for the service's own temporary files (replacement protocol,
-  planned). Longest path: `/fs/` + 31 characters (36 B with terminator).
-- **Not yet implemented (needed before images use the service):** the
-  storage quota and the reserve for one temporary replacement file, and the
-  reader-aware publish/delete protocol (ADR-016, see
-  [WEB_UI.md](WEB_UI.md) "Image storage and updates"). Until then
-  `format()` must only be called when no file is open: the library releases
-  open file descriptors during a format without notice.
+  reserved for the service's own replacement temporary file. Longest path: `/fs/` + 31 characters (36 B with terminator).
+- **Image layer:** quota, replacement reserve and reader-aware publication
+  are implemented in `components/images`; see [WEB_UI.md](WEB_UI.md).
+  Formatting acquires the LVGL lock and invalidates image cache readers.
+  Trial firmware blocks persistent mutations. The lower-level format API
+  still requires that no caller owns an open file.
 - **Memory (XIAO ESP32-C6, 2026-10-09):** flash +42,048 B in total
   (`firmware.bin`; the LittleFS library 31,818 B, the rest the service and
   the C-library/VFS file functions it pulls in); static RAM +240 B (DIRAM
@@ -254,14 +259,14 @@ C-library APIs and `esp_timer_get_time()` for monotonic milliseconds.
   source, monotonic set time and set count, then posts `kTimeChanged`.
   Zone changes post the same event; subscribers fetch the current state.
 - A settings event callback only raises an atomic flag. The app task copies
-  the settings (328 B), parses/applies a changed zone and updates diagnostics;
+  the settings (1,736 B in this candidate), applies a changed zone and updates diagnostics;
   this work runs outside the `events` task.
 - Civil windows follow local time, including midnight and skipped/repeated
   daylight-saving hours. Delays and deadlines use monotonic time.
 - The C6 offline test passed 112 zone-rule cases, 12 real-clock window cases,
   backward/forward jumps and notification/validity checks. Details and test
-  selector: [NETWORK.md](NETWORK.md#time). SNTP wiring and network tests are
-  deferred to P3.1; night-mode rendering remains planned.
+  selector: [NETWORK.md](NETWORK.md#time). SNTP wiring and night-mode rendering
+  are implemented in this candidate; their network/UI acceptance is pending.
 
 Before the health/FreeRTOS trace extension, the time-foundation C6 build
 was 512,800 B (`firmware.bin`), an increase of 12,256 B over the previous
@@ -276,7 +281,7 @@ build, heap after time init was 418,456 B; after display init and at 30 s
 it was 389,380 B with a 368,640 B largest block. Main/events stack minimum
 free was 2,464/1,940 B in that run.
 
-## Health service (implemented; extended device acceptance pending)
+## Health service (implemented; C6 console acceptance passed)
 
 `components/core/health_service.*` runs in the existing app task; the pure
 `health_meter.*` coordinator also has native tests. Design: ADR-021.
@@ -346,13 +351,36 @@ objects allocated by libraries:
 | Software timer | 4 |
 | Stream or message buffer | 4 |
 
-These are structure costs, not a complete firmware resource acceptance. The
-whole build and permitted workloads still need peak heap, fragmentation,
-stack, scheduler-pause and console-latency checks. `cfg::kHealthTest` is
-`kNone` in normal builds; diagnostic workers and fault injection are test-only.
-The browser transport remains planned: selected application diagnostics,
-live only, bounded and nonblocking for producers. No console hook or network
-transport is installed now; see [WEB_UI.md](WEB_UI.md#live-debug-output).
+These are structure costs, not a complete product resource acceptance.
+Historical C6 console/device acceptance passed on 2026-10-10 for the earlier boot and
+core-service load: a complete 16-task snapshot, clean overflow at 17 tasks,
+worker cleanup, targeted monitor allocation failure/retry, overlapping meters,
+32 repeated intervals, console on/off/on and one app-loop watchdog restart.
+The one-shot restart resumed automatically, skipped another injection and
+cleared the abnormal-reset counter after 60 s of display-task progress.
+
+The 16-task scheduler pause was 1426–1428 us. A diagnostic report with seven
+tasks, a busy display lock and 50 ms simulated delay per console line took
+709735 us (14 lines), below the unchanged 5 s watchdog. In normal firmware,
+a serial client closed for 70 s and reopened without control-line changes
+preserved uptime and report counts; the maximum complete report was 53998 us.
+Disconnected output can be dropped or truncated by the SDK. On the tested
+macOS/pyserial setup, a USB reset occurred when pyserial reopened the port
+and wrote DTR/RTS; such an observer cannot prove uninterrupted operation.
+DTR/RTS are host serial control signals also used for reset; the accepted
+observer only opened, read and closed the port. The USB cable remained attached in that test.
+
+That earlier normal image was 516304 B, static RAM 48220 B and DIRAM 93090 B,
+unchanged by its console acceptance session. Steady free internal 8-bit heap was 388012 B,
+largest block 368640 B and the reported lifetime minimum 388012 B; the
+minimum still has the SDK region-sum meaning above. That earlier normal
+image was 3504 B larger and static RAM 1084 B higher than the earlier time-only
+build. Future workloads need their own peak heap, fragmentation, stack and
+latency acceptance. `cfg::kHealthTest` is `kNone` in normal builds; diagnostic
+workers, hooks and the one-shot marker are absent from the normal ELF.
+The candidate adds a separate controlled WebSocket status producer with no
+console hook or retained history; see [WEB_UI.md](WEB_UI.md#live-debug).
+Its inactive/active, slow-client and concurrent-load budgets remain unaccepted.
 
 ## Display fault handling (implemented, device fault tests pending)
 - `esp_lvgl_port` stays unchanged (ADR-015). All handling lives in
@@ -406,15 +434,17 @@ transport is installed now; see [WEB_UI.md](WEB_UI.md#live-debug-output).
   Avoidable general-heap allocation churn remains prohibited. Event payloads,
   filtered parser documents and screen transitions still need peak and
   allocation-failure budgets.
-- One screen alive at a time; LVGL objects of the previous screen are deleted.
+- One persistent scene is reused for all four modes, with one image and
+  sixteen labels; text is only replaced when its value changes.
 - LVGL draw buffers partial, double buffered, internal DMA-capable RAM:
   1/12 of the screen height each (240×240: 2 × 20 rows = 2 × 9600 B), size
   computed from the profile (`components/display/display_port.cpp`).
   LVGL heap `LV_MEM_SIZE` = 32 KB static (`.bss`), see `sdkconfig.defaults`.
-  This is the current boot-screen configuration, not a proven production
-  minimum or sufficient end-state budget.
-- JSON parsed directly from the HTTP stream with a field filter (ADR-009);
-  the full response is never buffered.
+  The candidate keeps these limits. Full-screen/background/font/object peaks
+  remain unmeasured; the old boot measurement does not prove sufficiency.
+- JSON streams through a bounded array walker. Relevant records are mapped
+  one at a time; skipped fields still count toward byte, depth and allocation
+  bounds. A full response is never buffered.
 - TLS: one connection at a time.
 
 ### Staged resource acceptance
@@ -423,9 +453,9 @@ filtered JSON, JPEG and HTTP server), complete data model and production views,
 images/Web/debug operations, then supported maximum load and long-run operation.
 Passing the first stage does not certify the complete application.
 
-Heavy operations (TLS fetch with parsing, JPEG decoding, upload handling) run
-one at a time by default; overlaps are allowed only where measured and bounded
-(ADR-017). Before each stage, define capacities, overflow behaviour and
+Heavy admission serializes TLS/parsing, image validation/mutation and OTA.
+Routine LVGL JPEG redraw can still overlap provider traffic inside its fixed
+pool. That overlap is implemented but has not been accepted for the full load. Before each stage, define capacities, overflow behaviour and
 explicit reserves. Account for linked code/data SRAM,
 LVGL pool (without counting it twice), DMA buffers, all task stacks, snapshot
 storage and reader copies/leases, strings/events, queues, parser and TLS peaks,
@@ -461,6 +491,42 @@ shape the image design:
   (temporary file, then rename), otherwise a replacement during a redraw fails.
 This is integration evidence only, not the supported-maximum envelope.
 
+### Current compiled resource ledger — 2026-10-10
+
+| Item | C6 candidate | Growth over the accepted core image |
+|---|---|---|
+| Firmware binary | 1,607,728 B | +1,091,424 B |
+| PlatformIO flash report | 1,606,974 B, 87.6% of 1,835,008 B | +1,091,310 B |
+| Static data/BSS | 196,736 B | +148,516 B |
+| Linked DIRAM, official IDF size report | 266,066 B | +172,976 B |
+| Football snapshots | 3 × 27,168 B = 81,504 B | Included above |
+| Settings model / encoded record | 1,736 / 1,720 B | Format 2; legacy core import without NVS rewrite |
+| UI view model | 1,416 B | Static owned view |
+| Parser live allocation cap | 24,576 B including custom headers | Libc metadata additional |
+| JPEG validation workspace | 4,096 B static | Included above |
+| Stock JPEG files / filesystem image | 7,862 / 458,752 B | Logical files / gross partition |
+
+DIRAM consists of 179,000 B BSS, 17,736 B data and 69,330 B RAM-resident code.
+The full IDF certificate bundle is retained. No partitions, public features
+or library versions were removed to fit the slot. Runtime initialization of
+large snapshot defaults, shared stock aliases/font roles and unused C6 SDK
+speed/protocol features reduced the first complete build's 94.3% occupancy
+to the current 87.6%.
+
+The image fits the OTA slot but misses the 85% reserve goal by about 47.2 KB
+using the PlatformIO report. No flash-reserve gate is accepted. The linked
+186,046 B remaining DIRAM is not measured free heap: dynamic stacks, network,
+TLS, parser, DMA and library charges must still be accounted for. Peak heap,
+largest block, 25% stack reserves, LVGL fragmentation, ten-socket concurrency,
+filesystem metadata and replacement space remain hardware acceptance work.
+
+
+The parser cap is per allocator, not a global total: the single HTTP handler
+can have its own 24 KB JSON document alongside the provider's 24 KB document.
+During request parsing its bounded 8 KB receive buffer is additional. Basic
+configuration/status requests are permitted during TLS; measure that overlap
+along with normal JPEG redraw before accepting heap reserves.
+
 ## Scalability rules
 - No absolute pixel values in views: positions/sizes from layout tokens
   derived from resolution, shape and size class.
@@ -476,46 +542,31 @@ This is integration evidence only, not the supported-maximum envelope.
   flash/filesystem budget; hardware independence does not imply equal costs.
 
 ## Source layout
+
 ```
-platformio.ini
-sdkconfig.defaults     ESP-IDF settings shared by all targets
-dependencies.lock.<chip>  resolved component versions per chip target (tracked)
-.clang-format          code style; requirements-tools.txt pins host tools
-partitions/            partition tables per flash size
-boards/ displays/ targets/   hardware profiles; targets/<target>.sdkconfig.defaults
-                       = board-dependent ESP-IDF settings (ADR-010)
-include/hw_profile.h   hardware profile types + compile-time pin checks
-include/hw_target.h    selects the target (build flag), runs the checks
-include/app_config.h   single software configuration (defaults, limits,
-                       settings record version); grows with each feature
-include/secrets.h      local secrets + personal presets (git-ignored)
-src/                   entry point, app wiring
-components/            ESP-IDF components = modules (core, net, web, data,
-                       providers/*, ui, input). Existing:
-  display/             SPI bus, panel IO, GC9A01 driver, esp_lvgl_port setup;
-                       idf_component.yml pins lvgl + esp_lvgl_port
-  core/                settings store on NVS (load, save, reset, presets,
-                       device tests), event bus (own esp_event loop and
-                       task), file service (LittleFS mount, device tests),
-                       time service (validity, TZ, clocks, device tests),
-                       health console/watchdog and pure heap-meter coordinator;
-                       idf_component.yml pins joltwallet/littlefs
-  events/              pure C++ event catalog and queue admission
-                       (coalescing, UI slots); no ESP-IDF includes, host-tested
-  files/               pure C++ file name rule, path building, erased-flash
-                       check; no ESP-IDF includes, host-tested
-  geometry/            pure C++ SafeArea content bounds; no ESP-IDF/LVGL includes
-  settings/            pure C++ settings model, limits, record codec (CRC32);
-                       no ESP-IDF includes, host-tested
-  timekeeping/         pure C++ time-zone lookup and civil daily windows;
-                       no ESP-IDF includes, host-tested
-  ui/                  views (boot test screen); render a model, no logic
-web/                   Web UI sources (embedded at build time)
-assets/src/            high-res default images (sources)
-data/                  generated LittleFS image content
-test/                  native host tests + fixtures
-scripts/               native build source selection, sdkconfig regeneration
-                       and verification, guarded build-local SDK heap patch,
-                       format check (implemented)
-tools/                 build scripts (web embed, asset conversion, boundary test)
+platformio.ini, CMakeLists.txt, VERSION, sdkconfig.defaults
+dependencies.lock.<chip>     exact component resolution per chip
+partitions/                  unchanged flash layouts
+boards/ displays/ targets/   hardware/profile facts and SDK target settings
+include/app_config.h         all software defaults and bounds
+include/secrets.h            local ignored secrets/presets
+src/                         boot wiring and the app/service loop
+components/
+  core/                      NVS store, event loop, files, time, health
+  display/                   panel/LVGL port, JPEG validator, rotation/PWM
+  events/ files/ geometry/    pure admission, paths/erased check, SafeArea
+  settings/ timekeeping/     pure typed record/codec and civil rules
+  network/                   WiFi policy, antenna, DNS, mDNS, SNTP, admission
+  football/                  canonical model, four mappers, client/store/budget
+  ui/                        pure input/navigation policy, presenter, views
+  ui/fonts/                  generated fixed glyph subsets
+  images/                    quotas, validation, cache lifetime and publication
+  web/                       strict settings/API, upload and live debug
+  system/                    firmware identity, trial health and rollback
+web/                         offline browser sources
+assets/src/ assets/fonts/     stock artwork and licensed font sources
+data/                        generated stock LittleFS content
+test/                        existing native suites; new acceptance is pending
+scripts/                     configuration guards, native selection, heap patch,
+                             formatting, asset/font/web builders, release guard
 ```

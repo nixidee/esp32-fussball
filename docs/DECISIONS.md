@@ -2,6 +2,9 @@
 
 Status values: **Proposed** (waiting for approval) · **Accepted** · **Superseded
 by ADR-xxx**. Accepted ADRs change only via a new ADR.
+Dated entries preserve their original decision context; ADR-022 records the
+current candidate and the explicit ownership/budget refinements. Current code
+and contracts are described in ARCHITECTURE and the relevant product documents.
 
 ---
 
@@ -549,8 +552,9 @@ the image storage format, the replacement protocol with the image upload.
 
 ## ADR-021 — Health diagnostics, heap ownership and browser scope · Accepted 2026-10-09
 
-Refines ADR-012, ADR-016 and ADR-019. This accepts the design; extended
-health device/resource acceptance remains pending.
+Refines ADR-012, ADR-016 and ADR-019. The design was accepted on 2026-10-09;
+C6 console/device acceptance for the current core-service load passed on
+2026-10-10. Complete product and browser resource acceptance remain later work.
 
 **Context:** runtime status needs bounded all-task snapshots and reliable heap
 minimum labels. ESP-IDF's local heap monitor is global: overlapping starts
@@ -596,9 +600,119 @@ task (another task stack and supervision context).
 **Consequences:** no new settings layout, partition or normal-runtime task.
 The C6 task tables occupy 960 B; trace also expands task, queue/semaphore,
 event-group, timer and stream/message-buffer control objects, as listed in
-[ARCHITECTURE.md](ARCHITECTURE.md#health-service-implemented-extended-device-acceptance-pending).
+[ARCHITECTURE.md](ARCHITECTURE.md#health-service-implemented-c6-console-acceptance-passed).
 Phase meters add caller-stack storage and the SDK's bounded interval
 allocation. SDK upgrades require review of the guarded correction. The fix
 covers this monitor allocation only, not general firmware OOM recovery.
-Extended device checks and the complete resource budget remain acceptance
-work; browser transport has its own later acceptance.
+Extended C6 console checks passed, including a 70 s closed serial client
+observed without changing reset control lines, and normal firmware was restored.
+This covers the current boot/core-service workload; the complete resource
+budget and browser transport have their own later acceptance.
+
+## ADR-022 — Complete bounded candidate under delegated decisions · Accepted 2026-10-10
+
+**Context:** the owner explicitly requested autonomous continuation until the
+scheduled implementation is complete except polish and testing. The owner is
+unavailable for questions. Existing features, C6-first scope and earlier
+storage/identity choices still apply; no commit, push, release or device upload
+was requested.
+
+**Decision:**
+- Complete network/data/UI/images/Web/OTA inside the existing component
+  boundaries. Use the existing app/LVGL tasks and their lock for presentation,
+  one provider worker and a static debug worker. Reuse one fixed scene rather
+  than creating/destroying four object trees.
+- Keep the existing dual-OTA/LittleFS/NVS layout. The initial format-1 append
+  choice is superseded by ADR-023's format-2 encoding and legacy import,
+  including three competition/fallback routes and eight explicit fixture pairs.
+  Model/record are 1,736/1,720 B on C6. Provider identity stays scoped;
+  names never establish a cross-source fixture match.
+- Keep three fixed 27,168 B snapshots, one 24 KB capped streaming parser and
+  a 30-second operation deadline with one-second socket waits. Async DNS uses
+  one fixed record in the existing lwIP thread; incremental TLS preserves
+  hostname verification/SNI. No task closes another task's TLS context.
+- Serialize provider TLS/JSON, image mutation and OTA. Normal LVGL JPEG redraw
+  is permitted during provider work inside its fixed pool, but its full-load
+  peak is not accepted by delegation.
+- Use exact-resolution baseline JPEG with complete decoder validation,
+  32 KB per file, 320 KB unique image quota and 40 KB replacement reserve.
+  Ten logical slots share two stock aliases by default. Publish/delete under
+  the LVGL lock after invalidating the old image cache reader.
+- Use the full IDF CA bundle, client TLS, IPv4 and ordinary WiFi authentication.
+  Disable unused C6 SDK IPv6/enterprise/IRAM speed options to reduce memory;
+  throughput/RF acceptance is pending. Retain all public planned C6 features.
+- Pin ArduinoJson 7.4.3 and mDNS 1.14.0 after primary registry checks on
+  2026-10-10. Keep the previously accepted platform/IDF/LVGL/port/LittleFS
+  pins. Pillow 12.3.0 is a host asset-generation tool, not device code.
+- Bound browser debug to one client, one 256-byte in-flight record, once per
+  second, with a static 4 KB producer stack and explicit drop/disconnect.
+  Mutations use optional password plus nonce/session and origin checks;
+  reads redact keys and credentials.
+- Version firmware identity independently from app version. Check a 92-byte
+  target/layout/settings descriptor before OTA writes, validate the final
+  image and confirm only after ten seconds of local health. Trial storage and
+  durable budget mutations are blocked; router/provider success is not needed.
+- Use `VERSION`, development suffixes and an opt-in release source guard.
+  A source/build guard never stands in for runtime or release acceptance.
+
+**Alternatives and costs:** parallel heavy work needs additional simultaneous
+TLS/parser/upload memory and sockets. Raw full-screen RGB565 costs 115,200 B
+per 240×240 image and cannot meet the five-image goal in this filesystem.
+A separate UI task adds stack and another handoff protocol. Automatic
+cross-provider name matching weakens identity. Larger partitions consume image
+space and change OTA compatibility. These alternatives are not adopted.
+
+**Measured consequence before ADR-023:** C6 binary 1,607,344 B, PlatformIO flash 1,606,596 B
+(87.6% of the app slot), static RAM 196,736 B and linked DIRAM 266,066 B.
+This is +1,091,040 B binary / +148,516 B static RAM over the accepted core image.
+Stock files occupy 7,862 logical bytes. The app fits but misses the 85% flash
+reserve target by about 46.8 KB. Heap, largest block, stacks, LVGL and filesystem
+metadata/replacement peaks remain unmeasured for the complete candidate.
+
+**Acceptance boundary:** implementation and C6/filesystem build only.
+Provider fixtures/real keys, browser/device, power loss/rollback, maximum load,
+new resolutions, S3 and long-run tests are pending. Visual/resource polish,
+screenshots and the already deferred enhancement backlog remain. No reserve,
+coverage or production acceptance is implied.
+
+## ADR-023 — Settings size ceiling, format 2 and legacy import · Accepted 2026-10-10
+
+**Context:** final source review proved that the accepted core firmware refuses
+stored records above 1024 bytes, while the complete candidate encodes 1720.
+Keeping version 1 would incorrectly promise old-reader compatibility. The
+owner's autonomous implementation instruction authorizes a documented correction.
+This supersedes ADR-022's initial format-1 choice and clarifies ADR-018's append
+rule at the reader-size boundary; neither earlier decision proved an unlimited
+forward-readable record.
+
+**Decision:** encode format 2 at the same payload offsets and total size.
+Accept valid format-1 records only within their old 1024-byte bound; import the
+known core through byte 334, ignoring unknown legacy tail after length/CRC
+validation. Missing core fields retain initial values; partial/invalid fields
+fail atomically. New groups retain initial defaults/presets. Loading does not
+rewrite storage. The next explicit save writes format 2, and trial writes
+remain blocked. No reverse or arbitrary future-format migration is added.
+
+The OTA identity declares settings format 2 and upload now explicitly compares
+that field with the supported current identity before writing. Future schema
+transitions need their own declared policy; the current browser gate accepts
+matching format 2 only. An automatic trial rollback sees the untouched legacy
+record. A manual USB downgrade after an accepted format-2 save uses old-firmware
+initial values. It does not recover the new configuration automatically.
+
+**Alternatives:** keep format 1 and disclose silent loss on old firmware
+(contradicts the compatibility claim); constrain/drop routes/mappings to fit
+1024 bytes (reduces features); invent compressed fields without a schema change
+(changes the existing encoding contract); reset every legacy record immediately
+(loses valid WiFi/time settings). A bounded read-only import preserves those
+settings without a second NVS record or extra write protocol.
+
+**Cost and boundary:** model/record stay 1736/1720 B, with no extra static RAM,
+heap, filesystem or NVS quota. A span/version/branch uses bounded local scalars.
+The C6 build adds 64 B flash and zero static/DIRAM growth. Import, explicit save,
+CRC/partial-tail cases and actual rollback/downgrade tests are pending.
+The format-2 correction artifact, before subsequent network fixes, was
+1,607,408 B binary, PlatformIO flash 1,606,660 B (87.6% of the
+1,835,008 B app slot), static RAM 196,736 B and DIRAM 266,066 B. The 85%
+flash reserve goal is missed by 46,904 B. No device/storage write or behavioural
+test was performed for this correction.

@@ -25,7 +25,7 @@ Hardware facts are kept separate and combined per target (compile-time
   resolution, SPI mode, colour order (`bgr_order` = MADCTL BGR bit) and
   colour inversion (`invert_colors` = INVON). The controller init sequence
   lives in the display component (`components/display/gc9a01_panel.cpp`).
-  Rotation is not modelled yet.
+  Runtime rotation is applied by the display port from saved settings.
 - `targets/<target>.h` — `hw::kTarget`: includes one board + one display and
   defines the wiring (which board pin drives which display signal, SPI clock,
   backlight) and the inputs (input 1, 2, 3 … in order).
@@ -103,16 +103,17 @@ XIAO S3 build of an earlier project (S3: SCLK 6, MOSI 5, DC 3, CS 4, RST 2).
 The display module has **no backlight (BL) pin**: the backlight is
 always on at full brightness and cannot be dimmed or switched off by the
 firmware on this target. Night mode here is software-only (dark UI), see
-[UI.md](UI.md) → “Night mode”.
+[UI.md](UI.md) → “Overlays and night mode”.
 SPI clock on the C6: 40 MHz works (LVGL boot screen verified on the device
 2026-10-08). Recorded runtime after display + LVGL init (device status log
 2026-10-08):
 internal heap free 399 488 B, largest block 376 832 B (no PSRAM). Touch inputs: active high, momentary — confirmed on the device.
 This is an idle boot-screen observation, not a new measurement or a WiFi/TLS,
 production-screen or long-run acceptance result.
-Backlight driver: a target with a BL pin gets a plain on/off GPIO (off
-during panel init, on after the panel is cleared to black); PWM dimming
-(LEDC) is not implemented yet. The C6 target has no BL pin → no-op.
+Backlight driver: a target with a BL pin uses LEDC PWM for saved day/night
+brightness. The pin is off during panel init and enabled after clearing black.
+The C6 target has no BL pin, so brightness is a no-op there. PWM is compiled
+code only; the paused S3 profile has not been built or accepted with this path.
 
 ### Inputs (verified on the device)
 The ESP32-C6 has **no built-in capacitive touch sensor** (unlike ESP32 /
@@ -141,11 +142,13 @@ switch selects between them:
 Firmware option “external antenna” (default off) — set in the project config,
 changeable in the Web UI (WiFi settings). Use only with an antenna connected.
 
-Status: **planned, not implemented yet**. The profile
-fields exist in `boards/xiao_esp32c6.h`; the firmware currently does not
-touch GPIO3/14. The driver is deferred during display development and must be
-implemented before the production WiFi manager. The earlier diagnostic WiFi
-budget may run without it, with the undriven antenna state recorded as unverified.
+Status: implemented in the C6 candidate, not RF-tested. Hardware facts remain
+in `boards/xiao_esp32c6.h`; `network_service.cpp` enables GPIO3 low, waits the
+configured 100 ms and applies GPIO14 before WiFi starts. A saved antenna change
+reconfigures the radio without rebooting. The sequence was checked against the
+[Seeed XIAO ESP32C6 documentation](https://wiki.seeedstudio.com/xiao_esp32c6_getting_started/)
+on 2026-10-10. That source check does not establish actual internal/external
+reception on this device. The earlier probe ran before this driver existed.
 
 ## Waveshare ESP32-S3-LCD-1.28 (non-touch)
 - ESP32-S3R2: 2 MB PSRAM, 16 MB flash; USB-C via CH343 USB-UART.
@@ -197,4 +200,4 @@ Build setup (`platformio.ini` + `targets/waveshare_esp32s3_lcd128.sdkconfig.defa
   (profile) → whole panel written black → DISPON → backlight on.
 - Usable width shrinks towards top/bottom: chord width
   `w(y) = 2·√(r² − (y − cy)²)`. At 20 px from the edge only ≈ 133 px remain.
-  See [UI.md](UI.md) → “Round display rules”.
+  See [UI.md](UI.md) → “SafeArea and scaling”.

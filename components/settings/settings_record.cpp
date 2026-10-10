@@ -49,6 +49,11 @@ class Writer {
     writeU16(at_, value);
     at_ += 2;
   }
+  void u8(uint8_t value) { *at_++ = value; }
+  void u32(uint32_t value) {
+    writeU32(at_, value);
+    at_ += 4;
+  }
 
  private:
   uint8_t* at_;
@@ -80,6 +85,14 @@ class Reader {
   void u16(uint16_t& value) {
     const uint8_t* at = take(2);
     if (at != nullptr) value = readU16(at);
+  }
+  void u8(uint8_t& value) {
+    const auto* at = take(1);
+    if (at != nullptr) value = *at;
+  }
+  void u32(uint32_t& value) {
+    const auto* at = take(4);
+    if (at != nullptr) value = readU32(at);
   }
 
  private:
@@ -143,6 +156,57 @@ void encode(const Model& model, std::span<uint8_t, kRecordBytes> out) noexcept {
   writer.u16(model.debug_status_interval_s);
   writer.text(model.time_zone);
   writer.text(model.ntp_server);
+  writer.text(model.admin_password);
+  writer.text(model.api_football_key);
+  writer.text(model.football_data_key);
+  for (const auto& route : model.routes) {
+    writer.flag(route.enabled);
+    writer.u8(static_cast<uint8_t>(route.provider));
+    writer.text(route.competition);
+    writer.text(route.season);
+    writer.text(route.team);
+  }
+  for (const auto& style : model.screens) {
+    writer.flag(style.enabled);
+    writer.flag(style.background);
+    writer.u32(style.colour);
+    writer.u32(style.text);
+    writer.u32(style.accent);
+    writer.u8(style.text_scale);
+  }
+  writer.flag(model.espn_opt_in);
+  writer.flag(model.demo);
+  writer.flag(model.backgrounds);
+  writer.flag(model.night_enabled);
+  writer.flag(model.ip_badge_ap_permanent);
+  writer.flag(model.ip_badge_bottom);
+  writer.flag(model.browser_debug);
+  for (uint8_t value :
+       {model.language, model.brightness, model.night_brightness,
+        model.rotation, model.visible_matches, model.table_window,
+        static_cast<uint8_t>(model.idle_screen),
+        static_cast<uint8_t>(model.matchday_screen),
+        static_cast<uint8_t>(model.own_match_screen)})
+    writer.u8(value);
+  for (uint16_t value :
+       {model.manual_return_s, model.scroll_reset_s, model.scroll_repeat_ms,
+        model.slideshow_s, model.night_start, model.night_end, model.ip_badge_s,
+        model.window_before, model.window_after, model.api_daily_budget})
+    writer.u16(value);
+  for (const auto& route : model.fallback_routes) {
+    writer.flag(route.enabled);
+    writer.u8(static_cast<uint8_t>(route.provider));
+    writer.text(route.competition);
+    writer.text(route.season);
+    writer.text(route.team);
+  }
+  for (const auto& mapping : model.fixture_mappings) {
+    writer.flag(mapping.enabled);
+    writer.u8(mapping.route);
+    writer.flag(mapping.swapped);
+    writer.text(mapping.primary);
+    writer.text(mapping.secondary);
+  }
   seal(out);
 }
 
@@ -162,11 +226,18 @@ DecodeResult decode(std::span<const uint8_t> record, Model& model,
     return DecodeResult::kLengthMismatch;
   if (readU32(record.data() + kCrcOffset) != recordCrc(record))
     return DecodeResult::kChecksumMismatch;
-  if (readU16(record.data() + kVersionOffset) != cfg::kSettingsFormatVersion)
+  const auto version = readU16(record.data() + kVersionOffset);
+  const bool legacy = version == cfg::kSettingsLegacyFormatVersion;
+  if (version != cfg::kSettingsFormatVersion && !legacy)
     return DecodeResult::kUnknownVersion;
+  if (legacy && record.size() > cfg::kSettingsLegacyMaxRecordBytes)
+    return DecodeResult::kTooLong;
 
   Model candidate = model;
-  Reader reader(record.subspan(kHeaderBytes));
+  const auto readable =
+      legacy ? std::min(record.size(), cfg::kSettingsLegacyCoreRecordBytes)
+             : record.size();
+  Reader reader(record.subspan(kHeaderBytes, readable - kHeaderBytes));
   reader.text(Field::kWifiSsid, candidate.wifi_ssid);
   reader.text(Field::kWifiPassword, candidate.wifi_password);
   reader.text(Field::kApPassword, candidate.ap_password);
@@ -176,7 +247,68 @@ DecodeResult decode(std::span<const uint8_t> record, Model& model,
   reader.u16(candidate.debug_status_interval_s);
   reader.text(Field::kTimeZone, candidate.time_zone);
   reader.text(Field::kNtpServer, candidate.ntp_server);
+  if (!legacy) {
+    reader.text(Field::kApplication, candidate.admin_password);
+    reader.text(Field::kApplication, candidate.api_football_key);
+    reader.text(Field::kApplication, candidate.football_data_key);
+    for (auto& route : candidate.routes) {
+      reader.flag(Field::kApplication, route.enabled);
+      auto value = static_cast<uint8_t>(route.provider);
+      reader.u8(value);
+      route.provider = static_cast<cfg::Provider>(value);
+      reader.text(Field::kApplication, route.competition);
+      reader.text(Field::kApplication, route.season);
+      reader.text(Field::kApplication, route.team);
+    }
+    for (auto& style : candidate.screens) {
+      reader.flag(Field::kApplication, style.enabled);
+      reader.flag(Field::kApplication, style.background);
+      reader.u32(style.colour);
+      reader.u32(style.text);
+      reader.u32(style.accent);
+      reader.u8(style.text_scale);
+    }
+    reader.flag(Field::kApplication, candidate.espn_opt_in);
+    reader.flag(Field::kApplication, candidate.demo);
+    reader.flag(Field::kApplication, candidate.backgrounds);
+    reader.flag(Field::kApplication, candidate.night_enabled);
+    reader.flag(Field::kApplication, candidate.ip_badge_ap_permanent);
+    reader.flag(Field::kApplication, candidate.ip_badge_bottom);
+    reader.flag(Field::kApplication, candidate.browser_debug);
+    for (auto* value : {&candidate.language, &candidate.brightness,
+                        &candidate.night_brightness, &candidate.rotation,
+                        &candidate.visible_matches, &candidate.table_window})
+      reader.u8(*value);
+    for (auto* screen : {&candidate.idle_screen, &candidate.matchday_screen,
+                         &candidate.own_match_screen}) {
+      auto value = static_cast<uint8_t>(*screen);
+      reader.u8(value);
+      *screen = static_cast<cfg::Screen>(value);
+    }
+    for (auto* value : {&candidate.manual_return_s, &candidate.scroll_reset_s,
+                        &candidate.scroll_repeat_ms, &candidate.slideshow_s,
+                        &candidate.night_start, &candidate.night_end,
+                        &candidate.ip_badge_s, &candidate.window_before,
+                        &candidate.window_after, &candidate.api_daily_budget})
+      reader.u16(*value);
 
+    for (auto& route : candidate.fallback_routes) {
+      reader.flag(Field::kApplication, route.enabled);
+      auto provider = static_cast<uint8_t>(route.provider);
+      reader.u8(provider);
+      route.provider = static_cast<cfg::Provider>(provider);
+      reader.text(Field::kApplication, route.competition);
+      reader.text(Field::kApplication, route.season);
+      reader.text(Field::kApplication, route.team);
+    }
+    for (auto& mapping : candidate.fixture_mappings) {
+      reader.flag(Field::kApplication, mapping.enabled);
+      reader.u8(mapping.route);
+      reader.flag(Field::kApplication, mapping.swapped);
+      reader.text(Field::kApplication, mapping.primary);
+      reader.text(Field::kApplication, mapping.secondary);
+    }
+  }
   DecodeResult result = reader.result();
   Field bad = reader.invalidField();
   if (result == DecodeResult::kOk && !validate(candidate, &bad))

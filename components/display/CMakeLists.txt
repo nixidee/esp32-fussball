@@ -4,15 +4,19 @@ idf_component_register(
   SRCS
     "display_port.cpp"
     "gc9a01_panel.cpp"
+    "jpeg_validation.cpp"
   # include/ of the project for hw_profile.h (used by the public header).
   INCLUDE_DIRS
     "include"
     "../../include"
+  PRIV_INCLUDE_DIRS "../.."
   PRIV_REQUIRES
     esp_driver_gpio
+    esp_driver_ledc
     esp_driver_spi
     esp_lcd
     esp_system
+    esp_timer
     freertos
     heap
     log

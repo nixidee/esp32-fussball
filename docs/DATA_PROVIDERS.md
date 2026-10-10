@@ -1,142 +1,173 @@
 # Data providers
 
-> Research state 2026-10-08. “Verified” = tested with real requests or read
-> from the provider's own data; “unverified” = from third-party sources, must
-> be re-checked before implementation. This is a research snapshot, not a
-> current availability or pricing guarantee. Provider modules are planned.
+Four adapters and per-competition routing are implemented in the 0.1.0-dev
+candidate. Public endpoint research was refreshed on 2026-10-10; the C6 build
+compiles. Firmware requests and keyed-provider coverage have not been accepted
+on the device. Provider plans, quotas and supported competitions can change.
 
-## Requirement
-German competitions down to Regionalliga (leagues and cups), live scores,
-tables. Free provider as default; paid providers optional with API key.
+## Sources and capabilities
 
-## Comparison
-| Provider | Cost / auth | German coverage | Live | Events | Table | Status |
-|---|---|---|---|---|---|---|
-| **OpenLigaDB** | free, no key | BL, 2. BL, 3. Liga, DFB-Pokal, Regionalliga Nord, Nordost, Bayern, UCL (season 2026). **No RL West / Südwest.** | yes (community-entered), cheap change check `getlastchangedate` | **goals only** (minute, scorer, penalty, own goal) | yes | verified |
-| **API-Football** (api-sports.io) | key; free 100 req/day, 10 req/min; paid from ~$19/month | claims broad coverage; Regionalliga **not confirmed** | yes, elapsed minute | goals, cards, subs, VAR | yes | unverified |
-| **ESPN** (unofficial site API) | free, no key, **no contract / may change anytime** | `ger.1`, `ger.2`, `ger.dfb_pokal` respond; 3. Liga / Regionalliga slugs unknown | yes, status + clock | details incl. cards (format to verify) | standings endpoint to verify | partly verified |
-| **football-data.org** | key; free 10 req/min | free tier: Bundesliga only (no 2./3. Liga, no DFB-Pokal) | yes | limited in free tier | yes | unverified |
+| Provider | Authentication | Adapter data | Limits / acceptance |
+|---|---|---|---|
+| OpenLigaDB | none | competitions, teams, round/season fixtures, table, goals | community data; phase/minute estimated when absent |
+| API-Football | x-apisports-key | competitions, teams, fixtures, standings, own-club goals/cards/substitutions/VAR | configured daily budget; actual competition/tier coverage needs a key |
+| ESPN site API | explicit opt-in, no key | competitions, teams, current-day scores, own schedules, table, supplied event details | unofficial interface, no stability contract |
+| football-data.org v4 | X-Auth-Token | competitions, teams, fixtures, standings, supplied score phases | actual account permissions/coverage need a key; no fabricated minute/events |
 
-No free source was found that delivers **injuries** as match events.
+Capability flags describe mapper potential rather than proof that any particular
+fixture includes a field. Injury is a canonical event type and an ESPN detail
+may carry it; no general injury-feed coverage is promised. Club crests are
+uploaded user assets; provider SVG/large PNG files are not decoded by firmware.
+The interface also reports each provider's configured minimum request interval.
+Its crest-import flag is false while automatic browser import remains deferred.
 
-## Decision (ADR-005, accepted 2026-10-08)
-1. **OpenLigaDB as default** — only free, keyless source verified down to
-   Regionalliga. Limits: no cards/subs, no match clock → minute estimated
-   and shown as `~67'`.
-2. **API-Football as optional keyed provider** — richer events; budget of
-   100 requests/day requires strict scheduling (e.g. live polling only for the
-   own match). Coverage of Regionalliga to verify with a key before implementation.
-3. **ESPN as optional opt-in** — clearly labelled unofficial.
-4. football-data.org — low value for this project with free tier; later.
+The 2026-10-08 coverage research found OpenLigaDB German leagues down to
+Regionalliga Nord, Nordost and Bayern, plus DFB-Pokal and UEFA data; it did not
+confirm current RL West/Südwest coverage. Use the live competition list rather
+than that historical snapshot as an availability guarantee. Optional paid/free
+plan prices and exact account quotas are deliberately not hard-coded here.
 
-## Competitions and clubs in scope (decided 2026-10-08)
-- German leagues down to Regionalliga and the DFB-Pokal as listed above.
-- UEFA competitions (incl. Champions League) wanted; shown optionally, like
-  the DFB-Pokal.
-- Clubs in use / tested: Rot-Weiss Essen, FC Bayern München, Hertha BSC,
-  Borussia Mönchengladbach, 1. FC Union Berlin, Hallescher FC. Their
-  current leagues and provider coverage are verified before use (P9).
-- Club selection: per provider from its team list; on a provider switch the
-  device suggests the club by name. A suggestion requires a confirmed selection;
-  name similarity is not an identity mapping. Cross-provider field composition
-  requires an explicit mapping design before implementation (see below).
+## OpenLigaDB
 
-## OpenLigaDB details (verified)
-- Base URL `https://api.openligadb.de`.
-- Endpoints used:
-  - `GET /getavailableleagues` — competitions and shortcuts.
-  - `GET /getmatchdata/{league}/{season}/{matchday}` — matches of a round
-    (≈ 7 KB for a Bundesliga round).
-  - `GET /getlastchangedate/{league}/{season}/{matchday}` — timestamp; poll
-    this and only fetch match data when it changed.
-  - `GET /getbltable/{league}/{season}` — table (order = position).
-- Team icons: Wikimedia URLs (SVG/large PNG) — not decoded on the device.
-- Fair use: third-party guidance of ≤ 1 request per league every 30–60 s
-  during live play (unverified, to confirm before implementation).
+Base: [OpenLigaDB API](https://api.openligadb.de/).
 
-## Polling strategy (planned, P4.6)
-| State | Interval (proposal) |
+| Path | Use |
 |---|---|
-| No relevant match today | table + fixtures a few times per day |
-| Pre-match window | every few minutes |
-| Live | change check every 30–60 s (OpenLigaDB); keyed providers per budget |
-| Post-match | a few checks until final result is confirmed |
+| /getavailableleagues | searchable/paged competition and provider-season selection |
+| /getavailableteams/{league}/{season} | club selection |
+| /getmatchdata/{league} | current provider season when configuration leaves it empty |
+| /getcurrentgroup/{league} | current round identity |
+| /getlastchangedate/{league}/{season}/{round} | cheap change check |
+| /getmatchdata/{league}/{season} | season stream, retaining current-round and horizon-relevant fixtures |
+| /getbltable/{league}/{season} | primary league table |
 
-Exact values go into `include/app_config.h` (P2.1) once the provider limits are confirmed.
+Unchanged round data reuses primary-provenance values. A full refresh still
+runs at least every five minutes to discover catch-up fixtures and table
+changes. The current season is re-resolved after six hours.
 
-Polling covers relevant fixtures by round and a bounded date horizon, including
-earlier-round catch-up matches. Season identity comes from the provider, not
-the device's calendar year. Missing final status, delayed kickoff, abandoned
-matches, season rollover and off-season must have bounded scheduler behaviour;
-elapsed time must not fabricate a confirmed final result. The normal 30-minute
-matchday offsets and exceptional-case requirements are defined in
-[DATA_MODEL.md](DATA_MODEL.md).
+Results use the provider's semantic
+[resultTypeKind contract](https://github.com/OpenLigaDB/OpenLigaDB-Samples/discussions/136).
+Unknown kinds stay unavailable. Public DFB 2024 responses confirmed that
+AfterPenalties contains the combined result; a known AfterExtraTime base is
+subtracted for the separate shootout tally. The research also found inconsistent
+older regulation fields, so fixture tests must preserve and exercise those
+source contradictions rather than silently relabel them.
 
-## Mapping and publication contract (planned)
-- Provider mappers implement the validity, ownership, score and event contracts
-  in [DATA_MODEL.md](DATA_MODEL.md). Capability flags
-  describe what a provider supports; they do not prove a field is present in
-  a particular response.
-- Define each provider's semantic regulation, extra-time and shootout result
-  kinds before implementing it; do not rely on assumed numeric result IDs.
-  Fixtures include unknown kinds, event corrections/removals and own goals.
-- Additional substitution/VAR details require a model/record-size decision
-  before adding that provider. All published references must be independent
-  of parser storage; the mapper must carry the request's settings generation
-  through to publication.
+## API-Football
 
-## Operation limits (planned, required before implementation)
-Streaming with a field filter avoids retaining an entire HTTP response, but
-does not limit bytes received or parser allocations by itself. Every endpoint
-needs bounds for total response bytes (including discarded fields), JSON depth,
-string lengths, entity counts and parser storage. Competition/team selection
-responses are budgeted independently of a match round or table; one measured
-round does not establish their maximum size.
+Base: [API-Sports football documentation](https://www.api-football.com/documentation-v3).
 
-Provider requests follow the device-wide coordinated operation policy
-(ADR-016) together with the Web server and other network services.
-Requests also need bounded redirects, retries, total elapsed time and concurrent
-sockets. The total deadline includes slow partial reads and retries. Network
-loss, cancellation and a settings change terminate or invalidate pending work.
-Oversized/malformed responses fail explicitly and leave the last valid snapshot
-intact; they must not publish a partially mapped replacement.
+Selection requests use leagues?country=... (default Germany; World for
+international competitions) and teams?league=...&season=.... Country is a
+bounded selection argument, not a second persistent configuration field.
+Enabled routes require an explicit season. Match requests use
+fixtures?league=...&season=...&from=...&to=..., then primary-league standings.
+Own retained fixtures additionally request fixtures/events?fixture=....
 
-The scheduler applies verified provider limits and `429`/backoff, distinguishing
-an upstream shared-IP quota from this device's conservative polling interval.
-Reserve resources for the local Web UI within the permitted concurrency budget.
-Exact endpoint limits, record capacities, polling values and reserved resources
-are decided before the affected client, mapper or scheduler is implemented;
-their only software source is `include/app_config.h`.
+Every attempt, including selections, consumes the local budget before TLS
+starts. A durable 24-byte NVS ledger reserves up to eight attempts at once.
+Restarting loses unused credits and cannot replenish the day. Moving the clock
+backward cannot reopen a spent day. Budget-storage failures refuse requests.
+Normal settings resets retain this ledger.
 
-## Combining providers (before optional provider routing)
-Per-competition routing is supported by the design, but mixing fields from two
-sources requires mappings for competitions, seasons, teams and fixtures, with
-defined mapping ownership and memory cost. Every combined field must retain
-source provenance and follow an explicit conflict-precedence rule. The chosen
-scheme is explicit, verified mappings only for competitions that are actually
-combined (ADR-016); until then each provider is used on its own. Decide the
-mapping representation, richer-event requirements and budget before optional
-provider routing is implemented.
+Live polling stretches conservatively according to observed requests per refresh
+and remaining credits. This cannot control other devices sharing a provider
+account/IP. No keyed API request or paid-tier coverage was tested in this session.
 
-## Resource and acceptance requirements
-Endpoint filters, bounded parse documents, model fields, mappings and selection
-lists must be measured while TLS is active, with
-all permitted concurrent operations and snapshot/working copies included.
+## ESPN
 
-Recorded fixtures and host checks cover missing/null/valid-zero fields,
-provider-specific score phases, reordered/corrected/removed events, unknown
-statuses, initial/reconnect baselines, selection-response overflow and UTF-8
-limits. Client/scheduler checks cover discarded-field byte limits, excessive
-nesting, slow partial reads, redirects, `429`/backoff, lost network and selection
-changes during a request. Identity tests include similar names, unmatched
-fixtures, conflicting sources and season transitions. Device acceptance verifies
-maximum configured data and the resulting resource budget.
+Selection: site.api.espn.com/apis/site/v2/leagues/dropdown and
+.../sports/soccer/{slug}/teams. Scores: the same site's scoreboard?dates=YYYYMMDD.
+Own fixtures: teams/{id}/schedule, both past results and fixture=true upcoming
+schedule, then bounded local horizon filtering. Table:
+site.web.api.espn.com/apis/v2/sports/soccer/{slug}/standings.
+A configured season is forwarded to supported route/team endpoints.
 
-## Adding a provider
-1. Implement the provider interface (fetch competitions, teams, round,
-   table, live updates) and map to [DATA_MODEL.md](DATA_MODEL.md).
-2. Declare capabilities and rate limits.
-3. Add recorded JSON fixtures and host tests (`test/fixtures/<provider>/`).
-4. Add key/settings fields (if any) to the settings schema and
-   `secrets.h.example`.
-5. Update this file and README.
+Public research verified nested standings entries, integral floating-point
+statistics, score strings on scoreboards, score objects on schedules and dates
+without seconds. Multi-day scoreboard ranges repeatedly returned HTTP 400,
+so the adapter uses a single UTC day plus the club schedules. Rich details
+use semantic event flags/text; unknown fields stay unavailable. A public 2022
+World Cup final response confirmed principal 3:3 and separate shootoutScore 4:2.
+No numeric status/result ID is treated as a semantic constant.
+
+Public research is not firmware/device acceptance. Unofficial endpoint changes,
+event direction/coverage, empty schedules and season transitions need recorded
+fixtures and operational tests before release.
+
+## football-data.org
+
+Base: [v4 documentation](https://docs.football-data.org/general/v4/).
+
+Selection uses competitions and competitions/{id}/teams. Routes use
+competitions/{id}/matches with a bounded date range and standings. The optional
+configured season is forwarded; an empty one selects the provider's current
+season. Competition selection reads the supplied current-season start year.
+
+The [overtime contract](https://docs.football-data.org/general/v4/overtime.html)
+distinguishes regularTime, additional extraTime and penalties. Principal goals
+use regulation plus extra-time goals; shootout-inclusive fullTime is not ordinary
+goals. The [competition filters](https://docs.football-data.org/general/v4/competition.html)
+define season selection. Key/account permission errors remain explicit.
+
+## Polling and request bounds
+
+| Situation | Delay after a completed refresh |
+|---|---|
+| Outside relevant windows | 6 hours, shortened to the next known window start |
+| Before kickoff / between same-round fixtures | 5 minutes |
+| Active fixture | 60 seconds |
+| Confirmed post-match window | 5 minutes |
+| Ordinary error | 60 seconds |
+| HTTP 429 / exhausted budget / timeout | 5 minutes |
+
+Individual requests additionally respect conservative minimum spacing:
+OpenLigaDB/ESPN 30 seconds; API-Football/football-data 6 seconds. A multi-request
+refresh therefore takes time beyond the configured delay. These are local
+policy values, not provider service-level guarantees.
+
+HTTPS verifies the full IDF CA bundle and requires a valid clock. No redirect
+is followed automatically. One heavy operation token serializes TLS/parsing
+with uploads, image validation/deletion and OTA. A routine LVGL JPEG redraw can
+still overlap TLS inside its fixed pool; that overlap needs device measurement.
+
+The client checks a 30-second monotonic request deadline across asynchronous
+DNS, incremental TLS connection/handshake, headers, framing and reads; socket
+wait slices are at most one second. One fixed token-protected DNS job runs in
+the existing lwIP thread. Numeric IPv4 connection retains the original hostname
+for certificate verification and SNI. No other task closes a live TLS handle.
+SDK scheduling and cryptographic step duration still require measurement;
+this is not a measured hard real-time bound. Generation/epoch checks prevent
+obsolete publication.
+
+Ordinary bodies are limited to 256 KiB; season/selection streams to 1 MiB.
+Headers are 8 KiB, additional wire/framing allowance 32 KiB, JSON nesting 16,
+and live parser allocations 24 KiB including the custom allocation headers
+(libc allocator overhead is additional). Elements are mapped and released one
+at a time. All discarded fields still count toward byte/depth validation.
+Malformed, excessive or incomplete responses keep the last complete snapshot
+and report failure; they do not publish a partial replacement.
+
+## Combining providers
+
+Each route may have one alternate provider. Up to eight explicit fixture
+pairs bind primary and secondary IDs to a configured competition/season/club.
+Enabling a pair certifies that identity and home/away order were verified.
+Names/search suggestions do not certify it.
+
+Confirmed primary fields win. A matched fallback fills missing/estimated
+status, minute, kickoff and scores, plus richer events. Primary goal events
+take precedence over alternate goal events. Swapped home/away order also
+swaps every supplied score pair. Fields retain the supplying provider.
+A primary-route failure can use the whole alternate route with its own IDs
+and a fallback notice; there is no automatic cross-source identity claim.
+
+## Verification still required
+
+Recorded fixtures must cover missing/null/real-zero values, all score phases,
+duplicate/corrected/removed events, own goals, substitutions, source conflicts,
+capacity overflow, UTF-8 and season rollover. Network checks cover trickled
+headers/body, framing, TLS/DNS failure, 429, cancellation, budgets across reset/
+clock changes and configuration while a request runs. Real keys and maximum
+configured data are required for coverage and resource acceptance. None of
+these suites was run for this candidate.

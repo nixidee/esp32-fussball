@@ -3,7 +3,7 @@
 //
 // Header (8 bytes): format version (u16), payload length (u16), CRC32 (u32)
 // over the first four header bytes and the payload.
-// Payload, format 1, in Field order (append only):
+// Payload core shared by formats 1/2, in Field order (append only):
 //   wifi_ssid      u8 length + 32 bytes     wifi_password  u8 length + 64 bytes
 //   ap_password    u8 length + 63 bytes     hostname       u8 length + 63 bytes
 //   external_antenna u8 (0/1)   debug_status_log u8 (0/1)
@@ -28,7 +28,10 @@ inline constexpr std::size_t kPayloadBytes =
     (1 + decltype(Model::ap_password)::kCapacity) +
     (1 + decltype(Model::hostname)::kCapacity) + 1 + 1 + 2 +
     (1 + decltype(Model::time_zone)::kCapacity) +
-    (1 + decltype(Model::ntp_server)::kCapacity);
+    (1 + decltype(Model::ntp_server)::kCapacity) + 65 + 97 + 65 +
+    cfg::kRouteCount * (2 + 33 + 17 + 33) + cfg::kScreenCount * 15 + 7 + 9 +
+    20 + cfg::kRouteCount * (2 + 33 + 17 + 33) +
+    cfg::kFixtureMappings * (3 + 33 + 33);
 inline constexpr std::size_t kRecordBytes = kHeaderBytes + kPayloadBytes;
 static_assert(kRecordBytes <= cfg::kSettingsMaxRecordBytes);
 
@@ -59,9 +62,10 @@ void seal(std::span<uint8_t> record,
           uint16_t version = cfg::kSettingsFormatVersion) noexcept;
 
 // On entry 'model' holds the initial values. Fields missing from a shorter
-// record keep them; trailing fields of a longer record are ignored. On any
-// result other than kOk 'model' is unchanged; for kInvalidValue *invalid (if
-// given) names the field.
+// record keep them; trailing fields of a longer record are ignored. Format 1
+// loads only its legacy core within the old size bound, without rewriting it.
+// On any result other than kOk 'model' is unchanged; for kInvalidValue *invalid
+// (if given) names the field.
 DecodeResult decode(std::span<const uint8_t> record, Model& model,
                     Field* invalid = nullptr) noexcept;
 

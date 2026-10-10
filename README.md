@@ -4,27 +4,20 @@ Football information for **one club** on small (round) ESP32 displays: live
 scores, conference view of all running matches, league table and club crest.
 Configured through a built-in web interface.
 
-> **Project status: early scaffold (phase P2, core services).** The XIAO ESP32-C6 target
-> shows an LVGL boot test screen and logs touch input changes; the Waveshare
-> target was last accepted for boot logging before display integration and is
-> paused until the C6 is done. Pure SafeArea geometry has native host tests;
-> display failure handling is implemented and was verified on the device. A
-> temporary diagnostic build (since removed, kept in the Git history) showed that
-> WiFi, HTTPS to OpenLigaDB, JSON parsing, a JPEG background and a small HTTP
-> server fit the ESP32-C6 with reserves; this is integration evidence, not a
-> certification of the finished application. The build regenerates and
-> verifies its ESP-IDF configuration. Settings are stored in NVS (one checked
-> record, `secrets.h` presets), an event bus notifies services of changes,
-> and a file service mounts LittleFS without ever formatting existing
-> content; those services were host- and device-tested on the C6. The time
-> service now applies the selected zone, tracks wall-clock validity, emits
-> change notifications and provides monotonic time and civil night windows.
-> Its host tests and offline C6 device test passed; SNTP and its network
-> device test follow with the WiFi manager. Console health diagnostics, bounded
-> task snapshots, heap phase meters and app-loop supervision are implemented;
-> extended C6 acceptance is still pending. WiFi comes next.
-> Planned features are described
-> in [docs/](docs/); a successful boot screen does not certify the complete C6 app.
+> **Project status: implementation candidate, 0.1.0-dev.** WiFi/setup AP,
+> all four data adapters, bounded routing, four device screens, navigation,
+> images, the German/English Web UI, live debug and OTA/rollback are implemented.
+> The active C6 firmware and stock filesystem image build successfully.
+> Device acceptance is pending; provider fixture, browser, maximum-load and
+> long-run tests remain. Earlier boot/core tests
+> do not establish acceptance of these new services.
+>
+> Current C6 size: 1,607,728 B firmware binary, 1,606,974 B PlatformIO flash
+> (87.6% of one OTA slot), 196,736 B static RAM and 266,066 B linked DIRAM.
+> It fits the slot but exceeds the agreed 85% flash-reserve target by about
+> 47.2 KB. Peak heap, largest block, stack and LVGL reserves remain unmeasured
+> for the complete candidate. Visual/resource polish and acceptance are next;
+> this is not a release. S3 development remains paused.
 
 ---
 
@@ -35,9 +28,9 @@ environments below.
 
 | Environment (`<env>`) | Hardware | Status |
 |---|---|---|
-| `xiao_esp32c6_gc9a01` | Seeed XIAO ESP32-C6 + 1.28" GC9A01 round display | boot test screen (LVGL) and touch input log confirmed on the device; the boot log is visible only if the chip is reset while the monitor is open (press RST; the USB serial port re-connects after the reset); default env |
+| `xiao_esp32c6_gc9a01` | Seeed XIAO ESP32-C6 + 1.28" GC9A01 round display | current implementation candidate compiled; earlier boot/display/input acceptance only; candidate not uploaded; default env |
 | `waveshare_esp32s3_lcd128` | Waveshare ESP32-S3-LCD-1.28 | paused; last build and boot log before the display code (P1.2); not built with the display code yet; if the first log lines are missing after upload, press RST |
-| `native` | Host computer, unit tests only | SafeArea geometry, settings, event admission, file name, timekeeping and heap-meter suites; C++20, verified on macOS with Apple clang 21.0.0 |
+| `native` | Host computer, unit tests only | existing SafeArea, settings, event, file, timekeeping and health suites; earlier macOS acceptance; new candidate suites not run |
 
 | Task | Command |
 |---|---|
@@ -66,8 +59,9 @@ so PlatformIO may display that version and download an unused registry copy;
 the suite checks that the compiled header is actually 2.7.0. Other host operating
 systems are not yet verified.
 
-Firmware updates over WiFi via the web interface (Update tab) are planned.
-Routine firmware OTA will preserve images in LittleFS. USB `uploadfs` is for
+Firmware updates through the Web UI Update tab are implemented. The first
+candidate install uses USB; later compatible OTA uploads preserve LittleFS.
+Actual upload, trial health and rollback acceptance remain pending. USB `uploadfs` is for
 initial setup/development: it replaces the filesystem image and may erase
 uploaded user images; no preservation workflow is provided.
 
@@ -86,7 +80,7 @@ Build configuration files:
   defaults file. After a failed check the next build regenerates the file.
 - `partitions/*.csv` — flash layout per flash size.
 - `components/*/idf_component.yml` — exact versions of external ESP-IDF
-  components (LVGL, esp_lvgl_port, LittleFS), resolved into one lockfile per chip target,
+  components (LVGL, esp_lvgl_port, LittleFS, ArduinoJson and mDNS), resolved into one lockfile per chip target,
   `dependencies.lock.<chip>` (e.g. `dependencies.lock.esp32c6`), set in the
   root `CMakeLists.txt`. Lockfiles are tracked. The component manager changes
   a lockfile only when a manifest changes; review and commit both together.
@@ -97,7 +91,7 @@ Build configuration files:
 - `scripts/heap_monitor_patch.py` / `.cmake` — apply the project's bounded
   heap-monitor allocation-failure correction to a build-local ESP-IDF source
   copy. The shared SDK stays unchanged; an unexpected SDK version or source
-  hash stops the build and requires review (see ADR-021).
+  hash stops the build and requires review.
 - `.clang-format`, `requirements-tools.txt`, `scripts/check_format.py` — code
   style and its check (see “Code formatting”).
 - `boards/`, `displays/`, `targets/<target>.h` — hardware profiles (pins,
@@ -135,7 +129,7 @@ argument to check a range, e.g. `scripts/check_format.py main`.
 
 ---
 
-## Quick start (planned)
+## Development setup
 1. Install [PlatformIO](https://platformio.org/install) (VS Code extension or CLI).
 2. Optional: copy `include/secrets.h.example` to `include/secrets.h` and fill
    in your WiFi, club and API keys (the template marks which keys are used
@@ -147,26 +141,46 @@ argument to check a range, e.g. `scripts/check_format.py main`.
 4. For initial setup/development, upload firmware and filesystem:
    `pio run -e <env> -t upload` and `pio run -e <env> -t uploadfs`.
    The filesystem step replaces its contents, including uploaded user images.
-   Routine updates will use firmware OTA without a filesystem upload.
+   Routine compatible updates use firmware OTA without a filesystem upload.
 5. Without WiFi credentials the device opens the setup network
-   `Fussball-XXXX`. Connect with your phone; the configuration page opens
-   (or browse to `http://192.168.4.1`).
+   `Fussball-` followed by six hexadecimal characters. Connect with your phone
+   and browse to `http://192.168.4.1`; automatic captive opening depends on
+   the phone and is not yet accepted.
 6. With WiFi the device shows its IP address for 60 s. Open it in a browser
    (or `http://fussball.local`).
 
-## Development milestones
+## Development candidate and resources
 
-The active target is the XIAO ESP32-C6. Host geometry tests, the bounded
-display fault-path repair and the board-pin guards are done. A temporary
-diagnostic build has measured WiFi/TLS, filtered JSON, JPEG rendering and a
-small HTTP server together on the C6: they fit the current partition layout
-with reserves, and loading OpenLigaDB data over HTTPS works. Further checks
-cover the complete data model, images/Web/debug and the supported maximum load
-before release. Concrete limits and resource reserves are decided before each
-dependent implementation.
+The C6 candidate uses the existing 4 MB dual-OTA layout, a fixed 32 KB LVGL
+pool and two 9,600 B DMA draw buffers. Three fixed football snapshots consume
+81,504 B; parser allocations are capped at 24 KB. Shared admission prevents
+simultaneous provider TLS/JSON, image mutation and OTA. Normal JPEG redraw
+can overlap provider traffic and still needs peak-memory measurement.
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) records ownership and the current
+linker budget.
 
-Waveshare verification resumes after the C6 work. The external-antenna driver
-is deferred until before the WiFi manager; current firmware does not control it.
+The stock filesystem contains two baseline JPEG aliases (7,862 logical bytes)
+for the crest/slideshow and screen backgrounds. Rebuild from the high-resolution
+sources when a target resolution changes:
+
+```bash
+python scripts/build_assets.py --target xiao_esp32c6_gc9a01
+pio run -e xiao_esp32c6_gc9a01 -t buildfs
+```
+
+The asset/font builders require Pillow 12.3.0; ordinary firmware builds use
+the committed generated fonts and need no Pillow. Font source/licence are in
+`assets/fonts/`; stock artwork provenance is in `assets/src/README.md`.
+The gzip Web UI is regenerated during CMake configuration.
+
+`VERSION` is the application version source; [CHANGELOG.md](CHANGELOG.md)
+describes the candidate. CMake option `FUSSBALL_RELEASE_BUILD=ON` additionally
+requires a plain semantic release version and all six diagnostic/fault selectors
+disabled. It does not certify runtime acceptance or publish anything.
+
+Waveshare verification resumes after C6 acceptance. Other resolutions, controllers
+and inputs still require their own buffer, font and hardware acceptance.
+The C6 antenna driver is implemented; RF switching has not been tested.
 
 ## What it shows
 | Screen | When |
@@ -187,14 +201,16 @@ Pinouts and wiring: [docs/HARDWARE.md](docs/HARDWARE.md).
 
 | Board | Display | Notes |
 |---|---|---|
-| Seeed XIAO ESP32-C6 | 1.28" GC9A01 240×240 round (external, no backlight pin) | display and touch confirmed on the device (P1.4); 3 touch modules; optional external antenna |
+| Seeed XIAO ESP32-C6 | 1.28" GC9A01 240×240 round (external, no backlight pin) | earlier display/touch acceptance; candidate untested; 3 touch modules; optional external antenna |
 | Waveshare ESP32-S3-LCD-1.28 | built-in 240×240 round | 16 MB flash, 2 MB PSRAM; no inputs (BOOT button not reachable in the housing) |
 | Seeed XIAO ESP32-S3 | 1.28" GC9A01 240×240 round (external) | later |
 
 ## Data sources
-Default: **OpenLigaDB** (free, no key; Bundesliga down to Regionalliga Nord,
-Nordost, Bayern; DFB-Pokal). Optional providers with API key are planned.
-Comparison and limits: [docs/DATA_PROVIDERS.md](docs/DATA_PROVIDERS.md).
+Four adapters are implemented: **OpenLigaDB** (default, no key), API-Football,
+ESPN (unofficial, opt-in) and football-data.org. Keyed providers require owner
+credentials and tier/coverage acceptance. Three competition routes and explicit
+verified fallback fixture pairs are bounded by the shared model capacity.
+Contracts and limits: [docs/DATA_PROVIDERS.md](docs/DATA_PROVIDERS.md).
 
 ## Documentation
 | File | Content |

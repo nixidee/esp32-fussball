@@ -16,7 +16,7 @@ namespace settings {
 // values apply (see save() for when saving is refused).
 void init();
 
-// Copy of the current settings (short lock; about 330 B on the caller's
+// Copy of the current settings (short lock; about 1.7 KB on the caller's
 // stack).
 Model current();
 

@@ -29,11 +29,18 @@ esp_err_t init(const hw::DisplayProfile& profile,
 // long work (the LVGL supervision restarts the device after the task
 // watchdog timeout). Returns false on timeout.
 bool lock(uint32_t timeout_ms);
+bool ready();
 void unlock();
 
 // Logs the LVGL memory pool usage (takes the lock itself with a short
 // timeout and skips the log if LVGL is busy). Does nothing if init() has not
 // succeeded.
 void logMemory();
+esp_err_t validateJpeg(const char* path, uint16_t width, uint16_t height,
+                       int64_t deadline_ms);
+// Caller holds the LVGL lock for reader-safe replacement/deletion.
+void dropImageCache(const char* source);
+void setBrightness(uint8_t percent);
+void setRotation(uint8_t quarter_turns);
 
 }  // namespace display

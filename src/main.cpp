@@ -1,8 +1,9 @@
 // Firmware entry point. Boot log: version, chip, memory baseline and the
-// selected hardware profile. Event bus, settings load, file service mount
-// and time zone, display bring-up with the boot test screen, an input level log
-// and the periodic status log.
+// selected hardware profile. Boot wires core services, display, network,
+// football data, Web UI and OTA; the existing loop polls semantic inputs,
+// presentation, time/health, network policy and local trial confirmation.
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdio>
@@ -18,22 +19,26 @@
 #include "esp_log.h"
 #include "event_bus.h"
 #include "file_service.h"
+#include "football_service.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "health_service.h"
 #include "hw_target.h"
+#include "network_service.h"
+#include "ota_service.h"
 #include "safe_area.h"
 #include "sdkconfig.h"
 #include "settings_store.h"
 #include "time_service.h"
+#include "ui_controller.h"
+#include "web_service.h"
 
 namespace {
 
 constexpr const char* kTag = "boot";
 
-// Bring-up diagnostic: input levels are polled and every change is logged.
-// Replaced by the input driver later.
-constexpr uint32_t kInputPollMs = 20;
+// Profile input levels feed semantic policy; changes also retain boot logging.
+constexpr uint32_t kInputPollMs = cfg::kAppPollMs;
 // Time for LVGL to render the boot screen before its memory use is logged.
 constexpr uint32_t kFirstRenderWaitMs = 200;
 
@@ -93,7 +98,8 @@ void logHardwareProfile() {
              hw::kBoard.antenna_enable_pin, hw::kBoard.antenna_select_pin);
   }
 
-  ESP_LOGI(kTag, "inputs: %u", static_cast<unsigned>(hw::kTarget.inputs.size()));
+  ESP_LOGI(kTag, "inputs: %u",
+           static_cast<unsigned>(hw::kTarget.inputs.size()));
   for (std::size_t i = 0; i < hw::kTarget.inputs.size(); ++i) {
     const hw::InputPin& in = hw::kTarget.inputs[i];
     ESP_LOGI(kTag, "  input %u: GPIO%d, active %s",
@@ -113,8 +119,8 @@ void showBootScreen() {
       .detail = detail,
       .version = esp_app_get_description()->version,
   };
-  const auto safe_area = geometry::SafeArea::forDisplay(
-      hw::kDisplay, cfg::kContentMarginDivisor);
+  const auto safe_area =
+      geometry::SafeArea::forDisplay(hw::kDisplay, cfg::kContentMarginDivisor);
   if (!display::lock(cfg::kBootScreenLockTimeoutMs)) {
     ESP_LOGE(kTag, "boot screen skipped: LVGL lock timeout");
     return;
@@ -122,8 +128,9 @@ void showBootScreen() {
   const bool rendered = ui::showBootScreen(model, safe_area);
   display::unlock();
   if (!rendered) {
-    ESP_LOGE(kTag, "boot screen failed: content did not fit or an LVGL object "
-                  "could not be created");
+    ESP_LOGE(kTag,
+             "boot screen failed: content did not fit or an LVGL object "
+             "could not be created");
     return;
   }
   ESP_LOGI(kTag,
@@ -160,6 +167,7 @@ void logInputChanges(InputStates& active) {
   const auto inputs = hw::kTarget.inputs;
   for (std::size_t i = 0; i < inputs.size(); ++i) {
     const bool now = inputActive(inputs[i]);
+    ui::input(i, now);
     if (now == active[i]) continue;
     active[i] = now;
     ESP_LOGI(kTag, "input %u (GPIO%d): %s", static_cast<unsigned>(i + 1),
@@ -167,15 +175,15 @@ void logInputChanges(InputStates& active) {
   }
 }
 
-// Set in the event bus task, consumed by the diagnostic loop.
+// Set in the event bus task, consumed by the application loop.
 std::atomic<bool> settings_changed{false};
 
 void onSettingsChanged(events::Event, uint32_t, void*) {
   settings_changed.store(true, std::memory_order_release);
 }
 
-// Never returns. Input polling is replaced by the input driver later;
-// health owns periodic diagnostics and app-loop supervision.
+// Never returns. The profile driver feeds pure input policy and semantic
+// actions; health owns diagnostics and app-loop supervision.
 void runDiagnosticLoop() {
   InputStates active{};
   initInputs(active);
@@ -184,17 +192,43 @@ void runDiagnosticLoop() {
   ESP_ERROR_CHECK(events::subscribe(events::Event::kSettingsChanged,
                                     onSettingsChanged, nullptr));
   timekeeping::applySettings();
-  health::init();
-  health::runDeviceTest();
-  ESP_ERROR_CHECK(health::startLoopWatchdog());
+  int64_t reset_started = 0;
+  bool reset_latched = false;
   while (true) {
     vTaskDelay(pdMS_TO_TICKS(kInputPollMs));
     logInputChanges(active);
+    if (hw::kTarget.inputs.size() >= 3) {
+      const bool all = active[0] && active[1] && active[2];
+      const auto now = timekeeping::monotonicMs();
+      if (!all) {
+        reset_started = 0;
+        reset_latched = false;
+        ui::resetProgress(0);
+      } else if (!ota::trial() && !reset_latched) {
+        if (!reset_started) reset_started = now;
+        const auto elapsed = now - reset_started;
+        ui::resetProgress(static_cast<uint16_t>(std::max<int64_t>(
+            1, (cfg::kFactoryResetHoldMs - elapsed + 999) / 1000)));
+        if (elapsed >= cfg::kFactoryResetHoldMs) {
+          reset_latched = true;
+          const auto result = settings::reset();
+          if (result == ESP_OK)
+            ota::reboot();
+          else
+            ESP_LOGE(kTag, "input settings reset: %s", esp_err_to_name(result));
+        }
+      }
+    }
     if (settings_changed.exchange(false, std::memory_order_acq_rel)) {
       timekeeping::applySettings();
       health::applySettings();
+      network::applySettings();
+      football::refresh();
     }
     health::poll();
+    network::poll();
+    ui::poll();
+    ota::poll(network::healthy() && web::healthy() && ui::healthy());
   }
 }
 
@@ -206,6 +240,7 @@ extern "C" void app_main() {
 
   // A failure here is a memory budget error at boot: controlled restart.
   ESP_ERROR_CHECK(events::init());
+  ota::init(true);
   logHeap("after event bus init");
   events::runDeviceTest();
 
@@ -231,6 +266,20 @@ extern "C" void app_main() {
              esp_err_to_name(err));
   }
   logHeap("after display init");
+
+  health::init();
+  health::runDeviceTest();
+  ESP_ERROR_CHECK(health::startLoopWatchdog());
+  const auto network_error = network::init();
+  if (network_error != ESP_OK)
+    ESP_LOGE(kTag, "network init: %s", esp_err_to_name(network_error));
+  ESP_ERROR_CHECK(football::init());
+  ESP_ERROR_CHECK(ui::init(hw::kDisplay, hw::kTarget.inputs.size()));
+  const auto web_error = web::init();
+  if (web_error != ESP_OK)
+    ESP_LOGE(kTag, "Web init: %s", esp_err_to_name(web_error));
+  ota::startupHealth(network_error == ESP_OK && web_error == ESP_OK &&
+                     err == ESP_OK && files::state() == files::State::kMounted);
 
   runDiagnosticLoop();
 }

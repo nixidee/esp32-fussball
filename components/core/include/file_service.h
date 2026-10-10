@@ -41,8 +41,8 @@ esp_err_t usage(Usage& out);
 
 // Explicit reset: deletes every file and mounts an empty filesystem, also
 // when the content was damaged. Must not be called while a file is open:
-// the library releases open descriptors without notice. A reader-aware
-// protocol (ADR-016) is planned before images use this service.
+// the library releases open descriptors without notice. Runtime callers use
+// images::format(), which owns the LVGL reader/cache barrier.
 esp_err_t format();
 
 // Logs state and use (one line).

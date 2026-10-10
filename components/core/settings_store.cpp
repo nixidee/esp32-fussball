@@ -41,6 +41,27 @@
 #ifndef SECRET_TIME_ZONE
 #define SECRET_TIME_ZONE ""
 #endif
+#ifndef SECRET_ADMIN_PASSWORD
+#define SECRET_ADMIN_PASSWORD ""
+#endif
+#ifndef SECRET_API_FOOTBALL_KEY
+#define SECRET_API_FOOTBALL_KEY ""
+#endif
+#ifndef SECRET_FOOTBALL_DATA_KEY
+#define SECRET_FOOTBALL_DATA_KEY ""
+#endif
+#ifndef SECRET_DEFAULT_PROVIDER
+#define SECRET_DEFAULT_PROVIDER ""
+#endif
+#ifndef SECRET_DEFAULT_COMPETITION
+#define SECRET_DEFAULT_COMPETITION ""
+#endif
+#ifndef SECRET_DEFAULT_TEAM_ID
+#define SECRET_DEFAULT_TEAM_ID ""
+#endif
+#ifndef SECRET_DEFAULT_SEASON
+#define SECRET_DEFAULT_SEASON ""
+#endif
 
 namespace settings {
 
@@ -73,6 +94,13 @@ Presets presets() {
       .ap_password = SECRET_AP_PASSWORD,
       .hostname = SECRET_HOSTNAME,
       .time_zone = SECRET_TIME_ZONE,
+      .admin_password = SECRET_ADMIN_PASSWORD,
+      .api_football_key = SECRET_API_FOOTBALL_KEY,
+      .football_data_key = SECRET_FOOTBALL_DATA_KEY,
+      .provider = SECRET_DEFAULT_PROVIDER,
+      .competition = SECRET_DEFAULT_COMPETITION,
+      .team = SECRET_DEFAULT_TEAM_ID,
+      .season = SECRET_DEFAULT_SEASON,
   };
 }
 

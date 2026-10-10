@@ -10,6 +10,7 @@
 
 #include "app_config.h"
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "driver/spi_master.h"
 #include "esp_attr.h"
 #include "esp_check.h"
@@ -24,6 +25,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "gc9a01_panel.h"
+#include "hw_target.h"
 #include "lvgl.h"
 #include "sdkconfig.h"
 
@@ -130,8 +132,9 @@ bool resetHistoryAllowsDisplay() {
            static_cast<int>(reason), reasonText(record.last_failure));
   record.last_failure = FailReason::kNone;
   if (record.abnormal_resets < cfg::kAbnormalResetLimit) return true;
-  ESP_LOGE(kTag, "display disabled after %u abnormal resets in a row; power "
-                 "cycle or restart to try again",
+  ESP_LOGE(kTag,
+           "display disabled after %u abnormal resets in a row; power "
+           "cycle or restart to try again",
            static_cast<unsigned>(record.abnormal_resets));
   return false;
 }
@@ -183,8 +186,8 @@ esp_err_t initPanel(const hw::DisplayProfile& profile,
   bus.data6_io_num = -1;
   bus.data7_io_num = -1;
   bus.max_transfer_sz = static_cast<int>(max_transfer_bytes);
-  ESP_RETURN_ON_ERROR(spi_bus_initialize(kSpiHost, &bus, SPI_DMA_CH_AUTO),
-                      kTag, "SPI bus init failed");
+  ESP_RETURN_ON_ERROR(spi_bus_initialize(kSpiHost, &bus, SPI_DMA_CH_AUTO), kTag,
+                      "SPI bus init failed");
 
   esp_lcd_panel_io_spi_config_t io = {};
   io.cs_gpio_num = static_cast<gpio_num_t>(wiring.cs);
@@ -195,25 +198,25 @@ esp_err_t initPanel(const hw::DisplayProfile& profile,
   io.lcd_cmd_bits = 8;
   io.lcd_param_bits = 8;
   ESP_RETURN_ON_ERROR(
-      esp_lcd_new_panel_io_spi(
-          static_cast<esp_lcd_spi_bus_handle_t>(kSpiHost), &io, &g_io),
+      esp_lcd_new_panel_io_spi(static_cast<esp_lcd_spi_bus_handle_t>(kSpiHost),
+                               &io, &g_io),
       kTag, "panel IO init failed");
 
   switch (profile.controller) {
     case hw::DisplayController::kGc9a01:
-      ESP_RETURN_ON_ERROR(
-          newGc9a01Panel(g_io,
-                         {.reset_gpio = wiring.reset,
-                          .bgr_order = profile.bgr_order},
-                         &g_panel),
-          kTag, "panel create failed");
+      ESP_RETURN_ON_ERROR(newGc9a01Panel(g_io,
+                                         {.reset_gpio = wiring.reset,
+                                          .bgr_order = profile.bgr_order},
+                                         &g_panel),
+                          kTag, "panel create failed");
       break;
   }
 
   ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(g_panel), kTag, "panel reset failed");
   ESP_RETURN_ON_ERROR(esp_lcd_panel_init(g_panel), kTag, "panel init failed");
-  ESP_RETURN_ON_ERROR(esp_lcd_panel_invert_color(g_panel, profile.invert_colors),
-                      kTag, "panel invert failed");
+  ESP_RETURN_ON_ERROR(
+      esp_lcd_panel_invert_color(g_panel, profile.invert_colors), kTag,
+      "panel invert failed");
   return clearToBlack(profile);
 }
 
@@ -244,9 +247,7 @@ bool portMemoryAvailable(std::size_t buffer_bytes) {
 // Runs in the LVGL task inside the flush callback (via draw_bitmap).
 void onDrawResult(DrawResult result, void* ctx) {
   switch (result) {
-    case DrawResult::kSubmitted:
-      g_draw_failures = 0;
-      return;
+    case DrawResult::kSubmitted: g_draw_failures = 0; return;
     case DrawResult::kFailedBufferUnknown:
       failRestart(FailReason::kDrawStateUnknown);
     case DrawResult::kFailedBufferFree:
@@ -310,12 +311,21 @@ void injectRuntimeFault() {
   }
 }
 
-esp_err_t initLvgl(const hw::DisplayProfile& profile,
-                   uint32_t buffer_pixels) {
+esp_err_t initLvgl(const hw::DisplayProfile& profile, uint32_t buffer_pixels) {
   // Defaults of esp_lvgl_port 2.9.0: task priority 4, stack 7168 B in
   // internal RAM, any core, 5 ms tick timer.
   const lvgl_port_cfg_t port = ESP_LVGL_PORT_INIT_CONFIG();
   ESP_RETURN_ON_ERROR(lvgl_port_init(&port), kTag, "LVGL port init failed");
+  if (!lvgl_port_lock(cfg::kBootScreenLockTimeoutMs)) return ESP_ERR_TIMEOUT;
+  lv_log_register_print_cb([](lv_log_level_t level, const char* message) {
+    if (level == LV_LOG_LEVEL_WARN && strstr(message, "jd_restart error: 6"))
+      return;
+    if (level == LV_LOG_LEVEL_ERROR)
+      ESP_LOGE(kTag, "LVGL %s", message);
+    else
+      ESP_LOGW(kTag, "LVGL %s", message);
+  });
+  lvgl_port_unlock();
 
   lvgl_port_display_cfg_t disp = {};
   disp.io_handle = g_io;
@@ -372,7 +382,44 @@ esp_err_t init(const hw::DisplayProfile& profile,
   return ESP_OK;
 }
 
-bool lock(uint32_t timeout_ms) { return lvgl_port_lock(timeout_ms); }
+bool lock(uint32_t timeout_ms) {
+  return g_display != nullptr && lvgl_port_lock(timeout_ms);
+}
+bool ready() { return g_display != nullptr; }
+
+void setRotation(uint8_t quarter_turns) {
+  if (g_display != nullptr && quarter_turns <= 3)
+    lv_display_set_rotation(g_display,
+                            static_cast<lv_display_rotation_t>(quarter_turns));
+}
+
+void setBrightness(uint8_t percent) {
+  if constexpr (hw::kTarget.wiring.backlight != hw::kNoPin) {
+    if (g_wiring == nullptr || g_display == nullptr) return;
+    static bool configured = false;
+    if (!configured) {
+      ledc_timer_config_t timer{};
+      timer.speed_mode = LEDC_LOW_SPEED_MODE;
+      timer.duty_resolution = LEDC_TIMER_8_BIT;
+      timer.timer_num = LEDC_TIMER_0;
+      timer.freq_hz = cfg::kBacklightPwmHz;
+      timer.clk_cfg = LEDC_AUTO_CLK;
+      ESP_ERROR_CHECK(ledc_timer_config(&timer));
+      ledc_channel_config_t channel{};
+      channel.gpio_num = g_wiring->backlight;
+      channel.speed_mode = LEDC_LOW_SPEED_MODE;
+      channel.channel = LEDC_CHANNEL_0;
+      channel.timer_sel = LEDC_TIMER_0;
+      channel.flags.output_invert = !g_wiring->backlight_active_high;
+      ESP_ERROR_CHECK(ledc_channel_config(&channel));
+      configured = true;
+    }
+    ESP_ERROR_CHECK(
+        ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0,
+                      std::min<unsigned>(percent, 100) * 255 / 100));
+    ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
+  }
+}
 
 void unlock() { lvgl_port_unlock(); }
 

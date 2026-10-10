@@ -1,0 +1,3 @@
+# Latest stable registry releases checked 2026-10-10.
+dependencies:
+  espressif/mdns: "1.14.0"
