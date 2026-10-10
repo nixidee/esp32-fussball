@@ -17,6 +17,17 @@ uint32_t source_revision = UINT32_MAX;
 void text(lv_obj_t* label, const char* value) {
   if (strcmp(lv_label_get_text(label), value)) lv_label_set_text(label, value);
 }
+// LVGL 9.6 style setters invalidate the object even when the value is
+// unchanged, and a full-screen invalidation redraws the JPEG behind every
+// stripe. Apply a style only when it differs from the current value.
+void textColour(lv_obj_t* object, lv_color_t value) {
+  if (!lv_color_eq(lv_obj_get_style_text_color(object, LV_PART_MAIN), value))
+    lv_obj_set_style_text_color(object, value, 0);
+}
+void bgColour(lv_obj_t* object, lv_color_t value) {
+  if (!lv_color_eq(lv_obj_get_style_bg_color(object, LV_PART_MAIN), value))
+    lv_obj_set_style_bg_color(object, value, 0);
+}
 lv_obj_t* label(lv_obj_t* parent) {
   auto* object = lv_label_create(parent);
   if (object == nullptr) return nullptr;
@@ -43,12 +54,13 @@ bool band(lv_obj_t* object, const geometry::SafeArea& area, int y, int height,
   if (score_role && strspn(value, " 0123456789:-") == strlen(value) &&
       height >= ui_font_score_28.line_height)
     font = &ui_font_score_28;
-  lv_obj_set_style_text_font(object, font, 0);
-  lv_obj_set_style_pad_top(
-      object,
-      std::max(0, (height - static_cast<int>(font->line_height * lines)) / 2),
-      0);
-  lv_obj_set_style_text_color(object, lv_color_hex(colour), 0);
+  if (lv_obj_get_style_text_font(object, LV_PART_MAIN) != font)
+    lv_obj_set_style_text_font(object, font, 0);
+  const int32_t pad =
+      std::max(0, (height - static_cast<int>(font->line_height * lines)) / 2);
+  if (lv_obj_get_style_pad_top(object, LV_PART_MAIN) != pad)
+    lv_obj_set_style_pad_top(object, pad, 0);
+  textColour(object, lv_color_hex(colour));
   text(object, value);
   return area.contains({span.x, y, span.width, height});
 }
@@ -77,20 +89,22 @@ bool render(const ViewModel& m, const geometry::SafeArea& area) {
     lv_obj_set_style_bg_opa(badge, LV_OPA_80, 0);
     lv_obj_set_style_radius(badge, area.shorterSide() / 40, 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
+    lv_obj_center(image);
   }
-  lv_obj_set_style_bg_color(
-      root, lv_color_hex(m.night ? cfg::kNightBackground : m.style.colour), 0);
+  bgColour(root,
+           lv_color_hex(m.night ? cfg::kNightBackground : m.style.colour));
   if (strcmp(current_source, m.image) || source_revision != m.image_revision) {
     source_revision = m.image_revision;
     snprintf(current_source, sizeof(current_source), "%s", m.image);
     if (m.image[0]) lv_image_set_src(image, current_source);
   }
-  lv_obj_set_style_image_opa(image, m.night ? LV_OPA_20 : LV_OPA_COVER, 0);
+  const lv_opa_t opacity = m.night ? LV_OPA_20 : LV_OPA_COVER;
+  if (lv_obj_get_style_image_opa(image, LV_PART_MAIN) != opacity)
+    lv_obj_set_style_image_opa(image, opacity, 0);
   if (m.image[0])
     lv_obj_set_hidden(image, false);
   else
     lv_obj_set_hidden(image, true);
-  lv_obj_center(image);
   const int s = area.shorterSide();
   const int body = (s <= cfg::kSizeClassSmallMax ? 14 : 18) *
                    m.style.text_scale / cfg::kTextScaleDefault;

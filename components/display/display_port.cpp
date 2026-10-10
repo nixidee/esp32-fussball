@@ -318,7 +318,11 @@ esp_err_t initLvgl(const hw::DisplayProfile& profile, uint32_t buffer_pixels) {
   ESP_RETURN_ON_ERROR(lvgl_port_init(&port), kTag, "LVGL port init failed");
   if (!lvgl_port_lock(cfg::kBootScreenLockTimeoutMs)) return ESP_ERR_TIMEOUT;
   lv_log_register_print_cb([](lv_log_level_t level, const char* message) {
-    if (level == LV_LOG_LEVEL_WARN && strstr(message, "jd_restart error: 6"))
+    // LVGL 9.6 TJPGD has no end-of-image check: every image draw ends with
+    // one of these benign format results after the last MCU. Uploads are
+    // fully decoded by the same decoder before they are published.
+    if (level == LV_LOG_LEVEL_WARN && (strstr(message, "jd_restart error: 6") ||
+                                       strstr(message, "jd_mcu_load error: 6")))
       return;
     if (level == LV_LOG_LEVEL_ERROR)
       ESP_LOGE(kTag, "LVGL %s", message);
@@ -388,9 +392,11 @@ bool lock(uint32_t timeout_ms) {
 bool ready() { return g_display != nullptr; }
 
 void setRotation(uint8_t quarter_turns) {
-  if (g_display != nullptr && quarter_turns <= 3)
-    lv_display_set_rotation(g_display,
-                            static_cast<lv_display_rotation_t>(quarter_turns));
+  // Setting the rotation invalidates the whole screen even when unchanged.
+  const auto rotation = static_cast<lv_display_rotation_t>(quarter_turns);
+  if (g_display != nullptr && quarter_turns <= 3 &&
+      lv_display_get_rotation(g_display) != rotation)
+    lv_display_set_rotation(g_display, rotation);
 }
 
 void setBrightness(uint8_t percent) {

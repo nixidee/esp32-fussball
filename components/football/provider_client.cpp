@@ -43,6 +43,11 @@ struct Transport {
         1,
         std::min<int64_t>(requested, deadline - timekeeping::monotonicMs())));
   }
+  // One bounded wait slice before idle_end, so validity is rechecked often.
+  int slice(int64_t idle_end) {
+    return timeout(static_cast<int>(std::min<int64_t>(
+        cfg::kSocketTimeoutMs, idle_end - timekeeping::monotonicMs())));
+  }
 };
 Transport& transport(esp_transport_handle_t t) {
   return *static_cast<Transport*>(esp_transport_get_context_data(t));
@@ -129,11 +134,18 @@ int connect(esp_transport_handle_t t, const char* host, int port, int) {
   }
   return -1;
 }
+// The async connect leaves the TLS socket non-blocking. A partly received TLS
+// record then reads as 0 (timeout) at once instead of after `timeout`, so
+// keep waiting until data arrives or the provider stayed silent that long.
 int readTransport(esp_transport_handle_t t, char* bytes, int length,
                   int timeout) {
   auto& c = transport(t);
-  if (!c.valid()) return -1;
-  int count = esp_transport_read(c.tls, bytes, length, c.timeout(timeout));
+  const int64_t idle_end = timekeeping::monotonicMs() + timeout;
+  int count;
+  do {
+    if (!c.valid()) return -1;
+    count = esp_transport_read(c.tls, bytes, length, c.slice(idle_end));
+  } while (count == 0 && timekeeping::monotonicMs() < idle_end);
   if (count <= 0) return count;
   c.wire_bytes += count;
   for (int i = 0; i < count && c.headers; ++i) {
@@ -148,12 +160,25 @@ int readTransport(esp_transport_handle_t t, char* bytes, int length,
   }
   return count;
 }
+// Same non-blocking socket: wait for send space in slices, then write. A full
+// TLS send path reports WANT_WRITE/WANT_READ instead of blocking.
 int writeTransport(esp_transport_handle_t t, const char* bytes, int length,
                    int timeout) {
   auto& c = transport(t);
-  return c.valid()
-             ? esp_transport_write(c.tls, bytes, length, c.timeout(timeout))
-             : -1;
+  const int64_t idle_end = timekeeping::monotonicMs() + timeout;
+  while (c.valid()) {
+    const int ready = esp_transport_poll_write(c.tls, c.slice(idle_end));
+    if (ready < 0) return -1;
+    if (ready > 0) {
+      const int count =
+          esp_transport_write(c.tls, bytes, length, c.slice(idle_end));
+      if (count != ESP_TLS_ERR_SSL_WANT_WRITE &&
+          count != ESP_TLS_ERR_SSL_WANT_READ)
+        return count;
+    }
+    if (timekeeping::monotonicMs() >= idle_end) return 0;
+  }
+  return -1;
 }
 int closeTransport(esp_transport_handle_t t) {
   return esp_transport_close(transport(t).tls);
@@ -205,6 +230,7 @@ class Stream {
     return !failed_ && esp_http_client_is_complete_data_received(client_);
   }
   bool failed() const { return failed_; }
+  std::size_t bytes() const { return bytes_; }
 
  private:
   int next() {
@@ -341,7 +367,7 @@ void* JsonAllocator::reallocate(void* pointer, std::size_t size) {
 esp_err_t fetchJson(const char* url, const char* array_key,
                     cfg::Provider provider, const settings::Model& model,
                     uint32_t generation, JsonConsumer consume, void* context,
-                    bool selection) {
+                    bool selection, FetchResult* result) {
   esp_http_client_config_t config{};
   const std::size_t limit =
       selection ? cfg::kSelectionBodyBytes : cfg::kProviderBodyBytes;
@@ -364,7 +390,7 @@ esp_err_t fetchJson(const char* url, const char* array_key,
   config.transport = bounded;
   config.url = url;
   config.crt_bundle_attach = esp_crt_bundle_attach;
-  config.timeout_ms = cfg::kSocketTimeoutMs;
+  config.timeout_ms = cfg::kProviderIdleTimeoutMs;
   config.disable_auto_redirect = true;
   config.buffer_size = 1024;
   config.buffer_size_tx = 512;
@@ -390,7 +416,11 @@ esp_err_t fetchJson(const char* url, const char* array_key,
   if (err == ESP_OK) {
     const auto length = esp_http_client_fetch_headers(client);
     const int code = esp_http_client_get_status_code(client);
-    if (length < 0 || (length > 0 && static_cast<uint64_t>(length) > limit))
+    if (result) result->status = code;
+    // A negative length is a header read that failed or timed out.
+    if (length < 0)
+      err = ESP_ERR_INVALID_RESPONSE;
+    else if (length > 0 && static_cast<uint64_t>(length) > limit)
       err = ESP_ERR_INVALID_SIZE;
     else if (code == 429)
       err = ESP_ERR_TIMEOUT;
@@ -416,6 +446,7 @@ esp_err_t fetchJson(const char* url, const char* array_key,
     if (!ok || stream.nonSpace() != -1 || !stream.complete() ||
         context_transport.failed)
       err = ESP_ERR_INVALID_RESPONSE;
+    if (result) result->bytes = stream.bytes();
   }
   esp_http_client_close(client);
   esp_http_client_cleanup(client);

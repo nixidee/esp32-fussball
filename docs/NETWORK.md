@@ -31,8 +31,9 @@ Passwords are empty, 8–63 bytes, or exactly 64 hexadecimal characters. Enterpr
 authentication is not implemented. Only credential, AP-password and antenna
 changes restart radio configuration; changing a screen or club does not.
 
-The C6 hardware profile selects GPIO3/GPIO14 before RF start and on antenna
-changes, including the vendor's 100 ms settling interval. See
+The C6 hardware profile configures GPIO3/GPIO14 once at network start and
+selects them before RF start and on antenna changes, including the vendor's
+100 ms settling interval. See
 [HARDWARE.md](HARDWARE.md). Actual internal/external antenna reception remains
 unverified. The Waveshare S3 profile is paused; no previously reported WiFi
 power-save workaround has been added without current device evidence.
@@ -105,15 +106,27 @@ including its bounded JPEG decoder, is still allowed during provider traffic;
 that overlap must be measured.
 
 A provider operation has a 30-second monotonic deadline, one-second socket
-wait slices, no automatic redirects, an 8 KB incoming-header cap and body/wire
-caps described in [DATA_PROVIDERS.md](DATA_PROVIDERS.md). DNS runs asynchronously
-in the existing lwIP thread with one fixed, token-protected hostname/result
-record. Late callbacks cannot reference a dead caller or overwrite a newer job.
-TLS uses incremental nonblocking connection/handshake calls; the original host
-is retained for certificate verification and SNI after numeric IPv4 resolution.
+wait slices, an 8-second limit for provider silence while sending a request or
+receiving its response, no automatic redirects, an 8 KB incoming-header cap and
+body/wire caps described in [DATA_PROVIDERS.md](DATA_PROVIDERS.md). DNS runs
+asynchronously in the existing lwIP thread with one fixed, token-protected
+hostname/result record. Late callbacks cannot reference a dead caller or
+overwrite a newer job. TLS uses incremental nonblocking connection/handshake
+calls; the socket stays nonblocking afterwards, so reads and writes wait in
+slices for a complete TLS record or send space. The original host is retained
+for certificate verification and SNI after numeric IPv4 resolution.
 Cancellation checks run between steps for time, settings generation and network
 epoch. SDK scheduling and cryptographic step duration still require measurement;
 the implementation does not claim a measured hard real-time bound.
+
+Every provider request writes one serial log line (tag `provider`): either
+`not sent: <URL> (<reason>)` when it stops before the connection (provider not
+enabled, settings changed, network lost or changed, operation busy, daily
+budget used or budget unavailable), or `<URL>: HTTP <status>, <bytes> B,
+<duration> ms[, <error>]` after the transfer. API keys travel in request
+headers and never appear in the URL. Every rejected Web request writes one
+line (tag `web`) with method, path without query, HTTP status and reason, which
+explains the HTTP server's generic `uri handler execution failed` warning.
 
 The HTTP server has a 10 KB task stack, four client slots and bounded request
 headers. Each session's receive override starts a 30-second request deadline

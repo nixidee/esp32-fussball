@@ -48,6 +48,9 @@ esp_err_t startLoopWatchdog();
 // Once per completed app-loop iteration, including while console is disabled.
 void poll();
 void logStatus();
+// Short name of the reason for the last reset (esp_reset_reason), e.g.
+// "panic" or "task watchdog". Static string; safe from any task.
+const char* resetReason();
 
 // Fixed storage. Too many tasks (or a smaller test capacity) => no rows.
 TaskSnapshot taskSnapshot(std::size_t capacity = cfg::kHealthMaxTasks);

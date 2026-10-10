@@ -64,10 +64,38 @@ bool allowed(cfg::Provider p, const settings::Model& model) {
     return false;
   return true;
 }
+// Why the last get() stopped without a provider response. Provider task
+// only; the code pairs the text with the error it explains.
+const char* failure = nullptr;
+esp_err_t failure_code = ESP_OK;
+esp_err_t stop(const char* why, esp_err_t err) {
+  failure = why;
+  failure_code = err;
+  return err;
+}
+// Distinct text for the Web UI and logs; plain error name otherwise.
+const char* reason(esp_err_t err) {
+  return failure != nullptr && failure_code == err ? failure
+                                                   : esp_err_to_name(err);
+}
+const char* interrupted(uint32_t generation, uint32_t epoch) {
+  if (settings::generation() != generation) return "settings changed";
+  if (!network::ready()) return "network lost";
+  if (network::status().epoch != epoch) return "network changed";
+  return nullptr;
+}
 esp_err_t get(const char* url, const char* array, cfg::Provider p,
               const settings::Model& m, uint32_t generation,
               JsonConsumer consumer, void* context, bool selection = false) {
-  if (!allowed(p, m)) return ESP_ERR_INVALID_STATE;
+  failure = nullptr;
+  // One log line per provider request, sent or not. Keys travel in headers,
+  // never in the URL.
+  const auto skip = [url](const char* why, esp_err_t err) {
+    ESP_LOGW("provider", "not sent: %s (%s)", url, why);
+    return stop(why, err);
+  };
+  if (!allowed(p, m))
+    return skip("provider not enabled", ESP_ERR_INVALID_STATE);
   const auto index = static_cast<unsigned>(p);
   const auto now = timekeeping::monotonicMs();
   const unsigned daily_limit = p == cfg::Provider::kApiFootball
@@ -79,36 +107,48 @@ esp_err_t get(const char* url, const char* array, cfg::Provider p,
   const int64_t ready_at =
       now + std::max<int64_t>(0, last_request[index] > 0 ? remaining : 0);
   while (timekeeping::monotonicMs() < ready_at) {
-    if (settings::generation() != generation || !network::ready() ||
-        network::status().epoch != epoch)
-      return ESP_ERR_INVALID_STATE;
+    if (const auto why = interrupted(generation, epoch))
+      return skip(why, ESP_ERR_INVALID_STATE);
     vTaskDelay(pdMS_TO_TICKS(cfg::kProviderWaitSliceMs));
   }
-  if (settings::generation() != generation || !network::ready())
-    return ESP_ERR_INVALID_STATE;
+  if (const auto why = interrupted(generation, epoch))
+    return skip(why, ESP_ERR_INVALID_STATE);
   const int64_t deadline =
       timekeeping::monotonicMs() + cfg::kOperationDeadlineMs;
   while (!network::tryHeavy()) {
-    if (settings::generation() != generation || !network::ready() ||
-        network::status().epoch != epoch ||
-        timekeeping::monotonicMs() >= deadline)
-      return ESP_ERR_TIMEOUT;
+    if (const auto why = interrupted(generation, epoch))
+      return skip(why, ESP_ERR_INVALID_STATE);
+    if (timekeeping::monotonicMs() >= deadline)
+      return skip("operation busy", ESP_ERR_TIMEOUT);
     vTaskDelay(pdMS_TO_TICKS(cfg::kProviderWaitSliceMs));
   }
   const auto admitted =
       budget::admit(p, static_cast<uint32_t>(day), daily_limit);
   if (admitted != ESP_OK) {
     network::releaseHeavy();
-    return admitted;
+    if (admitted == ESP_ERR_NOT_ALLOWED)
+      return skip("daily budget used", admitted);
+    return skip("budget unavailable", admitted);
   }
   last_request[index] = timekeeping::monotonicMs();
   lock();
   ++requests[index];
   ++day_requests[index];
   unlock();
-  const auto err =
-      fetchJson(url, array, p, m, generation, consumer, context, selection);
+  FetchResult result;
+  const int64_t started = timekeeping::monotonicMs();
+  const auto err = fetchJson(url, array, p, m, generation, consumer, context,
+                             selection, &result);
   network::releaseHeavy();
+  const auto elapsed =
+      static_cast<long long>(timekeeping::monotonicMs() - started);
+  if (err == ESP_OK)
+    ESP_LOGI("provider", "%s: HTTP %d, %u B, %lld ms", url, result.status,
+             static_cast<unsigned>(result.bytes), elapsed);
+  else
+    ESP_LOGW("provider", "%s: HTTP %d, %u B, %lld ms, %s", url, result.status,
+             static_cast<unsigned>(result.bytes), elapsed,
+             esp_err_to_name(err));
   return err;
 }
 template <class T>
@@ -558,13 +598,15 @@ void runSelection(const settings::Model& model, uint32_t generation) {
               &context, true);
   lock();
   if (err != ESP_OK) {
-    selection_state.error.assign(esp_err_to_name(err));
+    // Distinct codes so the Web UI can explain each cause.
+    selection_state.error.assign(reason(err));
     selection_state.count = 0;
   }
   selection_state.busy = false;
   ++selection_state.revision;
-  unlock();
+  // Cleared under the mutex: select() checks it there before a new job.
   selecting.store(false);
+  unlock();
 }
 template <class T>
 void fill(Value<T>& primary, const Value<T>& secondary) {
@@ -748,14 +790,16 @@ void worker(void*) {
     const bool clock_valid = timekeeping::utcNow(utc);
     if (ota::trial()) continue;
     if ((!network::ready() || !clock_valid) && !model.demo) {
-      if (selecting.exchange(false)) {
-        lock();
+      // Under the mutex, like select(), so a new request cannot be lost.
+      lock();
+      if (selecting.load()) {
         selection_state.busy = false;
         selection_state.count = 0;
         selection_state.error.assign("network/time unavailable");
         ++selection_state.revision;
-        unlock();
+        selecting.store(false);
       }
+      unlock();
       continue;
     }
     if (utc / 86400 > day) {
@@ -841,10 +885,13 @@ void worker(void*) {
       baseline = false;
       events::post(events::Event::kDataUpdated);
     } else {
-      if (err == ESP_OK) err = ESP_ERR_INVALID_STATE;
+      if (err == ESP_OK)
+        err = stop(settings::generation() != generation ? "settings changed"
+                                                        : "network changed",
+                   ESP_ERR_INVALID_STATE);
       lock();
       slots[published].stale = true;
-      slots[published].error.assign(esp_err_to_name(err));
+      slots[published].error.assign(reason(err));
       unlock();
       interval = err == ESP_ERR_TIMEOUT || err == ESP_ERR_NOT_ALLOWED
                      ? cfg::kProviderRateRetryS
@@ -904,14 +951,16 @@ void read(Reader reader, void* context) {
 }
 esp_err_t select(const SelectionRequest& request) {
   if (mutex == nullptr) return ESP_ERR_INVALID_STATE;
-  bool expected = false;
-  if (!selecting.compare_exchange_strong(expected, true))
-    return ESP_ERR_INVALID_STATE;
   lock();
-  selection_request = request;
-  selection_state.busy = true;
+  // The request is stored before the worker can see the flag.
+  const bool running = selecting.load();
+  if (!running) {
+    selection_request = request;
+    selection_state.busy = true;
+    selecting.store(true);
+  }
   unlock();
-  return ESP_OK;
+  return running ? ESP_ERR_NOT_FINISHED : ESP_OK;
 }
 SelectionStatus selectionStatus() {
   lock();

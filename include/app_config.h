@@ -269,6 +269,9 @@ inline constexpr std::size_t kSelectionBodyBytes = 1048576;
 inline constexpr uint8_t kJsonDepth = 16;
 inline constexpr uint32_t kOperationDeadlineMs = 30000;
 inline constexpr uint32_t kSocketTimeoutMs = 1000;
+// Longest provider silence tolerated while sending a request or receiving
+// its response; waits run in kSocketTimeoutMs slices within the deadline.
+inline constexpr uint32_t kProviderIdleTimeoutMs = 8000;
 inline constexpr std::size_t kProviderHostBytes = 64;
 inline constexpr uint32_t kProviderStackBytes = 10240;
 inline constexpr uint32_t kHttpStackBytes = 10240;

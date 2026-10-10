@@ -11,11 +11,13 @@
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
 #include "esp_http_server.h"
+#include "esp_log.h"
 #include "esp_random.h"
 #include "file_service.h"
 #include "football_service.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "health_service.h"
 #include "hw_target.h"
 #include "image_service.h"
 #include "lwip/sockets.h"
@@ -109,6 +111,11 @@ bool sendReady(httpd_req_t* req) {
                     sizeof(timeout)) == 0;
 }
 esp_err_t error(httpd_req_t* req, const char* code, const char* message) {
+  // Pairs httpd's "uri handler execution failed" with its cause. The query
+  // is left out: the debug socket carries the session token there.
+  ESP_LOGW("web", "%s %.*s: %s (%s)",
+           http_method_str(static_cast<http_method>(req->method)),
+           static_cast<int>(strcspn(req->uri, "?")), req->uri, code, message);
   if (!sendReady(req)) return ESP_FAIL;
   httpd_resp_set_status(req, code);
   httpd_resp_set_type(req, "application/json");
@@ -288,6 +295,7 @@ esp_err_t get(httpd_req_t* req) {
     out["rssi"] = net.rssi;
     out["time_valid"] = timekeeping::status().valid;
     out["uptime_s"] = timekeeping::monotonicMs() / 1000;
+    out["reset_reason"] = health::resetReason();
     out["heap_free"] =
         heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     out["heap_largest"] =
@@ -427,12 +435,18 @@ esp_err_t mutation(httpd_req_t* req) {
     route.provider = request.provider;
     route.competition.assign(request.competition.data);
     route.season.assign(request.season.data);
-    if (!settings::validate(validate) ||
-        (request.teams && request.competition.empty()) ||
-        (request.teams && request.provider == cfg::Provider::kApiFootball &&
-         request.season.empty()))
-      return error(req, "400 Bad Request", "selection rejected");
+    // Distinct messages: the Web UI turns each into an explanation.
+    if (!settings::validate(validate))
+      return error(req, "400 Bad Request", "competition or season invalid");
+    if (request.teams && request.competition.empty())
+      return error(req, "400 Bad Request", "competition required");
+    if (request.teams && request.provider == cfg::Provider::kApiFootball &&
+        request.season.empty())
+      return error(req, "400 Bad Request", "season required");
     err = football::select(request);
+    // The Web UI waits for the running job and then sends again.
+    if (err == ESP_ERR_NOT_FINISHED)
+      return error(req, "409 Conflict", "selection busy");
   } else if (!strcmp(req->uri, "/api/v1/images/reset")) {
     network::HeavyGuard guard;
     if (!guard) return error(req, "409 Conflict", "operation busy");

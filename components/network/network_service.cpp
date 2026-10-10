@@ -132,17 +132,22 @@ void dns(void*) {
            reinterpret_cast<sockaddr*>(&source), length);
   }
 }
-esp_err_t antenna(bool external) {
+// Once at init: gpio_config reserves output pins, and configuring a reserved
+// pin again only logs "conflict found". antenna() then just sets levels.
+esp_err_t antennaPins() {
   if (!hw::kBoard.has_antenna_switch) return ESP_OK;
   const auto& b = hw::kBoard;
   gpio_config_t config{};
   config.pin_bit_mask =
       (1ULL << b.antenna_enable_pin) | (1ULL << b.antenna_select_pin);
   config.mode = GPIO_MODE_OUTPUT;
-  esp_err_t err = gpio_config(&config);
-  if (err == ESP_OK)
-    err = gpio_set_level(static_cast<gpio_num_t>(b.antenna_enable_pin),
-                         b.antenna_enable_active_high);
+  return gpio_config(&config);
+}
+esp_err_t antenna(bool external) {
+  if (!hw::kBoard.has_antenna_switch) return ESP_OK;
+  const auto& b = hw::kBoard;
+  esp_err_t err = gpio_set_level(static_cast<gpio_num_t>(b.antenna_enable_pin),
+                                 b.antenna_enable_active_high);
   vTaskDelay(pdMS_TO_TICKS(cfg::kAntennaSettleMs));
   if (err == ESP_OK)
     err = gpio_set_level(static_cast<gpio_num_t>(b.antenna_select_pin),
@@ -161,7 +166,8 @@ void sntp() {
 }  // namespace
 esp_err_t init() {
   applied = settings::current();
-  esp_err_t err = antenna(applied.external_antenna);
+  esp_err_t err = antennaPins();
+  if (err == ESP_OK) err = antenna(applied.external_antenna);
   if (err != ESP_OK) return err;
   if ((err = esp_netif_init()) != ESP_OK) return err;
   if ((err = esp_event_loop_create_default()) != ESP_OK &&

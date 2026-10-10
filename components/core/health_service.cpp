@@ -7,6 +7,7 @@
 #include "display_port.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "event_bus.h"
@@ -191,16 +192,37 @@ void logStatus() {
   ++console.reports;
   ESP_LOGI(kTag,
            "status report %u: payload %u us, previous complete %u us, "
-           "complete max %u us",
+           "complete max %u us, last reset %s",
            static_cast<unsigned>(console.reports),
            static_cast<unsigned>(payload_us),
            static_cast<unsigned>(console.last_report_us),
-           static_cast<unsigned>(console.max_report_us));
+           static_cast<unsigned>(console.max_report_us), resetReason());
   // Include the final log write in the measured complete report.
   console.last_report_us =
       static_cast<uint32_t>(esp_timer_get_time() - start_us);
   console.max_report_us =
       std::max(console.max_report_us, console.last_report_us);
+}
+
+const char* resetReason() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON: return "power-on";
+    case ESP_RST_EXT: return "external pin";
+    case ESP_RST_SW: return "software restart";
+    case ESP_RST_PANIC: return "panic";
+    case ESP_RST_INT_WDT: return "interrupt watchdog";
+    case ESP_RST_TASK_WDT: return "task watchdog";
+    case ESP_RST_WDT: return "other watchdog";
+    case ESP_RST_DEEPSLEEP: return "deep sleep";
+    case ESP_RST_BROWNOUT: return "brownout";
+    case ESP_RST_SDIO: return "SDIO";
+    case ESP_RST_USB: return "USB";
+    case ESP_RST_JTAG: return "JTAG";
+    case ESP_RST_EFUSE: return "eFuse error";
+    case ESP_RST_PWR_GLITCH: return "power glitch";
+    case ESP_RST_CPU_LOCKUP: return "CPU lockup";
+    default: return "unknown";
+  }
 }
 
 Coordinator& heapCoordinator() { return coordinator; }

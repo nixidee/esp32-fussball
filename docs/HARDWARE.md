@@ -143,8 +143,11 @@ Firmware option “external antenna” (default off) — set in the project conf
 changeable in the Web UI (WiFi settings). Use only with an antenna connected.
 
 Status: implemented in the C6 candidate, not RF-tested. Hardware facts remain
-in `boards/xiao_esp32c6.h`; `network_service.cpp` enables GPIO3 low, waits the
-configured 100 ms and applies GPIO14 before WiFi starts. A saved antenna change
+in `boards/xiao_esp32c6.h`; `network_service.cpp` configures GPIO3/GPIO14 as
+outputs once at network start, then enables GPIO3 low, waits the configured
+100 ms and applies GPIO14 before WiFi starts. Later antenna changes only set
+levels; configuring an already reserved output pin again would only log a
+`gpio: conflict found` warning. A saved antenna change
 reconfigures the radio without rebooting. The sequence was checked against the
 [Seeed XIAO ESP32C6 documentation](https://wiki.seeedstudio.com/xiao_esp32c6_getting_started/)
 on 2026-10-10. That source check does not establish actual internal/external

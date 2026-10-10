@@ -293,7 +293,10 @@ free was 2,464/1,940 B in that run.
   Disabling these reports preserves boot/state/error logs and supervision.
 - **Report:** internal 8-bit heap free/largest/minimum values, all-task stack
   low-water marks, LVGL memory when its short lock can be acquired, and event,
-  file and time status. Snapshot pause and complete report durations are
+  file and time status. The closing report line names the last reset reason
+  (`esp_reset_reason`, e.g. power-on, software restart, panic, task watchdog,
+  brownout); GET `/api/v1/status` returns the same text as `reset_reason`.
+  Snapshot pause and complete report durations are
   recorded, including the final console write. Console output can delay the
   app loop; its measured duration is part of the acceptance budget.
 - **Task snapshot:** two fixed tables hold at most 16 tasks (960 B together
@@ -485,7 +488,14 @@ shape the image design:
   (one per draw-buffer stripe): about 105 ms per 240×240 pass on the C6, so a
   full-screen redraw over 12 stripes takes 1.1–1.25 s. Text-only refreshes of a
   JPEG background cost 0.2–0.3 s. Fewer, larger stripes, a pre-rendered layer or
-  uncompressed RGB565 images trade this against RAM or flash.
+  uncompressed RGB565 images trade this against RAM or flash. Because LVGL 9.6
+  style setters and `lv_display_set_rotation` invalidate even when the value is
+  unchanged, the scene and the display port apply styles, alignment and
+  rotation only when they change; otherwise every refresh is a full redraw.
+- LVGL 9.6's TJPGD has no end-of-image check: every image walk ends with a
+  benign `jd_mcu_load error: 6` (or `jd_restart error: 6` with restart
+  intervals). The display port's LVGL log hook drops exactly these two warnings;
+  uploaded images are fully decoded by the same decoder before publication.
 - LittleFS cannot replace a file that is open, and a draw task keeps the JPEG
   open while it decodes. An image upload must swap the file under the LVGL lock
   (temporary file, then rename), otherwise a replacement during a redraw fails.

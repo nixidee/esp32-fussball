@@ -19,7 +19,16 @@ The status distinguishes invalid time, missing club/competition, stale data,
 provider errors and fallback use. Provider selection uses asynchronous,
 bounded result pages. A selected team/competition is saved by its provider ID;
 the firmware does not guess cross-provider identity from a name. API-Football
-requires a selected season. Optional fallback routes require explicit paired
+requires a selected season. The club list needs a chosen competition; load
+competitions first. Rejected or failed selections show a German/English
+explanation followed by the device's reason or error code, for example
+`settings changed`, `network lost`, `network changed`, `operation busy`,
+`daily budget used` or `budget unavailable`. The device runs one list request
+at a time; while one is still running (for example from an older page), a new
+request is answered with `selection busy`, and the page waits for the running
+one to finish and sends its request again (at most three attempts). While a
+list loads, the page says so: the provider's minimum request interval can
+delay it by up to 30 seconds. Optional fallback routes require explicit paired
 fixture IDs, with an explicit home/away swap flag when needed.
 
 Every configurable default and limit is supplied by the device schema.
