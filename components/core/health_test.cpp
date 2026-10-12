@@ -20,7 +20,9 @@ constexpr uint32_t kCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 constexpr std::size_t kTransientBytes = 4096;
 constexpr uint32_t kPollMs = 20;
 constexpr uint32_t kEnabledWaitMs = 5200;
-constexpr uint32_t kDisabledWaitMs = 6100;
+// Longer than the task watchdog timeout, derived from the sdkconfig value.
+constexpr uint32_t kDisabledWaitMs =
+    CONFIG_ESP_TASK_WDT_TIMEOUT_S * 1000 + 1100;
 constexpr uint32_t kMeterRepeatCount = 32;
 std::atomic<uint32_t> fail_monitor_allocation{0};
 std::atomic<uint32_t> lock_worker_state{0};

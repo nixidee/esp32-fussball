@@ -125,10 +125,16 @@ void poll() {
   }
 }
 
-TaskSnapshot taskSnapshot(std::size_t capacity) {
-  requireAppTask();
-  task_rows.fill({});
-  capacity = std::min(capacity, raw_tasks.size());
+namespace {
+struct Reading {
+  std::size_t count;
+  uint32_t total_tasks;
+  uint32_t pause_us;
+  bool complete;
+};
+// One consistent reading of all tasks: 'raw' is scratch space for
+// 'capacity' tasks, 'rows' receives the result (left empty unless complete).
+Reading readTasks(TaskStatus_t* raw, TaskRow* rows, std::size_t capacity) {
   // On the C6 this also protects name lifetime until copies are complete.
   // On SMP, names stay empty; use copied numeric IDs instead of dereferencing
   // a TCB that another core could delete after uxTaskGetSystemState returns.
@@ -137,16 +143,15 @@ TaskSnapshot taskSnapshot(std::size_t capacity) {
 #endif
   const int64_t start_us = esp_timer_get_time();
   const uint32_t total = uxTaskGetNumberOfTasks();
-  const std::size_t count =
-      uxTaskGetSystemState(raw_tasks.data(), capacity, nullptr);
+  const std::size_t count = uxTaskGetSystemState(raw, capacity, nullptr);
   const bool complete = count != 0 && count == total;
   if (complete) {
     for (std::size_t i = 0; i < count; ++i) {
-      TaskRow& row = task_rows[i];
-      row.id = raw_tasks[i].xTaskNumber;
-      row.min_free_bytes = raw_tasks[i].usStackHighWaterMark;
+      TaskRow& row = rows[i];
+      row.id = raw[i].xTaskNumber;
+      row.min_free_bytes = raw[i].usStackHighWaterMark;
 #if configNUMBER_OF_CORES == 1
-      const char* name = raw_tasks[i].pcTaskName;
+      const char* name = raw[i].pcTaskName;
       if (name != nullptr) {
         const std::size_t length = strnlen(name, sizeof(row.name) - 1);
         memcpy(row.name, name, length);
@@ -159,7 +164,29 @@ TaskSnapshot taskSnapshot(std::size_t capacity) {
 #if configNUMBER_OF_CORES == 1
   xTaskResumeAll();
 #endif
-  return {task_rows.data(), complete ? count : 0, total, pause_us, complete};
+  return {count, total, pause_us, complete};
+}
+}  // namespace
+
+TaskSnapshot taskSnapshot(std::size_t capacity) {
+  requireAppTask();
+  task_rows.fill({});
+  capacity = std::min(capacity, raw_tasks.size());
+  const Reading reading =
+      readTasks(raw_tasks.data(), task_rows.data(), capacity);
+  return {task_rows.data(), reading.complete ? reading.count : 0,
+          reading.total_tasks, reading.pause_us, reading.complete};
+}
+
+std::size_t stackMinima(TaskRow* rows, std::size_t capacity) {
+  capacity = std::min(capacity, cfg::kHealthMaxTasks);
+  auto* raw = static_cast<TaskStatus_t*>(
+      heap_caps_malloc(capacity * sizeof(TaskStatus_t), kHeapCaps));
+  if (raw == nullptr) return 0;
+  std::fill(rows, rows + capacity, TaskRow{});
+  const Reading reading = readTasks(raw, rows, capacity);
+  heap_caps_free(raw);
+  return reading.complete ? reading.count : 0;
 }
 
 void logStatus() {

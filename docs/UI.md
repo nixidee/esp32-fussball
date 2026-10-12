@@ -10,8 +10,8 @@ The earlier boot-screen and geometry acceptance covers that earlier workload.
 | Screen | Content |
 |---|---|
 | Own match | principal score, supplied/estimated minute or kickoff, teams, separate shootout tally, bounded recent events |
-| Conference | tracked club centred with a larger row; up to five fixtures of the selected competition, sorted by recent score change |
-| Table | up to nine rows around the club, shifted at edges; all 32 accepted rows reachable by scrolling |
+| Conference | tracked club centred with a larger row; up to the profile's maximum (four on 240 round), sorted by recent score change |
+| Table | profile-limited rows (seven maximum on 240 round) around the club, shifted at edges; all 32 accepted rows reachable by scrolling |
 | Crest / slideshow | uploaded crest or stock image; up to five uploaded slides rotate within this screen |
 
 Each screen has an enable switch, colour/text/accent, background switch and

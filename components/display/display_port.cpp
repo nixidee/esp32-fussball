@@ -304,9 +304,13 @@ void injectRuntimeFault() {
     lvgl_port_lock(0);
     while (true) lv_obj_create(lv_screen_active());
   } else if constexpr (cfg::kDisplayFault == DisplayFault::kLockStall) {
-    ESP_LOGW(kTag, "fault injection: holding the LVGL lock for 10 s");
+    // Must outlast the task watchdog; derived so a timeout change cannot
+    // silently turn this test into a no-op.
+    constexpr uint32_t kStallS = CONFIG_ESP_TASK_WDT_TIMEOUT_S + 5;
+    ESP_LOGW(kTag, "fault injection: holding the LVGL lock for %u s",
+             static_cast<unsigned>(kStallS));
     lvgl_port_lock(0);
-    vTaskDelay(pdMS_TO_TICKS(10'000));
+    vTaskDelay(pdMS_TO_TICKS(kStallS * 1000));
     lvgl_port_unlock();
   }
 }

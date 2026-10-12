@@ -55,6 +55,12 @@ const char* resetReason();
 // Fixed storage. Too many tasks (or a smaller test capacity) => no rows.
 TaskSnapshot taskSnapshot(std::size_t capacity = cfg::kHealthMaxTasks);
 
+// The free stack minimum of every task, for any task (taskSnapshot is for the
+// app task only). Fills 'rows' and returns their count; 0 when the tasks do
+// not fit in 'capacity' or there is no memory for the reading (about 45 B of
+// scratch per task, freed before returning).
+std::size_t stackMinima(TaskRow* rows, std::size_t capacity);
+
 Coordinator& heapCoordinator();
 Observation observeHeap();
 void runDeviceTest();

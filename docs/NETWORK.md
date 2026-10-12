@@ -35,8 +35,13 @@ The C6 hardware profile configures GPIO3/GPIO14 once at network start and
 selects them before RF start and on antenna changes, including the vendor's
 100 ms settling interval. See
 [HARDWARE.md](HARDWARE.md). Actual internal/external antenna reception remains
-unverified. The Waveshare S3 profile is paused; no previously reported WiFi
-power-save workaround has been added without current device evidence.
+unverified.
+
+Station modem sleep is off on every profile (`kWifiPowerSave` in
+`app_config.h`; the ESP-IDF default would be `WIFI_PS_MIN_MODEM`). The device
+is mains powered, and in modem sleep the access point holds incoming frames
+until the next beacon, which delays every TCP round trip. Its effect on
+provider transfer time still needs a device log.
 
 The C6 SDK configuration enables IPv4 and disables unused IPv6, enterprise WiFi
 and WiFi IRAM speed optimisations. This reduces fixed RAM use while retaining
@@ -149,27 +154,135 @@ or worker startup failures.
 
 | Method and endpoint | Purpose |
 |---|---|
-| GET `/api/v1/status`, `/schema`, `/settings` | Status, bounds/options and redacted settings |
-| GET `/api/v1/wifi`, `/selection`, `/images` | Bounded scan/selection results and image inventory |
+| GET `/api/v1/status`, `/schema`, `/settings` | Status (screen, own match, competition state, full build identity, heap/task minima), bounds/options and upload limits, redacted settings |
+| GET `/api/v1/session` | `{password_set, valid}` for the token the request carries |
+| GET `/api/v1/wifi`, `/selection` | Bounded scan/selection results |
+| GET `/api/v1/fixtures?competition=N&source=primary\|fallback` | The club's matches of a competition for the pair picker |
+| GET `/api/v1/images`, `/images/file?id=N\|stock=crest\|background[&r=rev]` | Image inventory with per-image revision; the JPEG itself |
 | POST `/api/v1/session`, `/logout` | Open/close the mutation session |
 | POST or PUT `/api/v1/settings` | Strictly typed settings patch |
 | POST `/api/v1/export` | Explicit settings export |
-| POST `/api/v1/wifi/scan`, `/data/select`, `/data/refresh` | Start asynchronous scan, selection or refresh |
+| POST `/api/v1/wifi/scan`, `/data/select`, `/data/fixtures`, `/data/refresh` | Start asynchronous scan, provider list, fallback fixtures or refresh |
+| POST `/api/v1/display` | Quick display action `{"action":"next"\|"ip"}` (same events as the buttons) |
 | POST `/api/v1/images/upload`, `/images/delete` | Upload a library image (optional `X-Image-Id` replaces one) or delete one by id |
+| POST `/api/v1/images/repair` | Confirmed image-storage formatting and reference cleanup; preserves other settings and does not restart |
 | POST `/api/v1/ota` | Stream compatible firmware to the inactive slot |
 | POST `/api/v1/reboot`, `/reset` | Reboot or reset settings, optionally delete all images or format image storage |
-| WebSocket `/api/v1/debug` | Controlled live status while the Debug tab is open |
+| WebSocket `/api/v1/debug?token=` | Controlled live status while the Debug tab is open; ends with the session that opened it |
 
 After the first full path, shortened paths in the table retain `/api/v1`.
 See [WEB_UI.md](WEB_UI.md) for the browser workflow and image contract.
 
+`GET /wifi` returns `busy` for a queued or running user scan and an
+`error_code`: empty after success, `scan_start`, `scan_result`, `net_lost` or
+`timeout` on failure. The list and state are read together. Connection scans
+have priority; a user scan runs with the existing 15-second scan deadline.
+Duplicate user requests return 409 `busy`; a failed or cancelled job is never
+represented as a successful empty scan.
+
+The schema publishes `ota_max` from the actual inactive OTA slot and
+`selection_text_max` from the shared search/country capacity. `firmware_id`
+in status is the full 64-character lowercase hexadecimal ELF SHA256 from the
+app descriptor. It distinguishes builds with equal version strings; it is
+not the shortened hash printed by the panic handler.
+Status `requests` contains each provider's request attempts since boot,
+including selection requests. It is not a daily usage or remaining-credit
+counter and must not be compared directly with the configured daily budget.
+
+Image repair requires `{"confirm":"repair"}`, same-origin/session admission,
+the heavy-operation token and no OTA trial. It formats LittleFS (including
+stock files), then saves cleaned image references only if necessary. Success
+returns `{"ok":true,"storage_formatted":true}`. A failed reference save after
+formatting returns HTTP 500, `code:"repair_references"` and
+`storage_formatted:true`; the filesystem operation already happened and must
+not be mistaken for a fully successful repair. Neither result resets other
+settings or restarts. USB `uploadfs` restores stock files.
+
+### Provider-operation error keys
+
+Status pairs `data_error` with `data_error_code`; selection/fallback fixture
+responses pair `error` with `error_code`. The text remains diagnostic, while
+the browser translates the stable key. The cause is reset at each operation
+boundary and successful results clear previous errors. Snapshot age is global;
+competition rows report source, match count and an error flag, not an
+independently measured fetch age. Warnings derive from existing state fields,
+without a second warnings array.
+
+| Key | Meaning |
+|---|---|
+| empty | No error |
+| `not_started`, `provider_off` | Service not started or provider unavailable by key/opt-in |
+| `budget_day`, `busy` | Daily budget spent or another heavy operation prevented admission |
+| `net_lost`, `time_invalid`, `settings_changed` | Network, clock or settings invalidated the operation |
+| `rate_limited`, `auth`, `not_found`, `http_error` | HTTP 429, 401/403, 404 or another non-200 response |
+| `connect` | No HTTP response; connection failed before a response |
+| `bad_response`, `too_large`, `memory` | Unreadable/incomplete result, exceeded capacity or allocation failure |
+| `other` | An unclassified failure; inspect the diagnostic text/log |
+
+### Sessions
+
 The admin password is optional. Mutations nevertheless require a random
-128-bit session nonce and same-origin/Host validation, including login, to
-reduce unintended browser requests. A configured password is checked before
-issuing the nonce. Sessions expire after 15 minutes. GET settings/status do not
-return passwords or API keys; explicit export is a protected mutation.
+128-bit session token (header `X-CSRF-Token`) and same-origin/Host validation,
+including login, to reduce unintended browser requests. A configured password
+is checked before the token is issued. There are four session slots
+(`cfg::kSessionSlots`); a fifth login replaces the least recently used one, so
+two browsers can work in parallel. A session expires 15 minutes after its last
+authenticated request (sliding, `cfg::kSessionLifetimeMs`); every request that
+carries the token, including reads, moves the expiry. Saving settings keeps all
+sessions; only changing the admin password ends every other session. `POST
+/logout` ends the caller's session. `GET /session` tells the page whether a
+password is set and whether its stored token is still valid.
+
+The Host header must name this device (its STA or AP address, `<hostname>.local`
+or the bare hostname, compared case-insensitively; `:80` is accepted) and an
+`Origin` header, if sent, must be `http://` plus that host. GET settings/status
+do not return passwords or API keys; explicit export is a protected mutation.
 Unknown keys, wrong types, excess arrays, embedded NULs and trailing non-space
 JSON bytes are rejected. API keys are not passed into the debug producer.
+
+The debug WebSocket takes its token from the URL query because the browser
+WebSocket API cannot set headers. The log line of a rejected request omits the
+query, and the stream is closed as soon as its session ends or Browser debug
+is switched off. The server checks the origin, the Browser debug setting, the
+session token and the single free socket slot before it answers the handshake
+(a pre-handshake callback; `CONFIG_HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT`).
+A refused request gets an ordinary HTTP error with the usual body and no
+upgrade: 403 `origin`, 403 `debug_disabled`, 401 `session` or 409 `busy`.
+The device only sends frames; frames from the browser are read and discarded,
+and the slot is freed when the TCP connection ends.
+
+`GET /status` reports the numbers needed to judge memory under load without a
+serial port: `heap_free`, `heap_largest` and `heap_min` (lowest free heap since
+boot, internal 8-bit memory) plus `tasks`, an array of `{name, id,
+stack_min_free}` with the lowest free stack in bytes of every task (at most 16).
+
+### Errors
+
+Every failed request answers `{"error": "<English text>", "code": "<stable
+code>"[, "field": "<name>"]}` with `Cache-Control: no-store`. `code` is for
+programs, `error` for people, `field` names the one value that caused a 400:
+the dotted settings path (for example `competitions[0].primary.competition`),
+a body key (`competition`, `season`, `id`, `confirm`) or a header
+(`X-Image-Id`). For value errors `code` is the settings reason (`invalid`,
+`range`, `type`, `unknown_key`, `too_long`, `too_many`, `required`,
+`duplicate`, `reference`, `conflict`, `none_enabled`). Other codes: `origin`
+(403), `session`, `password` (401), `trial`, `busy`, `state`, `changed` (409),
+`unknown_route`, `not_found` (404), `method` (405), `body_missing`,
+`body_incomplete`, `json`, `size`, `content`, `invalid` (400),
+`body_too_large` (413), `content_type` (415), `timeout` (408), `memory`,
+`storage_full` (507), `internal` (500).
+
+"Every 400 names its field" applies to value errors: a settings value, a
+body key or a header that is present but wrong. Errors about the request as a
+whole (`body_missing`, `body_incomplete`, `json`, `size`, `content`) have no
+single field and carry only `code`.
+
+The unread rest of a request body is read and discarded before the answer, up
+to `cfg::kDrainMaxBytes` (32 KB), so the browser reads the error instead of a
+connection reset and the connection stays usable. A body above that limit
+(firmware or an oversize image) cannot be drained; the connection is closed
+after the answer and a browser may report a network error instead of the
+message. The Web UI checks the size before uploading for this reason.
 
 The browser uses local HTTP. Passwords and API tokens sent to this device are
 therefore intended for its trusted local/setup network; TLS is used for provider

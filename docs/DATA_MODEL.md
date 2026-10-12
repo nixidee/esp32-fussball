@@ -50,6 +50,13 @@ the previous snapshot with an error/stale indication. Duplicate fixture IDs
 within a competition are ignored. Selection uses a separate 64-entry page and an
 explicit more flag; it is not an unbounded team cache.
 
+Provider-operation failures pair their diagnostic text with the canonical
+`Cause` enum. Status and selection expose its stable translation key (see
+[NETWORK.md](NETWORK.md)); a successful operation clears previous errors.
+The snapshot's single fetch time measures the age of the whole publication,
+not an independent age per competition. The added cause fits the existing
+C6 snapshot alignment; the record size above is unchanged.
+
 ## Match phases and scores
 
 Phases: Unknown, Scheduled, Live, HalfTime, ExtraTime, Penalties, Finished,

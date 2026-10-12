@@ -44,7 +44,7 @@ enum class DisplayFault : uint8_t {
   kLostCompletion,     // colour data never sent: watchdog restart
   kPortMemory,         // port allocation pre-check fails: restart
   kLvglPoolExhausted,  // LVGL pool runs out: assert, watchdog restart
-  kLockStall,          // LVGL lock held for 10 s: watchdog restart
+  kLockStall,          // LVGL lock held past the watchdog timeout: restart
 };
 inline constexpr DisplayFault kDisplayFault = DisplayFault::kNone;
 
@@ -293,7 +293,7 @@ inline constexpr uint32_t kSocketTimeoutMs = 1000;
 // its response; waits run in kSocketTimeoutMs slices within the deadline.
 inline constexpr uint32_t kProviderIdleTimeoutMs = 8000;
 inline constexpr std::size_t kProviderHostBytes = 64;
-inline constexpr uint32_t kProviderStackBytes = 10240;
+inline constexpr uint32_t kProviderStackBytes = 12800;
 inline constexpr uint32_t kHttpStackBytes = 10240;
 inline constexpr uint32_t kDnsStackBytes = 2048;
 inline constexpr uint8_t kHttpSockets = 4;
@@ -303,13 +303,17 @@ inline constexpr uint32_t kWifiIpDeadlineMs = 30000;
 inline constexpr uint32_t kWifiMissingScanMs = 20000;
 inline constexpr uint32_t kWifiFallbackMs = 300000;
 inline constexpr uint32_t kWifiAuthRetryMs[] = {10000, 30000, 60000};
+// Station modem sleep (IDF default WIFI_PS_MIN_MODEM) is off: the device is
+// mains powered, and in modem sleep the AP holds downlink frames until the
+// next DTIM beacon, which adds latency to every TCP round trip.
+inline constexpr bool kWifiPowerSave = false;
 inline constexpr uint32_t kAntennaSettleMs = 100;
 inline constexpr uint16_t kPollIdleS = 21600;
 inline constexpr uint16_t kPollPrematchS = 300;
 inline constexpr uint16_t kPollLiveS = 60;
 inline constexpr uint16_t kPollPostmatchS = 300;
 inline constexpr uint16_t kProviderBudgetDefault = 100;
-inline constexpr uint32_t kProviderMinIntervalMs[] = {30000, 6000, 30000, 6000};
+inline constexpr uint32_t kProviderMinIntervalMs[] = {5000, 6000, 30000, 6000};
 inline constexpr uint16_t kFixtureHorizonDays = 7;
 inline constexpr uint16_t kConferenceHorizonHours = 36;
 inline constexpr uint16_t kUnknownMatchEndMinutes = 240;
@@ -396,6 +400,10 @@ inline constexpr char kBudgetNvsNamespace[] = "provider_budget",
 inline constexpr uint32_t kBudgetRecordMagic = 0x46554231;
 inline constexpr uint8_t kBudgetReservationRequests = 8;
 inline constexpr char kSelectionCountryDefault[] = "Germany";
+// The OpenLigaDB competition list loads one season. Without a season in the
+// request it is the current one: from this month on the season named after
+// the current year, before it the previous year's.
+inline constexpr int kSeasonStartMonth = 7;
 inline constexpr uint32_t kNightBackground = 0x030609;
 inline constexpr uint16_t kSizeClassSmallMax = 260, kSizeClassMediumMax = 400;
 

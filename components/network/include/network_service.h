@@ -22,7 +22,13 @@ void poll();
 void applySettings();
 Status status();
 esp_err_t requestScan();
-std::size_t scanResults(AccessPoint* out, std::size_t capacity);
+struct ScanStatus {
+  bool busy;               // queued or running user scan
+  const char* error_code;  // empty after success; stable REST failure key
+};
+// Results and user-job state are copied together; no partial completion.
+std::size_t scanResults(AccessPoint* out, std::size_t capacity,
+                        ScanStatus* status = nullptr);
 bool ready();
 bool healthy();
 // Heavy operations use one nonblocking admission token; no waiting queue.

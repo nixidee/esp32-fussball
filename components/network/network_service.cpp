@@ -30,10 +30,21 @@ portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 Status current{};
 settings::Model applied;
 esp_netif_t *sta = nullptr, *ap = nullptr;
-std::atomic<bool> heavy{false}, scan_done{false}, got_ip{false}, lost_ip{false};
+std::atomic<bool> heavy{false}, got_ip{false}, lost_ip{false};
+std::atomic<int> scan_done{-1};  // -1 = none, SDK scan status 0 = successful
 std::atomic<uint16_t> reason{0};
 std::atomic<uint8_t> clients{0};
-std::atomic<bool> scan_requested{false};
+enum class UserScanState : uint8_t {
+  kIdle,
+  kQueued,
+  kRunning,
+  kStartFailed,
+  kResultFailed,
+  kInterrupted,
+  kTimeout
+};
+UserScanState scan_state = UserScanState::kIdle;  // protected by mux
+int64_t user_scan_at = 0;
 bool started = false, ap_on = false, scanning = false, user_scan = false;
 bool sntp_on = false, configured_radio = false, mdns_ready = false;
 int64_t published_at = 0;
@@ -43,6 +54,31 @@ char ntp_server[cfg::kNtpServerMaxChars + 1]{};
 StaticTask_t dns_tcb;
 StackType_t dns_stack[cfg::kDnsStackBytes / sizeof(StackType_t)];
 int dns_fd = -1;
+
+bool userScanBusy(UserScanState state) {
+  return state == UserScanState::kQueued || state == UserScanState::kRunning;
+}
+bool scanQueued() {
+  portENTER_CRITICAL(&mux);
+  const bool queued = scan_state == UserScanState::kQueued;
+  portEXIT_CRITICAL(&mux);
+  return queued;
+}
+void setScanState(UserScanState state) {
+  portENTER_CRITICAL(&mux);
+  scan_state = state;
+  portEXIT_CRITICAL(&mux);
+}
+void cancelUserScan(UserScanState state = UserScanState::kInterrupted) {
+  portENTER_CRITICAL(&mux);
+  if (userScanBusy(scan_state)) scan_state = state;
+  portEXIT_CRITICAL(&mux);
+  if (!user_scan) return;
+  esp_wifi_scan_stop();
+  scanning = false;
+  user_scan = false;
+  scan_done.store(-1);
+}
 
 void publish() {
   Status next{};
@@ -72,7 +108,8 @@ void publish() {
 }
 void event(void*, esp_event_base_t base, int32_t id, void* data) {
   if (base == WIFI_EVENT) {
-    if (id == WIFI_EVENT_SCAN_DONE) scan_done.store(true);
+    if (id == WIFI_EVENT_SCAN_DONE)
+      scan_done.store(static_cast<wifi_event_sta_scan_done_t*>(data)->status);
     if (id == WIFI_EVENT_STA_DISCONNECTED) {
       reason.store(static_cast<wifi_event_sta_disconnected_t*>(data)->reason);
       lost_ip.store(true);
@@ -189,6 +226,9 @@ esp_err_t init() {
   wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
   if ((err = esp_wifi_init(&config)) != ESP_OK) return err;
   if ((err = esp_wifi_set_storage(WIFI_STORAGE_RAM)) != ESP_OK) return err;
+  if ((err = esp_wifi_set_ps(cfg::kWifiPowerSave ? WIFI_PS_MIN_MODEM
+                                                 : WIFI_PS_NONE)) != ESP_OK)
+    return err;
   ESP_ERROR_CHECK(
       esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, event, nullptr));
   ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
@@ -246,6 +286,7 @@ void applySettings() {
     return;
   }
   // Reconfigure the radio while stopped; antenna changes always reconnect.
+  cancelUserScan();
   esp_wifi_scan_stop();
   esp_wifi_stop();
   scanning = false;
@@ -286,7 +327,7 @@ void applySettings() {
   clients.store(0);
   lost_ip.store(false);
   got_ip.store(false);
-  scan_done.store(false);
+  scan_done.store(-1);
   ESP_ERROR_CHECK(esp_wifi_set_mode(ap_on ? WIFI_MODE_APSTA : WIFI_MODE_STA));
   ESP_ERROR_CHECK(esp_wifi_start());
   configured_radio = true;
@@ -295,31 +336,24 @@ void applySettings() {
 void poll() {
   if (!started) return;
   const int64_t now = timekeeping::monotonicMs();
-  if (scan_requested.exchange(false) && !scanning &&
-      policy.state() != State::kConnecting &&
-      policy.state() != State::kScanning) {
-    wifi_scan_config_t scan{};
-    scan.show_hidden = true;
-    if (esp_wifi_scan_start(&scan, false) == ESP_OK) {
-      scanning = true;
-      user_scan = true;
-    }
-  }
   if (got_ip.exchange(false)) {
     policy.gotIp(now);
     sntp();
   }
   if (lost_ip.exchange(false)) {
+    cancelUserScan();
     const auto r = reason.load();
     policy.lost(r == WIFI_REASON_AUTH_FAIL ||
                     r == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT ||
                     r == WIFI_REASON_HANDSHAKE_TIMEOUT,
                 r == WIFI_REASON_NO_AP_FOUND, now);
   }
-  if (scan_done.exchange(false)) {
+  const int completed = scan_done.exchange(-1);
+  if (completed >= 0 && scanning) {
     wifi_ap_record_t records[cfg::kScanEntries]{};
     uint16_t count = cfg::kScanEntries;
-    bool ok = esp_wifi_scan_get_ap_records(&count, records) == ESP_OK;
+    const auto result = esp_wifi_scan_get_ap_records(&count, records);
+    const bool ok = completed == 0 && result == ESP_OK;
     bool found = false;
     portENTER_CRITICAL(&mux);
     result_count = ok ? count : 0;
@@ -334,12 +368,18 @@ void poll() {
                (applied.wifi_ssid.length == 32 ||
                 records[i].ssid[applied.wifi_ssid.length] == 0);
     }
+    if (user_scan)
+      scan_state = ok ? UserScanState::kIdle : UserScanState::kResultFailed;
     portEXIT_CRITICAL(&mux);
     scanning = false;
     if (!user_scan) policy.scanDone(ok, found, now);
     user_scan = false;
   }
-  const auto command = policy.poll(now, clients.load() > 0, esp_random());
+  if (user_scan && now - user_scan_at >= cfg::kWifiScanDeadlineMs)
+    cancelUserScan(UserScanState::kTimeout);
+  const auto command = user_scan
+                           ? Command::kNone
+                           : policy.poll(now, clients.load() > 0, esp_random());
   if (policy.ap() != ap_on) {
     ap_on = policy.ap();
     const auto err = esp_wifi_set_mode(ap_on ? WIFI_MODE_APSTA : WIFI_MODE_STA);
@@ -361,11 +401,30 @@ void poll() {
     err = esp_wifi_connect();
     if (err != ESP_OK) policy.lost(false, false, now);
   } else if (command == Command::kDisconnect) {
+    cancelUserScan();
     esp_wifi_scan_stop();
     scanning = false;
     esp_wifi_disconnect();
   }
   if (err != ESP_OK) ESP_LOGW(kTag, "operation: %s", esp_err_to_name(err));
+  // Connection scans have priority. Keep a user job queued until the radio
+  // can actually start it, rather than consuming the request while busy.
+  if (scanQueued() && !scanning && policy.state() != State::kConnecting &&
+      policy.state() != State::kScanning) {
+    wifi_scan_config_t scan{};
+    scan.show_hidden = true;
+    scan_done.store(-1);
+    const auto started_scan = esp_wifi_scan_start(&scan, false);
+    if (started_scan == ESP_OK) {
+      scanning = true;
+      user_scan = true;
+      user_scan_at = now;
+      setScanState(UserScanState::kRunning);
+    } else {
+      setScanState(UserScanState::kStartFailed);
+      ESP_LOGW(kTag, "user scan start: %s", esp_err_to_name(started_scan));
+    }
+  }
   if (now - published_at >= cfg::kNetworkPublishMs ||
       status().state != policy.state() || status().ap != ap_on ||
       status().ap_clients != clients.load()) {
@@ -382,13 +441,31 @@ Status status() {
 bool ready() { return status().connected; }
 esp_err_t requestScan() {
   if (!started) return ESP_ERR_INVALID_STATE;
-  scan_requested.store(true);
-  return ESP_OK;
+  portENTER_CRITICAL(&mux);
+  const bool busy = userScanBusy(scan_state);
+  if (!busy) scan_state = UserScanState::kQueued;
+  portEXIT_CRITICAL(&mux);
+  return busy ? ESP_ERR_NOT_FINISHED : ESP_OK;
 }
-std::size_t scanResults(AccessPoint* out, std::size_t capacity) {
+std::size_t scanResults(AccessPoint* out, std::size_t capacity,
+                        ScanStatus* status) {
   portENTER_CRITICAL(&mux);
   const auto count = std::min(capacity, result_count);
   memcpy(out, results, count * sizeof(AccessPoint));
+  if (status != nullptr) {
+    status->busy = userScanBusy(scan_state);
+    switch (scan_state) {
+      case UserScanState::kStartFailed:
+        status->error_code = "scan_start";
+        break;
+      case UserScanState::kResultFailed:
+        status->error_code = "scan_result";
+        break;
+      case UserScanState::kInterrupted: status->error_code = "net_lost"; break;
+      case UserScanState::kTimeout: status->error_code = "timeout"; break;
+      default: status->error_code = "";
+    }
+  }
   portEXIT_CRITICAL(&mux);
   return count;
 }

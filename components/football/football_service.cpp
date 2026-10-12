@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <strings.h>
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -68,38 +69,77 @@ bool allowed(cfg::Provider p, const settings::Model& model) {
     return false;
   return true;
 }
-// Why the last get() stopped without a provider response. Provider task
-// only; the code pairs the text with the error it explains.
+// Why the last get() failed. Provider task only; the code pairs the text and
+// the cause with the error they explain.
 const char* failure = nullptr;
+Cause failure_cause = Cause::kNone;
 esp_err_t failure_code = ESP_OK;
-esp_err_t stop(const char* why, esp_err_t err) {
+void clearFailure() {
+  failure = nullptr;
+  failure_cause = Cause::kNone;
+  failure_code = ESP_OK;
+}
+esp_err_t stop(const char* why, esp_err_t err, Cause cause) {
   failure = why;
+  failure_cause = cause;
   failure_code = err;
   return err;
 }
-// Distinct text for the Web UI and logs; plain error name otherwise.
+// Distinct text for the logs and the Web UI; plain error name otherwise.
 const char* reason(esp_err_t err) {
   return failure != nullptr && failure_code == err ? failure
                                                    : esp_err_to_name(err);
 }
-const char* interrupted(uint32_t generation, uint32_t epoch) {
-  if (settings::generation() != generation) return "settings changed";
-  if (!network::ready()) return "network lost";
-  if (network::status().epoch != epoch) return "network changed";
-  return nullptr;
+// Stable key behind reason(): the cause recorded for this error, else one
+// derived from the plain error code (failures outside get()).
+Cause causeOf(esp_err_t err) {
+  if (failure_cause != Cause::kNone && failure_code == err)
+    return failure_cause;
+  switch (err) {
+    case ESP_ERR_NO_MEM: return Cause::kMemory;
+    case ESP_ERR_INVALID_SIZE: return Cause::kTooLarge;
+    case ESP_ERR_INVALID_RESPONSE: return Cause::kBadResponse;
+    default: return Cause::kOther;
+  }
+}
+// A request that was sent: the error of fetchJson() and the HTTP status it
+// received (0 = none, so no response came).
+Cause fetchCause(esp_err_t err, int status) {
+  if (err == ESP_ERR_NO_MEM) return Cause::kMemory;
+  if (err == ESP_ERR_INVALID_SIZE) return Cause::kTooLarge;
+  if (err == ESP_ERR_INVALID_RESPONSE) return Cause::kBadResponse;
+  if (status == 429) return Cause::kRateLimited;
+  if (status == 401 || status == 403) return Cause::kAuth;
+  if (status == 404) return Cause::kNotFound;
+  if (status == 0) return Cause::kConnect;
+  return status != 200 ? Cause::kHttp : Cause::kOther;
+}
+struct Interruption {
+  const char* why = nullptr;
+  Cause cause = Cause::kNone;
+  explicit operator bool() const { return why != nullptr; }
+};
+Interruption interrupted(uint32_t generation, uint32_t epoch) {
+  if (settings::generation() != generation)
+    return {"settings changed", Cause::kSettings};
+  if (!network::ready()) return {"network lost", Cause::kNetwork};
+  if (network::status().epoch != epoch)
+    return {"network changed", Cause::kNetwork};
+  return {};
 }
 esp_err_t get(const char* url, const char* array, cfg::Provider p,
               const settings::Model& m, uint32_t generation,
               JsonConsumer consumer, void* context, bool selection = false) {
-  failure = nullptr;
+  clearFailure();
   // One log line per provider request, sent or not. Keys travel in headers,
   // never in the URL.
-  const auto skip = [url](const char* why, esp_err_t err) {
+  const auto skip = [url](const char* why, esp_err_t err, Cause cause) {
     ESP_LOGW("provider", "not sent: %s (%s)", url, why);
-    return stop(why, err);
+    return stop(why, err, cause);
   };
   if (!allowed(p, m))
-    return skip("provider not enabled", ESP_ERR_INVALID_STATE);
+    return skip("provider not enabled", ESP_ERR_INVALID_STATE,
+                Cause::kProviderOff);
   const auto index = static_cast<unsigned>(p);
   const auto now = timekeeping::monotonicMs();
   const unsigned daily_limit = p == cfg::Provider::kApiFootball
@@ -111,19 +151,19 @@ esp_err_t get(const char* url, const char* array, cfg::Provider p,
   const int64_t ready_at =
       now + std::max<int64_t>(0, last_request[index] > 0 ? remaining : 0);
   while (timekeeping::monotonicMs() < ready_at) {
-    if (const auto why = interrupted(generation, epoch))
-      return skip(why, ESP_ERR_INVALID_STATE);
+    if (const auto stopped = interrupted(generation, epoch))
+      return skip(stopped.why, ESP_ERR_INVALID_STATE, stopped.cause);
     vTaskDelay(pdMS_TO_TICKS(cfg::kProviderWaitSliceMs));
   }
-  if (const auto why = interrupted(generation, epoch))
-    return skip(why, ESP_ERR_INVALID_STATE);
+  if (const auto stopped = interrupted(generation, epoch))
+    return skip(stopped.why, ESP_ERR_INVALID_STATE, stopped.cause);
   const int64_t deadline =
       timekeeping::monotonicMs() + cfg::kOperationDeadlineMs;
   while (!network::tryHeavy()) {
-    if (const auto why = interrupted(generation, epoch))
-      return skip(why, ESP_ERR_INVALID_STATE);
+    if (const auto stopped = interrupted(generation, epoch))
+      return skip(stopped.why, ESP_ERR_INVALID_STATE, stopped.cause);
     if (timekeeping::monotonicMs() >= deadline)
-      return skip("operation busy", ESP_ERR_TIMEOUT);
+      return skip("operation busy", ESP_ERR_TIMEOUT, Cause::kBusy);
     vTaskDelay(pdMS_TO_TICKS(cfg::kProviderWaitSliceMs));
   }
   const auto admitted =
@@ -131,8 +171,8 @@ esp_err_t get(const char* url, const char* array, cfg::Provider p,
   if (admitted != ESP_OK) {
     network::releaseHeavy();
     if (admitted == ESP_ERR_NOT_ALLOWED)
-      return skip("daily budget used", admitted);
-    return skip("budget unavailable", admitted);
+      return skip("daily budget used", admitted, Cause::kBudget);
+    return skip("budget unavailable", admitted, Cause::kOther);
   }
   last_request[index] = timekeeping::monotonicMs();
   lock();
@@ -146,13 +186,20 @@ esp_err_t get(const char* url, const char* array, cfg::Provider p,
   network::releaseHeavy();
   const auto elapsed =
       static_cast<long long>(timekeeping::monotonicMs() - started);
-  if (err == ESP_OK)
+  if (err == ESP_OK) {
     ESP_LOGI("provider", "%s: HTTP %d, %u B, %lld ms", url, result.status,
              static_cast<unsigned>(result.bytes), elapsed);
-  else
+  } else {
     ESP_LOGW("provider", "%s: HTTP %d, %u B, %lld ms, %s", url, result.status,
              static_cast<unsigned>(result.bytes), elapsed,
              esp_err_to_name(err));
+    if (const auto stopped = interrupted(generation, epoch))
+      stop(stopped.why, err, stopped.cause);
+    else {
+      failure_cause = fetchCause(err, result.status);
+      failure_code = err;
+    }
+  }
   return err;
 }
 template <class T>
@@ -238,6 +285,20 @@ bool consume(ArduinoJson::JsonVariantConst row, void* context) {
   return c.table ? mapTable(row, *c.out, c.provider)
                  : mapMatch(row, *c.out, c.provider, c.route, c.now, c.filter);
 }
+// The club's fixtures across all competitions; only rows of this route's
+// competition and season are mapped.
+struct LeagueRows {
+  Mapping* mapping;
+  const char* competition;
+  int season;
+};
+bool consumeLeague(ArduinoJson::JsonVariantConst row, void* context) {
+  auto& c = *static_cast<LeagueRows*>(context);
+  if (strcasecmp(str(row["leagueShortcut"]), c.competition) != 0 ||
+      row["leagueSeason"].as<int>() != c.season)
+    return true;
+  return consume(row, c.mapping);
+}
 bool changed(ArduinoJson::JsonVariantConst row, void* context) {
   auto* buffer = static_cast<char*>(context);
   if (!row.is<const char*>() || strlen(str(row)) >= 64) return false;
@@ -275,6 +336,7 @@ esp_err_t routeFetch(settings::Source route, uint8_t index, bool table_source,
                      const settings::Model& model, uint32_t generation,
                      Snapshot& target, int64_t utc, bool primary = true,
                      bool events = true) {
+  clearFailure();
   char url[384], competition[cfg::kCompetitionIdMaxBytes + 1]{},
       season_text[cfg::kSeasonMaxBytes + 1]{};
   memcpy(competition, route.competition.data.data(), route.competition.length);
@@ -293,8 +355,8 @@ esp_err_t routeFetch(settings::Source route, uint8_t index, bool table_source,
       snprintf(url, sizeof(url), "https://api.openligadb.de/getmatchdata/%s",
                competition);
       err = get(url, "", p, model, generation, season, &route, true);
-      if (err != ESP_OK || route.season.empty())
-        return ESP_ERR_INVALID_RESPONSE;
+      if (err != ESP_OK) return err;
+      if (route.season.empty()) return ESP_ERR_INVALID_RESPONSE;
       memcpy(season_text, route.season.data.data(), route.season.length);
       if (primary) {
         snprintf(cache.season, sizeof(cache.season), "%s", season_text);
@@ -354,11 +416,22 @@ esp_err_t routeFetch(settings::Source route, uint8_t index, bool table_source,
       }
       return ESP_OK;
     }
-    // A complete season stream covers catch-up fixtures outside the current
-    // round. Only horizon-relevant fixtures survive into fixed storage.
-    snprintf(url, sizeof(url), "https://api.openligadb.de/getmatchdata/%s/%s",
-             competition, season_text);
-    err = get(url, "", p, model, generation, consume, &mapping, true);
+    // keep() retains the current round and the club's fixtures within
+    // kFixtureHorizonDays. The round request and the club's fixture request
+    // cover exactly that, including catch-up fixtures outside the round,
+    // without streaming the whole season (about 300 KB for bl1).
+    snprintf(url, sizeof(url),
+             "https://api.openligadb.de/getmatchdata/%s/%s/%d", competition,
+             season_text, round);
+    err = get(url, "", p, model, generation, consume, &mapping);
+    if (err == ESP_OK && own_team[0]) {
+      const unsigned weeks = (cfg::kFixtureHorizonDays + 6) / 7;
+      LeagueRows rows{&mapping, competition, atoi(season_text)};
+      snprintf(url, sizeof(url),
+               "https://api.openligadb.de/getmatchesbyteamid/%s/%u/%u",
+               own_team, weeks, weeks);
+      err = get(url, "", p, model, generation, consumeLeague, &rows);
+    }
     if (table_source && err == ESP_OK) {
       mapping.table = true;
       snprintf(url, sizeof(url), "https://api.openligadb.de/getbltable/%s/%s",
@@ -481,6 +554,10 @@ bool selectionRow(ArduinoJson::JsonVariantConst row, void* context) {
   Selection s;
   const auto p = request.provider;
   if (p == cfg::Provider::kOpenLigaDb) {
+    // The season list also carries test and other sports' competitions.
+    constexpr int kFootball = 1;
+    if (!request.teams && row["sport"]["sportId"].as<int>() != kFootball)
+      return true;
     identity(s.id, row[request.teams ? "teamId" : "leagueShortcut"]);
     s.name.assign(str(row[request.teams ? "teamName" : "leagueName"]));
     identity(s.season, row["leagueSeason"]);
@@ -528,7 +605,11 @@ void finishSelection(esp_err_t err) {
   if (err != ESP_OK) {
     // Distinct codes so the Web UI can explain each cause.
     selection_state.error.assign(reason(err));
+    selection_state.cause = causeOf(err);
     selection_state.count = 0;
+  } else {
+    selection_state.error = {};
+    selection_state.cause = Cause::kNone;
   }
   selection_state.busy = false;
   ++selection_state.revision;
@@ -582,12 +663,14 @@ esp_err_t runFixtures(const settings::Model& model, uint32_t generation,
 }
 void runSelection(const settings::Model& model, uint32_t generation,
                   int64_t utc) {
+  clearFailure();
   SelectionRequest request;
   lock();
   request = selection_request;
   selection_state.count = 0;
   selection_state.more = false;
   selection_state.error = {};
+  selection_state.cause = Cause::kNone;
   unlock();
   if (request.fixtures) {
     finishSelection(runFixtures(model, generation, request.route, utc));
@@ -630,9 +713,19 @@ void runSelection(const settings::Model& model, uint32_t generation,
       snprintf(url, sizeof(url),
                "https://api.openligadb.de/getavailableteams/%s/%s", comp,
                season_text);
-    else
+    else {
+      if (request.season.empty()) {
+        const time_t stamp = utc;
+        std::tm date{};
+        gmtime_r(&stamp, &date);
+        snprintf(season_text, sizeof(season_text), "%d",
+                 date.tm_year + 1900 -
+                     (date.tm_mon + 1 < cfg::kSeasonStartMonth ? 1 : 0));
+      }
       snprintf(url, sizeof(url),
-               "https://api.openligadb.de/getavailableleagues");
+               "https://api.openligadb.de/getavailableleagues/%s",
+               season_text);
+    }
   } else if (request.provider == cfg::Provider::kApiFootball) {
     if (request.teams)
       snprintf(url, sizeof(url),
@@ -860,6 +953,8 @@ void worker(void*) {
         selection_state.busy = false;
         selection_state.count = 0;
         selection_state.error.assign("network/time unavailable");
+        selection_state.cause =
+            network::ready() ? Cause::kTime : Cause::kNetwork;
         ++selection_state.revision;
         selecting.store(false);
       }
@@ -957,13 +1052,16 @@ void worker(void*) {
       baseline = false;
       events::post(events::Event::kDataUpdated);
     } else {
-      if (err == ESP_OK)
-        err = stop(settings::generation() != generation ? "settings changed"
-                                                        : "network changed",
-                   ESP_ERR_INVALID_STATE);
+      if (err == ESP_OK) {
+        const bool changed = settings::generation() != generation;
+        err = stop(changed ? "settings changed" : "network changed",
+                   ESP_ERR_INVALID_STATE,
+                   changed ? Cause::kSettings : Cause::kNetwork);
+      }
       lock();
       slots[published].stale = true;
       slots[published].error.assign(reason(err));
+      slots[published].error_cause = causeOf(err);
       error_route = failed;
       unlock();
       interval = err == ESP_ERR_TIMEOUT || err == ESP_ERR_NOT_ALLOWED
@@ -998,6 +1096,7 @@ Status status() {
   s.error_route = kNoRoute;
   if (mutex == nullptr) {
     s.error.assign("not started");
+    s.cause = Cause::kNotStarted;
     return s;
   }
   lock();
@@ -1012,6 +1111,7 @@ Status status() {
                            timekeeping::monotonicMs() - data.fetched_ms >
                                cfg::kDataStaleS * 1000LL);
   s.error = data.error;
+  s.cause = data.error_cause;
   s.routing_notice = data.routing_notice;
   s.error_route = error_route;
   unlock();
@@ -1035,6 +1135,10 @@ esp_err_t start(const SelectionRequest& request) {
     selection_state.busy = true;
     selection_state.fixtures = request.fixtures;
     selection_state.route = request.route;
+    selection_state.count = 0;
+    selection_state.more = false;
+    selection_state.error = {};
+    selection_state.cause = Cause::kNone;
     selecting.store(true);
   }
   unlock();

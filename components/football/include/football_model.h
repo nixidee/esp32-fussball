@@ -17,6 +17,27 @@ enum class Source : uint8_t {
   kEspn,
   kFootballData
 };
+// Why a provider operation failed; the stable key of the error text for the
+// Web UI (REST API). kNone = no error.
+enum class Cause : uint8_t {
+  kNone,
+  kNotStarted,   // the service has not started
+  kProviderOff,  // provider needs a key or opt-in that is not set
+  kBudget,       // daily request budget used
+  kBusy,         // another heavy operation held the network too long
+  kNetwork,      // network lost or changed during the operation
+  kTime,         // no valid time
+  kSettings,     // settings changed during the operation
+  kRateLimited,  // HTTP 429
+  kAuth,         // HTTP 401 or 403
+  kNotFound,     // HTTP 404
+  kHttp,         // any other HTTP status than 200
+  kConnect,      // no HTTP response: DNS, TCP or TLS failed
+  kBadResponse,  // response missing, incomplete or unreadable
+  kTooLarge,     // response or result exceeds the device's capacity
+  kMemory,       // out of memory
+  kOther
+};
 constexpr bool confirmed(Source source) {
   return source == Source::kProvider || source >= Source::kOpenLigaDb;
 }
@@ -143,6 +164,7 @@ struct Snapshot {
   bool stale = true, configured = false;
   Text<96> routing_notice;
   Text<96> error;
+  Cause error_cause = Cause::kNone;
 };
 struct Selection {
   Id id, season;
@@ -155,6 +177,8 @@ struct Capabilities {
   uint32_t minimum_interval_ms = 0;
 };
 const char* providerName(cfg::Provider provider);
+// Stable lower-case key of a failure cause (REST API); "" for kNone.
+const char* causeKey(Cause cause);
 // Stable lower-case code of a match phase (REST API).
 const char* phaseName(Phase phase);
 Capabilities capabilities(cfg::Provider provider);

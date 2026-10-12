@@ -1,7 +1,8 @@
 # Data providers
 
 Four adapters and per-competition routing are implemented in the 0.1.0-dev
-candidate. Public endpoint research was refreshed on 2026-10-10; the C6 build
+candidate. Public endpoint research was refreshed on 2026-10-10; OpenLigaDB's
+published request guidance was rechecked on 2026-10-12. The C6 build
 compiles. Firmware requests and keyed-provider coverage have not been accepted
 on the device. Provider plans, quotas and supported competitions can change.
 
@@ -33,17 +34,50 @@ Base: [OpenLigaDB API](https://api.openligadb.de/).
 
 | Path | Use |
 |---|---|
-| /getavailableleagues | searchable/paged competition and provider-season selection |
+| /getavailableleagues/{season} | competition selection for one season (football entries only) |
 | /getavailableteams/{league}/{season} | club selection |
 | /getmatchdata/{league} | current provider season when configuration leaves it empty |
 | /getcurrentgroup/{league} | current round identity |
 | /getlastchangedate/{league}/{season}/{round} | cheap change check |
-| /getmatchdata/{league}/{season} | season stream, retaining current-round and horizon-relevant fixtures |
+| /getmatchdata/{league}/{season}/{round} | all fixtures of the current round |
+| /getmatchesbyteamid/{club}/{weeks}/{weeks} | own club's fixtures around today, filtered to this competition and season |
 | /getbltable/{league}/{season} | primary league table |
 
-Unchanged round data reuses primary-provenance values. A full refresh still
-runs at least every five minutes to discover catch-up fixtures and table
-changes. The current season is re-resolved after six hours.
+The competition list requests one season: the one typed in the setup wizard's
+season field, otherwise the current season derived from the device clock
+(from July the season named after the current year, before that the previous
+year's). Entries of other sports (ice hockey, test data) are skipped. Some
+competition shortcuts contain spaces or umlauts; these are not yet usable as
+route IDs.
+
+The [official API description](https://api.openligadb.de/swagger/v1/swagger.json)
+states a limit of 60 requests per minute per IP and recommends polling the
+change date before fetching complete data. The local minimum request spacing
+is five seconds; this is a conservative device policy, not an upstream limit.
+Other clients sharing the same public IP also count toward the upstream limit.
+
+A full refresh of the first table-bearing route with a club needs five
+requests with an explicit season (round, change date, round fixtures, club
+fixtures, table), or six when it first discovers the season. At five-second
+spacing the last request starts at least 20 or 25 seconds after the first;
+network and processing time are additional. Typical bodies were 7–18 KB for a
+round, about 4 KB for the club and about 4 KB for the table (public responses,
+2026-10-12); the former season stream was about 300 KB and grew with every
+matchday. Publication waits for every active
+competition, its required fallback requests and the table to succeed. There
+is currently no early publication of the first competition.
+
+The RAM cache reuses primary-provenance data only when the round/change date
+match, no new baseline is required and the full fetch is less than five minutes
+old. The season is cached for six hours. Caches are not persisted across boots;
+every settings save clears them and the published snapshot. Network changes
+and successful time synchronizations require a new baseline. Fallback sources
+do not use this cache. Because pre/post-match delays already wait five minutes
+after completion, their next cycle repeats the full round/club/table fetch
+even when the round's change date is unchanged. The club request covers the
+own club's fixtures outside the polled round (cup and catch-up matches within
+the seven-day horizon); other clubs' catch-up fixtures outside the round are
+not kept.
 
 Results use the provider's semantic
 [resultTypeKind contract](https://github.com/OpenLigaDB/OpenLigaDB-Samples/discussions/136).
@@ -122,11 +156,15 @@ define season selection. Key/account permission errors remain explicit.
 | HTTP 429 / exhausted budget / timeout | 5 minutes |
 
 Individual requests additionally respect conservative minimum spacing:
-OpenLigaDB/ESPN 30 seconds; API-Football/football-data 6 seconds. A multi-request
-refresh therefore takes time beyond the configured delay. These are local
-policy values, not provider service-level guarantees.
+OpenLigaDB 5 seconds, ESPN 30 seconds; API-Football/football-data 6 seconds.
+Spacing is shared by all requests of one provider, including selections and
+multiple competitions, and is measured between request starts. These values
+are compile-time defaults, not currently saved/editable settings. A
+multi-request refresh therefore takes time beyond the configured delay.
+These are local policy values, not provider service-level guarantees.
 
-HTTPS verifies the full IDF CA bundle and requires a valid clock. No redirect
+HTTPS verifies the configured common-root IDF CA bundle and requires a valid
+clock. No redirect
 is followed automatically. One heavy operation token serializes TLS/parsing
 with uploads, image validation/deletion and OTA. A routine LVGL JPEG redraw can
 still overlap TLS inside its fixed pool; that overlap needs device measurement.
@@ -140,7 +178,12 @@ SDK scheduling and cryptographic step duration still require measurement;
 this is not a measured hard real-time bound. Generation/epoch checks prevent
 obsolete publication.
 
-Ordinary bodies are limited to 256 KiB; season/selection streams to 1 MiB.
+The deadline is not a rate limit and was not sized for large bodies; it
+bounds stalled or trickling transfers and how long TLS memory and the heavy
+operation token are held.
+
+Ordinary bodies, including all OpenLigaDB match requests, are limited to
+256 KiB; selection lists and OpenLigaDB season discovery to 1 MiB.
 Headers are 8 KiB, additional wire/framing allowance 32 KiB, JSON nesting 16,
 and live parser allocations 24 KiB including the custom allocation headers
 (libc allocator overhead is additional). Elements are mapped and released one

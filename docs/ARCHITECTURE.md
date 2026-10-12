@@ -18,7 +18,7 @@
 
 ```
  ┌────────────────────────────── Web UI (browser) ─────────────────────────────┐
- │ tabs: Dashboard · Screens · Images · Settings · Update   (embedded, gzip)   │
+ │ Overview · Competitions · Display · Images · Settings · System (gzip)     │
  └───────────────▲─────────────────────────────────────────────────────────────┘
                  │ REST /api/v1 (JSON), uploads
  ┌───────────────┴──────────┐   ┌───────────────────────────────────────────┐
@@ -117,7 +117,7 @@ marks. Previously measured boot/core marks below do not apply to the new load.
 | `events` | 5 | 2,304 B | Application notifications |
 | HTTP server | 5 | 10,240 B | REST/upload worker |
 | `taskLVGL` | 4 | 7,168 B | Existing LVGL port |
-| `provider` | 3 | 10,240 B, static | Fetch/parser/composition |
+| `provider` | 3 | 12,800 B, static | Fetch/parser/composition |
 | `portal_dns` | 2 | 2,048 B, static | Captive DNS |
 | `web_debug` | 2 | 4,096 B, static | Controlled live stream |
 | `main` | 1 | 8,704 B | App/service loop |
@@ -308,7 +308,8 @@ free was 2,464/1,940 B in that run.
   FreeRTOS trace is enabled for this API; CPU runtime statistics and the
   FreeRTOS text-formatting helpers remain disabled.
 - **App-loop watchdog:** after startup work and boot diagnostics finish,
-  `app_loop` is registered with the existing 5 s task watchdog. Each completed
+  `app_loop` is registered with the existing task watchdog (15 s, see
+  display failures below). Each completed
   polling iteration feeds it after status work, including with the console
   disabled. A separate timer cannot hide a blocked app loop. Existing IDLE
   and LVGL supervision and the RTC abnormal-reset/headless policy are
@@ -364,7 +365,8 @@ cleared the abnormal-reset counter after 60 s of display-task progress.
 
 The 16-task scheduler pause was 1426–1428 us. A diagnostic report with seven
 tasks, a busy display lock and 50 ms simulated delay per console line took
-709735 us (14 lines), below the unchanged 5 s watchdog. In normal firmware,
+709735 us (14 lines), below the watchdog timeout of that build (5 s at the
+time, now 15 s). In normal firmware,
 a serial client closed for 70 s and reopened without control-line changes
 preserved uptime and report counts; the maximum complete report was 53998 us.
 Disconnected output can be dropped or truncated by the SDK. On the tested
@@ -403,8 +405,13 @@ Its inactive/active, slow-client and concurrent-load budgets remain unaccepted.
   unknown, so the device restarts immediately.
 - LVGL supervision: an LVGL timer (500 ms) feeds a task-watchdog user. A
   stuck flush, a blocked transfer, a long-held LVGL lock or an LVGL assert
-  stops it, and the task watchdog (5 s, panic enabled in `sdkconfig.defaults`)
-  restarts the device. Never hold the LVGL lock for long work.
+  stops it, and the task watchdog (15 s, panic enabled in `sdkconfig.defaults`)
+  restarts the device. Never hold the LVGL lock for long work. The timeout is
+  one value for every watched task (IDLE, `lvgl`, `app_loop`), so a stalled
+  display or app loop is detected up to 15 s after the stall, not 5 s.
+  15 s is an interim value: at 5 s the IDLE task was starved while the
+  provider task ran a TLS handshake (reset at first boot). The clean solution
+  is open and tracked in the task plan.
 - Allocation: before `lvgl_port_add_disp`, the port's heap allocations are
   probed (allocated and freed again): its context with an upper-bound size
   (256 B) and the two DMA draw buffers with their size, alignment and caps.

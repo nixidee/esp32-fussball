@@ -3,6 +3,7 @@
 #include <strings.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <cstdio>
@@ -184,6 +185,8 @@ inline constexpr Fault kPassword{"401 Unauthorized", "password",
                                  "password rejected"};
 inline constexpr Fault kTrial{"409 Conflict", "trial", "OTA trial is read only"};
 inline constexpr Fault kBusy{"409 Conflict", "busy", "operation busy"};
+inline constexpr Fault kDebugOff{"403 Forbidden", "debug_disabled",
+                                 "browser debug is disabled"};
 // The Web UI waits for the running job and then sends again.
 inline constexpr Fault kSelectionBusy{"409 Conflict", "busy", "selection busy"};
 inline constexpr Fault kChanged{"409 Conflict", "changed", "selection changed"};
@@ -518,6 +521,8 @@ esp_err_t getSchema(httpd_req_t* req) {
   out["height"] = hw::kDisplay.height;
   out["round"] = hw::kDisplay.shape == hw::DisplayShape::kRound;
   out["antenna"] = hw::kBoard.has_antenna_switch;
+  out["ota_max"] = ota::capacity();
+  out["selection_text_max"] = cfg::kSelectionTextMaxBytes;
   return json(req, d.doc);
 }
 esp_err_t getStatus(httpd_req_t* req) {
@@ -529,7 +534,13 @@ esp_err_t getStatus(httpd_req_t* req) {
   const auto data = football::status();
   files::Usage usage{};
   files::usage(usage);
-  out["version"] = esp_app_get_description()->version;
+  const auto* description = esp_app_get_description();
+  out["version"] = description->version;
+  char firmware_id[2 * sizeof(description->app_elf_sha256) + 1];
+  for (std::size_t i = 0; i < sizeof(description->app_elf_sha256); ++i)
+    snprintf(firmware_id + 2 * i, 3, "%02x",
+             static_cast<unsigned>(description->app_elf_sha256[i]));
+  out["firmware_id"] = firmware_id;
   out["target"] = ota::identity().target;
   out["layout"] = ota::identity().layout;
   out["ip"] = net.ip;
@@ -544,6 +555,19 @@ esp_err_t getStatus(httpd_req_t* req) {
       heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   out["heap_largest"] =
       heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  // Lowest free heap since boot and stack minima of every task, for browser
+  // and health-log acceptance under the real workload.
+  out["heap_min"] =
+      heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  std::array<health::TaskRow, cfg::kHealthMaxTasks> stacks;
+  const auto task_count = health::stackMinima(stacks.data(), stacks.size());
+  auto tasks = out["tasks"].to<JsonArray>();
+  for (std::size_t i = 0; i < task_count; ++i) {
+    auto task = tasks.add<JsonObject>();
+    task["name"] = stacks[i].name;
+    task["id"] = stacks[i].id;
+    task["stack_min_free"] = stacks[i].min_free_bytes;
+  }
   out["fs_total"] = usage.total_bytes;
   out["fs_used"] = usage.used_bytes;
   out["trial"] = ota::trial();
@@ -551,6 +575,7 @@ esp_err_t getStatus(httpd_req_t* req) {
   out["last_update_ms"] = data.fetched_ms;
   out["data_stale"] = data.stale;
   out["data_error"] = data.error.data;
+  out["data_error_code"] = football::causeKey(data.cause);
   out["routing_notice"] = data.routing_notice.data;
   auto counts = out["requests"].to<JsonArray>();
   for (auto count : data.requests) counts.add(count);
@@ -588,7 +613,10 @@ esp_err_t getWifi(httpd_req_t* req) {
   Request request(req);
   Doc d;
   network::AccessPoint results[cfg::kScanEntries];
-  const auto count = network::scanResults(results, cfg::kScanEntries);
+  network::ScanStatus scan{};
+  const auto count = network::scanResults(results, cfg::kScanEntries, &scan);
+  d.doc["busy"] = scan.busy;
+  d.doc["error_code"] = scan.error_code;
   auto list = d.doc["networks"].to<JsonArray>();
   for (unsigned i = 0; i < count; ++i) {
     auto item = list.add<JsonObject>();
@@ -609,6 +637,7 @@ esp_err_t getSelection(httpd_req_t* req) {
   out["route"] = state.route;
   out["revision"] = state.revision;
   out["error"] = state.error.data;
+  out["error_code"] = football::causeKey(state.cause);
   auto list = out["items"].to<JsonArray>();
   football::Selection item;
   if (!state.busy)
@@ -680,6 +709,8 @@ esp_err_t getFixtures(httpd_req_t* req) {
   out["busy"] = state.busy;
   out["loaded"] = mine && !state.busy && state.error.empty();
   out["error"] = mine && !state.busy ? state.error.data : "";
+  out["error_code"] =
+      mine && !state.busy ? football::causeKey(state.cause) : "";
   if (mine && !state.busy)
     for (unsigned i = 0; i < state.count; ++i) {
       if (!football::selectionAt(i, state.revision, item))
@@ -865,6 +896,35 @@ esp_err_t reset(httpd_req_t* req) {
   ota::reboot();
   return ok(req, d.doc);
 }
+// Repair only the image filesystem. Formatting also removes the stock files;
+// they are restored by USB uploadfs, not by resetting the settings.
+esp_err_t repairImages(httpd_req_t* req) {
+  Request request(req);
+  Doc d;
+  if (const auto* f = admit(req, d.doc, nullptr, true)) return error(req, *f);
+  if (strcmp(d.doc["confirm"] | "", "repair"))
+    return invalid(req, Reason::kInvalid, "confirmation required", "confirm");
+  network::HeavyGuard guard;
+  if (!guard) return error(req, fault::kBusy);
+  const auto formatted = images::format();
+  if (formatted != ESP_OK) return failed(req, formatted);
+  auto model = settings::current();
+  esp_err_t saved = ESP_OK;
+  if (settings::dropMissingImages(model, images::present()))
+    saved = settings::save(model);
+  d.doc.clear();
+  d.doc["storage_formatted"] = true;
+  if (saved != ESP_OK) {
+    ESP_LOGW("web", "image storage formatted; reference save failed: %s",
+             esp_err_to_name(saved));
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    d.doc["code"] = "repair_references";
+    d.doc["error"] =
+        "image storage formatted but references could not be saved";
+  } else
+    d.doc["ok"] = true;
+  return json(req, d.doc);
+}
 
 // ---- Network, provider data, display --------------------------------------
 esp_err_t wifiScan(httpd_req_t* req) {
@@ -872,6 +932,7 @@ esp_err_t wifiScan(httpd_req_t* req) {
   Doc d;
   if (const auto* f = admit(req, d.doc)) return error(req, *f);
   const auto err = network::requestScan();
+  if (err == ESP_ERR_NOT_FINISHED) return error(req, fault::kBusy);
   return err == ESP_OK ? ok(req, d.doc) : failed(req, err);
 }
 esp_err_t dataRefresh(httpd_req_t* req) {
@@ -1080,20 +1141,34 @@ void closeSession(httpd_handle_t, int fd) {
   }
   close(fd);
 }
+// httpd answers a WebSocket handshake itself and never calls the handler for
+// it; this runs just before that answer (ws_pre_handshake_cb). A refusal is an
+// ordinary HTTP answer, and ESP_FAIL then closes the socket.
+esp_err_t debugAdmit(httpd_req_t* req) {
+  Request request(req);
+  const Fault* refusal = nullptr;
+  Serial serial = 0;
+  if (!origin(req))
+    refusal = &fault::kOrigin;
+  else if (!browserDebug())
+    refusal = &fault::kDebugOff;
+  else if (!(serial = authenticate(req, true)))
+    refusal = &fault::kSession;
+  else {
+    int expected = -1;
+    if (!debug_fd.compare_exchange_strong(expected, httpd_req_to_sockfd(req)))
+      refusal = &fault::kBusy;
+  }
+  if (refusal) {
+    error(req, *refusal);
+    return ESP_FAIL;
+  }
+  debug_serial.store(serial);
+  return ESP_OK;
+}
+// The frames a client sends on the open stream; their content is ignored.
 esp_err_t debug(httpd_req_t* req) {
   Request request(req);
-  if (req->method == HTTP_GET) {
-    // httpd has already answered the handshake when this runs, so a refusal
-    // can only close the socket.
-    if (!origin(req) || !browserDebug()) return ESP_FAIL;
-    const auto serial = authenticate(req, true);
-    if (!serial) return ESP_FAIL;
-    const int fd = httpd_req_to_sockfd(req);
-    int expected = -1;
-    if (!debug_fd.compare_exchange_strong(expected, fd)) return ESP_FAIL;
-    debug_serial.store(serial);
-    return ESP_OK;
-  }
   httpd_ws_frame_t frame{};
   frame.type = HTTPD_WS_TYPE_TEXT;
   const auto err = httpd_ws_recv_frame(req, &frame, 0);
@@ -1173,36 +1248,38 @@ struct Route {
   const char* path;
   httpd_method_t method;
   esp_err_t (*handler)(httpd_req_t*);
-  bool websocket;
+  // WebSocket route when set: decides before httpd answers the handshake.
+  esp_err_t (*handshake)(httpd_req_t*);
 };
 constexpr uint16_t kMaxHandlers = 40;
 constexpr Route kRoutes[] = {
-    {"/", HTTP_GET, page, false},
-    {"/api/v1/session", HTTP_GET, getSession, false},
-    {"/api/v1/status", HTTP_GET, getStatus, false},
-    {"/api/v1/schema", HTTP_GET, getSchema, false},
-    {"/api/v1/settings", HTTP_GET, getSettings, false},
-    {"/api/v1/wifi", HTTP_GET, getWifi, false},
-    {"/api/v1/selection", HTTP_GET, getSelection, false},
-    {"/api/v1/fixtures", HTTP_GET, getFixtures, false},
-    {"/api/v1/images", HTTP_GET, getImages, false},
-    {"/api/v1/images/file", HTTP_GET, getImageFile, false},
-    {"/api/v1/debug", HTTP_GET, debug, true},
-    {"/api/v1/session", HTTP_POST, login, false},
-    {"/api/v1/logout", HTTP_POST, logout, false},
-    {"/api/v1/settings", HTTP_POST, putSettings, false},
-    {"/api/v1/settings", HTTP_PUT, putSettings, false},
-    {"/api/v1/export", HTTP_POST, exportSettings, false},
-    {"/api/v1/wifi/scan", HTTP_POST, wifiScan, false},
-    {"/api/v1/data/select", HTTP_POST, dataSelect, false},
-    {"/api/v1/data/fixtures", HTTP_POST, dataFixtures, false},
-    {"/api/v1/data/refresh", HTTP_POST, dataRefresh, false},
-    {"/api/v1/display", HTTP_POST, postDisplay, false},
-    {"/api/v1/images/delete", HTTP_POST, deleteImage, false},
-    {"/api/v1/images/upload", HTTP_POST, uploadImage, false},
-    {"/api/v1/ota", HTTP_POST, uploadFirmware, false},
-    {"/api/v1/reboot", HTTP_POST, reboot, false},
-    {"/api/v1/reset", HTTP_POST, reset, false},
+    {"/", HTTP_GET, page, nullptr},
+    {"/api/v1/session", HTTP_GET, getSession, nullptr},
+    {"/api/v1/status", HTTP_GET, getStatus, nullptr},
+    {"/api/v1/schema", HTTP_GET, getSchema, nullptr},
+    {"/api/v1/settings", HTTP_GET, getSettings, nullptr},
+    {"/api/v1/wifi", HTTP_GET, getWifi, nullptr},
+    {"/api/v1/selection", HTTP_GET, getSelection, nullptr},
+    {"/api/v1/fixtures", HTTP_GET, getFixtures, nullptr},
+    {"/api/v1/images", HTTP_GET, getImages, nullptr},
+    {"/api/v1/images/file", HTTP_GET, getImageFile, nullptr},
+    {"/api/v1/debug", HTTP_GET, debug, debugAdmit},
+    {"/api/v1/session", HTTP_POST, login, nullptr},
+    {"/api/v1/logout", HTTP_POST, logout, nullptr},
+    {"/api/v1/settings", HTTP_POST, putSettings, nullptr},
+    {"/api/v1/settings", HTTP_PUT, putSettings, nullptr},
+    {"/api/v1/export", HTTP_POST, exportSettings, nullptr},
+    {"/api/v1/wifi/scan", HTTP_POST, wifiScan, nullptr},
+    {"/api/v1/data/select", HTTP_POST, dataSelect, nullptr},
+    {"/api/v1/data/fixtures", HTTP_POST, dataFixtures, nullptr},
+    {"/api/v1/data/refresh", HTTP_POST, dataRefresh, nullptr},
+    {"/api/v1/display", HTTP_POST, postDisplay, nullptr},
+    {"/api/v1/images/delete", HTTP_POST, deleteImage, nullptr},
+    {"/api/v1/images/repair", HTTP_POST, repairImages, nullptr},
+    {"/api/v1/images/upload", HTTP_POST, uploadImage, nullptr},
+    {"/api/v1/ota", HTTP_POST, uploadFirmware, nullptr},
+    {"/api/v1/reboot", HTTP_POST, reboot, nullptr},
+    {"/api/v1/reset", HTTP_POST, reset, nullptr},
 };
 static_assert(std::size(kRoutes) <= kMaxHandlers,
               "raise max_uri_handlers for the routes");
@@ -1224,7 +1301,8 @@ esp_err_t init() {
     uri.uri = route.path;
     uri.method = route.method;
     uri.handler = route.handler;
-    uri.is_websocket = route.websocket;
+    uri.is_websocket = route.handshake != nullptr;
+    uri.ws_pre_handshake_cb = route.handshake;
     err = httpd_register_uri_handler(server, &uri);
     if (err != ESP_OK) break;
   }

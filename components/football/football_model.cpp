@@ -19,6 +19,28 @@ const char* providerName(cfg::Provider p) {
   }
   return "unknown";
 }
+const char* causeKey(Cause cause) {
+  switch (cause) {
+    case Cause::kNone: return "";
+    case Cause::kNotStarted: return "not_started";
+    case Cause::kProviderOff: return "provider_off";
+    case Cause::kBudget: return "budget_day";
+    case Cause::kBusy: return "busy";
+    case Cause::kNetwork: return "net_lost";
+    case Cause::kTime: return "time_invalid";
+    case Cause::kSettings: return "settings_changed";
+    case Cause::kRateLimited: return "rate_limited";
+    case Cause::kAuth: return "auth";
+    case Cause::kNotFound: return "not_found";
+    case Cause::kHttp: return "http_error";
+    case Cause::kConnect: return "connect";
+    case Cause::kBadResponse: return "bad_response";
+    case Cause::kTooLarge: return "too_large";
+    case Cause::kMemory: return "memory";
+    case Cause::kOther: return "other";
+  }
+  return "other";
+}
 const char* phaseName(Phase phase) {
   switch (phase) {
     case Phase::kUnknown: return "unknown";

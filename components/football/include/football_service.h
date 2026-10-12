@@ -13,6 +13,7 @@ struct Status {
   uint8_t error_route;
   bool stale, busy;
   Text<96> error;
+  Cause cause;  // stable key of 'error'
   Text<96> routing_notice;
 };
 struct SelectionRequest {
@@ -34,6 +35,7 @@ struct SelectionStatus {
   uint16_t count;
   uint32_t revision;
   Text<96> error;
+  Cause cause;  // stable key of 'error'
 };
 // What the published data says about the club's current or next match and
 // about each competition (Web UI overview).

@@ -46,7 +46,8 @@ location label, such as `Europe/Berlin`, rather than a POSIX rule.
 ## Defaults and bounds
 
 The Web UI reads `GET /api/v1/schema`; it does not maintain another defaults
-table. Partial settings requests retain omitted fields, including secrets.
+table. Every rejected value is answered with the name of its field and the
+reason (see [NETWORK.md](NETWORK.md)). Partial settings requests retain omitted fields, including secrets.
 Unknown keys, incorrect types, malformed array lengths and invalid values
 are rejected before a whole-model save.
 
@@ -73,7 +74,7 @@ are rejected before a whole-model save.
 | Defaults outside / matchday / own game | Table / Conference / Own match | enabled available screen |
 | Manual return / scroll-direction reset | 60 / 20 seconds | 0–4000; 0 disables the corresponding timeout |
 | Scroll repetition | 250 ms | 100–2000 ms |
-| Visible conference / table rows | 5 / 5 | 1–5 / 1–9; all stored table rows remain reachable |
+| Visible conference / table rows | 5 / 5 (240 px round: 4 / 5) | 1–5 / 1–9 (240 px round: 1–4 / 1–7); the display profile sets the upper limits, the schema reports them, the API rejects more, stored values above them are clamped when loaded; all stored table rows remain reachable |
 | Slideshow | 15 seconds, no slides | 3–3600 seconds; up to five slides in play order, each the crest or a library image |
 | Image library | empty | up to ten uploaded JPEGs (ids 1–10); crest, screen backgrounds and slides refer to them, id 0 is the stock image |
 | Brightness / night brightness | 100% / 10% | 0–100%; hardware dimming requires a backlight pin |
@@ -87,6 +88,21 @@ are rejected before a whole-model save.
 
 Screen indices are Own match 0, Conference 1, Table 2, Crest/slideshow 3.
 Provider indices are OpenLigaDB 0, API-Football 1, ESPN 2, football-data 3.
+Minimum request spacing is currently a compile-time policy in `app_config.h`:
+5 / 6 / 30 / 6 seconds in that provider order. It applies to every request
+start, including selection lists, and is separate from both the post-refresh
+poll delay and API-Football's stored daily budget. It is not yet an editable
+runtime setting.
+An empty OpenLigaDB season means the current season: the competition list
+uses the season named after the current year from `kSeasonStartMonth`
+(July) on, before that the previous year's, and match requests let
+OpenLigaDB report the current season. A season typed in the setup wizard's
+season field is stored with the competition; picking from the current list
+leaves it empty. WiFi modem sleep is fixed off by `kWifiPowerSave`.
+On the current C6 without a backlight pin, night mode darkens background and
+images. Night brightness is stored/editable, but foreground colour dimming
+belongs to the still-unimplemented display redesign. A changed value is not
+evidence that the physical backlight or text brightness has changed.
 A fallback must use a different provider. Its configured competition, season
 and club plus each active primary/secondary fixture ID explicitly certify
 the pairing; `swapped` declares opposite home/away order. No name matching

@@ -194,6 +194,9 @@ Build setup (`platformio.ini` + `targets/waveshare_esp32s3_lcd128.sdkconfig.defa
 ## GC9A01 display notes
 - 240×240, round visible area (diameter 240 px); corners of the frame buffer
   are not visible.
+- Layout capacity in `displays/gc9a01_240_round.h`: at most 4 visible
+  conference matches and a 7-row table window (`visible_matches_max`,
+  `table_window_max`); settings and the API use them as upper limits.
 - SPI, RGB565. Init: custom command sequence from an earlier
   hardware-verified driver, 40 MHz SPI (verified on S3 and C6). `COLMOD`
   0x05 and 0x55 both select 16 bit/pixel for the SPI (MCU) interface; this

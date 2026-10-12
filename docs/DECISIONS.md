@@ -569,7 +569,8 @@ before introducing network buffers or a console hook.
   single-core scheduler pause and format afterwards. Overflow produces no
   partial/stale rows. Enable FreeRTOS trace without CPU runtime statistics
   or its text-formatting helpers.
-- Register `app_loop` with the existing 5 s task watchdog after startup and
+- Register `app_loop` with the existing task watchdog (5 s when decided, now
+  15 s as an interim value, see docs/ARCHITECTURE.md) after startup and
   feed it after each completed polling iteration, independently of console
   settings. Preserve IDLE/LVGL supervision and the existing abnormal-reset
   headless policy; this does not supervise event-subscriber liveness.
@@ -764,3 +765,98 @@ format-2 record, removal of the legacy image files and the first USB install
 are verified on the host only; device acceptance is pending. The page in
 `web/index.html` still edits the removed fixed slots until its rewrite; settings
 remain changeable through export/import and the API meanwhile.
+
+## ADR-025 — REST API for the new design: sessions, field-level errors, list and image endpoints · Accepted 2026-10-12
+
+**Context:** the Web UI review found that a second browser logged the first
+one out (one session slot), that a rejected request could end in a connection
+reset instead of a readable message, that a 400 did not say which value was
+wrong, and that the new list model had no endpoints for fixtures or image
+files. The owner decided the open points on 2026-10-12 (OQ-89 to OQ-93).
+
+**Decision:**
+- **Sessions:** a table of four slots (`cfg::kSessionSlots`) with a sliding
+  15-minute expiry; the least recently used slot is replaced by a new login.
+  Saving settings keeps every session; only a changed admin password ends the
+  other sessions. Wire format unchanged (`X-CSRF-Token`, `POST /session →
+  {token, expires_ms}`), plus `GET /session → {password_set, valid}`.
+- **Errors:** `{"error","code"[,"field"]}`. `code` is the settings reason name
+  for value errors, otherwise a stable word per failure; `field` names the
+  rejected value. The unread request body is drained (up to 32 KB) before the
+  answer, so the browser reads it and the connection stays usable. Message
+  strings the current page matches on are unchanged.
+- **Validation:** settings are validated against the display profile's limits
+  (`visible_matches_max`, `table_window_max`: 240 px round 4 and 7); the schema
+  reports them under `bounds`, the API rejects above them, stored values are
+  clamped when loaded (OQ-92).
+- **Host and origin:** the Host header must name the device (case-insensitive,
+  `:80` accepted), an `Origin` must be `http://` plus that host.
+- **Endpoints:** `GET /fixtures` (primary from the published data, fallback
+  from its own provider job started by `POST /data/fixtures`, OQ-90),
+  `GET /images/file` with per-image revision and long cache lifetime (W41),
+  `POST /display` for `next` and `ip` through the event bus (OQ-91), `/status`
+  extended by the shown screen, the club's own match and per-competition state.
+- **Debug stream:** the token stays in the URL query (a browser WebSocket
+  cannot set headers); the log never prints the query; the stream ends with
+  the session that opened it (OQ-93). ESP-IDF's httpd answers the WebSocket
+  handshake itself and never calls the URI handler for it, so origin, Browser
+  debug, token and the free slot are checked in a pre-handshake callback
+  (`CONFIG_HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT`) and a refusal is an ordinary
+  HTTP error before any upgrade (verified failure on the first firmware, fix
+  pending device re-check).
+- **Memory evidence:** `GET /status` reports `heap_min` and the minimum free
+  stack of every task, so load tests need no serial port (0 B static RAM,
+  about 720 B heap scratch and 384 B HTTP task stack per call).
+- One handler per route (26 of 40 registered), instead of dispatching by
+  string comparison, which keeps each handler's stack frame small.
+
+**Alternatives:** keep one session slot (fails the two-browser requirement);
+a cookie session (needs a different CSRF scheme and a page change); close the
+connection after every error (the previous behaviour; unverified whether it alone caused the reported resets); one
+fixtures job shared with the competition lists (the picker would have to wait
+for and overwrite the list the user is editing).
+
+**Cost and boundary:** C6 clean build against L41: firmware.bin +18,448 B,
+PIO flash +18,444 B (82.8 %, 39,858 B below the 85 % line), static RAM +312 B,
+gzip asset unchanged. HTTP handlers 26 of 40. Bodies above 32 KB (firmware,
+oversize images) cannot be drained, so their rejection can still end in a reset
+connection; the page must check sizes before uploading. `web/index.html` is not
+adapted at that earlier checkpoint: its removed fixed-slot accesses actually
+aborted startup before a session could be created; the earlier claim that
+other sections kept working was incorrect. Device checks on 2026-10-12: the W03 reproduction, two sessions
+saving in parallel for 16.5 minutes, field names on every value error and
+keep-alive after errors pass; the debug socket, image replace/delete and the
+heap and stack reserves are checked after the pre-handshake fix is flashed.
+Browser behaviour is not verified.
+
+### Browser rewrite completion and additive API fields · 2026-10-12
+
+The page now implements six task-oriented sections with an independent startup,
+one global draft/save, schema-based validation, explicit secret modes and
+saved-only fixture picking. Search/scan/error states are observable rather
+than inferred from English error strings or fixed delays. The endpoint adds
+scan completion/error, full ELF build identity, actual OTA capacity and a
+separate confirmed image-storage repair preserving other settings. Reference
+save failure after formatting is an explicit partial result.
+
+The page remains embedded/offline without a framework or new firmware
+dependency. Its larger cost is measured before a later reduction decision:
+41,432 B gzip (+28,302 B); C6 flash 1,551,506 B (84.6%), static RAM 197,380 B.
+The result fits the existing OTA slot and is about 8.3 KB below the 85% goal.
+Thirty-two host logic/markup tests pass, and the actual page was loaded
+locally without a device API to check retry visibility. This is not physical
+device, gesture, transport, upload or rollback acceptance. The display redesign
+has not started; the owner tests this browser stage first.
+
+### OpenLigaDB round and club requests, modem sleep off · 2026-10-12
+
+A full OpenLigaDB refresh no longer streams the whole season (about 300 KB in
+October, growing to roughly twice that by May). It requests the current round
+and the own club's fixtures around today, filtered to the route's competition
+and season, which covers the same retained fixtures as the former season
+filter: about 26 KB per refresh including the table. The competition list
+requests one season and offers only football entries. The 30-second operation
+deadline is unchanged: it limits stalled transfers and how long TLS memory and
+the heavy-operation token are held; it is not a rate limit. Station modem
+sleep, previously the unchosen ESP-IDF default, is now off on every profile.
+Flash +838 B, static RAM unchanged. Device transfer times are not yet measured.
