@@ -16,6 +16,9 @@ for component in pure_components:
         str(component_root),
     )
 
+# Header-only session table of the Web component; its other sources need IDF.
+env.Append(CPPPATH=[str(project_root / "components" / "web" / "include")])
+
 # Pure coordinator in the core service; the remaining core files require IDF.
 core_root = project_root / "components" / "core"
 env.Append(CPPPATH=[str(core_root / "include")])

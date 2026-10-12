@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -58,13 +59,68 @@ enum class Field : uint8_t {
 };
 inline constexpr std::size_t kFieldCount = 10;
 
-struct Route {
-  bool enabled = cfg::kRouteEnabledDefault;
+// Ordered list: fixed storage plus a count. Entries 0..count-1 are always
+// valid (no holes); comparison ignores the unused storage.
+template <typename T, std::size_t Capacity>
+struct List {
+  static_assert(Capacity <= 255, "count is stored in one byte");
+  static constexpr std::size_t kCapacity = Capacity;
+
+  uint8_t count = 0;
+  std::array<T, Capacity> items{};
+
+  std::size_t size() const noexcept { return count; }
+  bool empty() const noexcept { return count == 0; }
+  bool full() const noexcept { return count == Capacity; }
+  T& operator[](std::size_t index) noexcept { return items[index]; }
+  const T& operator[](std::size_t index) const noexcept {
+    return items[index];
+  }
+  T* begin() noexcept { return items.data(); }
+  T* end() noexcept { return items.data() + count; }
+  const T* begin() const noexcept { return items.data(); }
+  const T* end() const noexcept { return items.data() + count; }
+
+  // Fails and keeps the list if it is full.
+  bool push(const T& value) noexcept {
+    if (full()) return false;
+    items[count++] = value;
+    return true;
+  }
+  void clear() noexcept {
+    items = {};
+    count = 0;
+  }
+
+  bool operator==(const List& other) const noexcept {
+    return count == other.count && std::equal(begin(), end(), other.begin());
+  }
+};
+
+// Where one competition's data comes from: a provider's competition and team.
+struct Source {
   cfg::Provider provider = cfg::kProviderDefault;
-  Bytes<32> competition;
-  Bytes<16> season;
-  Bytes<32> team;
-  bool operator==(const Route&) const noexcept = default;
+  Bytes<cfg::kCompetitionIdMaxBytes> competition;
+  Bytes<cfg::kSeasonMaxBytes> season;
+  Bytes<cfg::kTeamIdMaxBytes> team;
+  bool complete() const noexcept {
+    return !competition.empty() && !team.empty();
+  }
+  bool operator==(const Source&) const noexcept = default;
+};
+
+// A league or cup the team plays in. 'active' false pauses it (the entry stays
+// complete and visible). The fallback is a second source of another provider.
+// The display names are stored when a competition and club are picked from a
+// provider list (OQ-75); they may be empty.
+struct Competition {
+  bool active = cfg::kEntryActiveDefault;
+  bool fallback_active = cfg::kFallbackActiveDefault;
+  Source primary;
+  Source fallback;
+  Bytes<cfg::kDisplayNameMaxBytes> competition_name;
+  Bytes<cfg::kDisplayNameMaxBytes> team_name;
+  bool operator==(const Competition&) const noexcept = default;
 };
 
 struct ScreenStyle {
@@ -74,18 +130,23 @@ struct ScreenStyle {
   uint32_t text = cfg::kThemeTextDefault;
   uint32_t accent = cfg::kThemeAccentDefault;
   uint8_t text_scale = cfg::kTextScaleDefault;
+  // Library image id (1..cfg::kImageLibraryMax) or cfg::kStockImageId. The
+  // crest screen shows the crest or its slides and has no background image.
+  uint8_t image = cfg::kStockImageId;
   bool operator==(const ScreenStyle&) const noexcept = default;
 };
 
 const char* fieldName(Field field) noexcept;
 
-// Explicitly verified provider fixture identity; no name/time matching.
-struct FixtureMapping {
-  bool enabled = cfg::kFixtureMappingEnabledDefault;
-  uint8_t route = 0;
-  bool swapped = cfg::kFixtureMappingSwappedDefault;
-  Bytes<cfg::kIdBytes> primary, secondary;
-  bool operator==(const FixtureMapping&) const noexcept = default;
+// Explicitly verified provider fixture identity of a competition (index into
+// Model::competitions): the match's id at the primary and at the fallback
+// provider; no name/time matching.
+struct FixturePair {
+  bool active = cfg::kEntryActiveDefault;
+  bool swapped = cfg::kFixturePairSwappedDefault;
+  uint8_t competition = 0;
+  Bytes<cfg::kIdBytes> primary_id, secondary_id;
+  bool operator==(const FixturePair&) const noexcept = default;
 };
 
 struct Model {
@@ -103,10 +164,9 @@ struct Model {
   Bytes<cfg::kNtpServerMaxChars> ntp_server;
 
   // Append-only application settings, after the original nine fields.
-  Bytes<64> admin_password;
-  Bytes<96> api_football_key;
-  Bytes<64> football_data_key;
-  std::array<Route, cfg::kRouteCount> routes{};
+  Bytes<cfg::kAdminPasswordMaxBytes> admin_password;
+  Bytes<cfg::kApiFootballKeyMaxBytes> api_football_key;
+  Bytes<cfg::kFootballDataKeyMaxBytes> football_data_key;
   std::array<ScreenStyle, cfg::kScreenCount> screens{};
   bool espn_opt_in = cfg::kEspnOptInDefault;
   bool demo = cfg::kDemoDefault;
@@ -134,8 +194,13 @@ struct Model {
   uint16_t window_before = cfg::kMatchWindowDefaultMinutes;
   uint16_t window_after = cfg::kMatchWindowDefaultMinutes;
   uint16_t api_daily_budget = cfg::kProviderBudgetDefault;
-  std::array<Route, cfg::kRouteCount> fallback_routes{};
-  std::array<FixtureMapping, cfg::kFixtureMappings> fixture_mappings{};
+
+  // Format 3 lists. The first active competition supplies the league table.
+  List<Competition, cfg::kCompetitionMax> competitions;
+  List<FixturePair, cfg::kFixtureMappingMax> fixture_pairs;
+  uint8_t crest_image = cfg::kStockImageId;  // library id, 0 = stock crest
+  // Crest screen slideshow in play order: 0 = the crest, else a library id.
+  List<uint8_t, cfg::kSlideMax> slides;
 
   bool operator==(const Model& other) const noexcept = default;
 };
@@ -147,10 +212,102 @@ bool isValidHostname(std::string_view value) noexcept;
 bool isValidStatusInterval(uint16_t seconds) noexcept;
 bool isValidTimeZone(std::string_view label) noexcept;
 bool isValidNtpServer(std::string_view value) noexcept;
+// A provider's competition, team or fixture identifier (may be empty).
+bool isValidIdentifier(std::string_view value) noexcept;
+// A season: empty, or digits (exactly four unless the provider is OpenLigaDB).
+bool isValidSeason(cfg::Provider provider, std::string_view season) noexcept;
+
+// Maxima of the two settings whose range depends on the display layout
+// (OQ-85, OQ-92). The boot code passes the display profile's values; the
+// defaults are the widest bounds in app_config.h.
+struct Limits {
+  uint8_t visible_matches_max = static_cast<uint8_t>(cfg::kVisibleMatchesRange.max);
+  uint8_t table_window_max = static_cast<uint8_t>(cfg::kTableWindowRange.max);
+};
+
+// Why a value was rejected. The names (reasonName) are the stable codes the
+// REST API reports next to the field path.
+enum class Reason : uint8_t {
+  kInvalid,      // wrong format or characters
+  kRange,        // number outside its bounds
+  kType,         // JSON value of the wrong type
+  kUnknownKey,   // JSON key the device does not know
+  kTooLong,      // text longer than its capacity
+  kTooMany,      // more list entries than the capacity
+  kRequired,     // empty where a value is needed
+  kDuplicate,    // value used twice where it must be unique
+  kReference,    // points at an entry that does not exist or is inactive
+  kConflict,     // contradicts another field
+  kNoneEnabled,  // not a single screen enabled
+};
+const char* reasonName(Reason reason) noexcept;
+
+// A JSON path such as "competitions[1].fallback.team" (names as in the
+// settings JSON). Text beyond the buffer is cut, never written past it.
+class FieldPath {
+ public:
+  FieldPath& key(const char* name) noexcept {
+    if (length_ > 0) append('.');
+    while (*name != '\0') append(*name++);
+    return *this;
+  }
+  FieldPath& index(unsigned n) noexcept {
+    append('[');
+    if (n >= 10) append(static_cast<char>('0' + n / 10 % 10));
+    append(static_cast<char>('0' + n % 10));
+    append(']');
+    return *this;
+  }
+  // A copy with one more key; the original stays the parent path.
+  FieldPath with(const char* name) const noexcept {
+    FieldPath copy = *this;
+    copy.key(name);
+    return copy;
+  }
+  FieldPath withIndex(unsigned n) const noexcept {
+    FieldPath copy = *this;
+    copy.index(n);
+    return copy;
+  }
+  const char* c_str() const noexcept { return text_.data(); }
+
+ private:
+  void append(char c) noexcept {
+    if (length_ + 1 < text_.size()) text_[length_++] = c;
+  }
+  std::array<char, cfg::kFieldPathBytes> text_{};
+  std::size_t length_ = 0;
+};
+
+// The first rejected value: where it is and why.
+struct Violation {
+  std::array<char, cfg::kFieldPathBytes> path{};  // NUL-terminated
+  Reason reason = Reason::kInvalid;
+
+  void set(const FieldPath& at, Reason why) noexcept {
+    std::size_t n = 0;
+    for (const char* c = at.c_str(); *c != '\0' && n + 1 < path.size(); ++c)
+      path[n++] = *c;
+    path[n] = '\0';
+    reason = why;
+  }
+};
 
 // True if every field is within its limits; otherwise *invalid (if given)
-// names the first rejected field.
-bool validate(const Model& model, Field* invalid = nullptr) noexcept;
+// names the first rejected field group and *violation (if given) the exact
+// path. 'limits' narrows the layout-dependent ranges.
+bool validate(const Model& model, Field* invalid = nullptr,
+              Violation* violation = nullptr,
+              const Limits& limits = {}) noexcept;
+
+// Bit n set = library image n exists (bit 0, the stock image, is ignored).
+using ImageMask = uint16_t;
+static_assert(cfg::kImageLibraryMax < 16, "ImageMask has 16 bits");
+
+// Replaces every reference to a library image missing from 'present' by the
+// stock image and removes it from the slides (a slide never stays empty).
+// True if the model changed.
+bool dropMissingImages(Model& model, ImageMask present) noexcept;
 
 // Values from secrets.h; empty = not set.
 struct Presets {
@@ -176,7 +333,9 @@ inline constexpr FieldMask fieldBit(Field field) noexcept {
 
 // Defaults from app_config.h, each overridden by its preset when set and
 // valid. Invalid presets are skipped (default kept) and reported in *rejected.
-Model initialValues(const Presets& presets,
-                    FieldMask* rejected = nullptr) noexcept;
+// 'limits' clamps the layout-dependent defaults (the default equals the
+// maximum, OQ-85).
+Model initialValues(const Presets& presets, FieldMask* rejected = nullptr,
+                    const Limits& limits = {}) noexcept;
 
 }  // namespace settings

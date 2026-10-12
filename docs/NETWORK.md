@@ -155,9 +155,9 @@ or worker startup failures.
 | POST or PUT `/api/v1/settings` | Strictly typed settings patch |
 | POST `/api/v1/export` | Explicit settings export |
 | POST `/api/v1/wifi/scan`, `/data/select`, `/data/refresh` | Start asynchronous scan, selection or refresh |
-| POST `/api/v1/images/upload`, `/images/reset` | Upload/reset one slot or explicitly format image storage |
+| POST `/api/v1/images/upload`, `/images/delete` | Upload a library image (optional `X-Image-Id` replaces one) or delete one by id |
 | POST `/api/v1/ota` | Stream compatible firmware to the inactive slot |
-| POST `/api/v1/reboot`, `/reset` | Reboot or reset settings, optionally images |
+| POST `/api/v1/reboot`, `/reset` | Reboot or reset settings, optionally delete all images or format image storage |
 | WebSocket `/api/v1/debug` | Controlled live status while the Debug tab is open |
 
 After the first full path, shortened paths in the table retain `/api/v1`.
@@ -179,7 +179,7 @@ requests. No certificate or local HTTPS service is installed.
 
 The firmware contains a 92-byte versioned identity descriptor after the ESP
 application descriptor. Upload checks cover project name, chip, target profile,
-`4mb_ota_littlefs_v1` layout, supported settings format 2 and slot size before writing;
+`4mb_ota_littlefs_v1` layout, a settings format equal to or newer than the running one and slot size before writing;
 ESP-IDF validates the final image. A malformed/truncated upload does not select
 the new slot. Compatible development versions are allowed in either direction;
 there is no enforced monotonic version counter.
@@ -191,10 +191,13 @@ are not prerequisites. Failed local health explicitly invalidates/reboots the
 image; if no previous bootable image exists, the fallback is a reboot path,
 not a promised recovery image.
 
-Valid format-1 core settings are imported into RAM without a write. The next
-explicit save writes format 2 because the expanded record exceeds the old
-1 KB reader. Browser OTA requires matching format 2; a manual USB downgrade
-after a new save selects old-firmware initial values.
+Valid format-1 and format-2 settings are converted in RAM without a write. The
+next explicit save writes format 3, which an older firmware cannot read. Browser
+OTA therefore refuses an image with an older settings format and accepts an
+equal or newer one (a newer image migrates the stored settings). The first
+format-3 image is installed by USB, because the running firmware's gate still
+demands an equal format. A manual USB downgrade after a new save selects
+old-firmware initial values.
 
 NVS and LittleFS are shared between slots. Until trial confirmation, persistent
 settings/image operations and durable provider-budget spending are blocked.

@@ -86,7 +86,9 @@ esp_err_t begin(const uint8_t* bytes, std::size_t count, std::size_t total) {
              sizeof(app.project_name)) != 0 ||
       custom.magic != identity().magic ||
       custom.version != identity().version ||
-      custom.settings_format != identity().settings_format ||
+      // A newer image migrates the stored settings; an older one could not
+      // read them (OQ-72).
+      custom.settings_format < identity().settings_format ||
       memcmp(custom.target, identity().target, sizeof(custom.target)) != 0 ||
       memcmp(custom.layout, identity().layout, sizeof(custom.layout)) != 0)
     return ESP_ERR_INVALID_RESPONSE;

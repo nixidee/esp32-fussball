@@ -45,7 +45,7 @@ def main():
     profile = (ROOT / match[1]).read_text()
     size = tuple(int(re.search(rf"\.{axis}\s*=\s*(\d+)", profile)[1]) for axis in ("width", "height"))
     config = (ROOT / "include/app_config.h").read_text()
-    names = list(dict.fromkeys(re.findall(r'"([a-z0-9_]+)\.jpg"', re.search(r"kDefaultImageFiles\[\]\[32\]\s*=\s*\{([^}]+)\}", config)[1])))
+    names = list(dict.fromkeys(re.findall(r'"([a-z0-9_]+)\.jpg"', re.search(r"kStockImageFiles\[\]\[32\]\s*=\s*\{([^}]+)\}", config)[1])))
     maximum = int(re.search(r"kImageMaxBytes\s*=\s*(\d+)", config)[1])
     (ROOT / "data").mkdir(exist_ok=True)
     total = 0

@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 
@@ -32,15 +34,17 @@ std::atomic<bool> time_changed{false};
 SelectionRequest selection_request;
 Selection selections[cfg::kSelectionEntries];
 SelectionStatus selection_state{};
-uint32_t requests[4]{}, day_requests[4]{};
-int64_t last_request[4]{}, day = 0, due = 0;
+// Competition whose fetch failed last (mutex-protected, like selection_state).
+uint8_t error_route = kNoRoute;
+uint32_t requests[cfg::kProviderCount]{}, day_requests[cfg::kProviderCount]{};
+int64_t last_request[cfg::kProviderCount]{}, day = 0, due = 0;
 uint32_t last_generation = 0, last_epoch = 0;
 struct RouteCache {
-  char season[17]{}, change[64]{};
+  char season[cfg::kSeasonMaxBytes + 1]{}, change[64]{};
   int round = 0;
   int64_t full_at = 0, season_at = 0;
 };
-RouteCache caches[cfg::kRouteCount];
+RouteCache caches[cfg::kCompetitionMax];
 bool baseline = true;
 const char* str(ArduinoJson::JsonVariantConst v) {
   return v.is<const char*>() ? v.as<const char*>() : "";
@@ -160,7 +164,7 @@ void tagScore(Score& value, cfg::Provider provider) {
   tag(value.home, provider);
   tag(value.away, provider);
 }
-void tagMatch(Snapshot& data, Match& m, const settings::Route& route) {
+void tagMatch(Snapshot& data, Match& m, const settings::Source& route) {
   m.provider = m.home.provider = m.away.provider = route.provider;
   m.own = route.team.view() == m.home.id.data ||
           route.team.view() == m.away.id.data;
@@ -201,7 +205,7 @@ bool appendMatch(Snapshot& target, const Snapshot& from, const Match& source,
   return true;
 }
 bool appendRoute(Snapshot& target, Snapshot& from,
-                 const settings::Route& route) {
+                 const settings::Source& route) {
   for (unsigned i = 0; i < from.match_count; ++i) {
     tagMatch(from, from.matches[i], route);
     if (!appendMatch(target, from, from.matches[i])) return false;
@@ -247,9 +251,9 @@ bool group(ArduinoJson::JsonVariantConst row, void* context) {
   return *result > 0 && *result <= 1000;
 }
 bool season(ArduinoJson::JsonVariantConst row, void* context) {
-  auto* route = static_cast<settings::Route*>(context);
+  auto* route = static_cast<settings::Source*>(context);
   if (row["leagueSeason"].is<int>()) {
-    char b[17];
+    char b[cfg::kSeasonMaxBytes + 1];
     snprintf(b, sizeof(b), "%d", row["leagueSeason"].as<int>());
     return route->season.assign(b);
   }
@@ -264,14 +268,19 @@ void dates(int64_t utc, char* from, char* to, bool compact) {
   strftime(from, 16, compact ? "%Y%m%d" : "%Y-%m-%d", &a);
   strftime(to, 16, compact ? "%Y%m%d" : "%Y-%m-%d", &b);
 }
-esp_err_t routeFetch(settings::Route route, uint8_t index,
+// 'table_source' marks the competition that supplies the league table (the
+// first active one). 'events' false skips the per-match event requests of
+// API-Football (the fixture picker needs only the match list).
+esp_err_t routeFetch(settings::Source route, uint8_t index, bool table_source,
                      const settings::Model& model, uint32_t generation,
-                     Snapshot& target, int64_t utc, bool primary = true) {
-  char url[384], competition[33]{}, season_text[17]{};
+                     Snapshot& target, int64_t utc, bool primary = true,
+                     bool events = true) {
+  char url[384], competition[cfg::kCompetitionIdMaxBytes + 1]{},
+      season_text[cfg::kSeasonMaxBytes + 1]{};
   memcpy(competition, route.competition.data.data(), route.competition.length);
   memcpy(season_text, route.season.data.data(), route.season.length);
   const auto p = route.provider;
-  char own_team[33]{};
+  char own_team[cfg::kTeamIdMaxBytes + 1]{};
   memcpy(own_team, route.team.data.data(), route.team.length);
   Mapping mapping{&target, p, index, utc, false, {own_team, 0}};
   esp_err_t err;
@@ -338,7 +347,7 @@ esp_err_t routeFetch(settings::Route route, uint8_t index,
         if (!appendMatch(target, prior, match, true))
           return ESP_ERR_INVALID_SIZE;
       }
-      if (index == 0 && prior.table_count &&
+      if (table_source && prior.table_count &&
           prior.table[0].team.provider == p) {
         target.table = prior.table;
         target.table_count = prior.table_count;
@@ -350,7 +359,7 @@ esp_err_t routeFetch(settings::Route route, uint8_t index,
     snprintf(url, sizeof(url), "https://api.openligadb.de/getmatchdata/%s/%s",
              competition, season_text);
     err = get(url, "", p, model, generation, consume, &mapping, true);
-    if (index == 0 && err == ESP_OK) {
+    if (table_source && err == ESP_OK) {
       mapping.table = true;
       snprintf(url, sizeof(url), "https://api.openligadb.de/getbltable/%s/%s",
                competition, season_text);
@@ -370,7 +379,7 @@ esp_err_t routeFetch(settings::Route route, uint8_t index,
              "fixtures?league=%s&season=%s&from=%s&to=%s",
              competition, season_text, from, to);
     err = get(url, "response", p, model, generation, consume, &mapping);
-    if (index == 0 && err == ESP_OK) {
+    if (table_source && err == ESP_OK) {
       mapping.table = true;
       snprintf(
           url, sizeof(url),
@@ -378,7 +387,7 @@ esp_err_t routeFetch(settings::Route route, uint8_t index,
           competition, season_text);
       err = get(url, "response", p, model, generation, consume, &mapping);
     }
-    if (err == ESP_OK)
+    if (err == ESP_OK && events)
       for (unsigned i = 0; i < target.match_count; ++i) {
         auto& match = target.matches[i];
         if (match.route != index || (route.team.view() != match.home.id.data &&
@@ -410,7 +419,7 @@ esp_err_t routeFetch(settings::Route route, uint8_t index,
              competition, from, to,
              route.season.empty() ? "" : "&season=", season_text);
     err = get(url, "matches", p, model, generation, consume, &mapping);
-    if (index == 0 && err == ESP_OK) {
+    if (table_source && err == ESP_OK) {
       mapping.table = true;
       snprintf(url, sizeof(url),
                "https://api.football-data.org/v4/competitions/%s/standings%s%s",
@@ -450,7 +459,7 @@ esp_err_t routeFetch(settings::Route route, uint8_t index,
           route.season.empty() ? "" : "?season=", season_text);
       err = get(url, "events", p, model, generation, consume, &mapping, true);
     }
-    if (index == 0 && err == ESP_OK) {
+    if (table_source && err == ESP_OK) {
       mapping.table = true;
       snprintf(url, sizeof(url),
                "https://site.web.api.espn.com/apis/v2/sports/soccer/%s/"
@@ -514,7 +523,65 @@ bool selectionRow(ArduinoJson::JsonVariantConst row, void* context) {
   unlock();
   return true;
 }
-void runSelection(const settings::Model& model, uint32_t generation) {
+void finishSelection(esp_err_t err) {
+  lock();
+  if (err != ESP_OK) {
+    // Distinct codes so the Web UI can explain each cause.
+    selection_state.error.assign(reason(err));
+    selection_state.count = 0;
+  }
+  selection_state.busy = false;
+  ++selection_state.revision;
+  // Cleared under the mutex: select() checks it there before a new job.
+  selecting.store(false);
+  unlock();
+}
+// Picker entry of a match: provider match id, kickoff (UTC seconds as text,
+// empty if unknown) and "home - away".
+void fixtureEntry(const Match& m, Selection& out) {
+  out = {};
+  out.id.assign(m.id.data);
+  if (m.kickoff.valid()) {
+    char text[24];
+    snprintf(text, sizeof(text), "%lld",
+             static_cast<long long>(m.kickoff.value));
+    out.season.assign(text);
+  }
+  char label[2 * cfg::kNameBytes + 4];
+  snprintf(label, sizeof(label), "%s - %s", m.home.name.data,
+           m.away.name.data);
+  out.name.assign(label);
+}
+// Loads the club's matches at the fallback source of competition 'route' into
+// the selection table. Same data a fallback round would use for pairing.
+esp_err_t runFixtures(const settings::Model& model, uint32_t generation,
+                      uint8_t route, int64_t utc) {
+  if (route >= model.competitions.size() ||
+      !model.competitions[route].fallback.complete())
+    return ESP_ERR_INVALID_ARG;
+  const auto& source = model.competitions[route].fallback;
+  route_scratch.reset();
+  const auto err = routeFetch(source, route, false, model, generation,
+                              route_scratch, utc, false, false);
+  if (err != ESP_OK) return err;
+  for (unsigned i = 0; i < route_scratch.match_count; ++i) {
+    const auto& m = route_scratch.matches[i];
+    if (source.team.view() != m.home.id.data &&
+        source.team.view() != m.away.id.data)
+      continue;
+    Selection entry;
+    fixtureEntry(m, entry);
+    lock();
+    if (selection_state.count >= cfg::kSelectionEntries)
+      selection_state.more = true;
+    else
+      selections[selection_state.count++] = entry;
+    unlock();
+  }
+  return ESP_OK;
+}
+void runSelection(const settings::Model& model, uint32_t generation,
+                  int64_t utc) {
   SelectionRequest request;
   lock();
   request = selection_request;
@@ -522,6 +589,10 @@ void runSelection(const settings::Model& model, uint32_t generation) {
   selection_state.more = false;
   selection_state.error = {};
   unlock();
+  if (request.fixtures) {
+    finishSelection(runFixtures(model, generation, request.route, utc));
+    return;
+  }
   char url[384], comp[33]{}, season_text[33]{};
   char country[145]{};
   const char* country_name = request.country.empty()
@@ -544,7 +615,7 @@ void runSelection(const settings::Model& model, uint32_t generation) {
   esp_err_t err = ESP_OK;
   if (request.provider == cfg::Provider::kOpenLigaDb) {
     if (request.teams && request.season.empty()) {
-      settings::Route current;
+      settings::Source current;
       snprintf(url, sizeof(url), "https://api.openligadb.de/getmatchdata/%s",
                comp);
       err = get(url, "", request.provider, model, generation, season, &current,
@@ -596,17 +667,7 @@ void runSelection(const settings::Model& model, uint32_t generation) {
   if (err == ESP_OK)
     err = get(url, key, request.provider, model, generation, selectionRow,
               &context, true);
-  lock();
-  if (err != ESP_OK) {
-    // Distinct codes so the Web UI can explain each cause.
-    selection_state.error.assign(reason(err));
-    selection_state.count = 0;
-  }
-  selection_state.busy = false;
-  ++selection_state.revision;
-  // Cleared under the mutex: select() checks it there before a new job.
-  selecting.store(false);
-  unlock();
+  finishSelection(err);
 }
 template <class T>
 void fill(Value<T>& primary, const Value<T>& secondary) {
@@ -624,20 +685,20 @@ bool isGoal(EventType type) {
          type == EventType::kPenaltyGoal || type == EventType::kPenaltyMissed;
 }
 void compose(Snapshot& primary, Snapshot& secondary,
-             const settings::Model& model, uint8_t route) {
-  const auto& fallback = model.fallback_routes[route];
+             const settings::Model& model, uint8_t route, bool table_source) {
+  const auto& fallback = model.competitions[route].fallback;
   for (unsigned i = 0; i < secondary.match_count; ++i)
     tagMatch(secondary, secondary.matches[i], fallback);
-  for (const auto& pair : model.fixture_mappings) {
-    if (!pair.enabled || pair.route != route) continue;
+  for (const auto& pair : model.fixture_pairs) {
+    if (!pair.active || pair.competition != route) continue;
     Match* a = nullptr;
     const Match* b = nullptr;
     for (unsigned i = 0; i < primary.match_count; ++i)
       if (primary.matches[i].route == route &&
-          pair.primary.view() == primary.matches[i].id.data)
+          pair.primary_id.view() == primary.matches[i].id.data)
         a = &primary.matches[i];
     for (unsigned i = 0; i < secondary.match_count; ++i)
-      if (pair.secondary.view() == secondary.matches[i].id.data)
+      if (pair.secondary_id.view() == secondary.matches[i].id.data)
         b = &secondary.matches[i];
     if (!a || !b) continue;
     if (!confirmed(a->phase_source) && confirmed(b->phase_source)) {
@@ -670,7 +731,7 @@ void compose(Snapshot& primary, Snapshot& secondary,
     }
     a->events_truncated |= b->events_truncated;
   }
-  if (route == 0 && primary.table_count == 0 && secondary.table_count) {
+  if (table_source && primary.table_count == 0 && secondary.table_count) {
     for (unsigned i = 0; i < secondary.table_count; ++i) {
       auto row = secondary.table[i];
       row.team.provider = fallback.provider;
@@ -684,24 +745,26 @@ void compose(Snapshot& primary, Snapshot& secondary,
     primary.table_count = secondary.table_count;
   }
 }
-esp_err_t routedFetch(uint8_t route, const settings::Model& model,
-                      uint32_t generation, Snapshot& target, int64_t utc) {
+esp_err_t routedFetch(uint8_t route, bool table_source,
+                      const settings::Model& model, uint32_t generation,
+                      Snapshot& target, int64_t utc) {
+  const auto& competition = model.competitions[route];
   route_scratch.reset();
-  auto err = routeFetch(model.routes[route], route, model, generation,
-                        route_scratch, utc);
+  auto err = routeFetch(competition.primary, route, table_source, model,
+                        generation, route_scratch, utc);
   const bool primary_ok = err == ESP_OK;
-  if (primary_ok && !appendRoute(target, route_scratch, model.routes[route]))
+  if (primary_ok && !appendRoute(target, route_scratch, competition.primary))
     return ESP_ERR_INVALID_SIZE;
   bool mapped = false;
-  for (const auto& pair : model.fixture_mappings)
-    mapped |= pair.enabled && pair.route == route;
-  const auto& fallback = model.fallback_routes[route];
-  if (!fallback.enabled ||
-      (primary_ok && !mapped && (route != 0 || target.table_count)))
+  for (const auto& pair : model.fixture_pairs)
+    mapped |= pair.active && pair.competition == route;
+  const auto& fallback = competition.fallback;
+  if (!competition.fallback_active ||
+      (primary_ok && !mapped && (!table_source || target.table_count)))
     return err;
   route_scratch.reset();
-  err =
-      routeFetch(fallback, route, model, generation, route_scratch, utc, false);
+  err = routeFetch(fallback, route, table_source, model, generation,
+                   route_scratch, utc, false);
   if (err != ESP_OK) {
     if (primary_ok) {
       target.routing_notice.assign(esp_err_to_name(err));
@@ -710,7 +773,7 @@ esp_err_t routedFetch(uint8_t route, const settings::Model& model,
     return err;
   }
   if (primary_ok)
-    compose(target, route_scratch, model, route);
+    compose(target, route_scratch, model, route, table_source);
   else {
     if (!appendRoute(target, route_scratch, fallback))
       return ESP_ERR_INVALID_SIZE;
@@ -774,6 +837,7 @@ void worker(void*) {
       lock();
       slots[published].reset();
       slots[published].generation = generation;
+      error_route = kNoRoute;
       unlock();
       last_generation = generation;
       for (auto& cache : caches) cache = {};
@@ -812,7 +876,7 @@ void worker(void*) {
     if (!selecting.load() && !requested.load() && now < due) continue;
     busy.store(true);
     if (selecting.load()) {
-      runSelection(model, generation);
+      runSelection(model, generation, utc);
       busy.store(false);
       continue;
     }
@@ -823,15 +887,22 @@ void worker(void*) {
     candidate.reset();
     candidate.generation = generation;
     esp_err_t err = ESP_OK;
+    uint8_t failed = kNoRoute;
     if (model.demo)
       demo(candidate);
-    else
-      for (unsigned i = 0; i < model.routes.size(); ++i) {
-        if (!model.routes[i].enabled) continue;
+    else {
+      bool first_active = true;  // supplies the league table
+      for (unsigned i = 0; i < model.competitions.size(); ++i) {
+        if (!model.competitions[i].active) continue;
         candidate.configured = true;
-        err = routedFetch(i, model, generation, candidate, utc);
-        if (err != ESP_OK) break;
+        err = routedFetch(i, first_active, model, generation, candidate, utc);
+        first_active = false;
+        if (err != ESP_OK) {
+          failed = static_cast<uint8_t>(i);
+          break;
+        }
       }
+    }
     uint16_t interval = cfg::kPollIdleS;
     int64_t next_window_ms = cfg::kPollIdleS * 1000LL;
     if (err == ESP_OK && settings::generation() == generation &&
@@ -839,6 +910,7 @@ void worker(void*) {
       candidate.fetched_ms = timekeeping::monotonicMs();
       candidate.stale = false;
       lock();
+      error_route = kNoRoute;
       reconcile(candidate, slots[published], utc);
       if (conferenceWindow(candidate, utc, model.window_before,
                            model.window_after))
@@ -892,6 +964,7 @@ void worker(void*) {
       lock();
       slots[published].stale = true;
       slots[published].error.assign(reason(err));
+      error_route = failed;
       unlock();
       interval = err == ESP_ERR_TIMEOUT || err == ESP_ERR_NOT_ALLOWED
                      ? cfg::kProviderRateRetryS
@@ -922,6 +995,7 @@ esp_err_t init() {
 void refresh() { requested.store(true); }
 Status status() {
   Status s{};
+  s.error_route = kNoRoute;
   if (mutex == nullptr) {
     s.error.assign("not started");
     return s;
@@ -939,6 +1013,7 @@ Status status() {
                                cfg::kDataStaleS * 1000LL);
   s.error = data.error;
   s.routing_notice = data.routing_notice;
+  s.error_route = error_route;
   unlock();
   s.busy = busy.load();
   return s;
@@ -949,7 +1024,8 @@ void read(Reader reader, void* context) {
   reader(slots[published], context);
   unlock();
 }
-esp_err_t select(const SelectionRequest& request) {
+namespace {
+esp_err_t start(const SelectionRequest& request) {
   if (mutex == nullptr) return ESP_ERR_INVALID_STATE;
   lock();
   // The request is stored before the worker can see the flag.
@@ -957,10 +1033,29 @@ esp_err_t select(const SelectionRequest& request) {
   if (!running) {
     selection_request = request;
     selection_state.busy = true;
+    selection_state.fixtures = request.fixtures;
+    selection_state.route = request.route;
     selecting.store(true);
   }
   unlock();
   return running ? ESP_ERR_NOT_FINISHED : ESP_OK;
+}
+}  // namespace
+esp_err_t select(const SelectionRequest& request) {
+  auto list = request;
+  list.fixtures = false;
+  list.route = 0;
+  return start(list);
+}
+esp_err_t selectFixtures(uint8_t route) {
+  const auto model = settings::current();
+  if (route >= model.competitions.size() ||
+      !model.competitions[route].fallback.complete())
+    return ESP_ERR_INVALID_ARG;
+  SelectionRequest request;
+  request.fixtures = true;
+  request.route = route;
+  return start(request);
 }
 SelectionStatus selectionStatus() {
   lock();
@@ -976,5 +1071,86 @@ bool selectionAt(uint16_t index, uint32_t revision, Selection& out) {
   if (ok) out = selections[index];
   unlock();
   return ok;
+}
+Overview overview(int64_t utc) {
+  Overview result{};
+  if (mutex == nullptr) return result;
+  lock();
+  const auto& data = slots[published];
+  const Match* best = nullptr;
+  bool best_live = false;
+  int64_t best_distance = 0;
+  for (unsigned i = 0; i < data.match_count; ++i) {
+    const auto& m = data.matches[i];
+    if (m.route < cfg::kCompetitionMax) {
+      auto& info = result.routes[m.route];
+      if (info.matches == 0) info.provider = m.provider;
+      if (info.matches < UINT8_MAX) ++info.matches;
+    }
+    if (!m.own) continue;
+    const bool live = m.phase == Phase::kLive || m.phase == Phase::kHalfTime ||
+                      m.phase == Phase::kExtraTime ||
+                      m.phase == Phase::kPenalties;
+    // Unknown kickoffs rank last.
+    const int64_t distance =
+        m.kickoff.valid() ? std::llabs(utc - m.kickoff.value) : INT64_MAX;
+    if (best == nullptr || (live && !best_live) ||
+        (live == best_live && distance < best_distance)) {
+      best = &m;
+      best_live = live;
+      best_distance = distance;
+    }
+  }
+  if (best != nullptr) {
+    auto& own = result.own;
+    own.present = true;
+    own.route = best->route;
+    own.phase = best->phase;
+    own.kickoff = best->kickoff.valid() ? best->kickoff.value : 0;
+    if (best->principal.valid()) {
+      own.home_goals = best->principal.home.value;
+      own.away_goals = best->principal.away.value;
+    }
+    if (best->minute.valid()) own.minute = best->minute.value;
+    own.home.assign(best->home.name.data);
+    own.away.assign(best->away.name.data);
+  }
+  unlock();
+  return result;
+}
+uint16_t publishedFixtureCount(uint8_t route, cfg::Provider provider,
+                               uint32_t& revision) {
+  revision = 0;
+  if (mutex == nullptr) return 0;
+  uint16_t count = 0;
+  lock();
+  const auto& data = slots[published];
+  revision = data.revision;
+  for (unsigned i = 0; i < data.match_count; ++i) {
+    const auto& m = data.matches[i];
+    if (m.route == route && m.own && m.provider == provider) ++count;
+  }
+  unlock();
+  return count;
+}
+bool publishedFixtureAt(uint8_t route, cfg::Provider provider, uint16_t index,
+                        uint32_t revision, Selection& out) {
+  if (mutex == nullptr) return false;
+  bool found = false;
+  lock();
+  const auto& data = slots[published];
+  if (data.revision == revision) {
+    uint16_t seen = 0;
+    for (unsigned i = 0; i < data.match_count && !found; ++i) {
+      const auto& m = data.matches[i];
+      if (m.route != route || !m.own || m.provider != provider) continue;
+      if (seen++ == index) {
+        fixtureEntry(m, out);
+        found = true;
+      }
+    }
+  }
+  unlock();
+  return found;
 }
 }  // namespace football

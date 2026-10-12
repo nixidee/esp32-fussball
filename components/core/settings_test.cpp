@@ -64,28 +64,29 @@ void storeRaw(std::span<const uint8_t> record, const char* what) {
 void storePrepared(SettingsTest test) {
   // Record plus room for one unknown trailing field.
   constexpr std::size_t kExtraBytes = 4;
-  std::array<uint8_t, kRecordBytes + kExtraBytes> buffer{};
-  const std::span<uint8_t, kRecordBytes> record(buffer.data(), kRecordBytes);
-  encode(sampleModel(), record);
+  std::array<uint8_t, kMaxRecordBytes + kExtraBytes> buffer{};
+  const Model model = sampleModel();
+  const std::size_t used = encode(
+      model, std::span<uint8_t, kMaxRecordBytes>(buffer.data(), kMaxRecordBytes));
+  const std::span<uint8_t> record(buffer.data(), used);
 
   switch (test) {
     case SettingsTest::kCorruptRecord:
-      buffer[kRecordBytes - 1] ^= 0xFF;  // payload changed, CRC kept
+      buffer[used - 1] ^= 0xFF;  // payload changed, CRC kept
       return storeRaw(record, "sample with a wrong check value");
     case SettingsTest::kUnknownVersion:
       seal(record, cfg::kSettingsFormatVersion + 1);
       return storeRaw(record, "sample with format version + 1");
     case SettingsTest::kShorterRecord: {
-      // Without ntp_server (the last field: length byte and text).
-      const auto shorter =
-          record.first(kRecordBytes - (1 + cfg::kNtpServerMaxChars));
+      // Without the fixture pairs (the last field: count and entries).
+      const auto shorter = record.first(
+          used - (1 + model.fixture_pairs.size() * kFixturePairBytes));
       seal(shorter);
       return storeRaw(shorter, "sample without its last field");
     }
     case SettingsTest::kLongerRecord: {
-      const std::span<uint8_t> longer(buffer);
-      for (std::size_t i = kRecordBytes; i < longer.size(); ++i)
-        longer[i] = 0xA5;
+      const std::span<uint8_t> longer(buffer.data(), used + kExtraBytes);
+      for (std::size_t i = used; i < longer.size(); ++i) longer[i] = 0xA5;
       seal(longer);
       return storeRaw(longer, "sample with an unknown trailing field");
     }

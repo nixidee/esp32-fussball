@@ -48,6 +48,10 @@ struct DisplayProfile {
   bool bgr_order;
   // Panel needs inverted colour data (INVON) to show correct colours.
   bool invert_colors;
+  // Most match rows and table rows that fit this display; the settings
+  // ranges (app_config.h) are clamped to them.
+  uint8_t visible_matches_max;
+  uint8_t table_window_max;
 };
 
 // Which board GPIO drives which display signal.

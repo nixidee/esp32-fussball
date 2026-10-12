@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -33,6 +34,9 @@ bool good = false, manual = false, scroll_down = true;
 std::size_t input_count = 0;
 uint32_t generation = UINT32_MAX, image_revision = 0, network_epoch = 0;
 hw::DisplayProfile profile{};
+// Screen and reason packed in one word: written by poll(), read by the Web
+// task without a lock.
+std::atomic<uint32_t> screen_state{0};
 struct BindContext {
   int64_t utc, now;
   bool valid, connected;
@@ -66,6 +70,12 @@ const char* name(const football::Team& team) {
   return team.short_name.empty() ? team.name.data : team.short_name.data;
 }
 bool own(const football::Match& match) { return match.own; }
+// Image of a settings reference; a library image that does not exist shows
+// the stock image of its role.
+void imageSource(uint8_t id, cfg::StockImage stock) {
+  if (!images::source(id, stock, view.image, sizeof(view.image)))
+    images::source(cfg::kStockImageId, stock, view.image, sizeof(view.image));
+}
 template <std::size_t N>
 void prefix(char (&out)[N + 1], const char* text) {
   football::Text<N> value;
@@ -95,6 +105,8 @@ void action(Action input) {
     selected = default_screen;
     scroll = 0;
     scroll_down = true;
+  } else if (input == Action::kShowIp) {
+    boot_at = input_at;
   } else if (input == Action::kToggleDirection) {
     scroll_down = !scroll_down;
     scroll_at = input_at;
@@ -144,10 +156,20 @@ void bind(const football::Snapshot& data, void* raw_context) {
     }
   }
   if (own_window && own_match) conference_route = own_match->route;
+  const bool chosen = input_count && manual &&
+                      model.screens[static_cast<unsigned>(selected)].enabled;
   auto navigation = resolve(model, {data.configured, window, own_window, manual,
                                     input_count, selected});
   default_screen = navigation.default_screen;
   selected = navigation.selected;
+  const Reason reason = chosen             ? Reason::kManual
+                        : !data.configured ? Reason::kSetup
+                        : own_window       ? Reason::kOwnMatch
+                        : window           ? Reason::kMatchday
+                                           : Reason::kIdle;
+  screen_state.store(
+      static_cast<uint32_t>(selected) | static_cast<uint32_t>(reason) << 8,
+      std::memory_order_relaxed);
   view.screen = selected;
   view.style = model.screens[static_cast<unsigned>(selected)];
   const auto now = context.now;
@@ -387,16 +409,25 @@ void poll() {
                timekeeping::contains(
                    {model.night_start, model.night_end},
                    static_cast<uint16_t>(local.tm_hour * 60 + local.tm_min));
-  const bool crest = selected == cfg::Screen::kCrest;
-  uint8_t image = crest ? 0 : 6 + static_cast<unsigned>(selected);
-  if (crest) {
-    uint8_t slides[5], count = 0;
-    for (uint8_t i = 1; i <= 5; ++i)
-      if (images::info(i).uploaded) slides[count++] = i;
-    if (count) image = slides[(now / (model.slideshow_s * 1000)) % count];
+  if (selected == cfg::Screen::kCrest) {
+    uint8_t id = model.crest_image;
+    if (!model.slides.empty()) {
+      // Slides of images that no longer exist are skipped.
+      const auto present = images::present();
+      uint8_t shown[cfg::kSlideMax], count = 0;
+      for (const uint8_t slide : model.slides)
+        if (slide == cfg::kStockImageId ||
+            (slide <= cfg::kImageLibraryMax && (present >> slide) & 1))
+          shown[count++] = slide;
+      if (count > 0) {
+        const uint8_t slide = shown[(now / (model.slideshow_s * 1000)) % count];
+        id = slide == cfg::kStockImageId ? model.crest_image : slide;
+      }
+    }
+    imageSource(id, cfg::kStockCrest);
+  } else if (model.backgrounds && view.style.background) {
+    imageSource(view.style.image, cfg::kStockBackground);
   }
-  if (crest || (model.backgrounds && view.style.background))
-    images::source(image, view.image, sizeof(view.image));
   auto net = network::status();
   if (net.epoch != network_epoch) {
     network_epoch = net.epoch;
@@ -433,4 +464,19 @@ void poll() {
   display::unlock();
 }
 bool healthy() { return good; }
+Status status() {
+  const uint32_t word = screen_state.load(std::memory_order_relaxed);
+  return {static_cast<cfg::Screen>(word & 0xff),
+          static_cast<Reason>(word >> 8 & 0xff)};
+}
+const char* reasonName(Reason reason) {
+  switch (reason) {
+    case Reason::kSetup: return "setup";
+    case Reason::kManual: return "manual";
+    case Reason::kOwnMatch: return "own_match";
+    case Reason::kMatchday: return "matchday";
+    case Reason::kIdle: return "idle";
+  }
+  return "idle";
+}
 }  // namespace ui

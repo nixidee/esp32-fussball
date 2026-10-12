@@ -1,17 +1,13 @@
 idf_component_register(SRCS "web_service.cpp" "settings_json.cpp"
   INCLUDE_DIRS "include" PRIV_INCLUDE_DIRS "../../include" "../.."
   REQUIRES core football images network settings system
-  PRIV_REQUIRES esp_http_server esp_app_format esp_hw_support heap lwip freertos)
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
-set(web_header "${CMAKE_CURRENT_BINARY_DIR}/web_asset.h")
-# PlatformIO compiles component sources through SCons rather than building
-# arbitrary CMake custom targets. Generate during configuration in both flows.
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-  "${PROJECT_DIR}/web/index.html" "${PROJECT_DIR}/scripts/embed_web.py")
-execute_process(COMMAND ${Python3_EXECUTABLE} "${PROJECT_DIR}/scripts/embed_web.py"
-  "${PROJECT_DIR}/web/index.html" "${web_header}"
-  RESULT_VARIABLE web_result)
-if(NOT web_result EQUAL 0)
-  message(FATAL_ERROR "Offline Web UI generation failed")
+  PRIV_REQUIRES esp_http_server esp_app_format esp_hw_support heap lwip freertos ui)
+# The embed_web.py pre-script regenerates web_asset.h on every PlatformIO run
+# (a changed web/index.html alone does not trigger a CMake reconfigure, W129);
+# CMake only consumes the result.
+set(web_asset_dir "${CMAKE_BINARY_DIR}/web_asset")
+if(NOT EXISTS "${web_asset_dir}/web_asset.h")
+  message(FATAL_ERROR
+    "Missing Web UI header; run the embed_web.py pre-script")
 endif()
-target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+target_include_directories(${COMPONENT_LIB} PRIVATE "${web_asset_dir}")

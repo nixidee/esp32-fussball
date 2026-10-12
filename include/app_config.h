@@ -151,11 +151,13 @@ enum class TimeTest : uint8_t {
 inline constexpr TimeTest kTimeTest = TimeTest::kNone;
 
 // ---- Settings record -------------------------------------------------------
-// Format 2 crosses the legacy reader's 1 KB ceiling. Field offsets stay
-// append-only; valid format-1 core records load without rewriting NVS.
-// Future appends retain the version only within the existing reader ceiling.
-inline constexpr uint16_t kSettingsFormatVersion = 2;
+// Format 3 stores the lists (competitions, fixture pairs, slides) as a count
+// followed by that many entries, so the record length varies. Formats 1 (core
+// only) and 2 (lists as fixed slots) are still read and converted in RAM; the
+// next save writes format 3. Loading never writes NVS.
+inline constexpr uint16_t kSettingsFormatVersion = 3;
 inline constexpr uint16_t kSettingsLegacyFormatVersion = 1;
+inline constexpr uint16_t kSettingsSlotFormatVersion = 2;
 inline constexpr std::size_t kSettingsLegacyMaxRecordBytes = 1024;
 inline constexpr std::size_t kSettingsLegacyCoreRecordBytes = 335;
 // Longest stored record that is read (newer firmware may have appended
@@ -244,9 +246,10 @@ inline constexpr Provider kProviderDefault = Provider::kOpenLigaDb;
 inline constexpr Screen kIdleScreenDefault = Screen::kTable,
                         kMatchdayScreenDefault = Screen::kLiveMulti,
                         kOwnMatchScreenDefault = Screen::kLiveSingle;
-inline constexpr bool kRouteEnabledDefault = false,
-                      kFixtureMappingEnabledDefault = false,
-                      kFixtureMappingSwappedDefault = false,
+// A new competition or fixture pair is active; a fallback is added on purpose.
+inline constexpr bool kEntryActiveDefault = true,
+                      kFallbackActiveDefault = false,
+                      kFixturePairSwappedDefault = false,
                       kScreenEnabledDefault = true, kBackgroundsDefault = true,
                       kEspnOptInDefault = false, kDemoDefault = false,
                       kNightEnabledDefault = true,
@@ -254,10 +257,27 @@ inline constexpr bool kRouteEnabledDefault = false,
                       kIpBadgeBottomDefault = false,
                       kBrowserDebugDefault = false;
 inline constexpr uint8_t kLanguageDefault = 0, kRotationDefault = 0;
-inline constexpr std::size_t kRouteCount = 3;  // league plus two optional cups
 inline constexpr std::size_t kScreenCount = 4;
+// List maxima of the settings model (target capacities; ordered lists without
+// empty entries). A competition is a league or cup of one team.
+inline constexpr std::size_t kCompetitionMax = 3;
+inline constexpr std::size_t kFixtureMappingMax = 8;
+inline constexpr std::size_t kSlideMax = 5;
+inline constexpr std::size_t kImageLibraryMax = 10;
+// Text capacities (bytes) of the settings model; validation, the stored
+// record and the schema derive from these.
+inline constexpr std::size_t kAdminPasswordMaxBytes = 64;
+inline constexpr std::size_t kApiFootballKeyMaxBytes = 96;
+inline constexpr std::size_t kFootballDataKeyMaxBytes = 64;
+inline constexpr std::size_t kCompetitionIdMaxBytes = 32;
+inline constexpr std::size_t kSeasonMaxBytes = 16;
+inline constexpr std::size_t kTeamIdMaxBytes = 32;
+inline constexpr std::size_t kDisplayNameMaxBytes = 32;
+// Provider ids of a match or team (also the fixture pair ids).
 inline constexpr std::size_t kIdBytes = 32;
 inline constexpr std::size_t kNameBytes = 64;
+// Longest search text of a competition or team list request.
+inline constexpr std::size_t kSelectionTextMaxBytes = 48;
 inline constexpr std::size_t kMatches = 32;
 inline constexpr std::size_t kTableRows = 32;
 inline constexpr std::size_t kMatchEvents = 12;
@@ -316,9 +336,14 @@ inline constexpr uint8_t kNightBrightnessDefault = 10;
 inline constexpr uint32_t kBacklightPwmHz = 5000;
 inline constexpr uint32_t kDebugTaskStackBytes = 4096;
 inline constexpr uint32_t kOtaLocalHealthMs = 10000;
+// Login sessions (several browsers at once, least recently used replaced);
+// every accepted request moves the expiry to now + kSessionLifetimeMs.
 inline constexpr uint32_t kSessionLifetimeMs = 900000;
-inline constexpr std::size_t kImageCount =
-    10;  // crest, five slides, four backgrounds
+inline constexpr uint8_t kSessionSlots = 4;
+// Request body bytes the server reads and discards before it answers a
+// rejected request, so the client receives the status instead of a reset
+// (D6). A longer body (firmware) ends with a closed connection.
+inline constexpr std::size_t kDrainMaxBytes = 32768;
 inline constexpr std::size_t kImageMaxBytes = 32768;
 inline constexpr std::size_t kImageTotalBytes = 327680;
 inline constexpr std::size_t kImageReserveBytes = 40960;
@@ -326,6 +351,10 @@ inline constexpr uint16_t kDebugStreamPeriodMs = 1000;
 inline constexpr uint16_t kAppPollMs = 20;
 inline constexpr uint16_t kUiRefreshMs = 500;
 inline constexpr uint16_t kHighlightRotateMs = 5000;
+
+// Longest field path of a rejected value, e.g. "competitions[2].fallback.team"
+// (NUL included); the API error names the field with it.
+inline constexpr std::size_t kFieldPathBytes = 48;
 
 // Validation and schema share these bounds. Browser controls read the schema.
 struct Range {
@@ -350,16 +379,17 @@ inline constexpr uint16_t kNetworkPublishMs = 1000;
 inline constexpr uint8_t kScanEntries = 16, kApClients = 2, kApChannel = 1;
 inline constexpr uint8_t kApIp[] = {192, 168, 4, 1};
 inline constexpr char kApNamePrefix[] = "Fussball";
-inline constexpr char kImageNames[][12] = {
+// Image id 0 is the stock image (a firmware file); ids 1..kImageLibraryMax are
+// uploaded library files "img<id>.jpg".
+inline constexpr uint8_t kStockImageId = 0;
+enum StockImage : uint8_t { kStockCrest, kStockBackground, kStockImageCount };
+inline constexpr char kStockImageFiles[][32] = {"default_crest.jpg",
+                                                "default_background.jpg"};
+// Named image files of settings format 2 and earlier. Format 3 does not
+// migrate them; the image service removes them once (OQ-73).
+inline constexpr char kLegacyImageNames[][12] = {
     "crest",  "slide1",      "slide2",     "slide3", "slide4",
     "slide5", "live_single", "live_multi", "table",  "slideshow"};
-inline constexpr char kDefaultImageFiles[][32] = {
-    "default_crest.jpg",      "default_crest.jpg",
-    "default_crest.jpg",      "default_crest.jpg",
-    "default_crest.jpg",      "default_crest.jpg",
-    "default_background.jpg", "default_background.jpg",
-    "default_background.jpg", "default_crest.jpg"};
-inline constexpr std::size_t kFixtureMappings = 8;
 inline constexpr std::size_t kProviderCount = 4;
 inline constexpr char kBudgetNvsNamespace[] = "provider_budget",
                       kBudgetNvsKey[] = "credits";

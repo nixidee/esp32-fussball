@@ -675,7 +675,7 @@ new resolutions, S3 and long-run tests are pending. Visual/resource polish,
 screenshots and the already deferred enhancement backlog remain. No reserve,
 coverage or production acceptance is implied.
 
-## ADR-023 — Settings size ceiling, format 2 and legacy import · Accepted 2026-10-10
+## ADR-023 — Settings size ceiling, format 2 and legacy import · Accepted 2026-10-10 · format-2 encoding and OTA gate superseded by ADR-024
 
 **Context:** final source review proved that the accepted core firmware refuses
 stored records above 1024 bytes, while the complete candidate encodes 1720.
@@ -716,3 +716,51 @@ The format-2 correction artifact, before subsequent network fixes, was
 1,835,008 B app slot), static RAM 196,736 B and DIRAM 266,066 B. The 85%
 flash reserve goal is missed by 46,904 B. No device/storage write or behavioural
 test was performed for this correction.
+
+## ADR-024 — Settings format 3: lists, image library, equal-or-newer OTA gate · Accepted 2026-10-12
+
+**Context:** the fixed slots of format 2 (three routes, three fallbacks, eight
+mappings, each with an enabled flag) show empty entries in the interface, cap
+the record near the NVS ceiling, and tie each of ten fixed image roles to its
+own file, so one upload could not be reused and "reset" was not a real delete.
+The owner decided on 2026-10-11 to use real lists and an image library.
+
+**Decision:**
+- Format 3 stores ordered lists with a count and only their entries:
+  competitions (max 3; each a primary source, an optional fallback source of
+  another provider, active flags and stored display names), fixture pairs
+  (max 8, referring to a competition by position), slides (max 5) and a crest
+  image. All maxima are constants in `app_config.h`. Order has meaning: the
+  first active competition supplies the league table; slides play in order.
+- The record is variable length with a longest case of 1931 bytes (pinned by a
+  host test) below the 2048-byte reader ceiling. The decoder converts formats 1
+  and 2 in RAM (complete routes become competitions, empty slots disappear,
+  mappings are renumbered); loading never writes NVS, the next save writes
+  format 3 (ADR-023 behaviour kept).
+- Images are a library of up to ten files `img<id>.jpg` (id 1–10, lowest free
+  id on upload, real delete); id 0 is the stock image. A reference may name a
+  missing image (deleted, or settings imported from another device): the
+  renderer skips it, and the application removes dead references outside an
+  OTA trial. Quota, validation and rename-under-display-lock are unchanged.
+  The earlier fixed-name files are not migrated; they are removed once outside
+  the trial and the owner uploads again.
+- The browser OTA gate accepts an image whose settings format is equal or
+  newer and refuses an older one. This replaces ADR-023's equality gate; the
+  first format-3 image is installed by USB because the running gate still
+  demands equality. Downgrade by USB after a format-3 save keeps ADR-023
+  behaviour (the old firmware starts with initial values).
+- The crest screen has no background image (its `image` stays 0).
+
+**Alternatives:** keep fixed slots and only hide empty ones (the cap and the
+enabled flags stay; no reuse of images); role-bound image files (no reuse, quota
+spent twice); keep the equality OTA gate (every format change would need USB).
+
+**Cost and boundary:** Model 1944 B (+208 B, of which 198 B are the stored
+display names), longest record 1931 B (+211 B transient on save, heap), each
+`settings::current()` copy 1.9 KB on the caller's stack. The C6 clean build is
++620 B static RAM and +3,706 B flash against the previous step; LittleFS holds
+at most ten library files within the unchanged quota. The migration of a real
+format-2 record, removal of the legacy image files and the first USB install
+are verified on the host only; device acceptance is pending. The page in
+`web/index.html` still edits the removed fixed slots until its rewrite; settings
+remain changeable through export/import and the API meanwhile.

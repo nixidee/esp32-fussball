@@ -24,6 +24,7 @@
 #include "freertos/task.h"
 #include "health_service.h"
 #include "hw_target.h"
+#include "image_service.h"
 #include "network_service.h"
 #include "ota_service.h"
 #include "safe_area.h"
@@ -194,6 +195,9 @@ void runDiagnosticLoop() {
   timekeeping::applySettings();
   int64_t reset_started = 0;
   bool reset_latched = false;
+  // Legacy image files and dead image references are removed once, outside
+  // the OTA trial, so a rollback still finds the previous firmware's files.
+  bool images_maintained = false;
   while (true) {
     vTaskDelay(pdMS_TO_TICKS(kInputPollMs));
     logInputChanges(active);
@@ -229,6 +233,7 @@ void runDiagnosticLoop() {
     network::poll();
     ui::poll();
     ota::poll(network::healthy() && web::healthy() && ui::healthy());
+    if (!images_maintained) images_maintained = images::maintain();
   }
 }
 
@@ -244,7 +249,8 @@ extern "C" void app_main() {
   logHeap("after event bus init");
   events::runDeviceTest();
 
-  settings::init();
+  settings::init({.visible_matches_max = hw::kDisplay.visible_matches_max,
+                  .table_window_max = hw::kDisplay.table_window_max});
   settings::runDeviceTest();
   logHeap("after settings init");
 

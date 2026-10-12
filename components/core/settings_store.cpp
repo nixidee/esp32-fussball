@@ -69,13 +69,15 @@ namespace {
 
 constexpr const char* kTag = "settings";
 
-enum class Source : uint8_t { kInitial, kStored };
+enum class Origin : uint8_t { kInitial, kStored };
 
-// Guards current_model and source; held only for copies.
+// Guards current_model and origin; held only for copies.
 StaticSemaphore_t model_mutex_buffer;
 SemaphoreHandle_t model_mutex = nullptr;
 Model current_model;
-Source source = Source::kInitial;
+Origin origin = Origin::kInitial;
+// Set once by init() before any other task runs; read-only afterwards.
+Limits display_limits;
 std::atomic<uint32_t> generation_counter{0};
 
 // Serialises save() and reset(); guards the two flags below.
@@ -104,10 +106,10 @@ Presets presets() {
   };
 }
 
-void setCurrent(const Model& model, Source from) {
+void setCurrent(const Model& model, Origin from) {
   xSemaphoreTake(model_mutex, portMAX_DELAY);
   current_model = model;
-  source = from;
+  origin = from;
   xSemaphoreGive(model_mutex);
   generation_counter.fetch_add(1, std::memory_order_release);
   events::post(events::Event::kSettingsChanged);
@@ -200,11 +202,11 @@ void load() {
 
   Model loaded = current_model;
   Field invalid = Field::kWifiSsid;
-  const DecodeResult result = decode({buffer, size}, loaded, &invalid);
+  const DecodeResult result = decode({buffer, size}, loaded, &invalid, display_limits);
   std::free(buffer);
   if (result == DecodeResult::kOk) {
     current_model = loaded;
-    source = Source::kStored;
+    origin = Origin::kStored;
     ESP_LOGI(kTag, "stored settings loaded (%u B)",
              static_cast<unsigned>(size));
   } else if (result == DecodeResult::kInvalidValue) {
@@ -220,7 +222,7 @@ void load() {
   }
 }
 
-esp_err_t writeRecord(std::span<const uint8_t, kRecordBytes> record) {
+esp_err_t writeRecord(std::span<const uint8_t> record) {
   nvs_handle_t handle;
   esp_err_t err = nvs_open(cfg::kSettingsNvsNamespace, NVS_READWRITE, &handle);
   if (err != ESP_OK) return err;
@@ -235,18 +237,21 @@ const char* setText(std::size_t length) { return length > 0 ? "set" : "empty"; }
 
 }  // namespace
 
-void init() {
+void init(const Limits& limits) {
+  display_limits = limits;
   model_mutex = xSemaphoreCreateMutexStatic(&model_mutex_buffer);
   write_mutex = xSemaphoreCreateMutexStatic(&write_mutex_buffer);
 
   FieldMask rejected = 0;
-  current_model = initialValues(presets(), &rejected);
+  current_model = initialValues(presets(), &rejected, display_limits);
   logRejectedPresets(rejected);
 
   nvs_ready = initNvs();
   if (nvs_ready) load();
   logCurrent("at boot");
 }
+
+const Limits& limits() { return display_limits; }
 
 Model current() {
   xSemaphoreTake(model_mutex, portMAX_DELAY);
@@ -259,9 +264,9 @@ uint32_t generation() {
   return generation_counter.load(std::memory_order_acquire);
 }
 
-esp_err_t save(const Model& model) {
+esp_err_t save(const Model& model, Violation* violation) {
   Field invalid = Field::kWifiSsid;
-  if (!validate(model, &invalid)) {
+  if (!validate(model, &invalid, violation, display_limits)) {
     ESP_LOGE(kTag, "save rejected: %s violates its limits", fieldName(invalid));
     return ESP_ERR_INVALID_ARG;
   }
@@ -272,17 +277,16 @@ esp_err_t save(const Model& model) {
     ESP_LOGE(
         kTag, "save refused: %s",
         nvs_ready ? "stored record unread, reset first" : "NVS unavailable");
-  } else if (auto* buffer = static_cast<uint8_t*>(std::malloc(kRecordBytes));
+  } else if (auto* buffer = static_cast<uint8_t*>(std::malloc(kMaxRecordBytes));
              buffer == nullptr) {
     err = ESP_ERR_NO_MEM;
     ESP_LOGE(kTag, "save failed: %s", esp_err_to_name(err));
   } else {
-    const std::span<uint8_t, kRecordBytes> record(buffer, kRecordBytes);
-    encode(model, record);
-    err = writeRecord(record);
+    const std::span<uint8_t, kMaxRecordBytes> record(buffer, kMaxRecordBytes);
+    err = writeRecord(record.first(encode(model, record)));
     std::free(buffer);
     if (err == ESP_OK) {
-      setCurrent(model, Source::kStored);
+      setCurrent(model, Origin::kStored);
     } else {
       ESP_LOGE(kTag, "save failed: %s, settings unchanged",
                esp_err_to_name(err));
@@ -306,7 +310,8 @@ esp_err_t reset() {
   }
   if (err == ESP_OK) {
     record_unread = false;
-    setCurrent(initialValues(presets()), Source::kInitial);
+    setCurrent(initialValues(presets(), nullptr, display_limits),
+               Origin::kInitial);
     ESP_LOGI(kTag, "settings reset: initial values apply");
   } else {
     ESP_LOGE(kTag, "reset failed: %s, settings unchanged",
@@ -319,7 +324,7 @@ esp_err_t reset() {
 void logCurrent(const char* when) {
   xSemaphoreTake(model_mutex, portMAX_DELAY);
   const Model model = current_model;
-  const Source from = source;
+  const Origin from = origin;
   xSemaphoreGive(model_mutex);
 
   ESP_LOGI(
@@ -327,7 +332,7 @@ void logCurrent(const char* when) {
       "%s (%s): wifi ssid %s (%u B), wifi password %s, ap password %s, "
       "hostname %.*s, external antenna %s, status log %s every %u s, "
       "time zone %.*s, ntp server %.*s",
-      when, from == Source::kStored ? "stored" : "initial values",
+      when, from == Origin::kStored ? "stored" : "initial values",
       setText(model.wifi_ssid.length),
       static_cast<unsigned>(model.wifi_ssid.length),
       setText(model.wifi_password.length), setText(model.ap_password.length),

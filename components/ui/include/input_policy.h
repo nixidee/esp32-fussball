@@ -12,7 +12,8 @@ enum class Action : uint8_t {
   kDefault,
   kUp,
   kDown,
-  kToggleDirection
+  kToggleDirection,
+  kShowIp  // from the Web UI only; no input maps to it
 };
 class InputPolicy {
  public:

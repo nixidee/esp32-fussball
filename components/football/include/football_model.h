@@ -155,6 +155,8 @@ struct Capabilities {
   uint32_t minimum_interval_ms = 0;
 };
 const char* providerName(cfg::Provider provider);
+// Stable lower-case code of a match phase (REST API).
+const char* phaseName(Phase phase);
 Capabilities capabilities(cfg::Provider provider);
 int64_t parseUtc(const char* text);
 void estimate(Match& match, int64_t utc);

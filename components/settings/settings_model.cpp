@@ -1,6 +1,8 @@
 #include "settings_model.h"
 
 #include <algorithm>
+#include <array>
+#include <utility>
 
 #include "civil_time.h"
 
@@ -90,102 +92,292 @@ bool isValidNtpServer(std::string_view value) noexcept {
   }
 }
 
-bool validate(const Model& model, Field* invalid) noexcept {
-  Field bad;
-  // Any SSID byte sequence up to its capacity is valid.
-  if (!isValidWifiPassword(model.wifi_password.view())) {
-    bad = Field::kWifiPassword;
-  } else if (!isValidApPassword(model.ap_password.view())) {
-    bad = Field::kApPassword;
-  } else if (!isValidHostname(model.hostname.view())) {
-    bad = Field::kHostname;
-  } else if (!isValidStatusInterval(model.debug_status_interval_s)) {
-    bad = Field::kDebugStatusIntervalS;
-  } else if (!isValidTimeZone(model.time_zone.view())) {
-    bad = Field::kTimeZone;
-  } else if (!isValidNtpServer(model.ntp_server.view())) {
-    bad = Field::kNtpServer;
-  } else {
-    bool ok =
-        model.admin_password.view().find('\0') == std::string_view::npos &&
-        isHeaderValue(model.api_football_key.view()) &&
-        isHeaderValue(model.football_data_key.view()) && model.language <= 1 &&
-        cfg::kRotationRange.contains(model.rotation) &&
-        cfg::kBrightnessRange.contains(model.brightness) &&
-        cfg::kBrightnessRange.contains(model.night_brightness) &&
-        cfg::kVisibleMatchesRange.contains(model.visible_matches) &&
-        cfg::kTableWindowRange.contains(model.table_window) &&
-        cfg::kReturnTimeRange.contains(model.manual_return_s) &&
-        cfg::kReturnTimeRange.contains(model.scroll_reset_s) &&
-        cfg::kScrollRepeatRange.contains(model.scroll_repeat_ms) &&
-        cfg::kSlideshowRange.contains(model.slideshow_s) &&
-        cfg::kDayMinutesRange.contains(model.night_start) &&
-        cfg::kDayMinutesRange.contains(model.night_end) &&
-        cfg::kReturnTimeRange.contains(model.ip_badge_s) &&
-        cfg::kMatchWindowRange.contains(model.window_before) &&
-        cfg::kMatchWindowRange.contains(model.window_after) &&
-        cfg::kProviderBudgetRange.contains(model.api_daily_budget) &&
-        static_cast<unsigned>(model.idle_screen) < cfg::kScreenCount &&
-        static_cast<unsigned>(model.matchday_screen) < cfg::kScreenCount &&
-        static_cast<unsigned>(model.own_match_screen) < cfg::kScreenCount;
-    auto identifier = [](std::string_view s) {
-      return std::all_of(s.begin(), s.end(), [](char c) {
-        return isHostnameChar(c) || c == '.' || c == '_';
-      });
-    };
-    auto validateRoute = [&](const Route& route) {
-      const auto season = route.season.view();
-      const bool valid_season =
-          season.empty()
-              ? route.provider != cfg::Provider::kApiFootball || !route.enabled
-              : (route.provider == cfg::Provider::kOpenLigaDb ||
-                 season.size() == 4) &&
-                    std::all_of(season.begin(), season.end(),
-                                [](char c) { return c >= '0' && c <= '9'; });
-      return static_cast<unsigned>(route.provider) < cfg::kProviderCount &&
-             identifier(route.competition.view()) &&
-             identifier(route.team.view()) && valid_season &&
-             (!route.enabled ||
-              (!route.competition.empty() && !route.team.empty()));
-    };
-    for (unsigned i = 0; i < cfg::kRouteCount; ++i) {
-      ok &= validateRoute(model.routes[i]) &&
-            validateRoute(model.fallback_routes[i]);
-      if (model.fallback_routes[i].enabled)
-        ok &= model.routes[i].enabled &&
-              model.routes[i].provider != model.fallback_routes[i].provider;
-    }
-    for (unsigned i = 0; i < model.fixture_mappings.size(); ++i) {
-      const auto& mapping = model.fixture_mappings[i];
-      ok &= mapping.route < cfg::kRouteCount &&
-            identifier(mapping.primary.view()) &&
-            identifier(mapping.secondary.view());
-      if (!mapping.enabled || mapping.route >= cfg::kRouteCount) continue;
-      ok &= model.fallback_routes[mapping.route].enabled &&
-            !mapping.primary.empty() && !mapping.secondary.empty();
-      for (unsigned j = 0; j < i; ++j) {
-        const auto& other = model.fixture_mappings[j];
-        if (other.enabled && other.route == mapping.route)
-          ok &= other.primary != mapping.primary &&
-                other.secondary != mapping.secondary;
-      }
-    }
-    bool enabled = false;
-    for (const auto& style : model.screens) {
-      enabled |= style.enabled;
-      ok &= style.colour <= 0xffffff && style.text <= 0xffffff &&
-            style.accent <= 0xffffff &&
-            cfg::kTextScaleRange.contains(style.text_scale);
-    }
-    if (ok && enabled) return true;
-    bad = Field::kApplication;
+bool isValidIdentifier(std::string_view value) noexcept {
+  return std::all_of(value.begin(), value.end(), [](char c) {
+    return isHostnameChar(c) || c == '.' || c == '_';
+  });
+}
+
+bool isValidSeason(cfg::Provider provider, std::string_view season) noexcept {
+  return season.empty() ||
+         ((provider == cfg::Provider::kOpenLigaDb || season.size() == 4) &&
+          std::all_of(season.begin(), season.end(),
+                      [](char c) { return c >= '0' && c <= '9'; }));
+}
+
+namespace {
+
+// Records the first violation and reports false so callers can return it.
+class Checker {
+ public:
+  explicit Checker(Violation* out) : out_(out) {}
+  bool fail(const FieldPath& path, Reason reason) {
+    if (out_ != nullptr && !failed_) out_->set(path, reason);
+    failed_ = true;
+    return false;
   }
+  // Fails with kRange at the key 'name' unless the number is within 'range'.
+  bool range(const char* name, cfg::Range range, unsigned value) {
+    return (value <= 0xffff && range.contains(static_cast<uint16_t>(value))) ||
+           fail(FieldPath().with(name), Reason::kRange);
+  }
+  bool invalid(const char* name, bool valid) {
+    return valid || fail(FieldPath().with(name), Reason::kInvalid);
+  }
+
+ private:
+  Violation* out_;
+  bool failed_ = false;
+};
+
+// Display names come from provider lists: any text without control
+// characters (they are shown on the display and embedded in JSON).
+bool isDisplayName(std::string_view s) {
+  return std::all_of(s.begin(), s.end(), [](char c) {
+    return static_cast<unsigned char>(c) >= 0x20 && c != 0x7f;
+  });
+}
+
+// A source needs its season only while it is used (API-Football).
+bool checkSource(Checker& check, const FieldPath& at, const Source& source,
+                 bool used) {
+  if (static_cast<unsigned>(source.provider) >= cfg::kProviderCount)
+    return check.fail(at.with("provider"), Reason::kRange);
+  if (!isValidIdentifier(source.competition.view()))
+    return check.fail(at.with("competition"), Reason::kInvalid);
+  if (!isValidIdentifier(source.team.view()))
+    return check.fail(at.with("team"), Reason::kInvalid);
+  const auto season = source.season.view();
+  if (season.empty()) {
+    if (source.provider == cfg::Provider::kApiFootball && used)
+      return check.fail(at.with("season"), Reason::kRequired);
+  } else if (!isValidSeason(source.provider, season)) {
+    return check.fail(at.with("season"), Reason::kInvalid);
+  }
+  return true;
+}
+
+bool checkSources(Checker& check, const Model& model) {
+  for (unsigned i = 0; i < model.competitions.size(); ++i) {
+    const auto& entry = model.competitions[i];
+    FieldPath at;
+    at.key("competitions").index(i);
+    const auto primary = at.with("primary");
+    if (entry.primary.competition.empty())
+      return check.fail(FieldPath(primary).with("competition"),
+                        Reason::kRequired);
+    if (entry.primary.team.empty())
+      return check.fail(FieldPath(primary).with("team"), Reason::kRequired);
+    if (!checkSource(check, primary, entry.primary, entry.active)) return false;
+    const auto fallback = at.with("fallback");
+    if (!checkSource(check, fallback, entry.fallback, entry.fallback_active))
+      return false;
+    if (!isDisplayName(entry.competition_name.view()))
+      return check.fail(at.with("competition_name"), Reason::kInvalid);
+    if (!isDisplayName(entry.team_name.view()))
+      return check.fail(at.with("team_name"), Reason::kInvalid);
+    if (!entry.fallback_active) continue;
+    if (entry.fallback.competition.empty())
+      return check.fail(FieldPath(fallback).with("competition"),
+                        Reason::kRequired);
+    if (entry.fallback.team.empty())
+      return check.fail(FieldPath(fallback).with("team"), Reason::kRequired);
+    if (entry.fallback.provider == entry.primary.provider)
+      return check.fail(FieldPath(fallback).with("provider"),
+                        Reason::kConflict);
+  }
+  return true;
+}
+
+bool checkPairs(Checker& check, const Model& model) {
+  for (unsigned i = 0; i < model.fixture_pairs.size(); ++i) {
+    const auto& pair = model.fixture_pairs[i];
+    FieldPath at;
+    at.key("fixture_pairs").index(i);
+    if (pair.competition >= model.competitions.size())
+      return check.fail(at.with("competition"), Reason::kReference);
+    for (const auto& [name, id] :
+         {std::pair{"primary_id", &pair.primary_id},
+          std::pair{"secondary_id", &pair.secondary_id}}) {
+      if (id->empty()) return check.fail(at.with(name), Reason::kRequired);
+      if (!isValidIdentifier(id->view()))
+        return check.fail(at.with(name), Reason::kInvalid);
+    }
+    if (!pair.active) continue;
+    if (!model.competitions[pair.competition].fallback_active)
+      return check.fail(at.with("competition"), Reason::kConflict);
+    for (unsigned j = 0; j < i; ++j) {
+      const auto& other = model.fixture_pairs[j];
+      if (!other.active || other.competition != pair.competition) continue;
+      if (other.primary_id == pair.primary_id)
+        return check.fail(at.with("primary_id"), Reason::kDuplicate);
+      if (other.secondary_id == pair.secondary_id)
+        return check.fail(at.with("secondary_id"), Reason::kDuplicate);
+    }
+  }
+  return true;
+}
+
+bool checkImages(Checker& check, const Model& model) {
+  if (model.crest_image > cfg::kImageLibraryMax)
+    return check.fail(FieldPath().with("crest_image"), Reason::kRange);
+  for (unsigned i = 0; i < model.slides.size(); ++i)
+    if (model.slides[i] > cfg::kImageLibraryMax)
+      return check.fail(FieldPath().with("slides").index(i), Reason::kRange);
+  bool enabled = false;
+  for (unsigned i = 0; i < model.screens.size(); ++i) {
+    const auto& style = model.screens[i];
+    FieldPath at;
+    at.key("screens").index(i);
+    enabled |= style.enabled;
+    if (style.colour > 0xffffff)
+      return check.fail(at.with("colour"), Reason::kRange);
+    if (style.text > 0xffffff)
+      return check.fail(at.with("text"), Reason::kRange);
+    if (style.accent > 0xffffff)
+      return check.fail(at.with("accent"), Reason::kRange);
+    if (!cfg::kTextScaleRange.contains(style.text_scale))
+      return check.fail(at.with("text_scale"), Reason::kRange);
+    if (style.image > cfg::kImageLibraryMax)
+      return check.fail(at.with("image"), Reason::kRange);
+  }
+  // The crest screen shows the crest, never a background image.
+  if (model.screens[static_cast<unsigned>(cfg::Screen::kCrest)].image !=
+      cfg::kStockImageId)
+    return check.fail(FieldPath().key("screens").index(
+                          static_cast<unsigned>(cfg::Screen::kCrest))
+                          .key("image"),
+                      Reason::kInvalid);
+  if (!enabled) return check.fail(FieldPath().with("screens"), Reason::kNoneEnabled);
+  return true;
+}
+
+}  // namespace
+
+const char* reasonName(Reason reason) noexcept {
+  switch (reason) {
+    case Reason::kInvalid: return "invalid";
+    case Reason::kRange: return "range";
+    case Reason::kType: return "type";
+    case Reason::kUnknownKey: return "unknown_key";
+    case Reason::kTooLong: return "too_long";
+    case Reason::kTooMany: return "too_many";
+    case Reason::kRequired: return "required";
+    case Reason::kDuplicate: return "duplicate";
+    case Reason::kReference: return "reference";
+    case Reason::kConflict: return "conflict";
+    case Reason::kNoneEnabled: return "none_enabled";
+  }
+  return "invalid";
+}
+
+bool validate(const Model& model, Field* invalid, Violation* violation,
+              const Limits& limits) noexcept {
+  Checker check(violation);
+  Field bad = Field::kApplication;
+  const auto core = [&](Field field, const char* name, bool valid) {
+    if (valid) return true;
+    bad = field;
+    return check.fail(FieldPath().with(name), Reason::kInvalid);
+  };
+  // Any SSID byte sequence up to its capacity is valid.
+  bool ok =
+      core(Field::kWifiPassword, "wifi_password",
+           isValidWifiPassword(model.wifi_password.view())) &&
+      core(Field::kApPassword, "ap_password",
+           isValidApPassword(model.ap_password.view())) &&
+      core(Field::kHostname, "hostname", isValidHostname(model.hostname.view())) &&
+      core(Field::kDebugStatusIntervalS, "debug_status_interval_s",
+           isValidStatusInterval(model.debug_status_interval_s)) &&
+      core(Field::kTimeZone, "time_zone", isValidTimeZone(model.time_zone.view())) &&
+      core(Field::kNtpServer, "ntp_server",
+           isValidNtpServer(model.ntp_server.view()));
+  if (ok) {
+    const cfg::Range visible{
+        cfg::kVisibleMatchesRange.min,
+        std::min<uint16_t>(cfg::kVisibleMatchesRange.max,
+                           limits.visible_matches_max)};
+    const cfg::Range window{
+        cfg::kTableWindowRange.min,
+        std::min<uint16_t>(cfg::kTableWindowRange.max,
+                           limits.table_window_max)};
+    const cfg::Range screens{0, static_cast<uint16_t>(cfg::kScreenCount - 1)};
+    ok = check.invalid("admin_password",
+                       model.admin_password.view().find('\0') ==
+                           std::string_view::npos) &&
+         check.invalid("api_football_key",
+                       isHeaderValue(model.api_football_key.view())) &&
+         check.invalid("football_data_key",
+                       isHeaderValue(model.football_data_key.view())) &&
+         check.range("language", {0, 1}, model.language) &&
+         check.range("rotation", cfg::kRotationRange, model.rotation) &&
+         check.range("brightness", cfg::kBrightnessRange, model.brightness) &&
+         check.range("night_brightness", cfg::kBrightnessRange,
+                     model.night_brightness) &&
+         check.range("visible_matches", visible, model.visible_matches) &&
+         check.range("table_window", window, model.table_window) &&
+         check.range("manual_return_s", cfg::kReturnTimeRange,
+                     model.manual_return_s) &&
+         check.range("scroll_reset_s", cfg::kReturnTimeRange,
+                     model.scroll_reset_s) &&
+         check.range("scroll_repeat_ms", cfg::kScrollRepeatRange,
+                     model.scroll_repeat_ms) &&
+         check.range("slideshow_s", cfg::kSlideshowRange, model.slideshow_s) &&
+         check.range("night_start", cfg::kDayMinutesRange, model.night_start) &&
+         check.range("night_end", cfg::kDayMinutesRange, model.night_end) &&
+         check.range("ip_badge_s", cfg::kReturnTimeRange, model.ip_badge_s) &&
+         check.range("window_before", cfg::kMatchWindowRange,
+                     model.window_before) &&
+         check.range("window_after", cfg::kMatchWindowRange,
+                     model.window_after) &&
+         check.range("api_daily_budget", cfg::kProviderBudgetRange,
+                     model.api_daily_budget) &&
+         check.range("idle_screen", screens,
+                     static_cast<unsigned>(model.idle_screen)) &&
+         check.range("matchday_screen", screens,
+                     static_cast<unsigned>(model.matchday_screen)) &&
+         check.range("own_match_screen", screens,
+                     static_cast<unsigned>(model.own_match_screen)) &&
+         checkSources(check, model) && checkPairs(check, model) &&
+         checkImages(check, model);
+  }
+  if (ok) return true;
   if (invalid != nullptr) *invalid = bad;
   return false;
 }
 
-Model initialValues(const Presets& presets, FieldMask* rejected) noexcept {
+bool dropMissingImages(Model& model, ImageMask present) noexcept {
+  const auto missing = [present](uint8_t id) {
+    return id != cfg::kStockImageId &&
+           (id > cfg::kImageLibraryMax || ((present >> id) & 1) == 0);
+  };
+  bool changed = false;
+  const auto replace = [&](uint8_t& id) {
+    if (!missing(id)) return;
+    id = cfg::kStockImageId;
+    changed = true;
+  };
+  replace(model.crest_image);
+  for (auto& style : model.screens) replace(style.image);
+  // Slide 0 is the crest, never a missing image.
+  decltype(model.slides) kept;
+  for (const uint8_t id : model.slides)
+    if (!missing(id)) kept.push(id);
+  if (kept.size() != model.slides.size()) {
+    model.slides = kept;
+    changed = true;
+  }
+  return changed;
+}
+
+Model initialValues(const Presets& presets, FieldMask* rejected,
+                    const Limits& limits) noexcept {
   Model model;
+  // A default above the display's capacity would never validate.
+  model.visible_matches =
+      std::min<uint8_t>(model.visible_matches, limits.visible_matches_max);
+  model.table_window =
+      std::min<uint8_t>(model.table_window, limits.table_window_max);
   model.hostname.assign(cfg::kHostnameDefault);
   model.external_antenna = cfg::kExternalAntennaDefault;
   model.debug_status_log = cfg::kDebugStatusLogDefault;
@@ -235,22 +427,24 @@ Model initialValues(const Presets& presets, FieldMask* rejected) noexcept {
     preset(model.football_data_key, presets.football_data_key);
   else
     skipped |= fieldBit(Field::kApplication);
-  auto& route = model.routes[0];
+  Competition entry;
   if (presets.provider == "api-football")
-    route.provider = cfg::Provider::kApiFootball;
+    entry.primary.provider = cfg::Provider::kApiFootball;
   else if (presets.provider == "espn")
-    route.provider = cfg::Provider::kEspn;
+    entry.primary.provider = cfg::Provider::kEspn;
   else if (presets.provider == "football-data")
-    route.provider = cfg::Provider::kFootballData;
+    entry.primary.provider = cfg::Provider::kFootballData;
   else if (!presets.provider.empty() && presets.provider != "openligadb")
     skipped |= fieldBit(Field::kApplication);
-  preset(route.competition, presets.competition);
-  preset(route.team, presets.team);
-  preset(route.season, presets.season);
-  route.enabled = !route.competition.empty() && !route.team.empty();
-  if (!validate(model)) {
-    route = {};
-    skipped |= fieldBit(Field::kApplication);
+  preset(entry.primary.competition, presets.competition);
+  preset(entry.primary.team, presets.team);
+  preset(entry.primary.season, presets.season);
+  if (entry.primary.complete()) {
+    model.competitions.push(entry);
+    if (!validate(model, nullptr, nullptr, limits)) {
+      model.competitions.clear();
+      skipped |= fieldBit(Field::kApplication);
+    }
   }
   if (rejected != nullptr) *rejected = skipped;
   return model;

@@ -54,13 +54,15 @@ class Writer {
     writeU32(at_, value);
     at_ += 4;
   }
+  const uint8_t* position() const { return at_; }
 
  private:
   uint8_t* at_;
 };
 
 // Reads fields in order. A field is either complete, missing (the payload
-// ended before it, so it keeps its initial value) or partial (an error).
+// ended before it, so it keeps its initial value) or partial (an error). The
+// read functions return true when they read a value.
 class Reader {
  public:
   explicit Reader(std::span<const uint8_t> payload) : payload_(payload) {}
@@ -70,34 +72,56 @@ class Reader {
   Field invalidField() const { return invalid_; }
 
   template <std::size_t N>
-  void text(Field field, Bytes<N>& value) {
+  bool text(Field field, Bytes<N>& value) {
     const uint8_t* at = take(1 + N);
-    if (at == nullptr) return;
+    if (at == nullptr) return false;
     if (at[0] > N) return reject(field);
     value.assign({reinterpret_cast<const char*>(at + 1), at[0]});
+    return true;
   }
-  void flag(Field field, bool& value) {
+  bool flag(Field field, bool& value) {
     const uint8_t* at = take(1);
-    if (at == nullptr) return;
+    if (at == nullptr) return false;
     if (at[0] > 1) return reject(field);
     value = at[0] == 1;
+    return true;
   }
-  void u16(uint16_t& value) {
+  bool u16(uint16_t& value) {
     const uint8_t* at = take(2);
-    if (at != nullptr) value = readU16(at);
+    if (at == nullptr) return false;
+    value = readU16(at);
+    return true;
   }
-  void u8(uint8_t& value) {
+  bool u8(uint8_t& value) {
     const auto* at = take(1);
-    if (at != nullptr) value = *at;
+    if (at == nullptr) return false;
+    value = *at;
+    return true;
   }
-  void u32(uint32_t& value) {
+  bool u32(uint32_t& value) {
     const auto* at = take(4);
-    if (at != nullptr) value = readU32(at);
+    if (at == nullptr) return false;
+    value = readU32(at);
+    return true;
   }
+  // Reads a list's entry count (at most 'capacity'). The entries that follow
+  // must be complete: a payload ending before them is a partial field, not a
+  // missing one. Call endList() after the entries.
+  bool count(std::size_t capacity, uint8_t& value) {
+    if (!u8(value)) return false;
+    if (value > capacity) return reject(Field::kApplication);
+    entries_required_ = value > 0;
+    return true;
+  }
+  void endList() { entries_required_ = false; }
 
  private:
   const uint8_t* take(std::size_t size) {
-    if (failed() || pos_ == payload_.size()) return nullptr;
+    if (failed()) return nullptr;
+    if (pos_ == payload_.size()) {
+      if (entries_required_) result_ = DecodeResult::kPartialField;
+      return nullptr;
+    }
     if (payload_.size() - pos_ < size) {
       result_ = DecodeResult::kPartialField;
       return nullptr;
@@ -106,16 +130,218 @@ class Reader {
     pos_ += size;
     return at;
   }
-  void reject(Field field) {
+  bool reject(Field field) {
     result_ = DecodeResult::kInvalidValue;
     invalid_ = field;
+    return false;
   }
 
   std::span<const uint8_t> payload_;
   std::size_t pos_ = 0;
   DecodeResult result_ = DecodeResult::kOk;
   Field invalid_ = Field::kWifiSsid;
+  bool entries_required_ = false;
 };
+
+// Fixed parts shared by format 3 and, where noted, format 2.
+void writeSource(Writer& writer, const Source& source) {
+  writer.u8(static_cast<uint8_t>(source.provider));
+  writer.text(source.competition);
+  writer.text(source.season);
+  writer.text(source.team);
+}
+
+void readSource(Reader& reader, Source& source) {
+  auto provider = static_cast<uint8_t>(source.provider);
+  reader.u8(provider);
+  source.provider = static_cast<cfg::Provider>(provider);
+  reader.text(Field::kApplication, source.competition);
+  reader.text(Field::kApplication, source.season);
+  reader.text(Field::kApplication, source.team);
+}
+
+void readCore(Reader& reader, Model& model) {
+  reader.text(Field::kWifiSsid, model.wifi_ssid);
+  reader.text(Field::kWifiPassword, model.wifi_password);
+  reader.text(Field::kApPassword, model.ap_password);
+  reader.text(Field::kHostname, model.hostname);
+  reader.flag(Field::kExternalAntenna, model.external_antenna);
+  reader.flag(Field::kDebugStatusLog, model.debug_status_log);
+  reader.u16(model.debug_status_interval_s);
+  reader.text(Field::kTimeZone, model.time_zone);
+  reader.text(Field::kNtpServer, model.ntp_server);
+}
+
+void readSecrets(Reader& reader, Model& model) {
+  reader.text(Field::kApplication, model.admin_password);
+  reader.text(Field::kApplication, model.api_football_key);
+  reader.text(Field::kApplication, model.football_data_key);
+}
+
+// Screen styles; format 2 has no image id.
+void readScreens(Reader& reader, Model& model, bool with_image) {
+  for (auto& style : model.screens) {
+    reader.flag(Field::kApplication, style.enabled);
+    reader.flag(Field::kApplication, style.background);
+    reader.u32(style.colour);
+    reader.u32(style.text);
+    reader.u32(style.accent);
+    reader.u8(style.text_scale);
+    if (with_image) reader.u8(style.image);
+  }
+}
+
+// 7 flags, 9 u8 values, 10 u16 values (formats 2 and 3).
+void readScalars(Reader& reader, Model& model) {
+  reader.flag(Field::kApplication, model.espn_opt_in);
+  reader.flag(Field::kApplication, model.demo);
+  reader.flag(Field::kApplication, model.backgrounds);
+  reader.flag(Field::kApplication, model.night_enabled);
+  reader.flag(Field::kApplication, model.ip_badge_ap_permanent);
+  reader.flag(Field::kApplication, model.ip_badge_bottom);
+  reader.flag(Field::kApplication, model.browser_debug);
+  for (auto* value : {&model.language, &model.brightness,
+                      &model.night_brightness, &model.rotation,
+                      &model.visible_matches, &model.table_window})
+    reader.u8(*value);
+  for (auto* screen :
+       {&model.idle_screen, &model.matchday_screen, &model.own_match_screen}) {
+    auto value = static_cast<uint8_t>(*screen);
+    reader.u8(value);
+    *screen = static_cast<cfg::Screen>(value);
+  }
+  for (auto* value :
+       {&model.manual_return_s, &model.scroll_reset_s, &model.scroll_repeat_ms,
+        &model.slideshow_s, &model.night_start, &model.night_end,
+        &model.ip_badge_s, &model.window_before, &model.window_after,
+        &model.api_daily_budget})
+    reader.u16(*value);
+}
+
+void writeScalars(Writer& writer, const Model& model) {
+  writer.flag(model.espn_opt_in);
+  writer.flag(model.demo);
+  writer.flag(model.backgrounds);
+  writer.flag(model.night_enabled);
+  writer.flag(model.ip_badge_ap_permanent);
+  writer.flag(model.ip_badge_bottom);
+  writer.flag(model.browser_debug);
+  for (uint8_t value :
+       {model.language, model.brightness, model.night_brightness,
+        model.rotation, model.visible_matches, model.table_window,
+        static_cast<uint8_t>(model.idle_screen),
+        static_cast<uint8_t>(model.matchday_screen),
+        static_cast<uint8_t>(model.own_match_screen)})
+    writer.u8(value);
+  for (uint16_t value :
+       {model.manual_return_s, model.scroll_reset_s, model.scroll_repeat_ms,
+        model.slideshow_s, model.night_start, model.night_end, model.ip_badge_s,
+        model.window_before, model.window_after, model.api_daily_budget})
+    writer.u16(value);
+}
+
+// Format 3 after the secrets: screens, scalars, crest image and the lists.
+void readLists(Reader& reader, Model& model) {
+  readScreens(reader, model, true);
+  readScalars(reader, model);
+  reader.u8(model.crest_image);
+
+  uint8_t count = 0;
+  if (reader.count(model.slides.kCapacity, count)) {
+    model.slides.clear();
+    for (uint8_t i = 0; i < count; ++i) reader.u8(model.slides.items[i]);
+    model.slides.count = count;
+    reader.endList();
+  }
+  if (reader.count(model.competitions.kCapacity, count)) {
+    model.competitions.clear();
+    for (uint8_t i = 0; i < count; ++i) {
+      auto& entry = model.competitions.items[i];
+      reader.flag(Field::kApplication, entry.active);
+      reader.flag(Field::kApplication, entry.fallback_active);
+      readSource(reader, entry.primary);
+      readSource(reader, entry.fallback);
+      reader.text(Field::kApplication, entry.competition_name);
+      reader.text(Field::kApplication, entry.team_name);
+    }
+    model.competitions.count = count;
+    reader.endList();
+  }
+  if (reader.count(model.fixture_pairs.kCapacity, count)) {
+    model.fixture_pairs.clear();
+    for (uint8_t i = 0; i < count; ++i) {
+      auto& pair = model.fixture_pairs.items[i];
+      reader.flag(Field::kApplication, pair.active);
+      reader.flag(Field::kApplication, pair.swapped);
+      reader.u8(pair.competition);
+      reader.text(Field::kApplication, pair.primary_id);
+      reader.text(Field::kApplication, pair.secondary_id);
+    }
+    model.fixture_pairs.count = count;
+    reader.endList();
+  }
+}
+
+// Format 2 stored its lists as fixed slots with an enabled flag each: three
+// routes with their fallbacks and eight fixture mappings that refer to a
+// route by index. They become ordered lists: a complete route is a competition
+// (a disabled one stays as paused), an empty slot disappears, a fallback
+// becomes its competition's property and a mapping is renumbered to its
+// competition (or dropped with its route).
+constexpr unsigned kSlotRoutes = 3;
+constexpr unsigned kSlotMappings = 8;
+constexpr uint8_t kNoCompetition = 0xff;
+
+void readSlots(Reader& reader, Model& model) {
+  uint8_t competition_of[kSlotRoutes];
+  std::fill(std::begin(competition_of), std::end(competition_of),
+            kNoCompetition);
+  bool replaced = false;
+  for (unsigned i = 0; i < kSlotRoutes; ++i) {
+    Competition entry;
+    bool enabled = false;
+    if (!reader.flag(Field::kApplication, enabled)) break;
+    readSource(reader, entry.primary);
+    entry.active = enabled;
+    if (!replaced) model.competitions.clear();
+    replaced = true;
+    if (entry.primary.complete()) {
+      competition_of[i] = model.competitions.count;
+      model.competitions.push(entry);
+    }
+  }
+  readScreens(reader, model, false);
+  readScalars(reader, model);
+
+  for (unsigned i = 0; i < kSlotRoutes; ++i) {
+    Source fallback;
+    bool enabled = false;
+    if (!reader.flag(Field::kApplication, enabled)) break;
+    readSource(reader, fallback);
+    if (competition_of[i] == kNoCompetition) continue;
+    auto& entry = model.competitions[competition_of[i]];
+    entry.fallback_active = enabled;
+    if (fallback.complete()) entry.fallback = fallback;
+  }
+
+  replaced = false;
+  for (unsigned i = 0; i < kSlotMappings; ++i) {
+    FixturePair pair;
+    uint8_t route = 0;
+    if (!reader.flag(Field::kApplication, pair.active)) break;
+    reader.u8(route);
+    reader.flag(Field::kApplication, pair.swapped);
+    reader.text(Field::kApplication, pair.primary_id);
+    reader.text(Field::kApplication, pair.secondary_id);
+    if (!replaced) model.fixture_pairs.clear();
+    replaced = true;
+    if (route < kSlotRoutes && competition_of[route] != kNoCompetition &&
+        !pair.primary_id.empty() && !pair.secondary_id.empty()) {
+      pair.competition = competition_of[route];
+      model.fixture_pairs.push(pair);
+    }
+  }
+}
 
 }  // namespace
 
@@ -144,7 +370,8 @@ uint32_t crc32(std::span<const uint8_t> data, uint32_t crc) noexcept {
   return ~crc;
 }
 
-void encode(const Model& model, std::span<uint8_t, kRecordBytes> out) noexcept {
+std::size_t encode(const Model& model,
+                   std::span<uint8_t, kMaxRecordBytes> out) noexcept {
   std::fill(out.begin(), out.end(), 0);
   Writer writer(out.data() + kHeaderBytes);
   writer.text(model.wifi_ssid);
@@ -159,13 +386,6 @@ void encode(const Model& model, std::span<uint8_t, kRecordBytes> out) noexcept {
   writer.text(model.admin_password);
   writer.text(model.api_football_key);
   writer.text(model.football_data_key);
-  for (const auto& route : model.routes) {
-    writer.flag(route.enabled);
-    writer.u8(static_cast<uint8_t>(route.provider));
-    writer.text(route.competition);
-    writer.text(route.season);
-    writer.text(route.team);
-  }
   for (const auto& style : model.screens) {
     writer.flag(style.enabled);
     writer.flag(style.background);
@@ -173,41 +393,32 @@ void encode(const Model& model, std::span<uint8_t, kRecordBytes> out) noexcept {
     writer.u32(style.text);
     writer.u32(style.accent);
     writer.u8(style.text_scale);
+    writer.u8(style.image);
   }
-  writer.flag(model.espn_opt_in);
-  writer.flag(model.demo);
-  writer.flag(model.backgrounds);
-  writer.flag(model.night_enabled);
-  writer.flag(model.ip_badge_ap_permanent);
-  writer.flag(model.ip_badge_bottom);
-  writer.flag(model.browser_debug);
-  for (uint8_t value :
-       {model.language, model.brightness, model.night_brightness,
-        model.rotation, model.visible_matches, model.table_window,
-        static_cast<uint8_t>(model.idle_screen),
-        static_cast<uint8_t>(model.matchday_screen),
-        static_cast<uint8_t>(model.own_match_screen)})
-    writer.u8(value);
-  for (uint16_t value :
-       {model.manual_return_s, model.scroll_reset_s, model.scroll_repeat_ms,
-        model.slideshow_s, model.night_start, model.night_end, model.ip_badge_s,
-        model.window_before, model.window_after, model.api_daily_budget})
-    writer.u16(value);
-  for (const auto& route : model.fallback_routes) {
-    writer.flag(route.enabled);
-    writer.u8(static_cast<uint8_t>(route.provider));
-    writer.text(route.competition);
-    writer.text(route.season);
-    writer.text(route.team);
+  writeScalars(writer, model);
+  writer.u8(model.crest_image);
+  writer.u8(model.slides.count);
+  for (const uint8_t slide : model.slides) writer.u8(slide);
+  writer.u8(model.competitions.count);
+  for (const auto& entry : model.competitions) {
+    writer.flag(entry.active);
+    writer.flag(entry.fallback_active);
+    writeSource(writer, entry.primary);
+    writeSource(writer, entry.fallback);
+    writer.text(entry.competition_name);
+    writer.text(entry.team_name);
   }
-  for (const auto& mapping : model.fixture_mappings) {
-    writer.flag(mapping.enabled);
-    writer.u8(mapping.route);
-    writer.flag(mapping.swapped);
-    writer.text(mapping.primary);
-    writer.text(mapping.secondary);
+  writer.u8(model.fixture_pairs.count);
+  for (const auto& pair : model.fixture_pairs) {
+    writer.flag(pair.active);
+    writer.flag(pair.swapped);
+    writer.u8(pair.competition);
+    writer.text(pair.primary_id);
+    writer.text(pair.secondary_id);
   }
-  seal(out);
+  const auto used = static_cast<std::size_t>(writer.position() - out.data());
+  seal(out.first(used));
+  return used;
 }
 
 void seal(std::span<uint8_t> record, uint16_t version) noexcept {
@@ -218,7 +429,7 @@ void seal(std::span<uint8_t> record, uint16_t version) noexcept {
 }
 
 DecodeResult decode(std::span<const uint8_t> record, Model& model,
-                    Field* invalid) noexcept {
+                    Field* invalid, const Limits& limits) noexcept {
   if (record.size() < kHeaderBytes) return DecodeResult::kTooShort;
   if (record.size() > cfg::kSettingsMaxRecordBytes)
     return DecodeResult::kTooLong;
@@ -228,7 +439,8 @@ DecodeResult decode(std::span<const uint8_t> record, Model& model,
     return DecodeResult::kChecksumMismatch;
   const auto version = readU16(record.data() + kVersionOffset);
   const bool legacy = version == cfg::kSettingsLegacyFormatVersion;
-  if (version != cfg::kSettingsFormatVersion && !legacy)
+  const bool slots = version == cfg::kSettingsSlotFormatVersion;
+  if (version != cfg::kSettingsFormatVersion && !legacy && !slots)
     return DecodeResult::kUnknownVersion;
   if (legacy && record.size() > cfg::kSettingsLegacyMaxRecordBytes)
     return DecodeResult::kTooLong;
@@ -238,80 +450,25 @@ DecodeResult decode(std::span<const uint8_t> record, Model& model,
       legacy ? std::min(record.size(), cfg::kSettingsLegacyCoreRecordBytes)
              : record.size();
   Reader reader(record.subspan(kHeaderBytes, readable - kHeaderBytes));
-  reader.text(Field::kWifiSsid, candidate.wifi_ssid);
-  reader.text(Field::kWifiPassword, candidate.wifi_password);
-  reader.text(Field::kApPassword, candidate.ap_password);
-  reader.text(Field::kHostname, candidate.hostname);
-  reader.flag(Field::kExternalAntenna, candidate.external_antenna);
-  reader.flag(Field::kDebugStatusLog, candidate.debug_status_log);
-  reader.u16(candidate.debug_status_interval_s);
-  reader.text(Field::kTimeZone, candidate.time_zone);
-  reader.text(Field::kNtpServer, candidate.ntp_server);
+  readCore(reader, candidate);
   if (!legacy) {
-    reader.text(Field::kApplication, candidate.admin_password);
-    reader.text(Field::kApplication, candidate.api_football_key);
-    reader.text(Field::kApplication, candidate.football_data_key);
-    for (auto& route : candidate.routes) {
-      reader.flag(Field::kApplication, route.enabled);
-      auto value = static_cast<uint8_t>(route.provider);
-      reader.u8(value);
-      route.provider = static_cast<cfg::Provider>(value);
-      reader.text(Field::kApplication, route.competition);
-      reader.text(Field::kApplication, route.season);
-      reader.text(Field::kApplication, route.team);
-    }
-    for (auto& style : candidate.screens) {
-      reader.flag(Field::kApplication, style.enabled);
-      reader.flag(Field::kApplication, style.background);
-      reader.u32(style.colour);
-      reader.u32(style.text);
-      reader.u32(style.accent);
-      reader.u8(style.text_scale);
-    }
-    reader.flag(Field::kApplication, candidate.espn_opt_in);
-    reader.flag(Field::kApplication, candidate.demo);
-    reader.flag(Field::kApplication, candidate.backgrounds);
-    reader.flag(Field::kApplication, candidate.night_enabled);
-    reader.flag(Field::kApplication, candidate.ip_badge_ap_permanent);
-    reader.flag(Field::kApplication, candidate.ip_badge_bottom);
-    reader.flag(Field::kApplication, candidate.browser_debug);
-    for (auto* value : {&candidate.language, &candidate.brightness,
-                        &candidate.night_brightness, &candidate.rotation,
-                        &candidate.visible_matches, &candidate.table_window})
-      reader.u8(*value);
-    for (auto* screen : {&candidate.idle_screen, &candidate.matchday_screen,
-                         &candidate.own_match_screen}) {
-      auto value = static_cast<uint8_t>(*screen);
-      reader.u8(value);
-      *screen = static_cast<cfg::Screen>(value);
-    }
-    for (auto* value : {&candidate.manual_return_s, &candidate.scroll_reset_s,
-                        &candidate.scroll_repeat_ms, &candidate.slideshow_s,
-                        &candidate.night_start, &candidate.night_end,
-                        &candidate.ip_badge_s, &candidate.window_before,
-                        &candidate.window_after, &candidate.api_daily_budget})
-      reader.u16(*value);
-
-    for (auto& route : candidate.fallback_routes) {
-      reader.flag(Field::kApplication, route.enabled);
-      auto provider = static_cast<uint8_t>(route.provider);
-      reader.u8(provider);
-      route.provider = static_cast<cfg::Provider>(provider);
-      reader.text(Field::kApplication, route.competition);
-      reader.text(Field::kApplication, route.season);
-      reader.text(Field::kApplication, route.team);
-    }
-    for (auto& mapping : candidate.fixture_mappings) {
-      reader.flag(Field::kApplication, mapping.enabled);
-      reader.u8(mapping.route);
-      reader.flag(Field::kApplication, mapping.swapped);
-      reader.text(Field::kApplication, mapping.primary);
-      reader.text(Field::kApplication, mapping.secondary);
-    }
+    readSecrets(reader, candidate);
+    if (slots)
+      readSlots(reader, candidate);
+    else
+      readLists(reader, candidate);
   }
   DecodeResult result = reader.result();
   Field bad = reader.invalidField();
-  if (result == DecodeResult::kOk && !validate(candidate, &bad))
+  // A record from a display with more room: the rows fit this display.
+  if (cfg::kVisibleMatchesRange.contains(candidate.visible_matches))
+    candidate.visible_matches =
+        std::min(candidate.visible_matches, limits.visible_matches_max);
+  if (cfg::kTableWindowRange.contains(candidate.table_window))
+    candidate.table_window =
+        std::min(candidate.table_window, limits.table_window_max);
+  if (result == DecodeResult::kOk &&
+      !validate(candidate, &bad, nullptr, limits))
     result = DecodeResult::kInvalidValue;
   if (result != DecodeResult::kOk) {
     if (result == DecodeResult::kInvalidValue && invalid != nullptr)

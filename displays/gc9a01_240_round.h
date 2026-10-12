@@ -19,6 +19,8 @@ inline constexpr DisplayProfile kDisplay{
     // ESP32-C6 module.
     .bgr_order = true,
     .invert_colors = true,
+    .visible_matches_max = 4,
+    .table_window_max = 7,
 };
 
 }  // namespace hw

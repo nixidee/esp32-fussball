@@ -1,7 +1,9 @@
 #include "settings_json.h"
 
 #include <cstring>
+#include <type_traits>
 
+#include "hw_target.h"
 #include "provider_client.h"
 namespace web {
 using namespace ArduinoJson;
@@ -43,19 +45,75 @@ using namespace ArduinoJson;
   X(admin_password);   \
   X(api_football_key); \
   X(football_data_key);
+using settings::FieldPath;
+using settings::Reason;
+// Where the first rejected value is recorded (D7); null: only the verdict.
+struct Context {
+  settings::Violation* violation;
+  bool reject(const FieldPath& at, Reason why) const {
+    if (violation) violation->set(at, why);
+    return false;
+  }
+};
+// A number that does not fit the target type is out of range, any other
+// mismatch is a wrong type.
 template <class T>
-bool scalar(JsonVariantConst v, T& target) {
+bool scalar(const Context& c, const FieldPath& at, JsonVariantConst v,
+            T& target) {
   if (v.isNull()) return true;
-  if (!v.is<T>()) return false;
+  if (!v.is<T>())
+    return c.reject(at, !std::is_same_v<T, bool> && v.is<long long>()
+                            ? Reason::kRange
+                            : Reason::kType);
   target = v.as<T>();
   return true;
 }
 template <std::size_t N>
-bool bytes(JsonVariantConst v, settings::Bytes<N>& target) {
+bool bytes(const Context& c, const FieldPath& at, JsonVariantConst v,
+           settings::Bytes<N>& target) {
   if (v.isNull()) return true;
-  if (!v.is<const char*>()) return false;
+  if (!v.is<const char*>()) return c.reject(at, Reason::kType);
   auto s = v.as<JsonString>();
-  return target.assign({s.c_str(), s.size()});
+  return target.assign({s.c_str(), s.size()}) || c.reject(at, Reason::kTooLong);
+}
+// True if 'row' is an object whose keys are all in 'names'.
+bool onlyKeys(const Context& c, const FieldPath& at, JsonVariantConst row,
+              std::initializer_list<const char*> names) {
+  if (!row.is<JsonObjectConst>()) return c.reject(at, Reason::kType);
+  for (JsonPairConst entry : row.as<JsonObjectConst>()) {
+    bool known = false;
+    for (const char* name : names) known |= !strcmp(entry.key().c_str(), name);
+    if (!known)
+      return c.reject(at.with(entry.key().c_str()), Reason::kUnknownKey);
+  }
+  return true;
+}
+// A list in the input: an array of at most 'capacity' entries.
+bool listOf(const Context& c, const FieldPath& at, JsonVariantConst rows,
+            std::size_t capacity) {
+  if (!rows.is<JsonArrayConst>()) return c.reject(at, Reason::kType);
+  return rows.size() <= capacity || c.reject(at, Reason::kTooMany);
+}
+void sourceJson(JsonObject out, const settings::Source& source) {
+  out["provider"] = static_cast<unsigned>(source.provider);
+  out["competition"] = std::string_view(source.competition.view());
+  out["season"] = std::string_view(source.season.view());
+  out["team"] = std::string_view(source.team.view());
+}
+// Absent keys keep the value in 'target'; null is absent.
+bool applySource(const Context& c, const FieldPath& at, JsonVariantConst row,
+                 settings::Source& target) {
+  if (row.isNull()) return true;
+  uint8_t provider = static_cast<uint8_t>(target.provider);
+  if (!onlyKeys(c, at, row, {"provider", "competition", "season", "team"}) ||
+      !scalar(c, at.with("provider"), row["provider"], provider) ||
+      !bytes(c, at.with("competition"), row["competition"],
+             target.competition) ||
+      !bytes(c, at.with("season"), row["season"], target.season) ||
+      !bytes(c, at.with("team"), row["team"], target.team))
+    return false;
+  target.provider = static_cast<cfg::Provider>(provider);
+  return true;
 }
 void settingsJson(JsonObject out, const settings::Model& m, bool secrets) {
 #define PUT(name) out[#name] = m.name;
@@ -72,33 +130,28 @@ void settingsJson(JsonObject out, const settings::Model& m, bool secrets) {
   out["idle_screen"] = static_cast<unsigned>(m.idle_screen);
   out["matchday_screen"] = static_cast<unsigned>(m.matchday_screen);
   out["own_match_screen"] = static_cast<unsigned>(m.own_match_screen);
-  auto routes = out["routes"].to<JsonArray>();
-  for (const auto& route : m.routes) {
-    auto item = routes.add<JsonObject>();
-    item["enabled"] = route.enabled;
-    item["provider"] = static_cast<unsigned>(route.provider);
-    item["competition"] = std::string_view(route.competition.view());
-    item["season"] = std::string_view(route.season.view());
-    item["team"] = std::string_view(route.team.view());
+  auto competitions = out["competitions"].to<JsonArray>();
+  for (const auto& entry : m.competitions) {
+    auto item = competitions.add<JsonObject>();
+    item["active"] = entry.active;
+    item["fallback_active"] = entry.fallback_active;
+    sourceJson(item["primary"].to<JsonObject>(), entry.primary);
+    sourceJson(item["fallback"].to<JsonObject>(), entry.fallback);
+    item["competition_name"] = std::string_view(entry.competition_name.view());
+    item["team_name"] = std::string_view(entry.team_name.view());
   }
-  auto fallbacks = out["fallback_routes"].to<JsonArray>();
-  for (const auto& route : m.fallback_routes) {
-    auto item = fallbacks.add<JsonObject>();
-    item["enabled"] = route.enabled;
-    item["provider"] = static_cast<unsigned>(route.provider);
-    item["competition"] = std::string_view(route.competition.view());
-    item["season"] = std::string_view(route.season.view());
-    item["team"] = std::string_view(route.team.view());
+  auto pairs = out["fixture_pairs"].to<JsonArray>();
+  for (const auto& pair : m.fixture_pairs) {
+    auto item = pairs.add<JsonObject>();
+    item["active"] = pair.active;
+    item["swapped"] = pair.swapped;
+    item["competition"] = pair.competition;
+    item["primary_id"] = std::string_view(pair.primary_id.view());
+    item["secondary_id"] = std::string_view(pair.secondary_id.view());
   }
-  auto mappings = out["fixture_mappings"].to<JsonArray>();
-  for (const auto& mapping : m.fixture_mappings) {
-    auto item = mappings.add<JsonObject>();
-    item["enabled"] = mapping.enabled;
-    item["route"] = mapping.route;
-    item["swapped"] = mapping.swapped;
-    item["primary"] = std::string_view(mapping.primary.view());
-    item["secondary"] = std::string_view(mapping.secondary.view());
-  }
+  out["crest_image"] = m.crest_image;
+  auto slides = out["slides"].to<JsonArray>();
+  for (const uint8_t id : m.slides) slides.add(id);
   auto screens = out["screens"].to<JsonArray>();
   for (const auto& style : m.screens) {
     auto item = screens.add<JsonObject>();
@@ -108,20 +161,13 @@ void settingsJson(JsonObject out, const settings::Model& m, bool secrets) {
     item["text"] = style.text;
     item["accent"] = style.accent;
     item["text_scale"] = style.text_scale;
+    item["image"] = style.image;
   }
 }
-bool applyJson(JsonObjectConst in, settings::Model& m) {
-  auto keys = [](JsonVariantConst row,
-                 std::initializer_list<const char*> names) {
-    if (!row.is<JsonObjectConst>()) return false;
-    for (JsonPairConst entry : row.as<JsonObjectConst>()) {
-      bool known = false;
-      for (const char* name : names)
-        known |= !strcmp(entry.key().c_str(), name);
-      if (!known) return false;
-    }
-    return true;
-  };
+bool applyJson(JsonObjectConst in, settings::Model& m,
+               settings::Violation* violation,
+               const settings::Limits& limits) {
+  const Context c{violation};
   for (JsonPairConst entry : in) {
     const auto* name = entry.key().c_str();
     bool known = false;
@@ -131,7 +177,7 @@ bool applyJson(JsonObjectConst in, settings::Model& m) {
     SECRETS(KNOWN)
 #undef KNOWN
     for (const char* other :
-         {"routes", "fallback_routes", "fixture_mappings", "screens",
+         {"competitions", "fixture_pairs", "crest_image", "slides", "screens",
           "idle_screen", "matchday_screen", "own_match_screen"})
       known |= strcmp(name, other) == 0;
     // Redacted exports carry only these boolean markers; they never clear a
@@ -141,14 +187,14 @@ bool applyJson(JsonObjectConst in, settings::Model& m) {
     SECRETS(MARKER)
 #undef MARKER
     if (marker && entry.value().is<bool>()) continue;
-    if (!known) return false;
+    if (!known) return c.reject(FieldPath().key(name), Reason::kUnknownKey);
   }
 #define GET(name) \
-  if (!scalar(in[#name], m.name)) return false;
+  if (!scalar(c, FieldPath().key(#name), in[#name], m.name)) return false;
   SCALARS(GET)
 #undef GET
 #define GETTEXT(name) \
-  if (!bytes(in[#name], m.name)) return false;
+  if (!bytes(c, FieldPath().key(#name), in[#name], m.name)) return false;
   TEXTS(GETTEXT)
   SECRETS(GETTEXT)
 #undef GETTEXT
@@ -156,69 +202,117 @@ bool applyJson(JsonObjectConst in, settings::Model& m) {
                     std::pair{"matchday_screen", &m.matchday_screen},
                     std::pair{"own_match_screen", &m.own_match_screen}}) {
     if (in[pair.first].isNull()) continue;
-    if (!in[pair.first].is<uint8_t>()) return false;
+    if (!in[pair.first].is<uint8_t>())
+      return c.reject(FieldPath().key(pair.first),
+                      in[pair.first].is<long long>() ? Reason::kRange
+                                                     : Reason::kType);
     *pair.second = static_cast<cfg::Screen>(in[pair.first].as<uint8_t>());
   }
-  for (const char* name : {"routes", "fallback_routes"}) {
-    if (in[name].isNull()) continue;
-    auto& target = !strcmp(name, "routes") ? m.routes : m.fallback_routes;
-    if (!in[name].is<JsonArrayConst>() || in[name].size() != target.size())
-      return false;
-    for (unsigned i = 0; i < target.size(); ++i) {
-      auto row = in[name][i];
-      if (!keys(row, {"enabled", "provider", "competition", "season", "team"}))
+  // A list in the input replaces the whole list; absent keys of an entry
+  // take the defaults of a new entry.
+  if (!in["competitions"].isNull()) {
+    const auto list = FieldPath().key("competitions");
+    const auto rows = in["competitions"];
+    if (!listOf(c, list, rows, m.competitions.kCapacity)) return false;
+    m.competitions.clear();
+    unsigned n = 0;
+    for (JsonVariantConst row : rows.as<JsonArrayConst>()) {
+      const auto at = list.withIndex(n++);
+      settings::Competition entry;
+      if (!onlyKeys(c, at, row,
+                    {"active", "fallback_active", "primary", "fallback",
+                     "competition_name", "team_name"}) ||
+          !scalar(c, at.with("active"), row["active"], entry.active) ||
+          !scalar(c, at.with("fallback_active"), row["fallback_active"],
+                  entry.fallback_active) ||
+          !applySource(c, at.with("primary"), row["primary"], entry.primary) ||
+          !applySource(c, at.with("fallback"), row["fallback"],
+                       entry.fallback) ||
+          !bytes(c, at.with("competition_name"), row["competition_name"],
+                 entry.competition_name) ||
+          !bytes(c, at.with("team_name"), row["team_name"], entry.team_name))
         return false;
-      auto& route = target[i];
-      uint8_t p = static_cast<uint8_t>(route.provider);
-      if (!scalar(row["enabled"], route.enabled) ||
-          !scalar(row["provider"], p) ||
-          !bytes(row["competition"], route.competition) ||
-          !bytes(row["season"], route.season) ||
-          !bytes(row["team"], route.team))
-        return false;
-      route.provider = static_cast<cfg::Provider>(p);
+      m.competitions.push(entry);
     }
   }
-  if (!in["fixture_mappings"].isNull()) {
-    if (!in["fixture_mappings"].is<JsonArrayConst>() ||
-        in["fixture_mappings"].size() != m.fixture_mappings.size())
-      return false;
-    for (unsigned i = 0; i < m.fixture_mappings.size(); ++i) {
-      const auto row = in["fixture_mappings"][i];
-      auto& mapping = m.fixture_mappings[i];
-      if (!keys(row, {"enabled", "route", "swapped", "primary", "secondary"}) ||
-          !scalar(row["enabled"], mapping.enabled) ||
-          !scalar(row["route"], mapping.route) ||
-          !scalar(row["swapped"], mapping.swapped) ||
-          !bytes(row["primary"], mapping.primary) ||
-          !bytes(row["secondary"], mapping.secondary))
+  if (!in["fixture_pairs"].isNull()) {
+    const auto list = FieldPath().key("fixture_pairs");
+    const auto rows = in["fixture_pairs"];
+    if (!listOf(c, list, rows, m.fixture_pairs.kCapacity)) return false;
+    m.fixture_pairs.clear();
+    unsigned n = 0;
+    for (JsonVariantConst row : rows.as<JsonArrayConst>()) {
+      const auto at = list.withIndex(n++);
+      settings::FixturePair pair;
+      if (!onlyKeys(c, at, row,
+                    {"active", "swapped", "competition", "primary_id",
+                     "secondary_id"}) ||
+          !scalar(c, at.with("active"), row["active"], pair.active) ||
+          !scalar(c, at.with("swapped"), row["swapped"], pair.swapped) ||
+          !scalar(c, at.with("competition"), row["competition"],
+                  pair.competition) ||
+          !bytes(c, at.with("primary_id"), row["primary_id"],
+                 pair.primary_id) ||
+          !bytes(c, at.with("secondary_id"), row["secondary_id"],
+                 pair.secondary_id))
         return false;
+      m.fixture_pairs.push(pair);
+    }
+  }
+  if (!scalar(c, FieldPath().key("crest_image"), in["crest_image"],
+              m.crest_image))
+    return false;
+  if (!in["slides"].isNull()) {
+    const auto list = FieldPath().key("slides");
+    const auto rows = in["slides"];
+    if (!listOf(c, list, rows, m.slides.kCapacity)) return false;
+    m.slides.clear();
+    unsigned n = 0;
+    for (JsonVariantConst row : rows.as<JsonArrayConst>()) {
+      const auto at = list.withIndex(n++);
+      if (!row.is<uint8_t>())
+        return c.reject(at, row.is<long long>() ? Reason::kRange
+                                                : Reason::kType);
+      m.slides.push(row.as<uint8_t>());
     }
   }
   if (!in["screens"].isNull()) {
-    if (!in["screens"].is<JsonArrayConst>() ||
-        in["screens"].size() != m.screens.size())
-      return false;
+    const auto list = FieldPath().key("screens");
+    if (!in["screens"].is<JsonArrayConst>())
+      return c.reject(list, Reason::kType);
+    if (in["screens"].size() != m.screens.size())
+      return c.reject(list, in["screens"].size() > m.screens.size()
+                                ? Reason::kTooMany
+                                : Reason::kInvalid);
     for (unsigned i = 0; i < m.screens.size(); ++i) {
+      const auto at = list.withIndex(i);
       auto row = in["screens"][i];
       auto& s = m.screens[i];
-      if (!keys(row, {"enabled", "background", "colour", "text", "accent",
-                      "text_scale"}) ||
-          !scalar(row["enabled"], s.enabled) ||
-          !scalar(row["background"], s.background) ||
-          !scalar(row["colour"], s.colour) || !scalar(row["text"], s.text) ||
-          !scalar(row["accent"], s.accent) ||
-          !scalar(row["text_scale"], s.text_scale))
+      if (!onlyKeys(c, at, row,
+                    {"enabled", "background", "colour", "text", "accent",
+                     "text_scale", "image"}) ||
+          !scalar(c, at.with("enabled"), row["enabled"], s.enabled) ||
+          !scalar(c, at.with("background"), row["background"], s.background) ||
+          !scalar(c, at.with("colour"), row["colour"], s.colour) ||
+          !scalar(c, at.with("text"), row["text"], s.text) ||
+          !scalar(c, at.with("accent"), row["accent"], s.accent) ||
+          !scalar(c, at.with("text_scale"), row["text_scale"], s.text_scale) ||
+          !scalar(c, at.with("image"), row["image"], s.image))
         return false;
     }
   }
-  return settings::validate(m);
+  return settings::validate(m, nullptr, violation, limits);
 }
-void schemaJson(JsonObject out) {
+void schemaJson(JsonObject out, const settings::Limits& limits) {
   out["version"] = cfg::kSettingsFormatVersion;
   out["max_body"] = cfg::kApiBodyBytes;
-  out["route_count"] = cfg::kRouteCount;
-  out["fixture_mappings"] = cfg::kFixtureMappings;
+  auto lists = out["limits"].to<JsonObject>();
+  lists["competitions"] = cfg::kCompetitionMax;
+  lists["fixture_pairs"] = cfg::kFixtureMappingMax;
+  lists["slides"] = cfg::kSlideMax;
+  lists["images"] = cfg::kImageLibraryMax;
+  lists["screens"] = cfg::kScreenCount;
+  out["backlight"] = hw::kTarget.wiring.backlight != hw::kNoPin;
   out["image_max"] = cfg::kImageMaxBytes;
   out["selection_entries"] = cfg::kSelectionEntries;
   out["selection_country_default"] = cfg::kSelectionCountryDefault;
@@ -233,7 +327,26 @@ void schemaJson(JsonObject out) {
   for (unsigned p = 0; p < cfg::kProviderCount; ++p)
     providers.add(football::providerName(static_cast<cfg::Provider>(p)));
   auto defaults = out["defaults"].to<JsonObject>();
-  settingsJson(defaults, settings::initialValues({}));
+  settingsJson(defaults, settings::initialValues({}, nullptr, limits));
+  // Longest accepted text in bytes; list entries are nested like in the
+  // settings JSON (W127).
+  using settings::Model;
+  auto text = out["text"].to<JsonObject>();
+#define TEXTMAX(name) text[#name] = decltype(Model::name)::kCapacity;
+  TEXTS(TEXTMAX)
+  SECRETS(TEXTMAX)
+#undef TEXTMAX
+  auto entry = text["competitions"].to<JsonObject>();
+  entry["competition"] = decltype(settings::Source::competition)::kCapacity;
+  entry["season"] = decltype(settings::Source::season)::kCapacity;
+  entry["team"] = decltype(settings::Source::team)::kCapacity;
+  entry["competition_name"] =
+      decltype(settings::Competition::competition_name)::kCapacity;
+  entry["team_name"] = decltype(settings::Competition::team_name)::kCapacity;
+  auto pair = text["fixture_pairs"].to<JsonObject>();
+  pair["primary_id"] = decltype(settings::FixturePair::primary_id)::kCapacity;
+  pair["secondary_id"] =
+      decltype(settings::FixturePair::secondary_id)::kCapacity;
   auto bounds = out["bounds"].to<JsonObject>();
   auto range = [&](const char* name, int min, int max) {
     auto row = bounds[name].to<JsonArray>();
@@ -242,14 +355,17 @@ void schemaJson(JsonObject out) {
   };
   range("debug_status_interval_s", cfg::kDebugStatusIntervalMinS,
         cfg::kDebugStatusIntervalMaxS);
-  auto bounded = [&](const char* name, cfg::Range limits) {
-    range(name, limits.min, limits.max);
+  auto bounded = [&](const char* name, cfg::Range r) {
+    range(name, r.min, r.max);
   };
   bounded("brightness", cfg::kBrightnessRange);
   bounded("night_brightness", cfg::kBrightnessRange);
   bounded("rotation", cfg::kRotationRange);
-  bounded("visible_matches", cfg::kVisibleMatchesRange);
-  bounded("table_window", cfg::kTableWindowRange);
+  // The display profile narrows the two layout-dependent maxima (OQ-92).
+  bounded("visible_matches",
+          {cfg::kVisibleMatchesRange.min, limits.visible_matches_max});
+  bounded("table_window",
+          {cfg::kTableWindowRange.min, limits.table_window_max});
   bounded("manual_return_s", cfg::kReturnTimeRange);
   bounded("scroll_reset_s", cfg::kReturnTimeRange);
   bounded("scroll_repeat_ms", cfg::kScrollRepeatRange);

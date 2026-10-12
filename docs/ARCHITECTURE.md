@@ -95,8 +95,8 @@
   uploads. Scan/selection/refresh requests signal their owning service.
   The static debug worker permits one fixed in-flight message. Heavy admission
   serializes provider TLS/JSON with image mutation and OTA.
-- Settings live behind a mutex. `settings::current()` returns a 1,736-byte
-  owned copy on the C6. NVS saves/reset use a second mutex and execute in the
+- Settings live behind a mutex. `settings::current()` returns a 1,944-byte
+  owned copy on the C6 (it lives on the caller's stack). NVS saves/reset use a second mutex and execute in the
   caller task. They post coalesced `kSettingsChanged` notifications.
 - State notifications and semantic input actions use the existing bounded
   event bus. UI's controller action queue also has four fixed entries and
@@ -259,7 +259,7 @@ C-library APIs and `esp_timer_get_time()` for monotonic milliseconds.
   source, monotonic set time and set count, then posts `kTimeChanged`.
   Zone changes post the same event; subscribers fetch the current state.
 - A settings event callback only raises an atomic flag. The app task copies
-  the settings (1,736 B in this candidate), applies a changed zone and updates diagnostics;
+  the settings (1,944 B in this candidate), applies a changed zone and updates diagnostics;
   this work runs outside the `events` task.
 - Civil windows follow local time, including midnight and skipped/repeated
   daylight-saving hours. Delays and deadlines use monotonic time.
@@ -501,32 +501,36 @@ shape the image design:
   (temporary file, then rename), otherwise a replacement during a redraw fails.
 This is integration evidence only, not the supported-maximum envelope.
 
-### Current compiled resource ledger — 2026-10-10
+### Current compiled resource ledger — 2026-10-12 (settings format 3)
 
 | Item | C6 candidate | Growth over the accepted core image |
 |---|---|---|
-| Firmware binary | 1,607,728 B | +1,091,424 B |
-| PlatformIO flash report | 1,606,974 B, 87.6% of 1,835,008 B | +1,091,310 B |
-| Static data/BSS | 196,736 B | +148,516 B |
-| Linked DIRAM, official IDF size report | 266,066 B | +172,976 B |
+| Firmware binary | 1,502,208 B | +985,904 B |
+| PlatformIO flash report | 1,501,454 B, 81.8% of 1,835,008 B | +985,790 B |
+| Static data/BSS | 194,516 B | +146,296 B |
+| Linked DIRAM, official IDF size report | not re-measured (266,066 B at the 2026-10-10 image) | — |
 | Football snapshots | 3 × 27,168 B = 81,504 B | Included above |
-| Settings model / encoded record | 1,736 / 1,720 B | Format 2; legacy core import without NVS rewrite |
+| Settings model / longest encoded record | 1,944 / 1,931 B | Format 3 (variable length, ceiling 2,048 B); formats 1 and 2 are converted in RAM without an NVS rewrite |
 | UI view model | 1,416 B | Static owned view |
 | Parser live allocation cap | 24,576 B including custom headers | Libc metadata additional |
 | JPEG validation workspace | 4,096 B static | Included above |
 | Stock JPEG files / filesystem image | 7,862 / 458,752 B | Logical files / gross partition |
 
-DIRAM consists of 179,000 B BSS, 17,736 B data and 69,330 B RAM-resident code.
-The full IDF certificate bundle is retained. No partitions, public features
-or library versions were removed to fit the slot. Runtime initialization of
-large snapshot defaults, shared stock aliases/font roles and unused C6 SDK
-speed/protocol features reduced the first complete build's 94.3% occupancy
-to the current 87.6%.
+The DIRAM split (179,000 B BSS, 17,736 B data, 69,330 B RAM-resident code) is
+from the 2026-10-10 image and was not re-measured. The certificate bundle is
+the common-CA set of 40 roots (16,738 B); the full Mozilla set (67,817 B) was
+replaced to save flash (verified at build level; TLS to every provider host
+still needs a device log). Assertions are silent in release builds. No
+partitions, public features or library versions were removed to fit the slot.
+Runtime initialization of large snapshot defaults, shared stock aliases/font
+roles and unused C6 SDK speed/protocol features reduced the first complete
+build's 94.3% occupancy to the current 81.8%.
 
-The image fits the OTA slot but misses the 85% reserve goal by about 47.2 KB
-using the PlatformIO report. No flash-reserve gate is accepted. The linked
-186,046 B remaining DIRAM is not measured free heap: dynamic stacks, network,
-TLS, parser, DMA and library charges must still be accounted for. Peak heap,
+The image fits the OTA slot and is about 58.3 KB below the 85% reserve line
+(1,559,757 B) using the PlatformIO report. Settings format 3 added 3,706 B flash
+and 620 B static RAM over the preceding build. No flash-reserve gate is
+accepted. Free heap is not derivable from the static figures: dynamic stacks,
+network, TLS, parser, DMA and library charges must still be accounted for. Peak heap,
 largest block, 25% stack reserves, LVGL fragmentation, ten-socket concurrency,
 filesystem metadata and replacement space remain hardware acceptance work.
 

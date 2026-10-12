@@ -6,9 +6,12 @@ concurrency and maximum-load acceptance remain open.
 
 ## Identity, values and ownership
 
-A provider ID is meaningful only with its provider and configured route.
-Settings own three competition/season/club routes; matches refer to a route
-index. There is no separate heap-allocated competition graph. Teams, names,
+A provider ID is meaningful only with its provider and configured competition.
+Settings own an ordered list of up to three competitions (primary source,
+optional fallback source, stored display names); matches refer to a competition
+by its list position (the field is still called `route`). The first active
+competition supplies the league table. There is no separate heap-allocated
+competition graph. Teams, names,
 scores and events are copied into the snapshot and never borrow JSON storage.
 
 `Value<T>` contains a value and source: None, Estimated or a confirmed
@@ -44,7 +47,7 @@ truncated lists, so eviction cannot pretend that a goal was withdrawn.
 
 Relevant match/table overflow rejects the complete new publication and keeps
 the previous snapshot with an error/stale indication. Duplicate fixture IDs
-within a route are ignored. Selection uses a separate 64-entry page and an
+within a competition are ignored. Selection uses a separate 64-entry page and an
 explicit more flag; it is not an unbounded team cache.
 
 ## Match phases and scores

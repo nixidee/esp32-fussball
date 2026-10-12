@@ -4,14 +4,21 @@ The embedded Web UI is implemented in the compiled C6 development candidate.
 Browser, phone and device acceptance are pending. It runs locally in German or
 English and needs no external scripts, fonts or CDN.
 
+**Interim state (settings format 3):** the device API already offers the list
+model described below (competitions, fixture pairs, slides, image library), but
+the page in `web/index.html` still edits the fixed slots of the former format.
+Until the page is rewritten, its competition, fixture-pair and image sections
+are limited or unusable; all other sections work. Settings stay changeable
+through the export/import file and the API in the meantime.
+
 ## Tabs
 
 | Tab | Implemented content |
 |---|---|
 | Dashboard | Club/provider selection, refresh and network/data/resource status |
 | Screens | Live single, conference, table and crest/slideshow; enable, colours, text scale, background and timing controls |
-| Images | Crest, five slideshow slots and four screen backgrounds; browser editor, upload, reset and storage repair |
-| Settings | Data routes and explicit fallback mappings, WiFi, antenna, display, overlays, time, system and admin password |
+| Images | Image library (up to ten uploaded images) used as crest, slideshow slides and screen backgrounds; browser editor, upload, delete and storage repair |
+| Settings | Competitions (up to three, each with an optional fallback source) and explicit fixture pairs, WiFi, antenna, display, overlays, time, system and admin password |
 | Update | Current version/profile and compatible firmware upload |
 | Debug | Controlled live status during the connection, without retained history |
 
@@ -28,10 +35,17 @@ at a time; while one is still running (for example from an older page), a new
 request is answered with `selection busy`, and the page waits for the running
 one to finish and sends its request again (at most three attempts). While a
 list loads, the page says so: the provider's minimum request interval can
-delay it by up to 30 seconds. Optional fallback routes require explicit paired
-fixture IDs, with an explicit home/away swap flag when needed.
+delay it by up to 30 seconds. A competition may have a fallback source at
+another provider; its matches are paired with explicit fixture IDs per
+competition, with an explicit home/away swap flag when needed. Lists hold only
+real entries (no empty slots): at most three competitions, eight fixture pairs
+and five slideshow slides. The first active competition supplies the league
+table. The competition and club names chosen from a provider list are stored
+with the entry so the page can show them without asking the provider again.
 
-Every configurable default and limit is supplied by the device schema.
+Every configurable default and limit is supplied by the device schema,
+including the list limits (`competition_max`, `fixture_pair_max`, `slide_max`)
+and the library size (`image_count_max`).
 Display dimensions and shape come from the active hardware profile. The browser
 preview uses static demo content; it does not display live scores or a live table.
 
@@ -56,10 +70,21 @@ already implemented import workflow.
 
 ## Image storage and lifetime
 
-There are ten logical slots: one crest, five slideshow images and four screen
-backgrounds. All use baseline JPEG at exactly the active display dimensions.
-Progressive JPEG, invalid markers, invalid dimensions and incomplete/corrupt
-decode are rejected before publication.
+Uploaded images form a library of at most ten files with ids 1 to 10; id 0
+is the stock image. A library image is not tied to a role: the crest
+(`crest_image`), each screen background and each slideshow slide refer to an id
+and may share one. An upload without an `X-Image-Id` header takes the lowest
+free id and returns it (`{"ok":true,"id":n}`); with the header it replaces that
+image. `GET /api/v1/images` lists the stored ids with their byte sizes and
+`POST /api/v1/images/delete` (`{"id":n}`) removes one. All images use baseline
+JPEG at exactly the active display dimensions. Progressive JPEG, invalid
+markers, invalid dimensions and incomplete/corrupt decode are rejected before
+publication.
+
+A reference to a missing image is tolerated: the renderer shows the stock image
+(or skips the slide). Deleting an image removes its references at once; the
+firmware also removes dead references once after boot, outside an OTA trial
+(settings imported from another device may carry some until then).
 
 | Bound | C6 candidate |
 |---|---|
@@ -67,7 +92,8 @@ decode are rejected before publication.
 | Total unique image-file quota | 327,680 bytes |
 | Reserved replacement space | 40,960 bytes |
 | LittleFS partition | 458,752 bytes |
-| Stock files | Two aliases shared by default slots; 7,862 logical bytes |
+| Library size | 10 images (limited by the quota above) |
+| Stock files | Two aliases shared by default screens; 7,862 logical bytes |
 
 The partition also needs filesystem metadata. These caps leave a reserve but
 do not substitute for a measured full-storage test. Larger/other profiles need
@@ -85,8 +111,10 @@ only a partition verified entirely erased is initialized at first boot. The Imag
 tab provides explicit full-storage formatting, including when display startup
 failed and the web repair path is available. Full formatting erases defaults
 as well as uploads; USB `uploadfs` restores the stock filesystem image.
-Resetting a single uploaded slot removes its override and selects its stock
-alias if that alias still exists.
+Deleting a library image frees its file; screens that used it fall back to
+the stock image. The image files of earlier firmware (fixed names) are not
+migrated: they are removed once after the first start of this format, outside
+an OTA trial, and the images are uploaded again.
 
 Routine firmware OTA preserves this shared storage. Trial firmware blocks
 persistent image mutation until local health confirmation. USB `uploadfs`

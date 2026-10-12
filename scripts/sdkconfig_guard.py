@@ -5,7 +5,9 @@ options from SDKCONFIG_DEFAULTS, and PlatformIO reconfigures only for a few
 watched files, so an edited defaults file would otherwise leave a stale
 sdkconfig.<env> in use. A fingerprint over every configuration input is kept
 in the build folder; when it differs, sdkconfig.<env> is deleted and ESP-IDF
-generates it again from the defaults files.
+generates it again from the defaults files. The mbedTLS certificate bundle in
+the build folder is deleted too, because PlatformIO would otherwise keep a
+bundle built for the previous configuration.
 
 The verification after configuration lives in sdkconfig_verify.py (post:
 script) and calls verify_sdkconfig() registered here: every option in the
@@ -23,6 +25,8 @@ Import("env")
 
 FINGERPRINT_FILE = "sdkconfig_inputs.sha256"
 DEPRECATED_MARKER = "# Deprecated options for backward compatibility"
+# Build outputs derived from the configuration that PlatformIO never refreshes.
+STALE_BUILD_FILES = ("x509_crt_bundle", "x509_crt_bundle.S")
 # Runs consisting only of these targets skip the verification (menuconfig must
 # stay usable to inspect a configuration that fails it).
 UNCHECKED_TARGETS = {"menuconfig", "clean", "fullclean", "erase", "monitor"}
@@ -153,3 +157,8 @@ if recorded != fingerprint() and sdkconfig_path.is_file():
     print("sdkconfig guard: configuration inputs changed, regenerating %s"
           % sdkconfig_path.name)
     sdkconfig_path.unlink()
+    # PlatformIO generates the mbedTLS certificate bundle only when none
+    # exists, so a bundle built for the previous configuration would stay in
+    # use after the bundle option changed.
+    for name in STALE_BUILD_FILES:
+        (build_dir / name).unlink(missing_ok=True)

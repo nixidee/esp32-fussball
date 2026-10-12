@@ -19,6 +19,21 @@ const char* providerName(cfg::Provider p) {
   }
   return "unknown";
 }
+const char* phaseName(Phase phase) {
+  switch (phase) {
+    case Phase::kUnknown: return "unknown";
+    case Phase::kScheduled: return "scheduled";
+    case Phase::kLive: return "live";
+    case Phase::kHalfTime: return "half_time";
+    case Phase::kExtraTime: return "extra_time";
+    case Phase::kPenalties: return "penalties";
+    case Phase::kFinished: return "finished";
+    case Phase::kPostponed: return "postponed";
+    case Phase::kCancelled: return "cancelled";
+    case Phase::kAbandoned: return "abandoned";
+  }
+  return "unknown";
+}
 Capabilities capabilities(cfg::Provider p) {
   switch (p) {
     case cfg::Provider::kOpenLigaDb:

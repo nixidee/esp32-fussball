@@ -12,10 +12,10 @@ Configured through a built-in web interface.
 > long-run tests remain. Earlier boot/core tests
 > do not establish acceptance of these new services.
 >
-> Current C6 size: 1,607,728 B firmware binary, 1,606,974 B PlatformIO flash
-> (87.6% of one OTA slot), 196,736 B static RAM and 266,066 B linked DIRAM.
-> It fits the slot but exceeds the agreed 85% flash-reserve target by about
-> 47.2 KB. Peak heap, largest block, stack and LVGL reserves remain unmeasured
+> Current C6 size: 1,502,208 B firmware binary, 1,501,454 B PlatformIO flash
+> (81.8% of one OTA slot) and 194,516 B static RAM. It fits the slot and is
+> about 58 KB below the agreed 85% flash-reserve line. Peak heap, largest
+> block, stack and LVGL reserves remain unmeasured
 > for the complete candidate. Visual/resource polish and acceptance are next;
 > this is not a release. S3 development remains paused.
 
@@ -208,8 +208,9 @@ Pinouts and wiring: [docs/HARDWARE.md](docs/HARDWARE.md).
 ## Data sources
 Four adapters are implemented: **OpenLigaDB** (default, no key), API-Football,
 ESPN (unofficial, opt-in) and football-data.org. Keyed providers require owner
-credentials and tier/coverage acceptance. Three competition routes and explicit
-verified fallback fixture pairs are bounded by the shared model capacity.
+credentials and tier/coverage acceptance. Up to three competitions (each with
+an optional fallback source at another provider) and up to eight explicit
+verified fixture pairs are stored as lists with fixed maxima.
 Contracts and limits: [docs/DATA_PROVIDERS.md](docs/DATA_PROVIDERS.md).
 
 ## Documentation
