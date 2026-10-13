@@ -120,13 +120,13 @@ overwrite a newer job. TLS uses incremental nonblocking connection/handshake
 calls; the socket stays nonblocking afterwards, so reads and writes wait in
 slices for a complete TLS record or send space. The original host is retained
 for certificate verification and SNI after numeric IPv4 resolution.
-Cancellation checks run between steps for time, settings generation and network
-epoch. SDK scheduling and cryptographic step duration still require measurement;
+Cancellation checks run between steps for time, provider-data settings
+generation and network epoch. SDK scheduling and cryptographic step duration still require measurement;
 the implementation does not claim a measured hard real-time bound.
 
 Every provider request writes one serial log line (tag `provider`): either
 `not sent: <URL> (<reason>)` when it stops before the connection (provider not
-enabled, settings changed, network lost or changed, operation busy, daily
+enabled, provider settings changed, network lost or changed, operation busy, daily
 budget used or budget unavailable), or `<URL>: HTTP <status>, <bytes> B,
 <duration> ms[, <error>]` after the transfer. API keys travel in request
 headers and never appear in the URL. Every rejected Web request writes one
@@ -158,13 +158,14 @@ or worker startup failures.
 | GET `/api/v1/session` | `{password_set, valid}` for the token the request carries |
 | GET `/api/v1/wifi`, `/selection` | Bounded scan/selection results |
 | GET `/api/v1/fixtures?competition=N&source=primary\|fallback` | The club's matches of a competition for the pair picker |
-| GET `/api/v1/images`, `/images/file?id=N\|stock=crest\|background[&r=rev]` | Image inventory with per-image revision; the JPEG itself |
+| GET `/api/v1/images`, `/images/file?id=N\|stock=crest\|background[&r=rev]` | Image inventory: library images with per-image revision, and the two roles `crest` and `background` with `replaced`, replacement `bytes` and `revision` (it changes when the role's image changes); the JPEG itself (`stock=` delivers the role's replacement, else its factory image) |
 | POST `/api/v1/session`, `/logout` | Open/close the mutation session |
 | POST or PUT `/api/v1/settings` | Strictly typed settings patch |
 | POST `/api/v1/export` | Explicit settings export |
 | POST `/api/v1/wifi/scan`, `/data/select`, `/data/fixtures`, `/data/refresh` | Start asynchronous scan, provider list, fallback fixtures or refresh |
 | POST `/api/v1/display` | Quick display action `{"action":"next"\|"ip"}` (same events as the buttons) |
-| POST `/api/v1/images/upload`, `/images/delete` | Upload a library image (optional `X-Image-Id` replaces one) or delete one by id |
+| POST `/api/v1/images/upload`, `/images/delete` | Upload a library image (optional `X-Image-Id` replaces one; `X-Image-Role: crest\|background` uploads the replacement of that role instead, answer `{"ok":true,"role":…}`) or delete a library image by id |
+| POST `/api/v1/images/role` | `{"role":"crest"\|"background","action":"reset"}` deletes the replacement, so the factory image shows again; `{"role":…,"action":"copy","id":N}` copies library image N as the replacement (the library image stays). Roles cannot be deleted. A replacement counts towards the image budget, not towards the ten library ids |
 | POST `/api/v1/images/repair` | Confirmed image-storage formatting and reference cleanup; preserves other settings and does not restart |
 | POST `/api/v1/ota` | Stream compatible firmware to the inactive slot |
 | POST `/api/v1/reboot`, `/reset` | Reboot or reset settings, optionally delete all images or format image storage |
@@ -256,14 +257,29 @@ serial port: `heap_free`, `heap_largest` and `heap_min` (lowest free heap since
 boot, internal 8-bit memory) plus `tasks`, an array of `{name, id,
 stack_min_free}` with the lowest free stack in bytes of every task (at most 16).
 
+`settings_source` says where the current settings come from: `stored` (the
+stored record or the last save), `initial` (no record, or after a reset),
+`rejected` (the stored record has a value outside its limits), `damaged`
+(too long or not decodable), `unreadable` (NVS read error or no memory) or
+`no_storage` (NVS unusable). Every value except `stored` means the initial
+values apply. A `rejected` or `damaged` record is overwritten by the next
+save; `unreadable` and `no_storage` refuse saving until a reset.
+
+`last_update_ms` is the monotonic time of the oldest data shown and
+`data_stale` is true while any competition shows earlier data.
+`competitions[i].error` is true for every competition whose last fetch
+failed; it keeps its earlier data until a later fetch succeeds, while the
+other competitions update. `data_error` and `data_error_code` explain the
+first failed competition.
+
 ### Errors
 
 Every failed request answers `{"error": "<English text>", "code": "<stable
 code>"[, "field": "<name>"]}` with `Cache-Control: no-store`. `code` is for
 programs, `error` for people, `field` names the one value that caused a 400:
 the dotted settings path (for example `competitions[0].primary.competition`),
-a body key (`competition`, `season`, `id`, `confirm`) or a header
-(`X-Image-Id`). For value errors `code` is the settings reason (`invalid`,
+a body key (`competition`, `season`, `id`, `role`, `action`, `confirm`) or a header
+(`X-Image-Id`, `X-Image-Role`). For value errors `code` is the settings reason (`invalid`,
 `range`, `type`, `unknown_key`, `too_long`, `too_many`, `required`,
 `duplicate`, `reference`, `conflict`, `none_enabled`). Other codes: `origin`
 (403), `session`, `password` (401), `trial`, `busy`, `state`, `changed` (409),

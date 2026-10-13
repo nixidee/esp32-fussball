@@ -7,10 +7,10 @@ idf_component_register(
     "ui_controller.cpp"
     "navigation_policy.cpp"
     "input_policy.cpp"
-    "fonts/ui_font_text_10.c"
+    "fonts/ui_font_text_12.c"
     "fonts/ui_font_text_14.c"
     "fonts/ui_font_text_18.c"
-    "fonts/ui_font_score_28.c"
+    "fonts/ui_font_score_48.c"
   INCLUDE_DIRS
     "include"
   PRIV_INCLUDE_DIRS
@@ -20,6 +20,7 @@ idf_component_register(
     lvgl__lvgl
     core
     display
+    esp_app_format
     football
     images
     network

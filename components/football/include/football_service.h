@@ -2,15 +2,15 @@
 #include "esp_err.h"
 #include "football_model.h"
 namespace football {
-// No competition caused the last error.
-inline constexpr uint8_t kNoRoute = 0xff;
 struct Status {
   uint32_t revision, requests[cfg::kProviderCount], generation;
+  // Monotonic time of the oldest data shown (a failed competition keeps
+  // earlier data); 0 = none yet.
   int64_t fetched_ms;
   uint8_t matches, rows;
-  // Index of the competition whose fetch failed last; kNoRoute after a
-  // successful round.
-  uint8_t error_route;
+  // Bit i set: competition i failed in the last round; it shows earlier
+  // data (or none) until a later fetch succeeds.
+  uint8_t error_routes;
   bool stale, busy;
   Text<96> error;
   Cause cause;  // stable key of 'error'

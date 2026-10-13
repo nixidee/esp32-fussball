@@ -166,7 +166,9 @@ can overlap provider traffic and still needs peak-memory measurement.
 linker budget.
 
 The stock filesystem contains two baseline JPEG aliases (7,862 logical bytes)
-for the crest/slideshow and screen backgrounds. Rebuild from the high-resolution
+for the crest/slideshow and screen backgrounds. These factory images stay on
+the device; the Web UI can replace the crest and the standard background and
+restore the factory images at any time. Rebuild from the high-resolution
 sources when a target resolution changes:
 
 ```bash
@@ -182,7 +184,7 @@ including cached CMake builds; unchanged content does not recompile it.
 
 `VERSION` is the application version source; [CHANGELOG.md](CHANGELOG.md)
 describes the candidate. CMake option `FUSSBALL_RELEASE_BUILD=ON` additionally
-requires a plain semantic release version and all six diagnostic/fault selectors
+requires a plain semantic release version and all seven diagnostic/fault selectors
 disabled. It does not certify runtime acceptance or publish anything.
 
 Waveshare verification resumes after C6 acceptance. Other resolutions, controllers
@@ -193,7 +195,7 @@ The C6 antenna driver is implemented; RF switching has not been tested.
 | Screen | When |
 |---|---|
 | Live (single match) | Your club plays: big score, match minute, teams, highlights |
-| Live (conference) | Match days: your match in the centre, others above/below |
+| Live (conference) | Match days: the matches of the current kickoff times, your match pinned on top (optional), several pages |
 | Table | Default outside match days: positions around your club |
 | Crest / slideshow | Club crest or your own images |
 

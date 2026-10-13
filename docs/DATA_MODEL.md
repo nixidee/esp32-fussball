@@ -36,7 +36,7 @@ overflow and invalid ranges. Goals are 0–99; minutes 0–240; added minutes
 | MatchEvent | provider, 32-bit identity/revision, type, minute/added time, actor/beneficiary, player/in/out/detail, score after, removed/shootout flags | 224 B |
 | Standing | owned team, own flag, position and eight statistics with validity | 162 B |
 | Selection | owned ID, provider season, name | 131 B |
-| Snapshot | 32 matches, 32 table rows, 32 events, counts, generation/revision/freshness/errors | 27168 B |
+| Snapshot | 32 matches, 32 table rows, 32 events, counts, generation/revision/freshness per competition/errors/next retry | 27200 B |
 
 Limits live in `app_config.h`. Each match references at most 12 events in the
 shared 32-entry pool. Rich events are retained for the tracked club across its
@@ -77,8 +77,9 @@ extra-time goals are added to regulation; its shootout-inclusive fullTime
 is not used as ordinary goals. ESPN's separate shootoutScore is retained.
 
 OpenLigaDB lacks a live clock: before kickoff status is estimated Scheduled;
-after kickoff the minute uses a 15-minute halftime allowance and is marked
-with `~`. After four hours without a confirmed final status phase becomes
+minutes 0–45 after kickoff are estimated Live, minutes 46–60 estimated
+HalfTime (shown as half time), later minutes subtract the 15-minute break.
+Estimated minutes are marked with `~`. After four hours without a confirmed final status phase becomes
 Unknown and the bounded window expires. Postponed/cancelled/abandoned fixtures
 are excluded from active windows.
 
@@ -97,7 +98,7 @@ complete later list become one-publication removal records. These 32-bit
 hashes are bounded representations; collision/correction fixtures still need
 tests. Richer provider event semantics require keyed/recorded acceptance.
 
-The first fetch, reconnect, settings generation change and time-change
+The first fetch, reconnect, provider-data settings change and time-change
 notification establish a baseline. They do not replay historical goals.
 Later principal-value changes update monotonic score-change time; switching
 provenance alone does not count as a score change.
@@ -109,17 +110,40 @@ OpenLigaDB additionally retains the provider's current round. Other providers
 retain conference fixtures within 36 hours. Filtering happens while streaming
 a response; discarded bytes still count toward transport limits.
 
-The configured competition conference windows span the first kickoff through the
-last finish of each relevant round, including gaps between fixtures. Round
-number is preferred, then supplied round text; without either, UTC date is
-the grouping boundary. Each fixture's unknown end is capped at kickoff plus
-240 minutes. Configurable before/after offsets default to 30 minutes.
+For the polling cadence, the configured competition conference windows span
+the first kickoff through the last finish of each relevant round, including
+gaps between fixtures. Round number is preferred, then supplied round text;
+without either, UTC date is the grouping boundary. Each fixture's unknown end
+is capped at kickoff plus 240 minutes. Configurable before/after offsets
+default to 30 minutes.
+
+The Konferenz screen shows kickoff blocks instead. A block is every retained
+match of every active competition with the same kickoff time; postponed,
+cancelled and abandoned matches and matches without a kickoff never take
+part. A block's matches are shown from kickoff minus the before offset until
+the block ends (the latest expected end of its matches plus the after
+offset) or the next block's before offset starts, whichever is first. A
+match that overruns into the next block (it finished after that start, or is
+still running) stays until its own end plus the after offset. The expected
+end is the final whistle when known; a provider-reported running phase
+allows up to 240 minutes after kickoff; otherwise 115 minutes after kickoff
+are assumed. A match first seen as finished without having been seen
+running gets an estimated final whistle of the earlier of now and kickoff
+plus 115 minutes. With "show own match for the whole matchday" on, the own
+match also stays from its kickoff while any other shown match belongs to the
+same matchday (same round of the same competition, by the same round rules
+as above). Members are listed in kickoff order. The relevant-matchday default
+screen applies while at least one match is a member.
 Own cup/catch-up matches have their own windows and can select Own match even
 outside the league window. This date fallback is a bounded implementation
 choice, not a claim that every provider supplies complete round metadata.
 
-Season comes from the selected provider. OpenLigaDB resolves an empty season
-from current match metadata and caches it for six hours. No rule guesses a
+Season comes from the selected provider. An empty season means the provider's
+current season. OpenLigaDB and API-Football need it in their URLs, so the
+device resolves it with one request (OpenLigaDB: current match metadata;
+API-Football: the league's season marked current) and caches it per competition
+and source for six hours; football-data.org and ESPN select their current
+season themselves when it is left out. No rule guesses a
 season from the local calendar. Season rollover, empty competitions and delayed
 fixtures remain required acceptance cases.
 
@@ -132,14 +156,29 @@ them in BSS rather than embedding mostly empty images in flash.
 A reader executes a short callback under the repository mutex and copies into
 its own fixed view/status model; it performs no I/O, LVGL work, allocation or
 blocking calls there. It retains no snapshot reference. The presenter view
-model is 1416 B on C6. The writer may reuse the old slot after publication
+model is 1420 B on C6. The writer may reuse the old slot after publication
 because every read has already released its protected copy.
 
-Every request carries settings generation and network epoch. Changed settings,
-network loss/reconnect or deadline expiration invalidate work before publication.
-A failed route rejects the candidate as a whole; the previous complete snapshot
-remains available with stale/error state. A stale age of 15 minutes is also
-reported independently of request failure.
+Every request carries the provider-data generation of the settings and the
+network epoch. Changed provider settings (see the configuration
+documentation), network loss/reconnect or deadline expiration invalidate work before publication.
+A competition whose fetch fails keeps its previously published matches,
+events (without removal markers, estimated again) and, for the first active
+competition, the league table, together with the time of its last successful
+fetch; the other competitions publish their new data in the same snapshot.
+Such a snapshot is marked stale, carries the error and cause of the first
+failed competition and the monotonic time of its next attempt (`retry_ms`).
+A failed competition is fetched again after its own retry delay (one minute,
+five minutes after a rate limit or a used budget); until then later rounds
+carry its earlier data without a request. A requested refresh, a settings
+save or a network or time change retries it at once. When every active
+competition fails, when the match list overflows or when settings or the
+network change during the round, nothing is published: the previous snapshot
+remains available with stale/error state and `retry_ms` (0 after a success),
+which the display shows on the "Keine Daten" card. The "as of" time on the
+display and the data age in the status API are the oldest competition fetch
+time. A stale age of 15 minutes is also reported independently of request
+failure.
 
 Cross-provider fields use explicit fixture mappings and precedence from
 [DATA_PROVIDERS.md](DATA_PROVIDERS.md). Valid primary values win; a fallback

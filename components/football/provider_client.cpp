@@ -33,7 +33,7 @@ struct Transport {
   bool headers = true, failed = false;
   bool valid() {
     const bool ok = timekeeping::monotonicMs() < deadline &&
-                    settings::generation() == generation && network::ready() &&
+                    settings::dataGeneration() == generation && network::ready() &&
                     network::status().epoch == epoch;
     failed |= !ok;
     return ok;
@@ -235,7 +235,7 @@ class Stream {
  private:
   int next() {
     if (timekeeping::monotonicMs() >= deadline_ ||
-        settings::generation() != generation_ || !network::ready() ||
+        settings::dataGeneration() != generation_ || !network::ready() ||
         network::status().epoch != epoch_) {
       failed_ = true;
       return -1;

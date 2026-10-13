@@ -37,3 +37,12 @@ env.BuildSources(
     str(football_root),
     src_filter="+<football_model.cpp> +<conference.cpp>",
 )
+
+# Pure input state machine and role mapping; the rest of the UI needs LVGL.
+ui_root = project_root / "components" / "ui"
+env.Append(CPPPATH=[str(ui_root / "include")])
+env.BuildSources(
+    str(Path(env.subst("$BUILD_DIR")) / "pure" / "ui"),
+    str(ui_root),
+    src_filter="+<input_policy.cpp>",
+)

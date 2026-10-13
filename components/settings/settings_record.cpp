@@ -240,11 +240,23 @@ void writeScalars(Writer& writer, const Model& model) {
     writer.u16(value);
 }
 
-// Format 3 after the secrets: screens, scalars, crest image and the lists.
-void readLists(Reader& reader, Model& model) {
+// Formats 3 to 6 after the secrets: screens, scalars, crest image (formats
+// 3 to 5 only) and the lists.
+// Format 5 tail; validate() rejects unknown mode and role values.
+void readFormat5(Reader& reader, Model& model) {
+  uint8_t value = 0;
+  if (reader.u8(value))
+    model.conference_mode = static_cast<cfg::ConferenceMode>(value);
+  reader.flag(Field::kApplication, model.whole_matchday);
+  for (auto& role : model.input_roles)
+    if (reader.u8(value)) role = static_cast<cfg::InputRole>(value);
+}
+
+// Formats 3 to 5 store a crest image id after the scalars ('crest' given).
+void readLists(Reader& reader, Model& model, uint8_t* crest) {
   readScreens(reader, model, true);
   readScalars(reader, model);
-  reader.u8(model.crest_image);
+  if (crest != nullptr) reader.u8(*crest);
 
   uint8_t count = 0;
   if (reader.count(model.slides.kCapacity, count)) {
@@ -396,7 +408,6 @@ std::size_t encode(const Model& model,
     writer.u8(style.image);
   }
   writeScalars(writer, model);
-  writer.u8(model.crest_image);
   writer.u8(model.slides.count);
   for (const uint8_t slide : model.slides) writer.u8(slide);
   writer.u8(model.competitions.count);
@@ -417,6 +428,10 @@ std::size_t encode(const Model& model,
     writer.text(pair.secondary_id);
   }
   writer.flag(model.pin_own_match);  // format 4
+  writer.u8(static_cast<uint8_t>(model.conference_mode));  // format 5
+  writer.flag(model.whole_matchday);
+  for (const auto role : model.input_roles)
+    writer.u8(static_cast<uint8_t>(role));
   const auto used = static_cast<std::size_t>(writer.position() - out.data());
   seal(out.first(used));
   return used;
@@ -430,7 +445,8 @@ void seal(std::span<uint8_t> record, uint16_t version) noexcept {
 }
 
 DecodeResult decode(std::span<const uint8_t> record, Model& model,
-                    Field* invalid, const Limits& limits) noexcept {
+                    Field* invalid, const Limits& limits,
+                    uint8_t* crest_image) noexcept {
   if (record.size() < kHeaderBytes) return DecodeResult::kTooShort;
   if (record.size() > cfg::kSettingsMaxRecordBytes)
     return DecodeResult::kTooLong;
@@ -442,7 +458,10 @@ DecodeResult decode(std::span<const uint8_t> record, Model& model,
   const bool legacy = version == cfg::kSettingsLegacyFormatVersion;
   const bool slots = version == cfg::kSettingsSlotFormatVersion;
   const bool lists = version == cfg::kSettingsListFormatVersion;
-  if (version != cfg::kSettingsFormatVersion && !legacy && !slots && !lists)
+  const bool pin = version == cfg::kSettingsPinFormatVersion;
+  const bool mode = version == cfg::kSettingsModeFormatVersion;
+  const bool current = version == cfg::kSettingsFormatVersion;
+  if (!current && !legacy && !slots && !lists && !pin && !mode)
     return DecodeResult::kUnknownVersion;
   if (legacy && record.size() > cfg::kSettingsLegacyMaxRecordBytes)
     return DecodeResult::kTooLong;
@@ -452,16 +471,19 @@ DecodeResult decode(std::span<const uint8_t> record, Model& model,
       legacy ? std::min(record.size(), cfg::kSettingsLegacyCoreRecordBytes)
              : record.size();
   Reader reader(record.subspan(kHeaderBytes, readable - kHeaderBytes));
+  uint8_t crest = cfg::kStockImageId;
   readCore(reader, candidate);
   if (!legacy) {
     readSecrets(reader, candidate);
     if (slots)
       readSlots(reader, candidate);
     else
-      readLists(reader, candidate);
-    // Format 3 ends before the pin flag and keeps the initial value.
-    if (version == cfg::kSettingsFormatVersion)
+      readLists(reader, candidate, current ? nullptr : &crest);
+    // Format 3 ends before the pin flag, format 4 before the format-5
+    // fields; missing fields keep their initial values.
+    if (pin || mode || current)
       reader.flag(Field::kApplication, candidate.pin_own_match);
+    if (mode || current) readFormat5(reader, candidate);
   }
   DecodeResult result = reader.result();
   Field bad = reader.invalidField();
@@ -485,6 +507,9 @@ DecodeResult decode(std::span<const uint8_t> record, Model& model,
     return result;
   }
   model = candidate;
+  // An id outside the library never passed validation; it is dropped.
+  if (crest_image != nullptr)
+    *crest_image = crest <= cfg::kImageLibraryMax ? crest : cfg::kStockImageId;
   return DecodeResult::kOk;
 }
 

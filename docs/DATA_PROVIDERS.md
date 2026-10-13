@@ -47,8 +47,9 @@ The competition list requests one season: the one typed in the setup wizard's
 season field, otherwise the current season derived from the device clock
 (from July the season named after the current year, before that the previous
 year's). Entries of other sports (ice hockey, test data) are skipped. Some
-competition shortcuts contain spaces or umlauts; these are not yet usable as
-route IDs.
+competition shortcuts contain spaces or umlauts; every identifier is
+percent-encoded (RFC 3986) when it is placed into a request URL, at all
+providers.
 
 The [official API description](https://api.openligadb.de/swagger/v1/swagger.json)
 states a limit of 60 requests per minute per IP and recommends polling the
@@ -70,7 +71,9 @@ is currently no early publication of the first competition.
 The RAM cache reuses primary-provenance data only when the round/change date
 match, no new baseline is required and the full fetch is less than five minutes
 old. The season is cached for six hours. Caches are not persisted across boots;
-every settings save clears them and the published snapshot. Network changes
+a save that changes provider settings (competitions, sources, fixture pairs,
+keys, ESPN opt-in, demo mode) clears them and the published snapshot, other
+saves keep both. Network changes
 and successful time synchronizations require a new baseline. Fallback sources
 do not use this cache. Because pre/post-match delays already wait five minutes
 after completion, their next cycle repeats the full round/club/table fetch
@@ -94,7 +97,11 @@ Base: [API-Sports football documentation](https://www.api-football.com/documenta
 Selection requests use leagues?country=... (default Germany; World for
 international competitions) and teams?league=...&season=.... Country is a
 bounded selection argument, not a second persistent configuration field.
-Enabled routes require an explicit season. Match requests use
+An empty season is resolved once with leagues?id=...&current=true (one
+request, the season marked current; cached per competition and source for six
+hours, cleared when provider settings change). A club list request with an empty season
+resolves it the same way; the setup wizard passes the season of the picked
+competition list entry, so that lookup is normally not needed. Match requests use
 fixtures?league=...&season=...&from=...&to=..., then primary-league standings.
 Own retained fixtures additionally request fixtures/events?fixture=....
 
@@ -137,6 +144,14 @@ Selection uses competitions and competitions/{id}/teams. Routes use
 competitions/{id}/matches with a bounded date range and standings. The optional
 configured season is forwarded; an empty one selects the provider's current
 season. Competition selection reads the supplied current-season start year.
+
+Every value of the v4 match status table is mapped (lookup table checked
+2026-10-13; the match page lists nine of its eleven values): SCHEDULED and
+TIMED → Scheduled, IN_PLAY → Live, PAUSED → HalfTime, EXTRA_TIME → ExtraTime,
+PENALTY_SHOOTOUT → Penalties, FINISHED → Finished, SUSPENDED and POSTPONED →
+Postponed, CANCELLED → Cancelled, AWARDED → Abandoned. The documentation does
+not describe SUSPENDED and AWARDED; they follow API-Football's SUSP and AWD.
+Any other value stays Unknown.
 
 The [overtime contract](https://docs.football-data.org/general/v4/overtime.html)
 distinguishes regularTime, additional extraTime and penalties. Principal goals
@@ -188,8 +203,9 @@ Headers are 8 KiB, additional wire/framing allowance 32 KiB, JSON nesting 16,
 and live parser allocations 24 KiB including the custom allocation headers
 (libc allocator overhead is additional). Elements are mapped and released one
 at a time. All discarded fields still count toward byte/depth validation.
-Malformed, excessive or incomplete responses keep the last complete snapshot
-and report failure; they do not publish a partial replacement.
+Malformed, excessive or incomplete responses fail their competition: it keeps
+its last published data, marked stale, while other competitions publish their
+new data; a response is never published partially.
 
 ## Combining providers
 
@@ -199,8 +215,11 @@ Enabling a pair certifies that identity and home/away order were verified.
 Names/search suggestions do not certify it.
 
 Confirmed primary fields win. A matched fallback fills missing/estimated
-status, minute, kickoff and scores, plus richer events. Primary goal events
-take precedence over alternate goal events. Swapped home/away order also
+status, minute, kickoff and scores, plus richer events. Scored goals (goal,
+own goal, penalty goal) of the alternate match are dropped when the primary
+match has a scored goal; its missed penalties are dropped when the primary
+match has a missed penalty of its own. A missed penalty alone therefore does
+not suppress the alternate goals. Swapped home/away order also
 swaps every supplied score pair. Fields retain the supplying provider.
 A primary-route failure can use the whole alternate route with its own IDs
 and a fallback notice; there is no automatic cross-source identity claim.

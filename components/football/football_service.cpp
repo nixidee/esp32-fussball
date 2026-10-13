@@ -35,20 +35,57 @@ std::atomic<bool> time_changed{false};
 SelectionRequest selection_request;
 Selection selections[cfg::kSelectionEntries];
 SelectionStatus selection_state{};
-// Competition whose fetch failed last (mutex-protected, like selection_state).
-uint8_t error_route = kNoRoute;
+// Bit i set: competition i failed in the last round and shows earlier data
+// (mutex-protected, like selection_state).
+uint8_t error_routes = 0;
+// A failed competition is fetched again at 'retry_at' (monotonic ms); until
+// then its earlier data is carried over. 'reason' and 'cause' explain the
+// failure (static texts). Provider task only.
+struct RouteFailure {
+  int64_t retry_at = 0;
+  const char* reason = nullptr;
+  Cause cause = Cause::kNone;
+};
+RouteFailure route_failures[cfg::kCompetitionMax];
 uint32_t requests[cfg::kProviderCount]{}, day_requests[cfg::kProviderCount]{};
 int64_t last_request[cfg::kProviderCount]{}, day = 0, due = 0;
 uint32_t last_generation = 0, last_epoch = 0;
+// Resolved current season of an empty season setting, per source (0 primary,
+// 1 fallback); valid for kPollIdleS.
+struct SeasonCache {
+  char text[cfg::kSeasonMaxBytes + 1]{};
+  int64_t at = 0;
+};
 struct RouteCache {
-  char season[cfg::kSeasonMaxBytes + 1]{}, change[64]{};
+  SeasonCache seasons[2];
+  char change[64]{};
   int round = 0;
-  int64_t full_at = 0, season_at = 0;
+  int64_t full_at = 0;
 };
 RouteCache caches[cfg::kCompetitionMax];
 bool baseline = true;
+// timekeeping::Status::step_count seen by the worker.
+uint32_t time_steps = 0;
 const char* str(ArduinoJson::JsonVariantConst v) {
   return v.is<const char*>() ? v.as<const char*>() : "";
+}
+// One URL path or query component: every byte outside the RFC 3986
+// unreserved set is percent-encoded (OpenLigaDB shortcuts may contain spaces
+// or umlauts). 'out' holds three bytes per input byte plus the terminator.
+template <std::size_t N>
+void encode(std::string_view in, char (&out)[N]) {
+  static_assert(N >= 4);
+  std::size_t at = 0;
+  for (const char ch : in) {
+    const auto c = static_cast<unsigned char>(ch);
+    if (at + 4 > N) break;
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' || c == '~')
+      out[at++] = static_cast<char>(c);
+    else
+      at += snprintf(out + at, 4, "%%%02X", c);
+  }
+  out[at] = '\0';
 }
 void identity(Id& out, ArduinoJson::JsonVariantConst v) {
   if (v.is<const char*>())
@@ -61,14 +98,6 @@ void identity(Id& out, ArduinoJson::JsonVariantConst v) {
 }
 void lock() { xSemaphoreTake(mutex, portMAX_DELAY); }
 void unlock() { xSemaphoreGive(mutex); }
-bool allowed(cfg::Provider p, const settings::Model& model) {
-  if (p == cfg::Provider::kEspn && !model.espn_opt_in) return false;
-  if (p == cfg::Provider::kApiFootball && model.api_football_key.empty())
-    return false;
-  if (p == cfg::Provider::kFootballData && model.football_data_key.empty())
-    return false;
-  return true;
-}
 // Why the last get() failed. Provider task only; the code pairs the text and
 // the cause with the error they explain.
 const char* failure = nullptr;
@@ -120,7 +149,7 @@ struct Interruption {
   explicit operator bool() const { return why != nullptr; }
 };
 Interruption interrupted(uint32_t generation, uint32_t epoch) {
-  if (settings::generation() != generation)
+  if (settings::dataGeneration() != generation)
     return {"settings changed", Cause::kSettings};
   if (!network::ready()) return {"network lost", Cause::kNetwork};
   if (network::status().epoch != epoch)
@@ -137,14 +166,14 @@ esp_err_t get(const char* url, const char* array, cfg::Provider p,
     ESP_LOGW("provider", "not sent: %s (%s)", url, why);
     return stop(why, err, cause);
   };
-  if (!allowed(p, m))
+  if (!settings::providerUsable(p, m))
     return skip("provider not enabled", ESP_ERR_INVALID_STATE,
                 Cause::kProviderOff);
   const auto index = static_cast<unsigned>(p);
   const auto now = timekeeping::monotonicMs();
   const unsigned daily_limit = p == cfg::Provider::kApiFootball
                                    ? m.api_daily_budget
-                                   : cfg::kProviderDefaultBudget;
+                                   : cfg::kUnbudgetedDailyRequestCap;
   const int64_t remaining =
       cfg::kProviderMinIntervalMs[index] - (now - last_request[index]);
   const uint32_t epoch = network::status().epoch;
@@ -232,25 +261,6 @@ void tagMatch(Snapshot& data, Match& m, const settings::Source& route) {
     tagScore(event.after, event.provider);
   }
 }
-bool appendMatch(Snapshot& target, const Snapshot& from, const Match& source,
-                 bool primary_events_only = false) {
-  if (target.match_count >= target.matches.size()) return false;
-  auto& match = target.matches[target.match_count++];
-  match = source;
-  match.event_count = 0;
-  for (unsigned i = 0; i < source.event_count; ++i) {
-    if (primary_events_only &&
-        from.events[source.events[i]].provider != source.provider)
-      continue;
-    if (target.event_count >= target.events.size()) {
-      match.events_truncated = true;
-      break;
-    }
-    target.events[target.event_count] = from.events[source.events[i]];
-    match.events[match.event_count++] = target.event_count++;
-  }
-  return true;
-}
 bool appendRoute(Snapshot& target, Snapshot& from,
                  const settings::Source& route) {
   for (unsigned i = 0; i < from.match_count; ++i) {
@@ -320,6 +330,40 @@ bool season(ArduinoJson::JsonVariantConst row, void* context) {
   }
   return false;
 }
+// API-Football league row: the season marked current.
+bool apiSeason(ArduinoJson::JsonVariantConst row, void* context) {
+  auto* route = static_cast<settings::Source*>(context);
+  for (auto item : row["seasons"].as<ArduinoJson::JsonArrayConst>())
+    if (item["current"].as<bool>() && item["year"].is<int>()) {
+      char b[cfg::kSeasonMaxBytes + 1];
+      snprintf(b, sizeof(b), "%d", item["year"].as<int>());
+      return route->season.assign(b);
+    }
+  return true;
+}
+// Fills the empty season of 'route' with the provider's current season (one
+// request). Only OpenLigaDB and API-Football need it in their URLs; the
+// others select their current season themselves when it is left out.
+esp_err_t currentSeason(settings::Source& route, const char* comp_url,
+                        const settings::Model& model, uint32_t generation) {
+  char url[160];
+  esp_err_t err;
+  if (route.provider == cfg::Provider::kOpenLigaDb) {
+    // The current round's matches carry leagueSeason (about 18 KB for bl1).
+    snprintf(url, sizeof(url), "https://api.openligadb.de/getmatchdata/%s",
+             comp_url);
+    err = get(url, "", route.provider, model, generation, season, &route,
+              true);
+  } else {
+    snprintf(url, sizeof(url),
+             "https://v3.football.api-sports.io/leagues?id=%s&current=true",
+             comp_url);
+    err = get(url, "response", route.provider, model, generation, apiSeason,
+              &route, true);
+  }
+  if (err == ESP_OK && route.season.empty()) err = ESP_ERR_INVALID_RESPONSE;
+  return err;
+}
 void dates(int64_t utc, char* from, char* to, bool compact) {
   time_t start = utc - cfg::kFixtureHorizonDays * 86400LL,
          end = utc + cfg::kFixtureHorizonDays * 86400LL;
@@ -344,37 +388,41 @@ esp_err_t routeFetch(settings::Source route, uint8_t index, bool table_source,
   const auto p = route.provider;
   char own_team[cfg::kTeamIdMaxBytes + 1]{};
   memcpy(own_team, route.team.data.data(), route.team.length);
+  // URL forms; the raw texts above are compared with provider rows.
+  char comp_url[3 * cfg::kCompetitionIdMaxBytes + 1],
+      team_url[3 * cfg::kTeamIdMaxBytes + 1];
+  encode(competition, comp_url);
+  encode(own_team, team_url);
   Mapping mapping{&target, p, index, utc, false, {own_team, 0}};
   esp_err_t err;
-  if (p == cfg::Provider::kOpenLigaDb) {
-    auto& cache = caches[index];
-    if (primary && route.season.empty() && cache.season[0] &&
-        timekeeping::monotonicMs() - cache.season_at < cfg::kPollIdleS * 1000LL)
-      route.season.assign(cache.season);
-    if (route.season.empty()) {
-      snprintf(url, sizeof(url), "https://api.openligadb.de/getmatchdata/%s",
-               competition);
-      err = get(url, "", p, model, generation, season, &route, true);
+  auto& cache = caches[index];
+  if (route.season.empty() &&
+      (p == cfg::Provider::kOpenLigaDb || p == cfg::Provider::kApiFootball)) {
+    auto& known = cache.seasons[primary ? 0 : 1];
+    if (known.text[0] &&
+        timekeeping::monotonicMs() - known.at < cfg::kPollIdleS * 1000LL) {
+      route.season.assign(known.text);
+    } else {
+      err = currentSeason(route, comp_url, model, generation);
       if (err != ESP_OK) return err;
-      if (route.season.empty()) return ESP_ERR_INVALID_RESPONSE;
-      memcpy(season_text, route.season.data.data(), route.season.length);
-      if (primary) {
-        snprintf(cache.season, sizeof(cache.season), "%s", season_text);
-        cache.season_at = timekeeping::monotonicMs();
-      }
-    } else
-      memcpy(season_text, route.season.data.data(), route.season.length);
+      memcpy(known.text, route.season.data.data(), route.season.length);
+      known.text[route.season.length] = '\0';
+      known.at = timekeeping::monotonicMs();
+    }
+    memcpy(season_text, route.season.data.data(), route.season.length);
+  }
+  if (p == cfg::Provider::kOpenLigaDb) {
     // Cheap change endpoint suppresses full refreshes of the current round.
     int round = 0;
     snprintf(url, sizeof(url), "https://api.openligadb.de/getcurrentgroup/%s",
-             competition);
+             comp_url);
     err = get(url, nullptr, p, model, generation, group, &round);
     if (err != ESP_OK) return err;
     mapping.filter.round = round;
     char timestamp[64]{};
     snprintf(url, sizeof(url),
              "https://api.openligadb.de/getlastchangedate/%s/%s/%d",
-             competition, season_text, round);
+             comp_url, season_text, round);
     err = get(url, nullptr, p, model, generation, changed, timestamp);
     if (err != ESP_OK) return err;
     if (primary && !baseline && cache.round == round &&
@@ -421,7 +469,7 @@ esp_err_t routeFetch(settings::Source route, uint8_t index, bool table_source,
     // cover exactly that, including catch-up fixtures outside the round,
     // without streaming the whole season (about 300 KB for bl1).
     snprintf(url, sizeof(url),
-             "https://api.openligadb.de/getmatchdata/%s/%s/%d", competition,
+             "https://api.openligadb.de/getmatchdata/%s/%s/%d", comp_url,
              season_text, round);
     err = get(url, "", p, model, generation, consume, &mapping);
     if (err == ESP_OK && own_team[0]) {
@@ -429,13 +477,13 @@ esp_err_t routeFetch(settings::Source route, uint8_t index, bool table_source,
       LeagueRows rows{&mapping, competition, atoi(season_text)};
       snprintf(url, sizeof(url),
                "https://api.openligadb.de/getmatchesbyteamid/%s/%u/%u",
-               own_team, weeks, weeks);
+               team_url, weeks, weeks);
       err = get(url, "", p, model, generation, consumeLeague, &rows);
     }
     if (table_source && err == ESP_OK) {
       mapping.table = true;
       snprintf(url, sizeof(url), "https://api.openligadb.de/getbltable/%s/%s",
-               competition, season_text);
+               comp_url, season_text);
       err = get(url, "", p, model, generation, consume, &mapping);
     }
     if (err == ESP_OK && primary) {
@@ -444,20 +492,19 @@ esp_err_t routeFetch(settings::Source route, uint8_t index, bool table_source,
       cache.full_at = timekeeping::monotonicMs();
     }
   } else if (p == cfg::Provider::kApiFootball) {
-    if (route.season.empty()) return ESP_ERR_INVALID_ARG;
     char from[16], to[16];
     dates(utc, from, to, false);
     snprintf(url, sizeof(url),
              "https://v3.football.api-sports.io/"
              "fixtures?league=%s&season=%s&from=%s&to=%s",
-             competition, season_text, from, to);
+             comp_url, season_text, from, to);
     err = get(url, "response", p, model, generation, consume, &mapping);
     if (table_source && err == ESP_OK) {
       mapping.table = true;
       snprintf(
           url, sizeof(url),
           "https://v3.football.api-sports.io/standings?league=%s&season=%s",
-          competition, season_text);
+          comp_url, season_text);
       err = get(url, "response", p, model, generation, consume, &mapping);
     }
     if (err == ESP_OK && events)
@@ -489,14 +536,14 @@ esp_err_t routeFetch(settings::Source route, uint8_t index, bool table_source,
     snprintf(url, sizeof(url),
              "https://api.football-data.org/v4/competitions/%s/"
              "matches?dateFrom=%s&dateTo=%s%s%s",
-             competition, from, to,
+             comp_url, from, to,
              route.season.empty() ? "" : "&season=", season_text);
     err = get(url, "matches", p, model, generation, consume, &mapping);
     if (table_source && err == ESP_OK) {
       mapping.table = true;
       snprintf(url, sizeof(url),
                "https://api.football-data.org/v4/competitions/%s/standings%s%s",
-               competition,
+               comp_url,
                route.season.empty() ? "" : "?season=", season_text);
       err = get(url, "standings", p, model, generation, consume, &mapping);
     }
@@ -509,7 +556,7 @@ esp_err_t routeFetch(settings::Source route, uint8_t index, bool table_source,
     snprintf(url, sizeof(url),
              "https://site.api.espn.com/apis/site/v2/sports/soccer/%s/"
              "scoreboard?dates=%s%s%s",
-             competition, today,
+             comp_url, today,
              route.season.empty() ? "" : "&season=", season_text);
     err = get(url, "events", p, model, generation, consume, &mapping);
     // Soccer scoreboard range requests returned HTTP 400 during contract
@@ -519,7 +566,7 @@ esp_err_t routeFetch(settings::Source route, uint8_t index, bool table_source,
           url, sizeof(url),
           "https://site.api.espn.com/apis/site/v2/sports/soccer/%s/teams/%s/"
           "schedule?fixture=true%s%s",
-          competition, own_team,
+          comp_url, team_url,
           route.season.empty() ? "" : "&season=", season_text);
       err = get(url, "events", p, model, generation, consume, &mapping, true);
     }
@@ -528,7 +575,7 @@ esp_err_t routeFetch(settings::Source route, uint8_t index, bool table_source,
           url, sizeof(url),
           "https://site.api.espn.com/apis/site/v2/sports/soccer/%s/teams/%s/"
           "schedule%s%s",
-          competition, own_team,
+          comp_url, team_url,
           route.season.empty() ? "" : "?season=", season_text);
       err = get(url, "events", p, model, generation, consume, &mapping, true);
     }
@@ -537,7 +584,7 @@ esp_err_t routeFetch(settings::Source route, uint8_t index, bool table_source,
       snprintf(url, sizeof(url),
                "https://site.web.api.espn.com/apis/v2/sports/soccer/%s/"
                "standings%s%s",
-               competition,
+               comp_url,
                route.season.empty() ? "" : "?season=", season_text);
       err = get(url, "entries", p, model, generation, consume, &mapping);
     }
@@ -548,6 +595,21 @@ struct SelectContext {
   const SelectionRequest* request;
   unsigned seen = 0;
 };
+// Lower case for the list search: ASCII and the UTF-8 Latin-1 capitals
+// (U+00C0..U+00DE except U+00D7, e.g. "Ä", "Ö", "Ü"), so "köln" finds "Köln".
+template <std::size_t N>
+void fold(char (&text)[N]) {
+  for (std::size_t i = 0; i < N && text[i]; ++i) {
+    auto& ch = reinterpret_cast<unsigned char&>(text[i]);
+    if (ch >= 'A' && ch <= 'Z') {
+      ch += 32;
+    } else if (ch == 0xc3 && i + 1 < N) {
+      auto& next = reinterpret_cast<unsigned char&>(text[i + 1]);
+      if (next >= 0x80 && next <= 0x9e && next != 0x97) next += 0x20;
+      if (next) ++i;
+    }
+  }
+}
 bool selectionRow(ArduinoJson::JsonVariantConst row, void* context) {
   auto& c = *static_cast<SelectContext*>(context);
   const auto& request = *c.request;
@@ -585,10 +647,8 @@ bool selectionRow(ArduinoJson::JsonVariantConst row, void* context) {
     char hay[65]{}, needle[49]{};
     snprintf(hay, sizeof(hay), "%s", s.name.data);
     snprintf(needle, sizeof(needle), "%s", request.search.data);
-    for (char& ch : hay)
-      if (ch >= 'A' && ch <= 'Z') ch += 32;
-    for (char& ch : needle)
-      if (ch >= 'A' && ch <= 'Z') ch += 32;
+    fold(hay);
+    fold(needle);
     if (strstr(hay, needle) == nullptr) return true;
   }
   if (c.seen++ < request.offset) return true;
@@ -676,39 +736,26 @@ void runSelection(const settings::Model& model, uint32_t generation,
     finishSelection(runFixtures(model, generation, request.route, utc));
     return;
   }
-  char url[384], comp[33]{}, season_text[33]{};
-  char country[145]{};
-  const char* country_name = request.country.empty()
-                                 ? cfg::kSelectionCountryDefault
-                                 : request.country.data;
-  unsigned country_at = 0;
-  for (const auto* cursor = country_name; *cursor; ++cursor) {
-    const auto c = static_cast<unsigned char>(*cursor);
-    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-        (c >= '0' && c <= '9') || c == '-')
-      country[country_at++] = c;
-    else {
-      snprintf(country + country_at, 4, "%%%02X", c);
-      country_at += 3;
-    }
-  }
-  memcpy(comp, request.competition.data, sizeof(comp));
+  char url[384], comp[3 * cfg::kCompetitionIdMaxBytes + 1], season_text[33]{};
+  char country[3 * cfg::kSelectionTextMaxBytes + 1];
+  encode(request.country.empty() ? cfg::kSelectionCountryDefault
+                                 : request.country.data,
+         country);
+  encode(request.competition.data, comp);
   memcpy(season_text, request.season.data, sizeof(season_text));
   const char* key = "";
   esp_err_t err = ESP_OK;
+  // A club list needs the season in the URL at these two providers.
+  if (request.teams && request.season.empty() &&
+      (request.provider == cfg::Provider::kOpenLigaDb ||
+       request.provider == cfg::Provider::kApiFootball)) {
+    settings::Source current;
+    current.provider = request.provider;
+    err = currentSeason(current, comp, model, generation);
+    if (err == ESP_OK)
+      memcpy(season_text, current.season.data.data(), current.season.length);
+  }
   if (request.provider == cfg::Provider::kOpenLigaDb) {
-    if (request.teams && request.season.empty()) {
-      settings::Source current;
-      snprintf(url, sizeof(url), "https://api.openligadb.de/getmatchdata/%s",
-               comp);
-      err = get(url, "", request.provider, model, generation, season, &current,
-                true);
-      if (err == ESP_OK && current.season.empty())
-        err = ESP_ERR_INVALID_RESPONSE;
-      if (err == ESP_OK) {
-        memcpy(season_text, current.season.data.data(), current.season.length);
-      }
-    }
     if (request.teams)
       snprintf(url, sizeof(url),
                "https://api.openligadb.de/getavailableteams/%s/%s", comp,
@@ -773,10 +820,6 @@ void fillScore(Score& primary, Score secondary, bool swapped) {
   fill(primary.home, secondary.home);
   fill(primary.away, secondary.away);
 }
-bool isGoal(EventType type) {
-  return type == EventType::kGoal || type == EventType::kOwnGoal ||
-         type == EventType::kPenaltyGoal || type == EventType::kPenaltyMissed;
-}
 void compose(Snapshot& primary, Snapshot& secondary,
              const settings::Model& model, uint8_t route, bool table_source) {
   const auto& fallback = model.competitions[route].fallback;
@@ -805,24 +848,7 @@ void compose(Snapshot& primary, Snapshot& secondary,
     fillScore(a->regulation, b->regulation, pair.swapped);
     fillScore(a->extra_time, b->extra_time, pair.swapped);
     fillScore(a->shootout, b->shootout, pair.swapped);
-    bool primary_goals = false;
-    for (unsigned i = 0; i < a->event_count; ++i)
-      primary_goals |= isGoal(primary.events[a->events[i]].type);
-    for (unsigned i = 0; i < b->event_count; ++i) {
-      const auto& event = secondary.events[b->events[i]];
-      if (primary_goals && isGoal(event.type)) continue;
-      if (a->event_count >= a->events.size() ||
-          primary.event_count >= primary.events.size()) {
-        a->events_truncated = true;
-        break;
-      }
-      primary.events[primary.event_count] = event;
-      if (pair.swapped)
-        std::swap(primary.events[primary.event_count].after.home,
-                  primary.events[primary.event_count].after.away);
-      a->events[a->event_count++] = primary.event_count++;
-    }
-    a->events_truncated |= b->events_truncated;
+    mergeEvents(primary, *a, secondary, *b, pair.swapped);
   }
   if (table_source && primary.table_count == 0 && secondary.table_count) {
     for (unsigned i = 0; i < secondary.table_count; ++i) {
@@ -877,7 +903,8 @@ esp_err_t routedFetch(uint8_t route, bool table_source,
 void reconcile(Snapshot& next, const Snapshot& old, int64_t utc) {
   for (unsigned i = 0; i < next.match_count; ++i) {
     auto& m = next.matches[i];
-    m.fetched_ms = next.fetched_ms;
+    if (m.route < next.route_fetched_ms.size())
+      m.fetched_ms = next.route_fetched_ms[m.route];
     // First seen finished: now, or the expected end when the match was never
     // seen running (e.g. after a restart) (W22).
     bool seen_running = false, finished_before = false;
@@ -927,21 +954,51 @@ void reconcile(Snapshot& next, const Snapshot& old, int64_t utc) {
     }
   }
 }
+// Replaces the worker's settings copy. Out of line, so the temporary copy
+// lives in this frame only and not in the worker's frame during requests.
+[[gnu::noinline]] void reload(settings::Model& model) {
+  model = settings::current();
+}
 void worker(void*) {
+  // Copied again only when one of the two settings generations changes. Saves
+  // that keep the data generation (display-only changes) keep data and caches;
+  // changed match windows or API budget only trigger a new refresh.
+  uint32_t settings_seen = settings::generation();
+  settings::Model model;
+  reload(model);
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(100));
-    const auto generation = settings::generation();
+    // Read before the copy: a save in between then interrupts this round.
+    const auto generation = settings::dataGeneration();
+    if (const auto seen = settings::generation();
+        seen != settings_seen || generation != last_generation) {
+      settings_seen = seen;
+      const auto before = model.window_before, after = model.window_after,
+                 budget = model.api_daily_budget;
+      reload(model);
+      if (model.window_before != before || model.window_after != after ||
+          model.api_daily_budget != budget)
+        requested.store(true);
+    }
+    // Only a clock step (first valid time, zone change, jump above
+    // cfg::kTimeJumpThresholdS) needs a new baseline; the hourly SNTP resync
+    // does not (W124).
     if (time_changed.exchange(false)) {
-      baseline = true;
-      requested.store(true);
+      const auto steps = timekeeping::status().step_count;
+      if (steps != time_steps) {
+        time_steps = steps;
+        baseline = true;
+        requested.store(true);
+      }
     }
     const auto epoch = network::status().epoch;
     if (generation != last_generation) {
       lock();
       slots[published].reset();
       slots[published].generation = generation;
-      error_route = kNoRoute;
+      error_routes = 0;
       unlock();
+      for (auto& failure : route_failures) failure = {};
       last_generation = generation;
       for (auto& cache : caches) cache = {};
       baseline = true;
@@ -952,7 +1009,6 @@ void worker(void*) {
       baseline = true;
       requested.store(true);
     }
-    const auto model = settings::current();
     time_t utc = 0;
     const bool clock_valid = timekeeping::utcNow(utc);
     if (ota::trial()) continue;
@@ -985,37 +1041,86 @@ void worker(void*) {
       busy.store(false);
       continue;
     }
-    requested.store(false);
+    // A requested refresh (owner, settings, time, network) also retries the
+    // failed competitions at once.
+    if (requested.exchange(false))
+      for (auto& failure : route_failures) failure.retry_at = 0;
     const uint32_t api_before =
         requests[static_cast<unsigned>(cfg::Provider::kApiFootball)];
     auto& candidate = slots[1 - published];
     candidate.reset();
     candidate.generation = generation;
+    // A failed competition keeps its earlier data, marked stale, and is
+    // fetched again after its own retry delay while the others are published
+    // (W81). A capacity overflow or an interrupted round (settings or network
+    // changed) publishes nothing, as does a round in which every active
+    // competition failed.
     esp_err_t err = ESP_OK;
-    uint8_t failed = kNoRoute;
-    if (model.demo)
+    bool aborted = false;
+    uint8_t failed = 0, fetched = 0;
+    const RouteFailure* first_failure = nullptr;
+    if (model.demo) {
       demo(candidate);
-    else {
+      candidate.route_fetched_ms.fill(timekeeping::monotonicMs());
+    } else {
       bool first_active = true;  // supplies the league table
-      for (unsigned i = 0; i < model.competitions.size(); ++i) {
+      for (unsigned i = 0; i < model.competitions.size() && !aborted; ++i) {
         if (!model.competitions[i].active) continue;
         candidate.configured = true;
-        err = routedFetch(i, first_active, model, generation, candidate, utc);
+        const bool table = first_active;
         first_active = false;
-        if (err != ESP_OK) {
-          failed = static_cast<uint8_t>(i);
-          break;
+        auto& failure = route_failures[i];
+        if (timekeeping::monotonicMs() >= failure.retry_at) {
+          err = routedFetch(i, table, model, generation, candidate, utc);
+          if (err == ESP_OK) {
+            failure = {};
+            fetched |= 1u << i;
+            candidate.route_fetched_ms[i] = timekeeping::monotonicMs();
+            continue;
+          }
+          aborted = err == ESP_ERR_INVALID_SIZE ||
+                    settings::dataGeneration() != generation ||
+                    network::status().epoch != epoch;
+          failure.reason = reason(err);
+          failure.cause = causeOf(err);
+          failure.retry_at =
+              timekeeping::monotonicMs() +
+              (err == ESP_ERR_TIMEOUT || err == ESP_ERR_NOT_ALLOWED
+                   ? cfg::kProviderRateRetryS
+                   : cfg::kProviderErrorRetryS) *
+                  1000LL;
+        }
+        failed |= 1u << i;
+        if (!first_failure) first_failure = &failure;
+        if (!aborted &&
+            !carryRoute(candidate, slots[published], i, table, utc)) {
+          err = ESP_ERR_INVALID_SIZE;
+          aborted = true;
         }
       }
     }
+    if (!aborted) err = ESP_OK;
+    int64_t retry_at = 0;
+    for (const auto& failure : route_failures)
+      if (failure.retry_at && (retry_at == 0 || failure.retry_at < retry_at))
+        retry_at = failure.retry_at;
     uint16_t interval = cfg::kPollIdleS;
     int64_t next_window_ms = cfg::kPollIdleS * 1000LL;
-    if (err == ESP_OK && settings::generation() == generation &&
-        (model.demo || network::status().epoch == epoch)) {
+    const char* failed_text = nullptr;
+    Cause failed_cause = Cause::kNone;
+    const bool published_now = !aborted && (fetched || !failed) &&
+                               settings::dataGeneration() == generation &&
+                               (model.demo || network::status().epoch == epoch);
+    if (published_now) {
       candidate.fetched_ms = timekeeping::monotonicMs();
-      candidate.stale = false;
+      candidate.stale = failed != 0;
+      if (first_failure) {
+        candidate.error.assign(first_failure->reason);
+        candidate.error_cause = first_failure->cause;
+        candidate.retry_ms = retry_at;
+      }
       lock();
-      error_route = kNoRoute;
+      error_routes = failed;
       reconcile(candidate, slots[published], utc);
       if (conferenceWindow(candidate, utc, model.window_before,
                            model.window_after))
@@ -1062,24 +1167,44 @@ void worker(void*) {
       baseline = false;
       events::post(events::Event::kDataUpdated);
     } else {
-      if (err == ESP_OK) {
-        const bool changed = settings::generation() != generation;
+      if (aborted) {
+        failed_text = reason(err);
+        failed_cause = causeOf(err);
+        interval = err == ESP_ERR_TIMEOUT || err == ESP_ERR_NOT_ALLOWED
+                       ? cfg::kProviderRateRetryS
+                       : cfg::kProviderErrorRetryS;
+      } else if (failed && !fetched) {
+        // Every active competition failed; each keeps its own retry delay.
+        failed_text = first_failure->reason;
+        failed_cause = first_failure->cause;
+      } else {
+        const bool changed = settings::dataGeneration() != generation;
         err = stop(changed ? "settings changed" : "network changed",
                    ESP_ERR_INVALID_STATE,
                    changed ? Cause::kSettings : Cause::kNetwork);
+        failed_text = reason(err);
+        failed_cause = causeOf(err);
+        interval = cfg::kProviderErrorRetryS;
       }
       lock();
       slots[published].stale = true;
-      slots[published].error.assign(reason(err));
-      slots[published].error_cause = causeOf(err);
-      error_route = failed;
+      slots[published].error.assign(failed_text);
+      slots[published].error_cause = failed_cause;
+      error_routes = failed;
       unlock();
-      interval = err == ESP_ERR_TIMEOUT || err == ESP_ERR_NOT_ALLOWED
-                     ? cfg::kProviderRateRetryS
-                     : cfg::kProviderErrorRetryS;
     }
+    // The earliest retry of a failed competition also ends the wait.
+    if (!aborted && retry_at)
+      next_window_ms =
+          std::min(next_window_ms, retry_at - timekeeping::monotonicMs());
     due = timekeeping::monotonicMs() +
-          std::min<int64_t>(interval * 1000LL, next_window_ms);
+          std::max<int64_t>(0, std::min<int64_t>(interval * 1000LL,
+                                                 next_window_ms));
+    if (!published_now) {
+      lock();
+      slots[published].retry_ms = due;
+      unlock();
+    }
     busy.store(false);
   }
 }
@@ -1103,7 +1228,6 @@ esp_err_t init() {
 void refresh() { requested.store(true); }
 Status status() {
   Status s{};
-  s.error_route = kNoRoute;
   if (mutex == nullptr) {
     s.error.assign("not started");
     s.cause = Cause::kNotStarted;
@@ -1114,16 +1238,16 @@ Status status() {
   s.revision = data.revision;
   s.generation = data.generation;
   memcpy(s.requests, requests, sizeof(requests));
-  s.fetched_ms = data.fetched_ms;
+  s.fetched_ms = oldestFetch(data);
   s.matches = data.match_count;
   s.rows = data.table_count;
-  s.stale = data.stale || (data.fetched_ms > 0 &&
-                           timekeeping::monotonicMs() - data.fetched_ms >
+  s.stale = data.stale || (s.fetched_ms > 0 &&
+                           timekeeping::monotonicMs() - s.fetched_ms >
                                cfg::kDataStaleS * 1000LL);
   s.error = data.error;
   s.cause = data.error_cause;
   s.routing_notice = data.routing_notice;
-  s.error_route = error_route;
+  s.error_routes = error_routes;
   unlock();
   s.busy = busy.load();
   return s;

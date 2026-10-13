@@ -571,6 +571,7 @@ esp_err_t getStatus(httpd_req_t* req) {
   out["fs_total"] = usage.total_bytes;
   out["fs_used"] = usage.used_bytes;
   out["trial"] = ota::trial();
+  out["settings_source"] = settings::originName(settings::origin());
   out["provider_busy"] = data.busy;
   out["last_update_ms"] = data.fetched_ms;
   out["data_stale"] = data.stale;
@@ -605,7 +606,7 @@ esp_err_t getStatus(httpd_req_t* req) {
     auto row = routes.add<JsonObject>();
     row["matches"] = overview.routes[i].matches;
     row["provider"] = football::providerName(overview.routes[i].provider);
-    row["error"] = data.error_route == i;
+    row["error"] = ((data.error_routes >> i) & 1) != 0;
   }
   return json(req, d.doc);
 }
@@ -719,10 +720,16 @@ esp_err_t getFixtures(httpd_req_t* req) {
     }
   return json(req, d.doc);
 }
-// Names of the stock images in the API (cfg::StockImage order).
+// Names of the image roles (stock images) in the API (cfg::StockImage order).
 constexpr const char* kStockNames[] = {"crest", "background"};
 static_assert(std::size(kStockNames) == cfg::kStockImageCount,
               "one API name per stock image");
+// The role called 'name'; cfg::kStockImageCount if there is none.
+cfg::StockImage roleNamed(const char* name) {
+  for (std::size_t i = 0; name != nullptr && i < std::size(kStockNames); ++i)
+    if (!strcmp(name, kStockNames[i])) return static_cast<cfg::StockImage>(i);
+  return cfg::kStockImageCount;
+}
 esp_err_t getImages(httpd_req_t* req) {
   Request request(req);
   Doc d;
@@ -736,8 +743,17 @@ esp_err_t getImages(httpd_req_t* req) {
     row["bytes"] = e.bytes;
     row["revision"] = images::revisionOf(id);
   }
-  auto stock = out["stock"].to<JsonArray>();
-  for (const char* name : kStockNames) stock.add(name);
+  // Each role shows its replacement when one exists, else the factory image.
+  auto roles = out["roles"].to<JsonArray>();
+  for (uint8_t i = 0; i < cfg::kStockImageCount; ++i) {
+    const auto stock = static_cast<cfg::StockImage>(i);
+    const auto role = images::role(stock);
+    auto row = roles.add<JsonObject>();
+    row["name"] = kStockNames[i];
+    row["replaced"] = role.replaced;
+    row["bytes"] = role.bytes;
+    row["revision"] = images::roleRevision(stock);
+  }
   const auto usage = images::usage();
   out["count"] = usage.count;
   out["used"] = usage.bytes;
@@ -762,12 +778,9 @@ esp_err_t getImageFile(httpd_req_t* req) {
     id = number;
   } else if (httpd_query_key_value(query, "stock", value, sizeof(value)) ==
              ESP_OK) {
-    std::size_t found = std::size(kStockNames);
-    for (std::size_t i = 0; i < std::size(kStockNames); ++i)
-      if (!strcmp(value, kStockNames[i])) found = i;
-    if (found == std::size(kStockNames))
+    stock = roleNamed(value);
+    if (stock == cfg::kStockImageCount)
       return invalid(req, Reason::kInvalid, "stock image rejected", "stock");
-    stock = static_cast<cfg::StockImage>(found);
   } else
     return invalid(req, Reason::kRequired, "image required", "id");
   char path[96];
@@ -960,21 +973,36 @@ esp_err_t dataSelect(httpd_req_t* req) {
     return invalid(req, Reason::kType, "selection types rejected", "offset");
   job.teams = in["teams"].as<bool>();
   job.offset = in["offset"].as<uint16_t>();
-  for (const char* field : {"competition", "season", "search", "country"}) {
-    if (!in[field].isNull() && !in[field].is<const char*>())
-      return invalid(req, Reason::kType, "selection text rejected", field);
-    auto text = in[field].as<JsonString>();
-    const unsigned max = (!strcmp(field, "search") || !strcmp(field, "country"))
-                             ? cfg::kSelectionTextMaxBytes
-                         : !strcmp(field, "season") ? cfg::kSeasonMaxBytes
-                                                    : cfg::kCompetitionIdMaxBytes;
-    if (text && (text.size() > max || strlen(text.c_str()) != text.size()))
-      return invalid(req, Reason::kTooLong, "selection length rejected", field);
+  // Only the fields this request uses are read and checked, so stale form
+  // content of an unused field cannot block a list (W130): the competition
+  // for a club list, the season for a club list or an OpenLigaDB competition
+  // list, the country for an API-Football competition list.
+  const bool openliga = job.provider == cfg::Provider::kOpenLigaDb;
+  const struct {
+    const char* name;
+    bool used;
+    unsigned max;
+  } fields[] = {
+      {"competition", job.teams, cfg::kCompetitionIdMaxBytes},
+      {"season", job.teams || openliga, cfg::kSeasonMaxBytes},
+      {"search", true, cfg::kSelectionTextMaxBytes},
+      {"country", !job.teams && job.provider == cfg::Provider::kApiFootball,
+       cfg::kSelectionTextMaxBytes},
+  };
+  for (const auto& field : fields) {
+    if (!field.used) continue;
+    if (!in[field.name].isNull() && !in[field.name].is<const char*>())
+      return invalid(req, Reason::kType, "selection text rejected", field.name);
+    auto text = in[field.name].as<JsonString>();
+    if (text &&
+        (text.size() > field.max || strlen(text.c_str()) != text.size()))
+      return invalid(req, Reason::kTooLong, "selection length rejected",
+                     field.name);
   }
-  job.competition.assign(in["competition"] | "");
-  job.season.assign(in["season"] | "");
+  if (job.teams) job.competition.assign(in["competition"] | "");
+  if (job.teams || openliga) job.season.assign(in["season"] | "");
   job.search.assign(in["search"] | "");
-  job.country.assign(in["country"] | "");
+  if (fields[3].used) job.country.assign(in["country"] | "");
   // Distinct messages: the Web UI turns each into an explanation.
   if (!settings::isValidIdentifier(job.competition.data))
     return invalid(req, Reason::kInvalid, "competition or season invalid",
@@ -1052,6 +1080,43 @@ esp_err_t deleteImage(httpd_req_t* req) {
   const auto err = images::remove(d.doc["id"].as<uint8_t>());
   return err == ESP_OK ? ok(req, d.doc) : failed(req, err);
 }
+// {"role":"crest"|"background","action":"reset"} deletes the replacement, so
+// the role shows its factory image again; {"role":…,"action":"copy","id":N}
+// makes a copy of library image N the replacement (the library image stays).
+esp_err_t postImageRole(httpd_req_t* req) {
+  Request request(req);
+  Doc d;
+  if (const auto* f = admit(req, d.doc, nullptr, true)) return error(req, *f);
+  const auto name = d.doc["role"];
+  if (name.isNull())
+    return invalid(req, Reason::kRequired, "image role required", "role");
+  if (!name.is<const char*>())
+    return invalid(req, Reason::kType, "image role rejected", "role");
+  const auto role = roleNamed(name.as<const char*>());
+  if (role == cfg::kStockImageCount)
+    return invalid(req, Reason::kInvalid, "image role rejected", "role");
+  const auto action = d.doc["action"];
+  if (action.isNull())
+    return invalid(req, Reason::kRequired, "role action required", "action");
+  if (!action.is<const char*>())
+    return invalid(req, Reason::kType, "role action rejected", "action");
+  const bool copy = !strcmp(action.as<const char*>(), "copy");
+  if (!copy && strcmp(action.as<const char*>(), "reset"))
+    return invalid(req, Reason::kInvalid, "role action rejected", "action");
+  Reason why = Reason::kRange;
+  if (copy && (!smallInt(d.doc["id"], cfg::kImageLibraryMax, why) ||
+               d.doc["id"].as<uint8_t>() < 1))
+    return invalid(req, why == Reason::kRequired || why == Reason::kType
+                            ? why
+                            : Reason::kRange,
+                   "image id required", "id");
+  network::HeavyGuard guard;
+  if (!guard) return error(req, fault::kBusy);
+  const auto err = copy ? images::copyToRole(d.doc["id"].as<uint8_t>(), role)
+                        : images::resetRole(role);
+  return err == ESP_OK ? ok(req, d.doc)
+                       : failed(req, err, err == ESP_ERR_NOT_FOUND ? "id" : nullptr);
+}
 // Streams the request body into the image library or the firmware slot.
 esp_err_t upload(httpd_req_t* req, bool firmware) {
   Request request(req);
@@ -1061,8 +1126,10 @@ esp_err_t upload(httpd_req_t* req, bool firmware) {
   network::HeavyGuard guard;
   if (!guard) return error(req, fault::kBusy);
   // No X-Image-Id header: store a new image under the lowest free id; with
-  // an id: replace that library image.
+  // an id: replace that library image. X-Image-Role instead: upload the
+  // replacement of that role.
   uint8_t index = cfg::kStockImageId;
+  auto role = cfg::kStockImageCount;
   if (!firmware) {
     char id[8]{};
     const auto found = httpd_req_get_hdr_value_str(req, "X-Image-Id", id, sizeof(id));
@@ -1073,6 +1140,18 @@ esp_err_t upload(httpd_req_t* req, bool firmware) {
         return invalid(req, Reason::kRange, "image id rejected", "X-Image-Id");
       index = value;
     }
+    char name[16]{};
+    const auto named =
+        httpd_req_get_hdr_value_str(req, "X-Image-Role", name, sizeof(name));
+    if (named != ESP_ERR_NOT_FOUND) {
+      if (found != ESP_ERR_NOT_FOUND)
+        return invalid(req, Reason::kConflict, "image id and role together",
+                       "X-Image-Role");
+      if (named == ESP_OK) role = roleNamed(name);
+      if (role == cfg::kStockImageCount)
+        return invalid(req, Reason::kInvalid, "image role rejected",
+                       "X-Image-Role");
+    }
   }
   const int64_t deadline = request_deadline;
   uint8_t buffer[1024];
@@ -1080,7 +1159,9 @@ esp_err_t upload(httpd_req_t* req, bool firmware) {
   bool begun = false;
   esp_err_t err = ESP_OK;
   if (!firmware) {
-    err = images::begin(index, req->content_len);
+    err = role == cfg::kStockImageCount
+              ? images::begin(index, req->content_len)
+              : images::beginRole(role, req->content_len);
     begun = err == ESP_OK;
   }
   if (firmware && (req->content_len < 32 + 256 + sizeof(ota::Identity) ||
@@ -1121,9 +1202,13 @@ esp_err_t upload(httpd_req_t* req, bool firmware) {
   httpd_resp_set_type(req, "application/json");
   if (!sendReady(req)) return ESP_FAIL;
   if (firmware) return httpd_resp_sendstr(req, "{\"ok\":true}");
-  char reply[24];
-  snprintf(reply, sizeof(reply), "{\"ok\":true,\"id\":%u}",
-           static_cast<unsigned>(images::uploadedId()));
+  char reply[40];
+  if (role != cfg::kStockImageCount)
+    snprintf(reply, sizeof(reply), "{\"ok\":true,\"role\":\"%s\"}",
+             kStockNames[role]);
+  else
+    snprintf(reply, sizeof(reply), "{\"ok\":true,\"id\":%u}",
+             static_cast<unsigned>(images::uploadedId()));
   return httpd_resp_sendstr(req, reply);
 }
 esp_err_t uploadFirmware(httpd_req_t* req) { return upload(req, true); }
@@ -1276,6 +1361,7 @@ constexpr Route kRoutes[] = {
     {"/api/v1/display", HTTP_POST, postDisplay, nullptr},
     {"/api/v1/images/delete", HTTP_POST, deleteImage, nullptr},
     {"/api/v1/images/repair", HTTP_POST, repairImages, nullptr},
+    {"/api/v1/images/role", HTTP_POST, postImageRole, nullptr},
     {"/api/v1/images/upload", HTTP_POST, uploadImage, nullptr},
     {"/api/v1/ota", HTTP_POST, uploadFirmware, nullptr},
     {"/api/v1/reboot", HTTP_POST, reboot, nullptr},

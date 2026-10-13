@@ -31,6 +31,10 @@ struct Status {
   Source source;
   int64_t set_at_ms;   // monotonicMs() of the last set; 0 while not valid
   uint32_t set_count;  // sets since boot
+  // First valid set, zone changes and wall-clock jumps above
+  // cfg::kTimeJumpThresholdS since boot: changes that move the clock or the
+  // local time noticeably. A regular resync does not count.
+  uint32_t step_count;
 };
 
 // Applies the zone from the settings. Call once at boot after events::init()
@@ -43,8 +47,8 @@ void init();
 // the C library parses the rule.
 void applySettings();
 
-// Sets the wall clock (UTC) and marks it valid; logs the first set and every
-// jump above cfg::kTimeJumpLogThresholdS. ESP_FAIL: the clock refused the
+// Sets the wall clock (UTC) and marks it valid; logs and counts the first set
+// and every jump above cfg::kTimeJumpThresholdS. ESP_FAIL: the clock refused the
 // value, nothing changed.
 esp_err_t setTime(const timeval& utc, Source source);
 

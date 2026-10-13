@@ -60,26 +60,6 @@ Team team(JsonVariantConst v, const char* id_key = "id",
   if (t.short_name.empty()) t.short_name.assign(t.name.data);
   return t;
 }
-Phase phase(const char* s) {
-  if (!strcmp(s, "NS") || !strcmp(s, "TBD") || !strcmp(s, "TIMED") ||
-      !strcmp(s, "SCHEDULED"))
-    return Phase::kScheduled;
-  if (!strcmp(s, "1H") || !strcmp(s, "2H") || !strcmp(s, "IN_PLAY") ||
-      !strcmp(s, "LIVE"))
-    return Phase::kLive;
-  if (!strcmp(s, "HT") || !strcmp(s, "PAUSED")) return Phase::kHalfTime;
-  if (!strcmp(s, "ET")) return Phase::kExtraTime;
-  if (!strcmp(s, "P")) return Phase::kPenalties;
-  if (!strcmp(s, "FT") || !strcmp(s, "AET") || !strcmp(s, "PEN") ||
-      !strcmp(s, "FINISHED"))
-    return Phase::kFinished;
-  if (!strcmp(s, "PST") || !strcmp(s, "POSTPONED") || !strcmp(s, "SUSP"))
-    return Phase::kPostponed;
-  if (!strcmp(s, "CANC") || !strcmp(s, "CANCELLED")) return Phase::kCancelled;
-  if (!strcmp(s, "ABD") || !strcmp(s, "AWD") || !strcmp(s, "ABANDONED"))
-    return Phase::kAbandoned;
-  return Phase::kUnknown;
-}
 bool keep(const Match& m, int64_t now, FixtureFilter filter) {
   if (m.id.empty()) return false;
   const bool own = std::string_view(filter.team) == m.home.id.data ||
@@ -250,7 +230,7 @@ bool mapMatch(JsonVariantConst row, Snapshot& out, cfg::Provider p,
     m.kickoff = instant(fixture["date"]);
     m.home = team(row["teams"]["home"]);
     m.away = team(row["teams"]["away"]);
-    m.phase = phase(text(fixture["status"]["short"]));
+    m.phase = statusPhase(text(fixture["status"]["short"]));
     m.minute = number(fixture["status"]["elapsed"], 0, 240);
     m.principal = score(row["goals"]);
     m.halftime = score(row["score"]["halftime"]);
@@ -264,7 +244,7 @@ bool mapMatch(JsonVariantConst row, Snapshot& out, cfg::Provider p,
     m.provider_changed = instant(row["lastUpdated"]);
     m.home = team(row["homeTeam"]);
     m.away = team(row["awayTeam"]);
-    m.phase = phase(text(row["status"]));
+    m.phase = statusPhase(text(row["status"]));
     auto round = number(row["matchday"], 1, 1000);
     if (round.valid())
       m.round = {static_cast<uint16_t>(round.value), round.source};

@@ -108,6 +108,8 @@ void logHardwareProfile() {
   }
 }
 
+// Diagnostic colour test (cfg::kDisplayTest); normal boots show the start
+// screen instead.
 void showBootScreen() {
   char detail[32];
   snprintf(detail, sizeof(detail), "%ux%u %s",
@@ -225,7 +227,8 @@ extern "C" void app_main() {
   events::runDeviceTest();
 
   settings::init({.visible_matches_max = hw::kDisplay.visible_matches_max,
-                  .table_window_max = hw::kDisplay.table_window_max});
+                  .table_window_max = hw::kDisplay.table_window_max,
+                  .inputs = static_cast<uint8_t>(hw::kTarget.inputs.size())});
   settings::runDeviceTest();
   logHeap("after settings init");
 
@@ -239,7 +242,12 @@ extern "C" void app_main() {
 
   const esp_err_t err = display::init(hw::kDisplay, hw::kTarget.wiring);
   if (err == ESP_OK) {
-    showBootScreen();
+    if constexpr (cfg::kDisplayTest == cfg::DisplayTest::kColourTest)
+      showBootScreen();
+    else if (!ui::showStartScreen(hw::kDisplay,
+                                  hw::kTarget.wiring.backlight != hw::kNoPin))
+      ESP_LOGE(kTag,
+               "start screen failed: lock timeout or content did not fit");
     vTaskDelay(pdMS_TO_TICKS(kFirstRenderWaitMs));
     display::logMemory();
   } else {
@@ -255,7 +263,8 @@ extern "C" void app_main() {
   if (network_error != ESP_OK)
     ESP_LOGE(kTag, "network init: %s", esp_err_to_name(network_error));
   ESP_ERROR_CHECK(football::init());
-  ESP_ERROR_CHECK(ui::init(hw::kDisplay, hw::kTarget.inputs.size()));
+  ESP_ERROR_CHECK(ui::init(hw::kDisplay, hw::kTarget.inputs.size(),
+                           hw::kTarget.wiring.backlight != hw::kNoPin));
   const auto web_error = web::init();
   if (web_error != ESP_OK)
     ESP_LOGE(kTag, "Web init: %s", esp_err_to_name(web_error));

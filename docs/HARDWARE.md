@@ -103,7 +103,7 @@ XIAO S3 build of an earlier project (S3: SCLK 6, MOSI 5, DC 3, CS 4, RST 2).
 The display module has **no backlight (BL) pin**: the backlight is
 always on at full brightness and cannot be dimmed or switched off by the
 firmware on this target. Night mode here is software-only (dark UI), see
-[UI.md](UI.md) → “Overlays and night mode”.
+[UI.md](UI.md) → “Colours and night”.
 SPI clock on the C6: 40 MHz works (LVGL boot screen verified on the device
 2026-10-08). Recorded runtime after display + LVGL init (device status log
 2026-10-08):

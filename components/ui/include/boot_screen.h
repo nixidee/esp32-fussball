@@ -1,4 +1,6 @@
 // Boot test screen: shows that panel, colours and geometry are right.
+// Diagnostic builds only (cfg::kDisplayTest); normal boots show the start
+// screen of the UI controller.
 // View only: renders the given texts, no logic (docs/ARCHITECTURE.md).
 //
 // Expected picture: red ring at the display edge, green ring just inside,

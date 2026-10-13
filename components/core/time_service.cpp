@@ -33,7 +33,7 @@ class Lock {
 // Entry of cfg::kTimeZones in effect; nullptr until one was applied (the C
 // library then uses UTC).
 const cfg::TimeZone* applied_zone = nullptr;
-Status state{false, Source::kNone, 0, 0};
+Status state{false, Source::kNone, 0, 0, 0};
 
 enum class ZoneResult : uint8_t { kUnchanged, kChanged, kFailed };
 
@@ -43,6 +43,7 @@ ZoneResult applyZoneLocked(const cfg::TimeZone& zone) {
   if (setenv("TZ", zone.rule, 1) != 0) return ZoneResult::kFailed;
   tzset();
   applied_zone = &zone;
+  ++state.step_count;
   return ZoneResult::kChanged;
 }
 
@@ -124,6 +125,7 @@ esp_err_t setTime(const timeval& utc, Source source) {
     }
     first = !state.valid;
     jump_s = static_cast<int64_t>(utc.tv_sec) - before.tv_sec;
+    if (first || llabs(jump_s) > cfg::kTimeJumpThresholdS) ++state.step_count;
     state.valid = true;
     state.source = source;
     state.set_at_ms = monotonicMs();
@@ -133,7 +135,7 @@ esp_err_t setTime(const timeval& utc, Source source) {
     std::tm local{};
     toLocal(utc.tv_sec, local);
     logLocal("time valid: ", local, sourceName(source));
-  } else if (llabs(jump_s) > cfg::kTimeJumpLogThresholdS) {
+  } else if (llabs(jump_s) > cfg::kTimeJumpThresholdS) {
     ESP_LOGW(kTag, "clock jumped by %lld s (%s)",
              static_cast<long long>(jump_s), sourceName(source));
   }

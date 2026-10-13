@@ -25,10 +25,39 @@ const Limits& limits();
 // the caller's stack, pinned by the host test).
 Model current();
 
+// Library id of the crest image a format 3 to 5 record referred to (format
+// 6 has no such field), 0 if none or after reset(). The image service copies that image into
+// the crest role once, saves the settings in the current format and then
+// calls forgetLegacyCrest().
+uint8_t legacyCrest();
+void forgetLegacyCrest();
+
 // Increases with every successful save or reset, which also posts
 // events::Event::kSettingsChanged (event_bus.h). Work started under one
 // generation can compare it later to detect a change.
 uint32_t generation();
+
+// Increases with every save or reset that changes a value provider data
+// depends on (sameProviderData, settings_model.h), at most as often as
+// generation(). The data service compares it, so display-only saves keep the
+// fetched data and do not interrupt a running request.
+uint32_t dataGeneration();
+
+// Where the current settings come from. Every value except kStored means the
+// initial values apply; kRejected and kDamaged records are overwritten by the
+// next save, kUnreadable and kNoStorage refuse saving (see save()).
+enum class Origin : uint8_t {
+  kInitial,     // no stored record, or reset() since boot
+  kStored,      // the stored record, or the last successful save
+  kRejected,    // stored record decoded, but a value violates its limits
+  kDamaged,     // stored record too long or not decodable
+  kUnreadable,  // stored record could not be read (NVS error, no memory)
+  kNoStorage,   // NVS unusable
+};
+Origin origin();
+// Stable name for the REST status ("initial", "stored", "rejected",
+// "damaged", "unreadable", "no_storage").
+const char* originName(Origin origin) noexcept;
 
 // Validates and stores the complete model, then makes it current.
 // ESP_ERR_INVALID_ARG: a value violates its limits, nothing stored; *violation

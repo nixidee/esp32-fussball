@@ -18,6 +18,10 @@ inline constexpr uint16_t kContentMarginDivisor = 60;  // 240 px: 4 px
 inline constexpr int32_t kBootRingWidthDivisor = 120;  // 240 px: 2 px
 inline constexpr int32_t kBootRingGapDivisor = 40;     // 240 px: 6 px
 inline constexpr int32_t kBootTextWidthPercent = 70;
+// Developer colour test at boot (rings and texts, see boot_screen.h) instead
+// of the start screen. Must be kNone in every normal build.
+enum class DisplayTest : uint8_t { kNone, kColourTest };
+inline constexpr DisplayTest kDisplayTest = DisplayTest::kNone;
 
 // ---- Display failure handling ----------------------------------------------
 // Consecutive failed draw calls (each one recovered) before a restart.
@@ -140,8 +144,10 @@ inline constexpr TimeZone kTimeZones[] = {
 };
 inline constexpr std::size_t kTimeZoneLabelMaxChars = 32;
 inline constexpr char kTimeZoneDefault[] = "Europe/Berlin";
-// A wall-clock change larger than this is logged as a jump (warning).
-inline constexpr int64_t kTimeJumpLogThresholdS = 2;
+// A wall-clock change larger than this is a jump: logged as a warning and
+// counted in timekeeping::Status::step_count (a new provider-data baseline).
+// Smaller changes, such as the regular SNTP resync, are neither.
+inline constexpr int64_t kTimeJumpThresholdS = 2;
 
 // Device test of the time service. Must be kNone in every normal build.
 enum class TimeTest : uint8_t {
@@ -153,10 +159,16 @@ inline constexpr TimeTest kTimeTest = TimeTest::kNone;
 // ---- Settings record -------------------------------------------------------
 // Format 3 stores the lists (competitions, fixture pairs, slides) as a count
 // followed by that many entries, so the record length varies. Format 4 appends
-// the Konferenz pin flag; a format-3 record is read with its default. Formats 1
-// (core only), 2 (lists as fixed slots) and 3 are still read and converted in
-// RAM; the next save writes format 4. Loading never writes NVS.
-inline constexpr uint16_t kSettingsFormatVersion = 4;
+// the Konferenz pin flag, format 5 the Konferenz mode, the whole-matchday flag
+// and one role byte per input slot; older records are read with the defaults
+// of the missing fields. Format 6 drops the crest image reference of formats
+// 3 to 5 (the crest is a protected image with its own file); the reference
+// read from an older record is handed to the image service once. Formats 1
+// (core only), 2 (lists as fixed slots), 3, 4 and 5 are still read and
+// converted in RAM; the next save writes format 6. Loading never writes NVS.
+inline constexpr uint16_t kSettingsFormatVersion = 6;
+inline constexpr uint16_t kSettingsModeFormatVersion = 5;
+inline constexpr uint16_t kSettingsPinFormatVersion = 4;
 inline constexpr uint16_t kSettingsLegacyFormatVersion = 1;
 inline constexpr uint16_t kSettingsSlotFormatVersion = 2;
 inline constexpr uint16_t kSettingsListFormatVersion = 3;
@@ -249,6 +261,22 @@ enum class Screen : uint8_t { kLiveSingle, kLiveMulti, kTable, kCrest };
 enum class ConferenceMode : uint8_t { kAllPages, kOnePage };
 inline constexpr ConferenceMode kConferenceModeDefault =
     ConferenceMode::kAllPages;
+// Function of one input (OQ-141…OQ-143). Exactly one active input carries the
+// mandatory one-key set: short Next, double Previous, long Default screen.
+// Up/Down page or scroll; Scroll moves in its current direction while held and
+// toggles the direction on release (reset after `scroll_reset_s`).
+enum class InputRole : uint8_t { kOff, kMandatory, kUp, kDown, kScroll };
+inline constexpr InputRole kInputRoleLast = InputRole::kScroll;
+// Default role of input `index` (0-based) of a profile with `inputs` inputs:
+// the mapping before settings format 5. Input 1 mandatory; with two inputs the
+// second scrolls with direction toggle; with more, input 3 Down and the others
+// Up (three inputs: OQ-150).
+constexpr InputRole inputRoleDefault(std::size_t index, std::size_t inputs) {
+  if (index >= inputs) return InputRole::kOff;
+  if (index == 0) return InputRole::kMandatory;
+  if (inputs == 2) return InputRole::kScroll;
+  return index == 2 ? InputRole::kDown : InputRole::kUp;
+}
 inline constexpr Provider kProviderDefault = Provider::kOpenLigaDb;
 inline constexpr Screen kIdleScreenDefault = Screen::kTable,
                         kMatchdayScreenDefault = Screen::kLiveMulti,
@@ -323,7 +351,8 @@ inline constexpr uint16_t kPollIdleS = 21600;
 inline constexpr uint16_t kPollPrematchS = 300;
 inline constexpr uint16_t kPollLiveS = 60;
 inline constexpr uint16_t kPollPostmatchS = 300;
-inline constexpr uint16_t kProviderBudgetDefault = 100;
+// Default of the API-Football daily request budget setting (api_daily_budget).
+inline constexpr uint16_t kApiFootballDailyBudgetDefault = 100;
 inline constexpr uint32_t kProviderMinIntervalMs[] = {5000, 6000, 30000, 6000};
 inline constexpr uint16_t kFixtureHorizonDays = 7;
 // Fixtures of other clubs kept around now by providers without a round
@@ -388,10 +417,12 @@ inline constexpr Range kVisibleMatchesRange{1, 5}, kTableWindowRange{1, 9};
 inline constexpr Range kReturnTimeRange{0, 4000}, kScrollRepeatRange{100, 2000};
 inline constexpr Range kSlideshowRange{3, 3600}, kDayMinutesRange{0, 1439};
 inline constexpr Range kMatchWindowRange{0, 180},
-    kProviderBudgetRange{1, 10000};
+    kApiFootballDailyBudgetRange{1, 10000};
 inline constexpr Range kTextScaleRange{70, 130};
 inline constexpr uint8_t kTextScaleDefault = 100;
-inline constexpr uint16_t kProviderDefaultBudget = 10000;
+// Daily request cap the budget ledger applies to providers without a daily
+// budget setting (OpenLigaDB, ESPN, football-data.org); a safety bound only.
+inline constexpr uint16_t kUnbudgetedDailyRequestCap = 10000;
 inline constexpr std::size_t kProviderHeaderBytes = 8192;
 inline constexpr std::size_t kProviderWireOverheadBytes = 32768;
 inline constexpr uint16_t kProviderWaitSliceMs = 100;
@@ -407,6 +438,11 @@ inline constexpr uint8_t kStockImageId = 0;
 enum StockImage : uint8_t { kStockCrest, kStockBackground, kStockImageCount };
 inline constexpr char kStockImageFiles[][32] = {"default_crest.jpg",
                                                 "default_background.jpg"};
+// Protected images (OQ-151): the replacement of a stock image is a separate
+// file; the factory file above stays. A replacement counts towards
+// kImageTotalBytes but not towards kImageLibraryMax (OQ-154).
+inline constexpr char kRoleImageFiles[][32] = {"role_crest.jpg",
+                                               "role_background.jpg"};
 // Named image files of settings format 2 and earlier. Format 3 does not
 // migrate them; the image service removes them once (OQ-73).
 inline constexpr char kLegacyImageNames[][12] = {
@@ -424,5 +460,18 @@ inline constexpr char kSelectionCountryDefault[] = "Germany";
 inline constexpr int kSeasonStartMonth = 7;
 inline constexpr uint32_t kNightBackground = 0x030609;
 inline constexpr uint16_t kSizeClassSmallMax = 260, kSizeClassMediumMax = 400;
+// Display design (docs/UI.md "Layout rules"): font role sizes in px per size
+// class (caption, body, title, score); the text scale picks the largest
+// compiled font at or below role x scale / 100.
+inline constexpr uint8_t kTextRolePx[3][4] = {
+    {12, 14, 18, 48}, {16, 20, 26, 72}, {20, 26, 34, 96}};
+// Semantic colours: status lines and state-card rims (warn, error, nothing to
+// show), IP chip and own Konferenz row, slideshow dots.
+inline constexpr uint32_t kWarnColour = 0xF2B84B, kErrorColour = 0xEF5B5B,
+                          kNeutralColour = 0x40505C, kChipColour = 0x22303C,
+                          kSlideDotOnColour = 0xFFFFFF,
+                          kSlideDotOffColour = 0x707880;
+// A Konferenz row is drawn in the accent colour for this long after a goal.
+inline constexpr uint16_t kGoalFlashS = 120;
 
 }  // namespace cfg

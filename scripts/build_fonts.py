@@ -53,6 +53,6 @@ def generate(size, points, name):
 if __name__ == "__main__":
     if hashlib.sha256(SOURCE.read_bytes()).hexdigest() != SHA256:
         raise SystemExit("Font source hash differs; review source/licence before regenerating")
-    for px in (10, 14, 18):
+    for px in (12, 14, 18):
         generate(px, LATIN, f"ui_font_text_{px}")
-    generate(28, sorted({ord(c) for c in " 0123456789:-?"}), "ui_font_score_28")
+    generate(48, sorted({ord(c) for c in " 0123456789:-?"}), "ui_font_score_48")

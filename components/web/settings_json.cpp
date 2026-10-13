@@ -19,6 +19,7 @@ using namespace ArduinoJson;
   X(ip_badge_bottom);         \
   X(browser_debug);           \
   X(pin_own_match);           \
+  X(whole_matchday);          \
   X(language);                \
   X(brightness);              \
   X(night_brightness);        \
@@ -131,6 +132,10 @@ void settingsJson(JsonObject out, const settings::Model& m, bool secrets) {
   out["idle_screen"] = static_cast<unsigned>(m.idle_screen);
   out["matchday_screen"] = static_cast<unsigned>(m.matchday_screen);
   out["own_match_screen"] = static_cast<unsigned>(m.own_match_screen);
+  out["conference_mode"] = static_cast<unsigned>(m.conference_mode);
+  // Every stored slot; the schema's "inputs" says how many the device has.
+  auto roles = out["input_roles"].to<JsonArray>();
+  for (const auto role : m.input_roles) roles.add(static_cast<unsigned>(role));
   auto competitions = out["competitions"].to<JsonArray>();
   for (const auto& entry : m.competitions) {
     auto item = competitions.add<JsonObject>();
@@ -150,7 +155,6 @@ void settingsJson(JsonObject out, const settings::Model& m, bool secrets) {
     item["primary_id"] = std::string_view(pair.primary_id.view());
     item["secondary_id"] = std::string_view(pair.secondary_id.view());
   }
-  out["crest_image"] = m.crest_image;
   auto slides = out["slides"].to<JsonArray>();
   for (const uint8_t id : m.slides) slides.add(id);
   auto screens = out["screens"].to<JsonArray>();
@@ -178,8 +182,9 @@ bool applyJson(JsonObjectConst in, settings::Model& m,
     SECRETS(KNOWN)
 #undef KNOWN
     for (const char* other :
-         {"competitions", "fixture_pairs", "crest_image", "slides", "screens",
-          "idle_screen", "matchday_screen", "own_match_screen"})
+         {"competitions", "fixture_pairs", "slides", "screens",
+          "idle_screen", "matchday_screen", "own_match_screen",
+          "conference_mode", "input_roles"})
       known |= strcmp(name, other) == 0;
     // Redacted exports carry only these boolean markers; they never clear a
     // key.
@@ -208,6 +213,24 @@ bool applyJson(JsonObjectConst in, settings::Model& m,
                       in[pair.first].is<long long>() ? Reason::kRange
                                                      : Reason::kType);
     *pair.second = static_cast<cfg::Screen>(in[pair.first].as<uint8_t>());
+  }
+  uint8_t mode = static_cast<uint8_t>(m.conference_mode);
+  if (!scalar(c, FieldPath().key("conference_mode"), in["conference_mode"],
+              mode))
+    return false;
+  m.conference_mode = static_cast<cfg::ConferenceMode>(mode);
+  // A role list replaces the first slots; the slots after it keep theirs.
+  if (!in["input_roles"].isNull()) {
+    const auto list = FieldPath().key("input_roles");
+    const auto rows = in["input_roles"];
+    if (!listOf(c, list, rows, m.input_roles.size())) return false;
+    unsigned n = 0;
+    for (JsonVariantConst row : rows.as<JsonArrayConst>()) {
+      if (!row.is<uint8_t>())
+        return c.reject(list.withIndex(n), row.is<long long>() ? Reason::kRange
+                                                               : Reason::kType);
+      m.input_roles[n++] = static_cast<cfg::InputRole>(row.as<uint8_t>());
+    }
   }
   // A list in the input replaces the whole list; absent keys of an entry
   // take the defaults of a new entry.
@@ -260,9 +283,6 @@ bool applyJson(JsonObjectConst in, settings::Model& m,
       m.fixture_pairs.push(pair);
     }
   }
-  if (!scalar(c, FieldPath().key("crest_image"), in["crest_image"],
-              m.crest_image))
-    return false;
   if (!in["slides"].isNull()) {
     const auto list = FieldPath().key("slides");
     const auto rows = in["slides"];
@@ -302,7 +322,8 @@ bool applyJson(JsonObjectConst in, settings::Model& m,
         return false;
     }
   }
-  return settings::validate(m, nullptr, violation, limits);
+  return settings::validate(m, nullptr, violation, limits) &&
+         settings::checkProviderAccess(m, violation);
 }
 void schemaJson(JsonObject out, const settings::Limits& limits) {
   out["version"] = cfg::kSettingsFormatVersion;
@@ -313,6 +334,8 @@ void schemaJson(JsonObject out, const settings::Limits& limits) {
   lists["slides"] = cfg::kSlideMax;
   lists["images"] = cfg::kImageLibraryMax;
   lists["screens"] = cfg::kScreenCount;
+  // Inputs of this device (the first entries of "input_roles").
+  out["inputs"] = limits.inputs;
   out["backlight"] = hw::kTarget.wiring.backlight != hw::kNoPin;
   out["image_max"] = cfg::kImageMaxBytes;
   out["selection_entries"] = cfg::kSelectionEntries;
@@ -376,6 +399,6 @@ void schemaJson(JsonObject out, const settings::Limits& limits) {
   bounded("ip_badge_s", cfg::kReturnTimeRange);
   bounded("window_before", cfg::kMatchWindowRange);
   bounded("window_after", cfg::kMatchWindowRange);
-  bounded("api_daily_budget", cfg::kProviderBudgetRange);
+  bounded("api_daily_budget", cfg::kApiFootballDailyBudgetRange);
 }
 }  // namespace web

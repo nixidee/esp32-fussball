@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
+#include <utility>
 namespace football {
 void Snapshot::reset() noexcept {
   static_assert(std::is_trivially_copyable_v<Snapshot>);
@@ -130,6 +132,29 @@ int64_t parseUtc(const char* text) {
   int64_t utc = (era * 146097LL + doe - 719468) * 86400 + h * 3600 + n * 60 + s;
   return utc - offset;
 }
+Phase statusPhase(const char* s) {
+  if (!strcmp(s, "NS") || !strcmp(s, "TBD") || !strcmp(s, "TIMED") ||
+      !strcmp(s, "SCHEDULED"))
+    return Phase::kScheduled;
+  if (!strcmp(s, "1H") || !strcmp(s, "2H") || !strcmp(s, "IN_PLAY") ||
+      !strcmp(s, "LIVE"))
+    return Phase::kLive;
+  if (!strcmp(s, "HT") || !strcmp(s, "PAUSED")) return Phase::kHalfTime;
+  if (!strcmp(s, "ET") || !strcmp(s, "EXTRA_TIME")) return Phase::kExtraTime;
+  if (!strcmp(s, "P") || !strcmp(s, "PENALTY_SHOOTOUT"))
+    return Phase::kPenalties;
+  if (!strcmp(s, "FT") || !strcmp(s, "AET") || !strcmp(s, "PEN") ||
+      !strcmp(s, "FINISHED"))
+    return Phase::kFinished;
+  if (!strcmp(s, "PST") || !strcmp(s, "POSTPONED") || !strcmp(s, "SUSP") ||
+      !strcmp(s, "SUSPENDED"))
+    return Phase::kPostponed;
+  if (!strcmp(s, "CANC") || !strcmp(s, "CANCELLED")) return Phase::kCancelled;
+  if (!strcmp(s, "ABD") || !strcmp(s, "AWD") || !strcmp(s, "ABANDONED") ||
+      !strcmp(s, "AWARDED"))
+    return Phase::kAbandoned;
+  return Phase::kUnknown;
+}
 void estimate(Match& m, int64_t now) {
   if (!m.kickoff.valid() || confirmed(m.phase_source)) return;
   if (now < m.kickoff.value) {
@@ -146,11 +171,15 @@ void estimate(Match& m, int64_t now) {
   } else if (elapsed > cfg::kUnknownMatchEndMinutes) {
     m.phase = Phase::kUnknown;
     m.minute = {};
+  } else if (elapsed > 45 && elapsed <= 60) {
+    // Assumed 15-minute break after the first half.
+    m.phase = Phase::kHalfTime;
+    m.minute = {};
   } else {
     m.phase = Phase::kLive;
     m.minute = {
-        static_cast<int16_t>(std::min<int64_t>(
-            elapsed > 60 ? elapsed - 15 : std::min<int64_t>(elapsed, 45), 120)),
+        static_cast<int16_t>(
+            std::min<int64_t>(elapsed > 60 ? elapsed - 15 : elapsed, 120)),
         Source::kEstimated};
   }
 }
@@ -200,10 +229,79 @@ bool conferenceWindow(const Snapshot& data, int64_t utc, uint16_t before,
   }
   return false;
 }
+void mergeEvents(Snapshot& primary, Match& a, const Snapshot& secondary,
+                 const Match& b, bool swapped) {
+  const auto scored = [](EventType type) {
+    return type == EventType::kGoal || type == EventType::kOwnGoal ||
+           type == EventType::kPenaltyGoal;
+  };
+  bool primary_scored = false, primary_missed = false;
+  for (unsigned i = 0; i < a.event_count; ++i) {
+    const auto type = primary.events[a.events[i]].type;
+    primary_scored |= scored(type);
+    primary_missed |= type == EventType::kPenaltyMissed;
+  }
+  for (unsigned i = 0; i < b.event_count; ++i) {
+    const auto& event = secondary.events[b.events[i]];
+    if (primary_scored && scored(event.type)) continue;
+    if (primary_missed && event.type == EventType::kPenaltyMissed) continue;
+    if (a.event_count >= a.events.size() ||
+        primary.event_count >= primary.events.size()) {
+      a.events_truncated = true;
+      break;
+    }
+    auto& added = primary.events[primary.event_count];
+    added = event;
+    if (swapped) std::swap(added.after.home, added.after.away);
+    a.events[a.event_count++] = primary.event_count++;
+  }
+  a.events_truncated |= b.events_truncated;
+}
 uint32_t fingerprint(std::string_view text) {
   uint32_t h = 2166136261;
   for (unsigned char c : text) h = (h ^ c) * 16777619;
   return h;
+}
+bool appendMatch(Snapshot& target, const Snapshot& from, const Match& source,
+                 bool own_events_only, bool skip_removed) {
+  if (target.match_count >= target.matches.size()) return false;
+  auto& match = target.matches[target.match_count++];
+  match = source;
+  match.event_count = 0;
+  for (unsigned i = 0; i < source.event_count; ++i) {
+    const auto& event = from.events[source.events[i]];
+    if ((own_events_only && event.provider != source.provider) ||
+        (skip_removed && event.removed))
+      continue;
+    if (target.event_count >= target.events.size()) {
+      match.events_truncated = true;
+      break;
+    }
+    target.events[target.event_count] = event;
+    match.events[match.event_count++] = target.event_count++;
+  }
+  return true;
+}
+bool carryRoute(Snapshot& target, const Snapshot& from, uint8_t route,
+                bool table, int64_t utc) {
+  for (unsigned i = 0; i < from.match_count; ++i) {
+    if (from.matches[i].route != route) continue;
+    if (!appendMatch(target, from, from.matches[i], false, true)) return false;
+    estimate(target.matches[target.match_count - 1], utc);
+  }
+  if (table && target.table_count == 0 && from.table_count) {
+    target.table = from.table;
+    target.table_count = from.table_count;
+  }
+  if (route < target.route_fetched_ms.size())
+    target.route_fetched_ms[route] = from.route_fetched_ms[route];
+  return true;
+}
+int64_t oldestFetch(const Snapshot& data) {
+  int64_t oldest = 0;
+  for (const auto at : data.route_fetched_ms)
+    if (at > 0 && (oldest == 0 || at < oldest)) oldest = at;
+  return oldest ? oldest : data.fetched_ms;
 }
 void demo(Snapshot& out) {
   out.reset();

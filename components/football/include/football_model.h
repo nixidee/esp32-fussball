@@ -161,6 +161,11 @@ struct Snapshot {
   uint8_t match_count = 0, table_count = 0, event_count = 0;
   uint32_t generation = 0, revision = 0;
   int64_t fetched_ms = 0;
+  // Monotonic time of each competition's last successful fetch; a route
+  // carried over after a failed fetch keeps its earlier time. 0 = none.
+  std::array<int64_t, cfg::kCompetitionMax> route_fetched_ms{};
+  // Monotonic time of the next attempt after a failed one; 0 = none.
+  int64_t retry_ms = 0;
   bool stale = true, configured = false;
   Text<96> routing_notice;
   Text<96> error;
@@ -183,6 +188,15 @@ const char* causeKey(Cause cause);
 const char* phaseName(Phase phase);
 Capabilities capabilities(cfg::Provider provider);
 int64_t parseUtc(const char* text);
+// Phase of an API-Football short status or a football-data.org v4 match
+// status (all eleven values of its lookup table); kUnknown otherwise.
+// Suspended maps to postponed and awarded to abandoned, like API-Football's
+// SUSP and AWD.
+Phase statusPhase(const char* status);
+// Phase and minute from the kickoff alone, for a match without a provider
+// status: scheduled before kickoff, live minutes 0-45, half time minutes
+// 46-60, then live (elapsed minus the break), unknown after
+// kUnknownMatchEndMinutes. A confirmed phase is kept.
 void estimate(Match& match, int64_t utc);
 // A match with a kickoff that is not postponed, cancelled or abandoned.
 bool scheduled(const Match& match);
@@ -203,5 +217,28 @@ bool matchWindow(const Match& match, int64_t utc, uint16_t before,
 bool conferenceWindow(const Snapshot& data, int64_t utc, uint16_t before,
                       uint16_t after);
 uint32_t fingerprint(std::string_view value);
+// Adds the events of paired match 'b' (fallback source) to match 'a' of the
+// primary snapshot. Scored goals (goal, own goal, penalty goal) of 'b' are
+// dropped when 'a' has a scored goal; missed penalties of 'b' are dropped
+// when 'a' has a missed penalty. 'swapped' exchanges the home and away score
+// of the added events. A full event list sets 'events_truncated'.
+void mergeEvents(Snapshot& primary, Match& a, const Snapshot& secondary,
+                 const Match& b, bool swapped);
+// Appends 'source', a match of 'from', with its events to 'target'.
+// 'own_events_only' skips events of another provider (fallback events merged
+// into a primary match); 'skip_removed' skips removal markers. A full event
+// pool sets 'events_truncated'. False when the match list is full.
+bool appendMatch(Snapshot& target, const Snapshot& from, const Match& source,
+                 bool own_events_only = false, bool skip_removed = false);
+// Keeps the published data of competition 'route' after its fetch failed:
+// copies its matches from 'from' into 'target' with their events (removal
+// markers excluded), estimated again at 'utc', and its fetch time; with
+// 'table', also the league table when 'target' has none. False when the
+// match list is full.
+bool carryRoute(Snapshot& target, const Snapshot& from, uint8_t route,
+                bool table, int64_t utc);
+// Monotonic time of the oldest data in 'data': the earliest non-zero route
+// fetch time, else 'fetched_ms'.
+int64_t oldestFetch(const Snapshot& data);
 void demo(Snapshot& out);
 }  // namespace football

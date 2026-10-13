@@ -861,7 +861,7 @@ the heavy-operation token are held; it is not a rate limit. Station modem
 sleep, previously the unchosen ESP-IDF default, is now off on every profile.
 Flash +838 B, static RAM unchanged. Device transfer times are not yet measured.
 
-## ADR-026 — Settings format 4: Konferenz pin switch, matchday without own match · Accepted 2026-10-12
+## ADR-026 — Settings format 4: Konferenz pin switch, matchday without own match · Accepted 2026-10-12 · record extended by ADR-027
 
 **Context:** the owner wants the own match pinned in the Konferenz to be
 optional (default on), and the matchday default ("while other matches run")
@@ -881,8 +881,7 @@ was completed to the approved design in the same step.
   firmware; it refuses the older firmware afterwards (downgrade only by USB,
   which then starts with initial values once format 4 has been saved).
 - The switch is stored and offered in the Web UI; the display effect follows
-  with the display redesign. Until then the own match stays pinned regardless
-  of the switch.
+  with the display redesign (implemented with ADR-027).
 
 **Alternative:** append the byte to format 3 without a new number (older
 firmware would stay installable by browser, but the format number would not
@@ -896,3 +895,134 @@ above: firmware.bin +6,928 B, flash 1,559,248 B (85.0 %, about 500 B below the
 (+6,754 B). The page is sent from flash without a heap copy. Host settings
 tests cover the format-4 layout, the format-3 read path and the matchday
 conversion; device behaviour is not yet checked.
+
+## ADR-027 — Settings format 5: Konferenz mode, whole matchday, input roles · Accepted 2026-10-13 · crest byte removed by ADR-028
+
+**Context:** the owner decided the Konferenz content (kickoff blocks of every
+active competition), two display modes (All pages, One page), an optional
+"show own match for the whole matchday" and a free role per input (Off,
+Mandatory, Up, Down, Scroll with direction change; exactly one Mandatory).
+The previous fixed behaviour per input count and the fixed own-match row could
+not express these choices.
+
+**Decision:**
+- Format 5 appends ten bytes after the format-4 pin flag: conference mode
+  (0/1), whole-matchday switch (0/1) and eight input roles, one byte per input
+  slot (`hw::kMaxInputs`). The record stays positional; formats 3 and 4 are
+  read with the new fields at their initial values (All pages, off, the
+  profile's default roles); formats 1 and 2 convert as before. The next
+  explicit save writes format 5.
+- Validation requires exactly one Mandatory role among the device's inputs;
+  roles of slots beyond the profile's input count are stored but ignored.
+  No Mandatory input is reported as required, several as a conflict.
+- Default roles come from `cfg::inputRoleDefault(index, count)`: three
+  inputs Mandatory, Up, Down; two Mandatory, Scroll; one Mandatory; further
+  inputs Up, the third Down.
+- The display reads mode, pin and whole-matchday from the model; the input
+  policy maps every event through the input's role. The schema reports the
+  device's input count (`inputs`) so the Web UI offers one choice per input.
+- The browser OTA gate of ADR-024 accepts format-5 firmware from format-3 and
+  format-4 firmware and refuses the older firmware afterwards.
+
+**Alternative:** keep the behaviour per input count and add only the two
+Konferenz values (one byte less per input, but no free assignment, which the
+owner asked for).
+
+**Cost and boundary:** model 1956 B (+12 B: 10 B fields, 2 B padding);
+longest record 1942 B (+10 B, transient on save); every `settings::current()`
+copy +12 B of stack; JSON +75 B, schema +11 B. C6 build: flash +1,184 B and
+static RAM +48 B for the firmware part, +1,536 B for the Web UI fields
+(embedded page 50,019 B gzip); total flash 1,563,216 B (85.2 %, 3,459 B above
+the 85 % line, permitted during the redesign). Host tests cover the format-5
+layout, format-3/4 reads and the role rules; the input mapping has its own
+host suite. Device behaviour is not yet checked.
+
+## ADR-028 — Protected stock images as roles, settings format 6 without a crest setting · Accepted 2026-10-13
+
+**Context:** the owner asked for the management of all images under "Images":
+the stock crest and the stock background must be replaceable there and can
+always be restored to the factory image; the crest is a special image, not a
+display setting. Until now the factory files could not be replaced on the
+device, and the crest was a settings reference (`crest_image`) to a library
+image.
+
+**Decision:**
+- Each stock image is a role (crest, background). A role shows its
+  replacement file when one exists (`role_crest.jpg`, `role_background.jpg`),
+  else the factory file, which is never changed by the device. A replacement
+  is uploaded like a library image (same JPEG check) or copied from a library
+  image; "reset" deletes the replacement. Roles cannot be deleted. Id 0 in
+  every reference means "the role's image".
+- Replacements count towards the shared image budget but not towards the ten
+  library ids. Deleting all images deletes the library and resets both roles.
+- Format 6 removes the crest byte; slide id 0 is the crest role. Formats 3
+  to 5 are read as before. Their crest id, when it is a library id, is
+  handed to the image service, which copies that image once as the crest
+  replacement outside an OTA trial and then saves format 6, so the old
+  reference cannot overwrite a later replacement. A missing image or a full
+  storage leaves the factory crest; the library image stays. An out-of-range
+  crest id is ignored rather than rejecting the whole record.
+- The API and the Web UI no longer carry `crest_image`; the Web UI drops it
+  from an older backup file before import and says so.
+- The API lists both roles with their state and revision, accepts a role
+  replacement upload (`X-Image-Role`) and offers copy and reset through one
+  endpoint (`POST /api/v1/images/role`).
+- The Web UI manages every image on the image page (library uploads, edits,
+  deletes; crest and standard background: replace, copy from the library,
+  restore). The display page only selects per screen (background off,
+  standard background or a library image) and the slideshow order; it has
+  no upload.
+
+**Alternatives:** keep `crest_image` and add a separate replacement only for
+the background (two ways to change the crest); overwrite the factory files
+(no restore without USB upload).
+
+**Cost and boundary:** model 1952 B (−4 B including padding), longest record
+1941 B (−1 B); JSON −16 B. C6 build: role service +458 B flash (static RAM
+unchanged), format 6 and migration +798 B flash in total with the Web UI
+change, static RAM −16 B; the role API +1,310 B flash, static RAM
+unchanged, one more HTTP handler; the image page role tiles +1,200 B flash
+(embedded page +1,195 B gzip), static RAM unchanged; removing the upload
+buttons from the display page −320 B flash; total flash 1,571,628 B
+(85.6 %). A replacement
+needs its JPEG size of LittleFS within the shared budget. Host tests cover the
+format-6 layout and the crest hand-over from format 4 and 5 records; the copy
+and the device behaviour are not yet checked on the device.
+
+## ADR-029 — Current season resolved on the device, free-text identifiers · Accepted 2026-10-13
+
+**Context:** the owner decided that every provider follows its current season
+automatically and that a stored season stays only as an explicit expert
+override. API-Football could only be used with a stored year, so it never
+rolled over. Some OpenLigaDB competition shortcuts contain spaces or umlauts
+and were neither accepted nor sent correctly.
+
+**Decision:**
+- An empty season is valid for every provider and means the current season.
+  OpenLigaDB and API-Football need a year in their URLs: the device resolves
+  it with one request (OpenLigaDB: the current round's `leagueSeason`;
+  API-Football: `leagues?id=…&current=true`, the season marked current) and
+  keeps it per competition and source (main or fallback) for six hours; a
+  provider-settings change clears it. football-data.org and ESPN get no season
+  parameter and answer with their current season.
+- The setup wizard stores no season for a picked API-Football competition; it
+  passes the listed season to the club list request only, so that list needs
+  no extra lookup.
+- Competition, club and fixture identifiers are any text without control
+  characters and without a space at either end (up to their byte limits).
+  Every identifier is percent-encoded (RFC 3986 unreserved characters kept)
+  when it is placed into a request URL.
+- The list search folds ASCII and the UTF-8 Latin-1 capitals to lower case.
+
+**Alternatives:** keep the stored API-Football year and ask for a manual
+rollover (contradicts the owner decision); resolve the season with every
+refresh (one more API-Football credit per refresh); restrict identifiers to
+URL-safe characters (excludes real OpenLigaDB shortcuts).
+
+**Cost and boundary:** one API-Football credit per competition and source
+every six hours while the season is empty. C6 build: flash +428 B in total
+(1,572,056 B, 85.7 %), static RAM +128 B (second season cache per
+competition), embedded page −282 B gzip. Provider task stack peak estimated (unverified) at about
++250 B on the resolving path (URL buffers); the measured minimum is part of
+the provider stack acceptance on the device. Season rollover itself is not yet
+observed with real provider data.

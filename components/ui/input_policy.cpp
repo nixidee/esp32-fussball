@@ -45,19 +45,28 @@ uint8_t InputPolicy::update(bool active, int64_t now, bool doubles,
   }
   return events;
 }
-Action mapInput(unsigned inputs, unsigned index, RawInput event, bool down) {
-  if (!inputs || index >= inputs) return Action::kNone;
-  if (index == 0) {
-    if (event == RawInput::kShort) return Action::kNext;
-    if (event == RawInput::kDouble) return Action::kPrevious;
-    if (event == RawInput::kLong) return Action::kDefault;
-    return Action::kNone;
+Action mapInput(cfg::InputRole role, RawInput event, bool down) {
+  using cfg::InputRole;
+  switch (role) {
+    case InputRole::kMandatory:
+      if (event == RawInput::kShort) return Action::kNext;
+      if (event == RawInput::kDouble) return Action::kPrevious;
+      if (event == RawInput::kLong) return Action::kDefault;
+      return Action::kNone;
+    case InputRole::kUp:
+    case InputRole::kDown:
+      if (event == RawInput::kShort || event == RawInput::kLong ||
+          event == RawInput::kRepeat)
+        return role == InputRole::kDown ? Action::kDown : Action::kUp;
+      return Action::kNone;
+    case InputRole::kScroll:
+      if (event == RawInput::kRelease) return Action::kToggleDirection;
+      if (event == RawInput::kLong || event == RawInput::kRepeat)
+        return down ? Action::kDown : Action::kUp;
+      return Action::kNone;
+    case InputRole::kOff:
+      break;
   }
-  if (inputs == 2 && event == RawInput::kRelease)
-    return Action::kToggleDirection;
-  if (event == RawInput::kLong || event == RawInput::kRepeat ||
-      (inputs >= 3 && event == RawInput::kShort))
-    return (inputs == 2 ? down : index == 2) ? Action::kDown : Action::kUp;
   return Action::kNone;
 }
 }  // namespace ui

@@ -88,14 +88,14 @@
   references after its reader callback returns. Reader lock duration is
   still to be measured.
 - Parser strings are copied into canonical fixed records before the document
-  is released. Every request carries settings generation and network epoch;
-  obsolete results cannot publish. Missing and estimated values retain
+  is released. Every request carries the provider-data generation of the
+  settings and the network epoch; obsolete results cannot publish. Missing and estimated values retain
   explicit provenance.
 - The HTTP worker performs strict settings mutations and bounded streaming
   uploads. Scan/selection/refresh requests signal their owning service.
   The static debug worker permits one fixed in-flight message. Heavy admission
   serializes provider TLS/JSON with image mutation and OTA.
-- Settings live behind a mutex. `settings::current()` returns a 1,944-byte
+- Settings live behind a mutex. `settings::current()` returns a 1,956-byte
   owned copy on the C6 (it lives on the caller's stack). NVS saves/reset use a second mutex and execute in the
   caller task. They post coalesced `kSettingsChanged` notifications.
 - State notifications and semantic input actions use the existing bounded
@@ -259,7 +259,7 @@ C-library APIs and `esp_timer_get_time()` for monotonic milliseconds.
   source, monotonic set time and set count, then posts `kTimeChanged`.
   Zone changes post the same event; subscribers fetch the current state.
 - A settings event callback only raises an atomic flag. The app task copies
-  the settings (1,944 B in this candidate), applies a changed zone and updates diagnostics;
+  the settings (1,956 B in this candidate), applies a changed zone and updates diagnostics;
   this work runs outside the `events` task.
 - Civil windows follow local time, including midnight and skipped/repeated
   daylight-saving hours. Delays and deadlines use monotonic time.
@@ -434,7 +434,10 @@ Its inactive/active, slow-client and concurrent-load budgets remain unaccepted.
 - Profile resolution, SPI mode and clock are checked at compile time
   (`include/hw_target.h`).
 - Fault injection: `cfg::kDisplayFault` compiles one test fault in (it must be
-  `kNone` in normal builds). A multi-chunk partial transfer is not injectable
+  `kNone` in normal builds). `cfg::kDisplayTest = DisplayTest::kColourTest`
+  shows the developer colour test (red outer ring, green inner ring, white
+  texts, version in blue) at boot instead of the start screen; normal builds
+  do not link it. A multi-chunk partial transfer is not injectable
   without changing ESP-IDF. It cannot occur with the current sizing (one
   flush = one SPI transaction), and it uses the same drain path.
 
@@ -508,17 +511,17 @@ shape the image design:
   (temporary file, then rename), otherwise a replacement during a redraw fails.
 This is integration evidence only, not the supported-maximum envelope.
 
-### Current compiled resource ledger — 2026-10-12 (settings format 4)
+### Current compiled resource ledger — 2026-10-13 (settings format 6, image roles, font set 12/14/18/48, display design renderer, start screen, automatic season)
 
 | Item | C6 candidate | Growth over the accepted core image |
 |---|---|---|
-| Firmware binary | 1,560,000 B | +1,043,696 B |
-| PlatformIO flash report | 1,559,248 B, 85.0% of 1,835,008 B | +1,043,584 B |
-| Static data/BSS | 197,380 B | +149,160 B |
+| Firmware binary | 1,576,656 B | +1,060,352 B |
+| PlatformIO flash report | 1,575,900 B, 85.9% of 1,835,008 B | +1,060,236 B |
+| Static data/BSS | 201,452 B | +153,232 B |
 | Linked DIRAM, official IDF size report | not re-measured (266,066 B at the 2026-10-10 image) | — |
-| Football snapshots | 3 × 27,168 B = 81,504 B | Included above |
-| Settings model / longest encoded record | 1,944 / 1,932 B | Format 4 (variable length, ceiling 2,048 B); formats 1 to 3 are converted in RAM without an NVS rewrite |
-| UI view model | 1,416 B | Static owned view |
+| Football snapshots | 3 × 27,200 B = 81,600 B | Included above |
+| Settings model / longest encoded record | 1,952 / 1,941 B | Format 6 (variable length, ceiling 2,048 B); formats 1 to 5 are converted in RAM without an NVS rewrite (the crest id of formats 3 to 5 is handed to the image service once, which saves format 6) |
+| UI view model / draw list / text store | 1,852 / 2,016 / 1,280 B | Static owned view; 72 draw items of 28 B; view and draw list are initialised data (also stored in flash) |
 | Parser live allocation cap | 24,576 B including custom headers | Libc metadata additional |
 | JPEG validation workspace | 4,096 B static | Included above |
 | Stock JPEG files / filesystem image | 7,862 / 458,752 B | Logical files / gross partition |
@@ -533,12 +536,37 @@ Runtime initialization of large snapshot defaults, shared stock aliases/font
 roles and unused C6 SDK speed/protocol features reduced the first complete
 build's 94.3% occupancy to 81.8% at the settings-format-3 build.
 
-The image fits the OTA slot and is 509 B below the 85% reserve line
-(1,559,757 B) using the PlatformIO report. Settings format 3 added 3,706 B flash
+The image fits the OTA slot and is 10,991 B above the 85% reserve line
+(1,559,757 B) using the PlatformIO report; the line may be exceeded during
+the display redesign, and the savings are decided at alpha from a size map. Settings format 3 added 3,706 B flash
 and 620 B static RAM over the preceding build; the later Web UI rewrite, API
 and provider changes grew flash to 84.6%, and settings format 4 with the
 completed Web UI added 6,928 B flash (6,754 B of it embedded page gzip) and no
-static RAM. No flash-reserve gate is
+static RAM. The display redesign so far: removing the input reset −412 B,
+Konferenz blocks and pages +1,660 B, settings format 5 with input roles
++1,184 B flash and +48 B static RAM (three static model copies +12 B
+each; the other 12 B are not itemised), their Web
+UI fields +1,536 B (embedded page 50,019 B gzip), the mockup font set
+−7,688 B, and the new renderer and screen binding +15,302 B flash and
++3,736 B static RAM (largest parts: screen binding about 5.2 KB, renderer
+about 4.2 KB, LVGL arc drawing about 3.3 KB, the night gamma `powf` about
+2.8 KB, view model and draw list as initialised data 3.9 KB). The UI
+binding runs on the main task (8 KB stack) with a 368 B frame inside the
+2.1 KB frame of the UI poll. The next-retry time in the snapshot added
+266 B flash and 16 B static RAM. The start screen in place of the colour
+test saved 7,386 B flash and no static RAM: the colour test was the last
+user of the LVGL label widget and flex layout, and it is linked only when
+`cfg::kDisplayTest` selects it. The SVG previews of the redesigned display
+in the Web UI added 4,472 B (embedded page). Image roles (replaceable stock
+crest and background) added 458 B flash and no static RAM; settings format 6
+with the crest hand-over and the matching Web UI change added 798 B flash and
+saved 16 B static RAM (embedded page 54,619 B gzip); the role API (list,
+role upload, copy/reset endpoint) added 1,310 B flash and no static RAM; the
+image page role tiles (replace, copy from the library, restore, delete-all
+resets) added 1,200 B flash and no static RAM (embedded page 55,814 B gzip);
+removing the upload buttons from the display page saved 320 B flash (embedded
+page 55,496 B gzip).
+No flash-reserve gate is
 accepted. Free heap is not derivable from the static figures: dynamic stacks,
 network, TLS, parser, DMA and library charges must still be accounted for. Peak heap,
 largest block, 25% stack reserves, LVGL fragmentation, ten-socket concurrency,
@@ -584,6 +612,7 @@ components/
   football/                  canonical model, four mappers, client/store/budget
   ui/                        pure input/navigation policy, presenter, views
   ui/fonts/                  generated fixed glyph subsets
+  ui/lvgl_font/              LVGL default-font header (14 px text role)
   images/                    quotas, validation, cache lifetime and publication
   web/                       strict settings/API, upload and live debug
   system/                    firmware identity, trial health and rollback

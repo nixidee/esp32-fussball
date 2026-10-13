@@ -25,5 +25,7 @@ class InputPolicy {
   bool raw_ = false, stable_ = false, long_sent_ = false, pending_ = false;
   int64_t edge_ = 0, pressed_ = 0, repeat_ = 0, released_ = 0;
 };
-Action mapInput(unsigned inputs, unsigned index, RawInput event, bool down);
+// Action of one input event for the input's role (OQ-141…OQ-143); `down` is
+// the current direction of a Scroll input.
+Action mapInput(cfg::InputRole role, RawInput event, bool down);
 }  // namespace ui

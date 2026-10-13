@@ -93,9 +93,10 @@ bool isValidNtpServer(std::string_view value) noexcept {
 }
 
 bool isValidIdentifier(std::string_view value) noexcept {
-  return std::all_of(value.begin(), value.end(), [](char c) {
-    return isHostnameChar(c) || c == '.' || c == '_';
-  });
+  return (value.empty() || (value.front() != ' ' && value.back() != ' ')) &&
+         std::all_of(value.begin(), value.end(), [](char c) {
+           return static_cast<unsigned char>(c) >= 0x20 && c != 0x7f;
+         });
 }
 
 bool isValidSeason(cfg::Provider provider, std::string_view season) noexcept {
@@ -103,6 +104,55 @@ bool isValidSeason(cfg::Provider provider, std::string_view season) noexcept {
          ((provider == cfg::Provider::kOpenLigaDb || season.size() == 4) &&
           std::all_of(season.begin(), season.end(),
                       [](char c) { return c >= '0' && c <= '9'; }));
+}
+
+bool sameProviderData(const Model& a, const Model& b) noexcept {
+  if (a.competitions.size() != b.competitions.size()) return false;
+  for (std::size_t i = 0; i < a.competitions.size(); ++i) {
+    const auto& x = a.competitions[i];
+    const auto& y = b.competitions[i];
+    if (x.active != y.active || x.fallback_active != y.fallback_active ||
+        !(x.primary == y.primary) || !(x.fallback == y.fallback))
+      return false;
+  }
+  return a.fixture_pairs == b.fixture_pairs &&
+         a.api_football_key == b.api_football_key &&
+         a.football_data_key == b.football_data_key &&
+         a.espn_opt_in == b.espn_opt_in && a.demo == b.demo;
+}
+
+bool providerUsable(cfg::Provider provider, const Model& model) noexcept {
+  switch (provider) {
+    case cfg::Provider::kEspn:
+      return model.espn_opt_in;
+    case cfg::Provider::kApiFootball:
+      return !model.api_football_key.empty();
+    case cfg::Provider::kFootballData:
+      return !model.football_data_key.empty();
+    default:
+      return true;
+  }
+}
+
+bool checkProviderAccess(const Model& model, Violation* violation) noexcept {
+  for (unsigned i = 0; i < model.competitions.size(); ++i) {
+    const auto& entry = model.competitions[i];
+    if (!entry.active) continue;
+    const char* source = nullptr;
+    if (!providerUsable(entry.primary.provider, model))
+      source = "primary";
+    else if (entry.fallback_active &&
+             !providerUsable(entry.fallback.provider, model))
+      source = "fallback";
+    if (source == nullptr) continue;
+    if (violation != nullptr) {
+      FieldPath at;
+      at.key("competitions").index(i).key(source).key("provider");
+      violation->set(at, Reason::kConflict);
+    }
+    return false;
+  }
+  return true;
 }
 
 namespace {
@@ -138,22 +188,17 @@ bool isDisplayName(std::string_view s) {
   });
 }
 
-// A source needs its season only while it is used (API-Football).
-bool checkSource(Checker& check, const FieldPath& at, const Source& source,
-                 bool used) {
+// An empty season means the provider's current season, resolved at runtime
+// for every provider (owner decision D3).
+bool checkSource(Checker& check, const FieldPath& at, const Source& source) {
   if (static_cast<unsigned>(source.provider) >= cfg::kProviderCount)
     return check.fail(at.with("provider"), Reason::kRange);
   if (!isValidIdentifier(source.competition.view()))
     return check.fail(at.with("competition"), Reason::kInvalid);
   if (!isValidIdentifier(source.team.view()))
     return check.fail(at.with("team"), Reason::kInvalid);
-  const auto season = source.season.view();
-  if (season.empty()) {
-    if (source.provider == cfg::Provider::kApiFootball && used)
-      return check.fail(at.with("season"), Reason::kRequired);
-  } else if (!isValidSeason(source.provider, season)) {
+  if (!isValidSeason(source.provider, source.season.view()))
     return check.fail(at.with("season"), Reason::kInvalid);
-  }
   return true;
 }
 
@@ -168,10 +213,9 @@ bool checkSources(Checker& check, const Model& model) {
                         Reason::kRequired);
     if (entry.primary.team.empty())
       return check.fail(FieldPath(primary).with("team"), Reason::kRequired);
-    if (!checkSource(check, primary, entry.primary, entry.active)) return false;
+    if (!checkSource(check, primary, entry.primary)) return false;
     const auto fallback = at.with("fallback");
-    if (!checkSource(check, fallback, entry.fallback, entry.fallback_active))
-      return false;
+    if (!checkSource(check, fallback, entry.fallback)) return false;
     if (!isDisplayName(entry.competition_name.view()))
       return check.fail(at.with("competition_name"), Reason::kInvalid);
     if (!isDisplayName(entry.team_name.view()))
@@ -219,8 +263,6 @@ bool checkPairs(Checker& check, const Model& model) {
 }
 
 bool checkImages(Checker& check, const Model& model) {
-  if (model.crest_image > cfg::kImageLibraryMax)
-    return check.fail(FieldPath().with("crest_image"), Reason::kRange);
   for (unsigned i = 0; i < model.slides.size(); ++i)
     if (model.slides[i] > cfg::kImageLibraryMax)
       return check.fail(FieldPath().with("slides").index(i), Reason::kRange);
@@ -249,6 +291,21 @@ bool checkImages(Checker& check, const Model& model) {
                           .key("image"),
                       Reason::kInvalid);
   if (!enabled) return check.fail(FieldPath().with("screens"), Reason::kNoneEnabled);
+  return true;
+}
+
+// Every slot holds a known role; exactly one of the profile's inputs carries
+// the mandatory one-key set (OQ-141). A target without inputs has no rule.
+bool checkInputs(Checker& check, const Model& model, std::size_t inputs) {
+  const auto at = FieldPath().with("input_roles");
+  unsigned mandatory = 0;
+  for (unsigned i = 0; i < model.input_roles.size(); ++i) {
+    if (model.input_roles[i] > cfg::kInputRoleLast)
+      return check.fail(at.withIndex(i), Reason::kRange);
+    if (i < inputs) mandatory += model.input_roles[i] == cfg::InputRole::kMandatory;
+  }
+  if (inputs > 0 && mandatory != 1)
+    return check.fail(at, mandatory == 0 ? Reason::kRequired : Reason::kConflict);
   return true;
 }
 
@@ -333,7 +390,7 @@ bool validate(const Model& model, Field* invalid, Violation* violation,
                      model.window_before) &&
          check.range("window_after", cfg::kMatchWindowRange,
                      model.window_after) &&
-         check.range("api_daily_budget", cfg::kProviderBudgetRange,
+         check.range("api_daily_budget", cfg::kApiFootballDailyBudgetRange,
                      model.api_daily_budget) &&
          check.range("idle_screen", screens,
                      static_cast<unsigned>(model.idle_screen)) &&
@@ -341,6 +398,10 @@ bool validate(const Model& model, Field* invalid, Violation* violation,
                      static_cast<unsigned>(model.matchday_screen)) &&
          check.range("own_match_screen", screens,
                      static_cast<unsigned>(model.own_match_screen)) &&
+         check.range("conference_mode",
+                     {0, static_cast<uint16_t>(cfg::ConferenceMode::kOnePage)},
+                     static_cast<unsigned>(model.conference_mode)) &&
+         checkInputs(check, model, limits.inputs) &&
          checkSources(check, model) && checkPairs(check, model) &&
          checkImages(check, model);
   }
@@ -360,7 +421,6 @@ bool dropMissingImages(Model& model, ImageMask present) noexcept {
     id = cfg::kStockImageId;
     changed = true;
   };
-  replace(model.crest_image);
   for (auto& style : model.screens) replace(style.image);
   // Slide 0 is the crest, never a missing image.
   decltype(model.slides) kept;
@@ -381,6 +441,7 @@ Model initialValues(const Presets& presets, FieldMask* rejected,
       std::min<uint8_t>(model.visible_matches, limits.visible_matches_max);
   model.table_window =
       std::min<uint8_t>(model.table_window, limits.table_window_max);
+  model.input_roles = inputRolesDefault(limits.inputs);
   model.hostname.assign(cfg::kHostnameDefault);
   model.external_antenna = cfg::kExternalAntennaDefault;
   model.debug_status_log = cfg::kDebugStatusLogDefault;

@@ -44,6 +44,7 @@ class SafeArea {
     return width_ < height_ ? width_ : height_;
   }
   uint16_t margin() const noexcept { return margin_; }
+  hw::DisplayShape shape() const noexcept { return shape_; }
 
   // Requires positive dimensions, a known shape and a remaining interior.
   // Valid continuous geometry need not contain a nonempty whole-pixel span:

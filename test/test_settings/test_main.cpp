@@ -1,6 +1,8 @@
 // Host acceptance for the settings model, its limits, the initial values and
-// the stored record: format 4 (variable length, lists, Konferenz pin flag)
-// and the conversion of the older formats 1, 2 and 3 (docs/CONFIGURATION.md).
+// the stored record: format 6 (variable length, lists, Konferenz pin flag,
+// Konferenz mode, whole-matchday flag, input roles) and the conversion of the
+// older formats 1 to 5, including the crest image id of formats 3 to 5
+// (docs/CONFIGURATION.md).
 
 #include <unity.h>
 
@@ -30,8 +32,9 @@ using settings::kMaxRecordBytes;
 using settings::Model;
 using settings::Presets;
 
-// A record has exactly its used length (format 4 varies, formats 1 to 3 are
-// built by the tests themselves).
+// A record has exactly its used length (format 6 varies, formats 1 and 2 are
+// built by the tests themselves, formats 3 to 5 from format 6 by
+// olderFormat()).
 using Record = std::vector<uint8_t>;
 
 // Offsets of the record, header included, written out independently of the
@@ -47,7 +50,9 @@ constexpr std::size_t kTimeZoneAt = 238;
 constexpr std::size_t kNtpServerAt = 271;
 constexpr std::size_t kCoreBytes = 335;
 // Format 3 continues with the secrets, the screens, the scalar values, the
-// crest image and then the lists; format 4 appends the pin flag.
+// crest image and then the lists; format 4 appends the pin flag, format 5
+// the Konferenz mode, the whole-matchday flag and the input roles; format 6
+// drops the crest image, so its lists start where the crest image was.
 constexpr std::size_t kAdminAt = kCoreBytes;
 constexpr std::size_t kApiKeyAt = kAdminAt + 1 + 64;
 constexpr std::size_t kFootballKeyAt = kApiKeyAt + 1 + 96;
@@ -56,16 +61,19 @@ constexpr std::size_t kScreenBytes = 16;
 constexpr std::size_t kScalarsAt = kScreensAt + 4 * kScreenBytes;
 constexpr std::size_t kLanguageAt = kScalarsAt + 7;
 constexpr std::size_t kSlideshowAt = kScalarsAt + 16 + 2 * 3;
-constexpr std::size_t kCrestAt = kScalarsAt + 7 + 9 + 2 * 10;
-constexpr std::size_t kSlidesAt = kCrestAt + 1;  // count, then one byte each
+constexpr std::size_t kCrestAt = kScalarsAt + 7 + 9 + 2 * 10;  // formats 3-5
+constexpr std::size_t kSlidesAt = kCrestAt;  // format 6: count, then one byte each
 constexpr std::size_t kSourceBytes = 1 + 33 + 17 + 33;
 constexpr std::size_t kCompetitionBytes = 2 + 2 * kSourceBytes + 33 + 33;
 constexpr std::size_t kPairBytes = 3 + 33 + 33;
-// Lists empty plus the pin flag: the shortest format-4 record.
-constexpr std::size_t kEmptyListsBytes = kSlidesAt + 3 + 1;
+// Format 5 and 6 tail after the pin flag: mode, whole matchday, eight input roles.
+constexpr std::size_t kFormat5TailBytes = 1 + 1 + 8;
+// Lists empty plus the pin flag and the format-5 tail: the shortest record.
+constexpr std::size_t kEmptyListsBytes = kSlidesAt + 3 + 1 + kFormat5TailBytes;
 // The model is copied onto task stacks (settings::current(), HTTP handlers):
-// growth is a stack budget change, see docs/ARCHITECTURE.md.
-constexpr std::size_t kModelBytesBudget = 1944;
+// growth is a stack budget change, see docs/ARCHITECTURE.md. Format 5 added
+// 10 bytes of fields and 2 bytes of padding (1,944 -> 1,956).
+constexpr std::size_t kModelBytesBudget = 1956;
 
 Model defaults() { return initialValues({}); }
 
@@ -124,7 +132,6 @@ Model full() {
   model.admin_password.assign(std::string(64, 'A'));
   model.api_football_key.assign(std::string(96, 'k'));
   model.football_data_key.assign(std::string(64, 'd'));
-  model.crest_image = cfg::kImageLibraryMax;
   for (std::size_t i = 0; i < 3; ++i) model.screens[i].image = 10;
   for (std::size_t i = 0; i < model.slides.kCapacity; ++i)
     model.slides.push(i % 2 == 0 ? cfg::kImageLibraryMax : 0);
@@ -168,6 +175,22 @@ uint32_t readU32(const uint8_t* at) {
 DecodeResult decodeInto(std::span<const uint8_t> record, Model& model,
                         Field* invalid = nullptr) {
   return decode(record, model, invalid);
+}
+
+// The record of format 3, 4 or 5 for the format-6 bytes 'current' of the
+// same model: the crest image id before the lists, without the fields the
+// format did not have yet.
+Record olderFormat(const Record& current, uint16_t version,
+                   uint8_t crest = cfg::kStockImageId) {
+  std::size_t end = current.size();
+  if (version < 5) end -= kFormat5TailBytes;
+  if (version < 4) end -= 1;  // the pin flag
+  Record record(current.begin(), current.begin() + kCrestAt);
+  record.push_back(crest);
+  record.insert(record.end(), current.begin() + kCrestAt,
+                current.begin() + end);
+  settings::seal(record, version);
+  return record;
 }
 
 // Record with one payload byte changed and a valid header, so the value
@@ -358,7 +381,6 @@ void testDefaults() {
   TEST_ASSERT_TRUE(model.competitions.empty());
   TEST_ASSERT_TRUE(model.fixture_pairs.empty());
   TEST_ASSERT_TRUE(model.slides.empty());
-  TEST_ASSERT_EQUAL_UINT8(cfg::kStockImageId, model.crest_image);
   for (const auto& style : model.screens)
     TEST_ASSERT_EQUAL_UINT8(cfg::kStockImageId, style.image);
   TEST_ASSERT_TRUE(settings::validate(model));
@@ -395,12 +417,12 @@ void testListContainer() {
   TEST_ASSERT_FALSE(a == b);
 }
 
-void testFormat4Layout() {
+void testFormat6Layout() {
   TEST_ASSERT_EQUAL_size_t(8, kHeaderBytes);
   // Pinned: the longest record is the NVS blob ceiling, a memory budget item.
-  TEST_ASSERT_EQUAL_size_t(1932, kMaxRecordBytes);
+  TEST_ASSERT_EQUAL_size_t(1941, kMaxRecordBytes);
   TEST_ASSERT_TRUE(kMaxRecordBytes <= cfg::kSettingsMaxRecordBytes);
-  TEST_ASSERT_EQUAL_size_t(667, kEmptyListsBytes);
+  TEST_ASSERT_EQUAL_size_t(676, kEmptyListsBytes);
 
   Model model = defaults();
   model.admin_password.assign("pw");
@@ -414,7 +436,6 @@ void testFormat4Layout() {
   style.image = 3;
   model.language = 1;
   model.slideshow_s = 0x0123;  // 291 s, little-endian 23 01
-  model.crest_image = 2;
   model.slides.push(0);
   model.slides.push(3);
   Competition entry = competition(cfg::Provider::kOpenLigaDb, "bl1", "2025", "16");
@@ -432,6 +453,12 @@ void testFormat4Layout() {
   pair.primary_id.assign("100");
   pair.secondary_id.assign("200");
   model.fixture_pairs.push(pair);
+  model.conference_mode = cfg::ConferenceMode::kOnePage;
+  model.whole_matchday = true;
+  model.input_roles = {cfg::InputRole::kScroll, cfg::InputRole::kOff,
+                       cfg::InputRole::kMandatory, cfg::InputRole::kDown,
+                       cfg::InputRole::kUp,     cfg::InputRole::kOff,
+                       cfg::InputRole::kOff,    cfg::InputRole::kOff};
   TEST_ASSERT_TRUE(settings::validate(model));
 
   const Record record = encoded(model);
@@ -439,7 +466,7 @@ void testFormat4Layout() {
       kEmptyListsBytes + 2 + kCompetitionBytes + kPairBytes;
   TEST_ASSERT_EQUAL_size_t(expected, record.size());
 
-  TEST_ASSERT_EQUAL_HEX8(0x04, record[0]);  // version 4
+  TEST_ASSERT_EQUAL_HEX8(0x06, record[0]);  // version 6
   TEST_ASSERT_EQUAL_HEX8(0x00, record[1]);
   const std::size_t payload = expected - kHeaderBytes;
   TEST_ASSERT_EQUAL_HEX8(payload & 0xff, record[2]);
@@ -470,8 +497,8 @@ void testFormat4Layout() {
   TEST_ASSERT_EQUAL_HEX8(0x23, record[kSlideshowAt]);
   TEST_ASSERT_EQUAL_HEX8(0x01, record[kSlideshowAt + 1]);
 
-  // Crest image and the lists, each a count followed by its entries.
-  TEST_ASSERT_EQUAL_UINT8(2, record[kCrestAt]);
+  // The lists, each a count followed by its entries, right after the
+  // scalar values.
   TEST_ASSERT_EQUAL_UINT8(2, record[kSlidesAt]);
   TEST_ASSERT_EQUAL_UINT8(0, record[kSlidesAt + 1]);
   TEST_ASSERT_EQUAL_UINT8(3, record[kSlidesAt + 2]);
@@ -499,10 +526,17 @@ void testFormat4Layout() {
   TEST_ASSERT_EQUAL_UINT8(0, record[pairs + 3]);  // competition index
   expectText(record, pairs + 4, "100", 32);
   expectText(record, pairs + 4 + 33, "200", 32);
-  // Format 4: the pin flag closes the record (default on).
+  // Format 4: the pin flag after the lists (default on).
   const std::size_t pin = pairs + 1 + kPairBytes;
   TEST_ASSERT_EQUAL_HEX8(1, record[pin]);
-  TEST_ASSERT_EQUAL_size_t(pin + 1, record.size());
+  // Formats 5 and 6: mode, whole matchday and one role byte per input slot
+  // close the record.
+  TEST_ASSERT_EQUAL_HEX8(1, record[pin + 1]);  // One page
+  TEST_ASSERT_EQUAL_HEX8(1, record[pin + 2]);  // whole matchday on
+  const uint8_t roles[] = {4, 0, 1, 3, 2, 0, 0, 0};
+  for (std::size_t i = 0; i < sizeof(roles); ++i)
+    TEST_ASSERT_EQUAL_HEX8(roles[i], record[pin + 3 + i]);
+  TEST_ASSERT_EQUAL_size_t(pin + 1 + kFormat5TailBytes, record.size());
 
   // CRC over header bytes 0..3 followed by the payload.
   std::vector<uint8_t> covered(record.begin(), record.begin() + 4);
@@ -560,7 +594,6 @@ void testRoundTrip() {
   lists.admin_password.assign("admin");
   lists.api_football_key.assign("key-1");
   lists.football_data_key.assign("key-2");
-  lists.crest_image = 4;
   lists.screens[0].image = 7;
   lists.screens[1].colour = 0xabcdef;
   lists.slides.push(0);
@@ -656,10 +689,10 @@ void testShorterRecordKeepsInitialValues() {
   TEST_ASSERT_TRUE(loaded.competitions == initial.competitions);
 
   record = encoded(later);
-  const auto before_crest = std::span(record).first(kCrestAt);
-  settings::seal(before_crest);
+  const auto before_lists = std::span(record).first(kSlidesAt);
+  settings::seal(before_lists);
   loaded = initial;
-  TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(before_crest, loaded));
+  TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(before_lists, loaded));
   TEST_ASSERT_EQUAL_UINT8(1, loaded.language);
   TEST_ASSERT_EQUAL_UINT16(20, loaded.slideshow_s);
   TEST_ASSERT_TRUE(loaded.competitions == initial.competitions);
@@ -742,7 +775,6 @@ void testListsPartialAndInvalid() {
   const Case values[] = {
       {crest_screen_image, 1},
       {first_screen_image, cfg::kImageLibraryMax + 1},
-      {kCrestAt, cfg::kImageLibraryMax + 1},
   };
   for (const Case& c : values) {
     const Record record = withByte(sample(), c.at, c.value);
@@ -810,9 +842,9 @@ void testDamagedHeaders() {
   TEST_ASSERT_EQUAL(DecodeResult::kChecksumMismatch,
                     decodeInto(record, loaded));
 
-  // Formats 1 to 4 are known; any other version is not.
+  // Formats 1 to 6 are known; any other version is not.
   record = encoded(original);
-  for (const uint16_t version : {uint16_t{0}, uint16_t{5}, uint16_t{0xFFFF}}) {
+  for (const uint16_t version : {uint16_t{0}, uint16_t{7}, uint16_t{0xFFFF}}) {
     settings::seal(record, version);
     TEST_ASSERT_EQUAL(DecodeResult::kUnknownVersion,
                       decodeInto(record, loaded));
@@ -858,9 +890,9 @@ void testFormat1IsMigrated() {
   loaded = defaults();
   TEST_ASSERT_EQUAL(DecodeResult::kTooLong, decodeInto(record, loaded));
 
-  // The next save writes format 4 with the same values.
+  // The next save writes format 6 with the same values.
   const Record saved = encoded(stored);
-  TEST_ASSERT_EQUAL_HEX8(4, saved[0]);
+  TEST_ASSERT_EQUAL_HEX8(6, saved[0]);
 }
 
 void testFormat2IsConvertedToLists() {
@@ -944,9 +976,9 @@ void testFormat2IsConvertedToLists() {
   TEST_ASSERT_EQUAL_size_t(2, loaded.competitions.size());
   TEST_ASSERT_EQUAL_size_t(2, loaded.fixture_pairs.size());
 
-  // The next save writes format 4 and reads back the same.
+  // The next save writes format 6 and reads back the same.
   const Record saved = encoded(loaded);
-  TEST_ASSERT_EQUAL_HEX8(4, saved[0]);
+  TEST_ASSERT_EQUAL_HEX8(6, saved[0]);
   Model again = defaults();
   TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(saved, again));
   TEST_ASSERT_TRUE(again == expected);
@@ -1140,9 +1172,12 @@ void testNtpServerLimits() {
 void testIdentifierAndSeasonLimits() {
   using settings::isValidIdentifier;
   using settings::isValidSeason;
-  for (const char* id : {"", "bl1", "BL1", "ger.1", "a_b", "78", "a-b"})
+  // OpenLigaDB shortcuts may contain spaces and umlauts (owner finding
+  // 2026-10-12); requests percent-encode identifiers.
+  for (const char* id : {"", "bl1", "BL1", "ger.1", "a_b", "78", "a-b",
+                         "Bundesliga 1", "th\xc3\xbcli-26", "a:b"})
     TEST_ASSERT_TRUE(isValidIdentifier(id));
-  for (const char* id : {"a b", "a/b", "a:b", "a\n", "bl\xc3\xa4"})
+  for (const char* id : {"a\n", "a\t", "a\x7f", " bl1", "bl1 ", " "})
     TEST_ASSERT_FALSE(isValidIdentifier(id));
 
   using cfg::Provider;
@@ -1240,7 +1275,7 @@ void testViolationNamesListPath() {
   expectViolation(model, "competitions[0].primary.competition", "required");
 
   model = withLists();
-  model.competitions[0].primary.team.assign("bad id");
+  model.competitions[0].primary.team.assign("bad\tid");
   expectViolation(model, "competitions[0].primary.team", "invalid");
 
   model = withLists();
@@ -1268,8 +1303,8 @@ void testViolationNamesListPath() {
 
 void testViolationNamesImageAndScreenPath() {
   Model model = withLists();
-  model.crest_image = cfg::kImageLibraryMax + 1;
-  expectViolation(model, "crest_image", "range");
+  model.slides.push(cfg::kImageLibraryMax + 1);
+  expectViolation(model, "slides[0]", "range");
 
   model = withLists();
   model.screens[1].text_scale = 69;
@@ -1292,7 +1327,7 @@ void testViolationKeepsFieldMapping() {
   TEST_ASSERT_FALSE(settings::validate(model, &field));
   TEST_ASSERT_EQUAL_STRING("time_zone", settings::fieldName(field));
   model = withLists();
-  model.crest_image = 99;
+  model.slides.push(99);
   TEST_ASSERT_FALSE(settings::validate(model, &field));
   TEST_ASSERT_EQUAL_STRING("application", settings::fieldName(field));
 }
@@ -1300,7 +1335,7 @@ void testViolationKeepsFieldMapping() {
 void testViolationFitsPathBuffer() {
   // The longest path of a full model must not be cut.
   Model model = full();
-  model.competitions[2].fallback.competition.assign("bad id");
+  model.competitions[2].fallback.competition.assign("bad\tid");
   const Rejected result = reject(model);
   TEST_ASSERT_TRUE(result.rejected);
   TEST_ASSERT_EQUAL_STRING("competitions[2].fallback.competition",
@@ -1393,22 +1428,25 @@ void testMatchdayScreenWithoutOwnMatch() {
   TEST_ASSERT_TRUE(settings::validate(stored));
 }
 
-// OQ-123/OQ-126: format 4 stores the Konferenz pin flag as its last byte; a
+// OQ-123/OQ-126: format 4 stores the Konferenz pin flag after the lists; a
 // format-3 record (the same bytes without it) loads the initial value.
+// Formats 5 and 6 keep the flag at that place, followed by their tail.
 void testPinOwnMatchFormats() {
   TEST_ASSERT_TRUE(defaults().pin_own_match);
+  const auto pinAt = [](const Record& r) {
+    return r.size() - 1 - kFormat5TailBytes;
+  };
 
   Model stored = withLists();
   stored.pin_own_match = false;
   Record record = encoded(stored);
-  TEST_ASSERT_EQUAL_HEX8(0, record.back());
+  TEST_ASSERT_EQUAL_HEX8(0, record[pinAt(record)]);
   Model loaded = defaults();
   TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(record, loaded));
   TEST_ASSERT_TRUE(loaded == stored);
 
   // Format 3: without the flag, the stored value cannot win.
-  record.pop_back();
-  settings::seal(record, 3);
+  record = olderFormat(record, 3);
   loaded = defaults();
   TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(record, loaded));
   TEST_ASSERT_TRUE(loaded.pin_own_match);
@@ -1422,17 +1460,154 @@ void testPinOwnMatchFormats() {
   TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(record, loaded));
   TEST_ASSERT_TRUE(loaded.pin_own_match);
 
-  // The next save writes format 4 with the flag.
+  // The next save writes format 6 with the flag.
   record = encoded(loaded);
-  TEST_ASSERT_EQUAL_HEX8(4, record[0]);
-  TEST_ASSERT_EQUAL_HEX8(1, record.back());
+  TEST_ASSERT_EQUAL_HEX8(6, record[0]);
+  TEST_ASSERT_EQUAL_HEX8(1, record[pinAt(record)]);
 
   // Only 0 and 1 are a flag.
   record = encoded(stored);
-  record.back() = 2;
+  record[pinAt(record)] = 2;
   settings::seal(record);
   loaded = defaults();
   TEST_ASSERT_EQUAL(DecodeResult::kInvalidValue, decodeInto(record, loaded));
+}
+
+// OQ-136/OQ-139/OQ-141: format 5 stores the Konferenz mode, the
+// whole-matchday flag and one role per input slot; a format-4 record (the
+// same bytes without that tail) loads the initial values.
+void testFormat5Fields() {
+  const Model initial = defaults();
+  TEST_ASSERT_EQUAL(cfg::ConferenceMode::kAllPages, initial.conference_mode);
+  TEST_ASSERT_FALSE(initial.whole_matchday);
+
+  Model stored = withLists();
+  stored.pin_own_match = false;
+  stored.conference_mode = cfg::ConferenceMode::kOnePage;
+  stored.whole_matchday = true;
+  stored.input_roles[0] = cfg::InputRole::kUp;
+  stored.input_roles[1] = cfg::InputRole::kMandatory;
+  stored.input_roles[2] = cfg::InputRole::kScroll;
+  Record record = encoded(stored);
+  Model loaded = defaults();
+  TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(record, loaded));
+  TEST_ASSERT_TRUE(loaded == stored);
+
+  // Format 5: the same fields after a crest image id; a library id is
+  // handed over, an id outside the library is dropped (OQ-152).
+  uint8_t crest = cfg::kStockImageId;
+  loaded = defaults();
+  TEST_ASSERT_EQUAL(DecodeResult::kOk,
+                    decode(olderFormat(record, 5, 4), loaded, nullptr, {},
+                           &crest));
+  TEST_ASSERT_TRUE(loaded == stored);
+  TEST_ASSERT_EQUAL_UINT8(4, crest);
+  loaded = defaults();
+  TEST_ASSERT_EQUAL(DecodeResult::kOk,
+                    decode(olderFormat(record, 5, cfg::kImageLibraryMax + 1),
+                           loaded, nullptr, {}, &crest));
+  TEST_ASSERT_TRUE(loaded == stored);
+  TEST_ASSERT_EQUAL_UINT8(cfg::kStockImageId, crest);
+  // Format 6 has no crest image id.
+  crest = 4;
+  loaded = defaults();
+  TEST_ASSERT_EQUAL(DecodeResult::kOk,
+                    decode(record, loaded, nullptr, {}, &crest));
+  TEST_ASSERT_EQUAL_UINT8(cfg::kStockImageId, crest);
+
+  // Format 4: the pin flag is read, the tail fields keep the initial values.
+  const std::size_t tail = record.size() - kFormat5TailBytes;
+  crest = cfg::kStockImageId;
+  Record format4 = olderFormat(record, 4, 2);
+  loaded = defaults();
+  TEST_ASSERT_EQUAL(DecodeResult::kOk,
+                    decode(format4, loaded, nullptr, {}, &crest));
+  TEST_ASSERT_EQUAL_UINT8(2, crest);
+  TEST_ASSERT_FALSE(loaded.pin_own_match);
+  TEST_ASSERT_EQUAL(cfg::ConferenceMode::kAllPages, loaded.conference_mode);
+  TEST_ASSERT_FALSE(loaded.whole_matchday);
+  TEST_ASSERT_TRUE(loaded.input_roles == initial.input_roles);
+  TEST_ASSERT_TRUE(loaded.competitions == stored.competitions);
+  // A format-4 record with trailing bytes does not read them as the tail.
+  format4.push_back(1);
+  settings::seal(format4, 4);
+  loaded = defaults();
+  TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(format4, loaded));
+  TEST_ASSERT_EQUAL(cfg::ConferenceMode::kAllPages, loaded.conference_mode);
+
+  // Unknown mode, a flag other than 0/1 and an unknown role are rejected.
+  for (const auto& [offset, value] :
+       {std::pair{std::size_t{0}, uint8_t{2}}, std::pair{std::size_t{1}, uint8_t{2}},
+        std::pair{std::size_t{2 + 7}, uint8_t{5}}}) {
+    Record bad = record;
+    bad[tail + offset] = value;
+    settings::seal(bad);
+    loaded = defaults();
+    TEST_ASSERT_EQUAL(DecodeResult::kInvalidValue, decodeInto(bad, loaded));
+  }
+}
+
+// OQ-141/OQ-150: the initial roles follow the profile's input count; exactly
+// one of the profile's inputs is mandatory, slots after them do not count.
+void testInputRoles() {
+  using cfg::InputRole;
+  const auto roles = [](uint8_t inputs) {
+    return initialValues({}, nullptr, {.inputs = inputs}).input_roles;
+  };
+  const settings::InputRoles none{};
+  TEST_ASSERT_TRUE(roles(0) == none);
+  settings::InputRoles one{};
+  one[0] = InputRole::kMandatory;
+  TEST_ASSERT_TRUE(roles(1) == one);
+  settings::InputRoles two = one;
+  two[1] = InputRole::kScroll;
+  TEST_ASSERT_TRUE(roles(2) == two);
+  settings::InputRoles three = one;  // C6 default (OQ-150)
+  three[1] = InputRole::kUp;
+  three[2] = InputRole::kDown;
+  TEST_ASSERT_TRUE(roles(3) == three);
+  settings::InputRoles four = three;  // the mapping before format 5
+  four[3] = InputRole::kUp;
+  TEST_ASSERT_TRUE(roles(4) == four);
+
+  const settings::Limits limits{.inputs = 3};
+  Model model = initialValues({}, nullptr, limits);
+  TEST_ASSERT_TRUE(settings::validate(model, nullptr, nullptr, limits));
+  // A slot after the profile's inputs does not count as a second mandatory.
+  model.input_roles[5] = InputRole::kMandatory;
+  TEST_ASSERT_TRUE(settings::validate(model, nullptr, nullptr, limits));
+
+  settings::Violation why;
+  model = initialValues({}, nullptr, limits);
+  model.input_roles[0] = InputRole::kOff;
+  TEST_ASSERT_FALSE(settings::validate(model, nullptr, &why, limits));
+  TEST_ASSERT_EQUAL_STRING("input_roles", why.path.data());
+  TEST_ASSERT_EQUAL(settings::Reason::kRequired, why.reason);
+
+  model = initialValues({}, nullptr, limits);
+  model.input_roles[2] = InputRole::kMandatory;
+  TEST_ASSERT_FALSE(settings::validate(model, nullptr, &why, limits));
+  TEST_ASSERT_EQUAL_STRING("input_roles", why.path.data());
+  TEST_ASSERT_EQUAL(settings::Reason::kConflict, why.reason);
+
+  model = initialValues({}, nullptr, limits);
+  model.input_roles[7] = static_cast<InputRole>(5);
+  TEST_ASSERT_FALSE(settings::validate(model, nullptr, &why, limits));
+  TEST_ASSERT_EQUAL_STRING("input_roles[7]", why.path.data());
+  TEST_ASSERT_EQUAL(settings::Reason::kRange, why.reason);
+
+  // Every input may be switched off except the mandatory one (OQ-141).
+  model = initialValues({}, nullptr, limits);
+  model.input_roles[1] = model.input_roles[2] = InputRole::kOff;
+  TEST_ASSERT_TRUE(settings::validate(model, nullptr, nullptr, limits));
+  // Without inputs there is no mandatory rule.
+  model.input_roles = {};
+  TEST_ASSERT_TRUE(settings::validate(model, nullptr, nullptr, {.inputs = 0}));
+
+  model = initialValues({}, nullptr, limits);
+  model.conference_mode = static_cast<cfg::ConferenceMode>(2);
+  TEST_ASSERT_FALSE(settings::validate(model, nullptr, &why, limits));
+  TEST_ASSERT_EQUAL_STRING("conference_mode", why.path.data());
 }
 
 void testValidateLists() {
@@ -1460,19 +1635,17 @@ void testValidateLists() {
   TEST_ASSERT_TRUE(invalid(model));
 
   model = withLists();
-  model.competitions[0].primary.competition.assign("bl 1");
+  model.competitions[0].primary.competition.assign("bl\t1");
   TEST_ASSERT_TRUE(invalid(model));
 
   model = withLists();
   model.competitions[0].fallback.season.assign("25");  // 4 digits needed
   TEST_ASSERT_TRUE(invalid(model));
 
-  // API-Football needs its season while the competition is active.
+  // An empty season is the current season for every provider (D3).
   model = withLists();
   model.competitions[0].primary.provider = Provider::kApiFootball;
   model.competitions[0].primary.season.assign("");
-  TEST_ASSERT_TRUE(invalid(model));
-  model.competitions[0].active = false;
   TEST_ASSERT_TRUE(settings::validate(model));
 
   model = withLists();
@@ -1512,15 +1685,11 @@ void testValidateLists() {
 
   // Images: library ids only; the crest screen has no background image.
   model = defaults();
-  model.crest_image = cfg::kImageLibraryMax;
   model.screens[0].image = cfg::kImageLibraryMax;
   model.slides.push(0);
   model.slides.push(cfg::kImageLibraryMax);
   TEST_ASSERT_TRUE(settings::validate(model));
 
-  model = defaults();
-  model.crest_image = cfg::kImageLibraryMax + 1;
-  TEST_ASSERT_TRUE(invalid(model));
   model = defaults();
   model.slides.push(cfg::kImageLibraryMax + 1);
   TEST_ASSERT_TRUE(invalid(model));
@@ -1532,9 +1701,108 @@ void testValidateLists() {
   TEST_ASSERT_TRUE(invalid(model));
 }
 
+// Which saves keep the fetched data. Proves only the comparison; the device
+// evidence (a brightness save without a provider request and without an
+// empty screen) is separate.
+// A save through the REST API refuses an active source whose provider has
+// no key or no opt-in, and names its provider field.
+void testProviderAccess() {
+  Model model = withLists();
+  model.football_data_key.assign("key");
+  model.espn_opt_in = false;
+  TEST_ASSERT_TRUE(settings::checkProviderAccess(model));
+
+  settings::Violation why;
+  model.football_data_key.assign("");
+  TEST_ASSERT_FALSE(settings::checkProviderAccess(model, &why));
+  TEST_ASSERT_EQUAL_STRING("competitions[0].fallback.provider",
+                           why.path.data());
+  TEST_ASSERT_TRUE(why.reason == settings::Reason::kConflict);
+  // An inactive fallback or competition is not requested.
+  model.competitions[0].fallback_active = false;
+  TEST_ASSERT_TRUE(settings::checkProviderAccess(model));
+  model.competitions[0].fallback_active = true;
+  model.competitions[0].active = false;
+  TEST_ASSERT_TRUE(settings::checkProviderAccess(model));
+  model.competitions[0].active = true;
+
+  model = withLists();
+  model.football_data_key.assign("key");
+  model.competitions[0].primary.provider = cfg::Provider::kEspn;
+  TEST_ASSERT_FALSE(settings::checkProviderAccess(model, &why));
+  TEST_ASSERT_EQUAL_STRING("competitions[0].primary.provider",
+                           why.path.data());
+  model.espn_opt_in = true;
+  TEST_ASSERT_TRUE(settings::checkProviderAccess(model));
+
+  model.competitions.push(model.competitions[0]);
+  model.competitions[1].primary.provider = cfg::Provider::kApiFootball;
+  model.api_football_key.assign("");
+  TEST_ASSERT_FALSE(settings::checkProviderAccess(model, &why));
+  TEST_ASSERT_EQUAL_STRING("competitions[1].primary.provider",
+                           why.path.data());
+  model.api_football_key.assign("key");
+  TEST_ASSERT_TRUE(settings::checkProviderAccess(model));
+
+  // OpenLigaDB needs neither.
+  model = withLists();
+  model.competitions[0].fallback_active = false;
+  model.api_football_key.assign("");
+  model.football_data_key.assign("");
+  model.espn_opt_in = false;
+  TEST_ASSERT_TRUE(settings::checkProviderAccess(model));
+  // validate() does not apply this rule, so a stored older record still
+  // loads.
+  model.competitions[0].fallback_active = true;
+  TEST_ASSERT_TRUE(settings::validate(model));
+  TEST_ASSERT_FALSE(settings::checkProviderAccess(model));
+}
+
+void testSameProviderData() {
+  const Model base = withLists();
+  Model other = base;
+  other.brightness = static_cast<uint8_t>(base.brightness == 1 ? 2 : 1);
+  other.language = static_cast<uint8_t>(1 - base.language);
+  other.window_before = static_cast<uint16_t>(base.window_before + 1);
+  other.api_daily_budget = static_cast<uint16_t>(base.api_daily_budget + 1);
+  other.competitions[0].competition_name.assign("Erste Liga");
+  other.competitions[0].team_name.assign("Other name");
+  TEST_ASSERT_TRUE(settings::sameProviderData(base, other));
+
+  other = base;
+  other.competitions[0].primary.season.assign("");
+  TEST_ASSERT_FALSE(settings::sameProviderData(base, other));
+  other = base;
+  other.competitions[0].fallback.team.assign("6");
+  TEST_ASSERT_FALSE(settings::sameProviderData(base, other));
+  other = base;
+  other.competitions[0].active = false;
+  TEST_ASSERT_FALSE(settings::sameProviderData(base, other));
+  other = base;
+  other.competitions[0].fallback_active = false;
+  TEST_ASSERT_FALSE(settings::sameProviderData(base, other));
+  other = base;
+  other.competitions.push(base.competitions[0]);
+  TEST_ASSERT_FALSE(settings::sameProviderData(base, other));
+  other = base;
+  other.fixture_pairs[0].swapped = !base.fixture_pairs[0].swapped;
+  TEST_ASSERT_FALSE(settings::sameProviderData(base, other));
+  other = base;
+  other.api_football_key.assign("key");
+  TEST_ASSERT_FALSE(settings::sameProviderData(base, other));
+  other = base;
+  other.football_data_key.assign("key");
+  TEST_ASSERT_FALSE(settings::sameProviderData(base, other));
+  other = base;
+  other.espn_opt_in = !base.espn_opt_in;
+  TEST_ASSERT_FALSE(settings::sameProviderData(base, other));
+  other = base;
+  other.demo = !base.demo;
+  TEST_ASSERT_FALSE(settings::sameProviderData(base, other));
+}
+
 void testDropMissingImages() {
   Model model = defaults();
-  model.crest_image = 3;
   model.screens[0].image = 2;
   model.screens[1].image = 5;
   for (const uint8_t slide : {0, 3, 7, 2, 5}) model.slides.push(slide);
@@ -1542,7 +1810,6 @@ void testDropMissingImages() {
   // Images 2 and 3 exist: 5 and 7 go, the crest slide 0 and the order stay.
   const settings::ImageMask present = (1u << 2) | (1u << 3);
   TEST_ASSERT_TRUE(settings::dropMissingImages(model, present));
-  TEST_ASSERT_EQUAL_UINT8(3, model.crest_image);
   TEST_ASSERT_EQUAL_UINT8(2, model.screens[0].image);
   TEST_ASSERT_EQUAL_UINT8(cfg::kStockImageId, model.screens[1].image);
   TEST_ASSERT_EQUAL_size_t(3, model.slides.size());
@@ -1555,7 +1822,6 @@ void testDropMissingImages() {
 
   // No image left: the stock image and the crest slide remain.
   TEST_ASSERT_TRUE(settings::dropMissingImages(model, 0));
-  TEST_ASSERT_EQUAL_UINT8(cfg::kStockImageId, model.crest_image);
   TEST_ASSERT_EQUAL_UINT8(cfg::kStockImageId, model.screens[0].image);
   TEST_ASSERT_EQUAL_size_t(1, model.slides.size());
   TEST_ASSERT_EQUAL_UINT8(0, model.slides[0]);
@@ -1564,10 +1830,10 @@ void testDropMissingImages() {
   // An id outside the library is missing whatever the mask says; bit 0 (the
   // stock image) is not a library image.
   model = defaults();
-  model.crest_image = 200;
+  model.screens[0].image = 200;
   model.slides.push(11);
   TEST_ASSERT_TRUE(settings::dropMissingImages(model, 0xFFFF));
-  TEST_ASSERT_EQUAL_UINT8(cfg::kStockImageId, model.crest_image);
+  TEST_ASSERT_EQUAL_UINT8(cfg::kStockImageId, model.screens[0].image);
   TEST_ASSERT_TRUE(model.slides.empty());
 
   // An unchanged model reports no change.
@@ -1645,7 +1911,7 @@ void testPresetsCreateCompetition() {
   TEST_ASSERT_TRUE(model.competitions.empty());
 
   // An invalid identifier is skipped and reported.
-  model = initialValues({.competition = "bad id", .team = "16"}, &rejected);
+  model = initialValues({.competition = "bad\tid", .team = "16"}, &rejected);
   TEST_ASSERT_EQUAL_UINT32(fieldBit(Field::kApplication), rejected);
   TEST_ASSERT_TRUE(model.competitions.empty());
   TEST_ASSERT_TRUE(settings::validate(model));
@@ -1680,7 +1946,7 @@ int main() {
   RUN_TEST(testCrc32KnownVector);
   RUN_TEST(testDefaults);
   RUN_TEST(testListContainer);
-  RUN_TEST(testFormat4Layout);
+  RUN_TEST(testFormat6Layout);
   RUN_TEST(testFullModelUsesTheMaximumRecord);
   RUN_TEST(testRoundTrip);
   RUN_TEST(testShorterRecordKeepsInitialValues);
@@ -1712,6 +1978,10 @@ int main() {
   RUN_TEST(testDecodeClampsToLimits);
   RUN_TEST(testMatchdayScreenWithoutOwnMatch);
   RUN_TEST(testPinOwnMatchFormats);
+  RUN_TEST(testFormat5Fields);
+  RUN_TEST(testInputRoles);
+  RUN_TEST(testSameProviderData);
+  RUN_TEST(testProviderAccess);
   RUN_TEST(testDropMissingImages);
   RUN_TEST(testPresetsOverrideDefaults);
   RUN_TEST(testInvalidPresetsKeepDefaults);

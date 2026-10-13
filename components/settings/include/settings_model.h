@@ -13,6 +13,7 @@
 #include <string_view>
 
 #include "app_config.h"
+#include "hw_profile.h"
 
 namespace settings {
 
@@ -149,6 +150,15 @@ struct FixturePair {
   bool operator==(const FixturePair&) const noexcept = default;
 };
 
+// Role per input slot of a profile with `inputs` inputs (cfg::inputRoleDefault).
+using InputRoles = std::array<cfg::InputRole, hw::kMaxInputs>;
+constexpr InputRoles inputRolesDefault(std::size_t inputs) noexcept {
+  InputRoles roles{};
+  for (std::size_t i = 0; i < roles.size(); ++i)
+    roles[i] = cfg::inputRoleDefault(i, inputs);
+  return roles;
+}
+
 struct Model {
   // Boot construction initializes the fixed defaults without flash-resident
   // copies of every large global model. No allocation or persistent write.
@@ -176,6 +186,8 @@ struct Model {
   bool ip_badge_bottom = cfg::kIpBadgeBottomDefault;
   bool browser_debug = cfg::kBrowserDebugDefault;
   bool pin_own_match = cfg::kPinOwnMatchDefault;  // format 4
+  bool whole_matchday = cfg::kWholeMatchdayDefault;  // format 5
+  cfg::ConferenceMode conference_mode = cfg::kConferenceModeDefault;  // format 5
   uint8_t language = cfg::kLanguageDefault;  // 0 German, 1 English
   uint8_t brightness = cfg::kBrightnessDefault;
   uint8_t night_brightness = cfg::kNightBrightnessDefault;
@@ -194,14 +206,17 @@ struct Model {
   uint16_t ip_badge_s = cfg::kIpBadgeDefaultS;
   uint16_t window_before = cfg::kMatchWindowDefaultMinutes;
   uint16_t window_after = cfg::kMatchWindowDefaultMinutes;
-  uint16_t api_daily_budget = cfg::kProviderBudgetDefault;
+  uint16_t api_daily_budget = cfg::kApiFootballDailyBudgetDefault;
 
   // Format 3 lists. The first active competition supplies the league table.
   List<Competition, cfg::kCompetitionMax> competitions;
   List<FixturePair, cfg::kFixtureMappingMax> fixture_pairs;
-  uint8_t crest_image = cfg::kStockImageId;  // library id, 0 = stock crest
   // Crest screen slideshow in play order: 0 = the crest, else a library id.
   List<uint8_t, cfg::kSlideMax> slides;
+
+  // Format 5 (stored after pin_own_match). Input slots after the profile's
+  // inputs are stored but unused.
+  InputRoles input_roles = inputRolesDefault(hw::kMaxInputs);
 
   bool operator==(const Model& other) const noexcept = default;
 };
@@ -213,17 +228,20 @@ bool isValidHostname(std::string_view value) noexcept;
 bool isValidStatusInterval(uint16_t seconds) noexcept;
 bool isValidTimeZone(std::string_view label) noexcept;
 bool isValidNtpServer(std::string_view value) noexcept;
-// A provider's competition, team or fixture identifier (may be empty).
+// A provider's competition, team or fixture identifier (may be empty): any
+// text without control characters and without a space at either end. Some
+// OpenLigaDB shortcuts contain spaces or umlauts; requests percent-encode it.
 bool isValidIdentifier(std::string_view value) noexcept;
 // A season: empty, or digits (exactly four unless the provider is OpenLigaDB).
 bool isValidSeason(cfg::Provider provider, std::string_view season) noexcept;
 
 // Maxima of the two settings whose range depends on the display layout
-// (OQ-85, OQ-92). The boot code passes the display profile's values; the
-// defaults are the widest bounds in app_config.h.
+// (OQ-85, OQ-92) and the number of inputs of the target (OQ-141). The boot
+// code passes the profile's values; the defaults are the widest bounds.
 struct Limits {
   uint8_t visible_matches_max = static_cast<uint8_t>(cfg::kVisibleMatchesRange.max);
   uint8_t table_window_max = static_cast<uint8_t>(cfg::kTableWindowRange.max);
+  uint8_t inputs = static_cast<uint8_t>(hw::kMaxInputs);
 };
 
 // Why a value was rejected. The names (reasonName) are the stable codes the
@@ -300,6 +318,25 @@ struct Violation {
 bool validate(const Model& model, Field* invalid = nullptr,
               Violation* violation = nullptr,
               const Limits& limits = {}) noexcept;
+
+// True if 'a' and 'b' agree in every value that provider requests or the
+// fetched match data depend on: each competition's active flags and sources
+// (not its display names), the fixture pairs, both provider keys, the ESPN
+// opt-in and demo mode. A save that changes one of them discards the fetched
+// data; any other save keeps it.
+bool sameProviderData(const Model& a, const Model& b) noexcept;
+
+// True if the device may request 'provider' with these settings: ESPN needs
+// the opt-in, API-Football and football-data.org need their key.
+bool providerUsable(cfg::Provider provider, const Model& model) noexcept;
+
+// True if every active competition uses only usable providers (the primary
+// source, and the fallback source while it is active); otherwise
+// *violation (if given) names the first such provider field with kConflict.
+// Checked when settings are changed through the REST API, not when a stored
+// record is loaded, so an older record keeps its values.
+bool checkProviderAccess(const Model& model,
+                         Violation* violation = nullptr) noexcept;
 
 // Bit n set = library image n exists (bit 0, the stock image, is ignored).
 using ImageMask = uint16_t;

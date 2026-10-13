@@ -78,7 +78,7 @@ void storePrepared(SettingsTest test) {
       seal(record, cfg::kSettingsFormatVersion + 1);
       return storeRaw(record, "sample with format version + 1");
     case SettingsTest::kShorterRecord: {
-      // Without the Konferenz pin flag (the last field, format 4).
+      // Without the last input role (the last field, format 5).
       const auto shorter = record.first(used - 1);
       seal(shorter);
       return storeRaw(shorter, "sample without its last field");

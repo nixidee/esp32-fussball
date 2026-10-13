@@ -69,16 +69,14 @@ namespace {
 
 constexpr const char* kTag = "settings";
 
-enum class Origin : uint8_t { kInitial, kStored };
-
-// Guards current_model and origin; held only for copies.
+// Guards current_model and current_source; held only for copies.
 StaticSemaphore_t model_mutex_buffer;
 SemaphoreHandle_t model_mutex = nullptr;
 Model current_model;
-Origin origin = Origin::kInitial;
+Origin current_source = Origin::kInitial;
 // Set once by init() before any other task runs; read-only afterwards.
 Limits display_limits;
-std::atomic<uint32_t> generation_counter{0};
+std::atomic<uint32_t> generation_counter{0}, data_generation_counter{0};
 
 // Serialises save() and reset(); guards the two flags below.
 StaticSemaphore_t write_mutex_buffer;
@@ -88,6 +86,8 @@ bool nvs_ready = false;
 // for the buffer). Saving would replace data that was never checked, so only
 // reset() may replace it.
 bool record_unread = false;
+// Crest image id of a format 3 to 5 record, read at boot; 0 once handed over.
+std::atomic<uint8_t> legacy_crest{cfg::kStockImageId};
 
 Presets presets() {
   return {
@@ -108,9 +108,12 @@ Presets presets() {
 
 void setCurrent(const Model& model, Origin from) {
   xSemaphoreTake(model_mutex, portMAX_DELAY);
+  const bool data_changed = !sameProviderData(current_model, model);
   current_model = model;
-  origin = from;
+  current_source = from;
   xSemaphoreGive(model_mutex);
+  if (data_changed)
+    data_generation_counter.fetch_add(1, std::memory_order_release);
   generation_counter.fetch_add(1, std::memory_order_release);
   events::post(events::Event::kSettingsChanged);
 }
@@ -149,8 +152,17 @@ bool initNvs() {
   return true;
 }
 
+// Records where the current settings come from (boot only, before other
+// tasks run).
+void setOrigin(Origin why) {
+  xSemaphoreTake(model_mutex, portMAX_DELAY);
+  current_source = why;
+  xSemaphoreGive(model_mutex);
+}
+
 void refuseSavingAfter(const char* step, esp_err_t err) {
   record_unread = true;
+  setOrigin(Origin::kUnreadable);
   ESP_LOGE(kTag,
            "stored settings not readable (%s: %s): initial values apply, "
            "saving is disabled until a reset",
@@ -180,6 +192,7 @@ void load() {
   }
   if (size > cfg::kSettingsMaxRecordBytes) {
     nvs_close(handle);
+    setOrigin(Origin::kDamaged);
     ESP_LOGE(kTag,
              "stored settings damaged (%u B, %s): initial values apply until "
              "the next save",
@@ -202,19 +215,24 @@ void load() {
 
   Model loaded = current_model;
   Field invalid = Field::kWifiSsid;
-  const DecodeResult result = decode({buffer, size}, loaded, &invalid, display_limits);
+  uint8_t crest = cfg::kStockImageId;
+  const DecodeResult result =
+      decode({buffer, size}, loaded, &invalid, display_limits, &crest);
   std::free(buffer);
   if (result == DecodeResult::kOk) {
     current_model = loaded;
-    origin = Origin::kStored;
+    legacy_crest = crest;
+    setOrigin(Origin::kStored);
     ESP_LOGI(kTag, "stored settings loaded (%u B)",
              static_cast<unsigned>(size));
   } else if (result == DecodeResult::kInvalidValue) {
+    setOrigin(Origin::kRejected);
     ESP_LOGE(kTag,
              "stored settings rejected (%s: %s): initial values apply until "
              "the next save",
              fieldName(invalid), decodeResultText(result));
   } else {
+    setOrigin(Origin::kDamaged);
     ESP_LOGE(kTag,
              "stored settings damaged (%u B, %s): initial values apply until "
              "the next save",
@@ -247,7 +265,10 @@ void init(const Limits& limits) {
   logRejectedPresets(rejected);
 
   nvs_ready = initNvs();
-  if (nvs_ready) load();
+  if (nvs_ready)
+    load();
+  else
+    setOrigin(Origin::kNoStorage);
   logCurrent("at boot");
 }
 
@@ -260,8 +281,41 @@ Model current() {
   return copy;
 }
 
+Origin origin() {
+  xSemaphoreTake(model_mutex, portMAX_DELAY);
+  const Origin from = current_source;
+  xSemaphoreGive(model_mutex);
+  return from;
+}
+
+const char* originName(Origin origin) noexcept {
+  switch (origin) {
+    case Origin::kInitial:
+      return "initial";
+    case Origin::kStored:
+      return "stored";
+    case Origin::kRejected:
+      return "rejected";
+    case Origin::kDamaged:
+      return "damaged";
+    case Origin::kUnreadable:
+      return "unreadable";
+    case Origin::kNoStorage:
+      return "no_storage";
+  }
+  return "initial";
+}
+
+uint8_t legacyCrest() { return legacy_crest.load(); }
+
+void forgetLegacyCrest() { legacy_crest = cfg::kStockImageId; }
+
 uint32_t generation() {
   return generation_counter.load(std::memory_order_acquire);
+}
+
+uint32_t dataGeneration() {
+  return data_generation_counter.load(std::memory_order_acquire);
 }
 
 esp_err_t save(const Model& model, Violation* violation) {
@@ -310,6 +364,7 @@ esp_err_t reset() {
   }
   if (err == ESP_OK) {
     record_unread = false;
+    legacy_crest = cfg::kStockImageId;
     setCurrent(initialValues(presets(), nullptr, display_limits),
                Origin::kInitial);
     ESP_LOGI(kTag, "settings reset: initial values apply");
@@ -324,7 +379,7 @@ esp_err_t reset() {
 void logCurrent(const char* when) {
   xSemaphoreTake(model_mutex, portMAX_DELAY);
   const Model model = current_model;
-  const Origin from = origin;
+  const Origin from = current_source;
   xSemaphoreGive(model_mutex);
 
   ESP_LOGI(
@@ -332,7 +387,7 @@ void logCurrent(const char* when) {
       "%s (%s): wifi ssid %s (%u B), wifi password %s, ap password %s, "
       "hostname %.*s, external antenna %s, status log %s every %u s, "
       "time zone %.*s, ntp server %.*s",
-      when, from == Origin::kStored ? "stored" : "initial values",
+      when, originName(from),
       setText(model.wifi_ssid.length),
       static_cast<unsigned>(model.wifi_ssid.length),
       setText(model.wifi_password.length), setText(model.ap_password.length),

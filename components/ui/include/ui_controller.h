@@ -12,7 +12,12 @@ struct Status {
   cfg::Screen screen = cfg::Screen::kCrest;
   Reason reason = Reason::kSetup;
 };
-esp_err_t init(const hw::DisplayProfile& display, std::size_t inputs);
+// `backlight` false: the panel cannot dim, so night mode dims the colours.
+esp_err_t init(const hw::DisplayProfile& display, std::size_t inputs,
+               bool backlight);
+// Draws the start screen once the display runs, before init(); the next
+// poll() continues it. False: lock timeout or the screen did not fit.
+bool showStartScreen(const hw::DisplayProfile& display, bool backlight);
 void input(std::size_t index, bool active);
 void poll();
 bool healthy();
