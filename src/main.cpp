@@ -3,7 +3,6 @@
 // football data, Web UI and OTA; the existing loop polls semantic inputs,
 // presentation, time/health, network policy and local trial confirmation.
 
-#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdio>
@@ -193,36 +192,12 @@ void runDiagnosticLoop() {
   ESP_ERROR_CHECK(events::subscribe(events::Event::kSettingsChanged,
                                     onSettingsChanged, nullptr));
   timekeeping::applySettings();
-  int64_t reset_started = 0;
-  bool reset_latched = false;
   // Legacy image files and dead image references are removed once, outside
   // the OTA trial, so a rollback still finds the previous firmware's files.
   bool images_maintained = false;
   while (true) {
     vTaskDelay(pdMS_TO_TICKS(kInputPollMs));
     logInputChanges(active);
-    if (hw::kTarget.inputs.size() >= 3) {
-      const bool all = active[0] && active[1] && active[2];
-      const auto now = timekeeping::monotonicMs();
-      if (!all) {
-        reset_started = 0;
-        reset_latched = false;
-        ui::resetProgress(0);
-      } else if (!ota::trial() && !reset_latched) {
-        if (!reset_started) reset_started = now;
-        const auto elapsed = now - reset_started;
-        ui::resetProgress(static_cast<uint16_t>(std::max<int64_t>(
-            1, (cfg::kFactoryResetHoldMs - elapsed + 999) / 1000)));
-        if (elapsed >= cfg::kFactoryResetHoldMs) {
-          reset_latched = true;
-          const auto result = settings::reset();
-          if (result == ESP_OK)
-            ota::reboot();
-          else
-            ESP_LOGE(kTag, "input settings reset: %s", esp_err_to_name(result));
-        }
-      }
-    }
     if (settings_changed.exchange(false, std::memory_order_acq_rel)) {
       timekeeping::applySettings();
       health::applySettings();

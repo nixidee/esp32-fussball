@@ -244,6 +244,11 @@ enum class Provider : uint8_t {
   kFootballData
 };
 enum class Screen : uint8_t { kLiveSingle, kLiveMulti, kTable, kCrest };
+// Konferenz page order (OQ-136): every page in turn in kickoff order, or a
+// single page ranked by activity.
+enum class ConferenceMode : uint8_t { kAllPages, kOnePage };
+inline constexpr ConferenceMode kConferenceModeDefault =
+    ConferenceMode::kAllPages;
 inline constexpr Provider kProviderDefault = Provider::kOpenLigaDb;
 inline constexpr Screen kIdleScreenDefault = Screen::kTable,
                         kMatchdayScreenDefault = Screen::kLiveMulti,
@@ -259,7 +264,9 @@ inline constexpr bool kEntryActiveDefault = true,
                       kIpBadgeBottomDefault = false,
                       kBrowserDebugDefault = false,
                       // Konferenz keeps the own match in a fixed row (OQ-123).
-                      kPinOwnMatchDefault = true;
+                      kPinOwnMatchDefault = true,
+                      // Own match shown for its whole matchday (OQ-139).
+                      kWholeMatchdayDefault = false;
 inline constexpr uint8_t kLanguageDefault = 0, kRotationDefault = 0;
 inline constexpr std::size_t kScreenCount = 4;
 // List maxima of the settings model (target capacities; ordered lists without
@@ -319,8 +326,16 @@ inline constexpr uint16_t kPollPostmatchS = 300;
 inline constexpr uint16_t kProviderBudgetDefault = 100;
 inline constexpr uint32_t kProviderMinIntervalMs[] = {5000, 6000, 30000, 6000};
 inline constexpr uint16_t kFixtureHorizonDays = 7;
+// Fixtures of other clubs kept around now by providers without a round
+// filter (provider_mappers.cpp keep(); W86 is reworked in R3).
 inline constexpr uint16_t kConferenceHorizonHours = 36;
+// Latest end of a match the provider reports as still running.
 inline constexpr uint16_t kUnknownMatchEndMinutes = 240;
+// Expected end of a match without a reported running phase or final whistle
+// (90 minutes, half time, stoppage time).
+inline constexpr uint16_t kExpectedMatchMinutes = 115;
+// Automatic Konferenz page change (OQ-81).
+inline constexpr uint16_t kConferencePageMs = 8000;
 inline constexpr uint16_t kDataStaleS = 900;
 inline constexpr uint16_t kMatchWindowDefaultMinutes = 30;
 inline constexpr uint16_t kManualReturnDefaultS = 60;
@@ -329,7 +344,6 @@ inline constexpr uint16_t kScrollRepeatDefaultMs = 250;
 inline constexpr uint16_t kInputDebounceMs = 40;
 inline constexpr uint16_t kInputLongMs = 600;
 inline constexpr uint16_t kInputDoubleMs = 300;
-inline constexpr uint16_t kFactoryResetHoldMs = 8000;
 inline constexpr uint8_t kVisibleMatchesDefault = 5;
 inline constexpr uint8_t kTableWindowDefault = 5;
 inline constexpr uint16_t kSlideshowDefaultS = 15;

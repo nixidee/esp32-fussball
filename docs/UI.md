@@ -86,9 +86,8 @@ do not block or call LVGL. Overflow is counted/logged and drops excess input
 rather than accumulating stale actions. Touch screens and encoders remain
 future hardware input types.
 
-Holding all three current C6 inputs for eight seconds shows a countdown and
-resets settings/restarts. Release cancels it; it does not erase images.
-The gesture is unavailable during an OTA trial.
+There is no input gesture that resets settings; the reset is available in
+the Web UI only.
 
 ## SafeArea and scaling
 

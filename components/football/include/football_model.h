@@ -184,6 +184,17 @@ const char* phaseName(Phase phase);
 Capabilities capabilities(cfg::Provider provider);
 int64_t parseUtc(const char* text);
 void estimate(Match& match, int64_t utc);
+// A match with a kickoff that is not postponed, cancelled or abandoned.
+bool scheduled(const Match& match);
+// Live, half time, extra time or penalties.
+bool running(const Match& match);
+// End of a match's window: final whistle + after, else the expected end
+// (kExpectedMatchMinutes), else kUnknownMatchEndMinutes while the provider
+// reports it running. Requires a valid kickoff.
+int64_t matchEnd(const Match& match, uint16_t after);
+// Same competition route and round (round number, else round label, else
+// kickoff date in UTC).
+bool sameRound(const Match& a, const Match& b);
 bool matchWindow(const Match& match, int64_t utc, uint16_t before,
                  uint16_t after);
 // The conference remains active between the first and last fixture of the

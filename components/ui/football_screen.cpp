@@ -10,8 +10,36 @@ namespace ui {
 namespace {
 lv_obj_t *image = nullptr, *title = nullptr, *score = nullptr,
          *minute = nullptr, *teams = nullptr, *highlight = nullptr,
-         *status = nullptr, *badge = nullptr;
+         *status = nullptr, *badge = nullptr, *pager = nullptr;
 lv_obj_t* rows[9]{};
+// Konferenz page dots (approved mockup): active dot in the accent colour,
+// the others in the text colour at 16 % over the background.
+struct Dots {
+  uint8_t page = 0, pages = 0;
+  int radius = 2;
+  uint32_t on = 0, off = 0;
+  bool operator==(const Dots&) const = default;
+} dots;
+void drawDots(lv_event_t* event) {
+  auto* object = static_cast<lv_obj_t*>(lv_event_get_target(event));
+  lv_area_t box;
+  lv_obj_get_coords(object, &box);
+  const int pitch = dots.radius * 4;
+  const int cx = (box.x1 + box.x2) / 2, cy = (box.y1 + box.y2) / 2;
+  const int x0 = cx - (dots.pages - 1) * pitch / 2;
+  lv_draw_rect_dsc_t dsc;
+  lv_draw_rect_dsc_init(&dsc);
+  dsc.radius = LV_RADIUS_CIRCLE;
+  for (unsigned i = 0; i < dots.pages; ++i) {
+    const bool active = i == dots.page;
+    dsc.bg_color = lv_color_hex(active ? dots.on : dots.off);
+    dsc.bg_opa = static_cast<lv_opa_t>(active ? LV_OPA_COVER : 41);
+    const int x = x0 + static_cast<int>(i) * pitch;
+    const lv_area_t dot{x - dots.radius, cy - dots.radius, x + dots.radius,
+                        cy + dots.radius};
+    lv_draw_rect(lv_event_get_layer(event), &dsc, &dot);
+  }
+}
 char current_source[64]{};
 uint32_t source_revision = UINT32_MAX;
 void text(lv_obj_t* label, const char* value) {
@@ -78,10 +106,13 @@ bool render(const ViewModel& m, const geometry::SafeArea& area) {
     highlight = label(root);
     status = label(root);
     badge = label(root);
+    pager = lv_obj_create(root);
     for (auto& row : rows) row = label(root);
     if (!image || !title || !score || !minute || !teams || !highlight ||
-        !status || !badge)
+        !status || !badge || !pager)
       return false;
+    lv_obj_remove_style_all(pager);
+    lv_obj_add_event_cb(pager, drawDots, LV_EVENT_DRAW_MAIN, nullptr);
     for (auto* row : rows)
       if (row == nullptr) return false;
     lv_obj_set_style_bg_color(badge, lv_color_hex(cfg::kThemeBackgroundDefault),
@@ -113,8 +144,26 @@ bool render(const ViewModel& m, const geometry::SafeArea& area) {
                          : static_cast<int>(ui_font_text_14.line_height));
   bool ok = band(title, area, area.height() / 2 - s * 38 / 100, h, m.title,
                  m.style.accent, body);
-  ok &= band(status, area, area.height() / 2 + s * 30 / 100, h, m.status,
-             m.style.text, body);
+  // Page dots take the status band while the Konferenz has several pages.
+  const bool paging = m.screen == cfg::Screen::kLiveMulti && m.pages > 1;
+  const int status_y = area.height() / 2 + s * 30 / 100;
+  ok &= band(status, area, status_y, h, paging ? "" : m.status, m.style.text,
+             body);
+  if (paging) {
+    const Dots next{m.page, m.pages, std::max(2, s / 100), m.style.accent,
+                    m.style.text};
+    const auto span = area.spanForBand(status_y, h);
+    lv_obj_set_pos(pager, span.x, status_y);
+    lv_obj_set_size(pager, span.width, h);
+    if (!(next == dots)) {
+      dots = next;
+      lv_obj_invalidate(pager);
+    }
+    ok &= span.width >= (m.pages - 1) * dots.radius * 4 + 2 * dots.radius &&
+          area.contains({span.x, status_y, span.width, h});
+    lv_obj_set_hidden(pager, false);
+  } else
+    lv_obj_set_hidden(pager, true);
   const bool single = m.screen == cfg::Screen::kLiveSingle;
   ok &= band(minute, area, area.height() / 2 - s * 22 / 100, h,
              single ? m.minute : "", m.style.accent, body);

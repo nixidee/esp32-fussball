@@ -201,10 +201,8 @@ It requires explicit confirmation and never follows automatically from a
 mount fault. Stock files then need initial USB `uploadfs`; custom files can
 be uploaded through the Web UI.
 
-On the current three-input C6, holding **all three inputs for eight seconds**
-resets settings and restarts. The badge shows a countdown. Release cancels the
-gesture; after triggering it stays latched until release. This gesture does
-not erase images. It is disabled during an OTA trial.
+There is no input gesture that resets settings; the reset is available in
+the Web UI only.
 
 The provider-budget namespace is retained by normal settings/image resets.
 Its 24-byte durable ledger reserves blocks of up to eight attempts before

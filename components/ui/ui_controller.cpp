@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "app_config.h"
+#include "conference.h"
 #include "display_port.h"
 #include "esp_log.h"
 #include "event_bus.h"
@@ -29,8 +30,11 @@ ViewModel view;
 cfg::Screen selected = cfg::Screen::kCrest,
             default_screen = cfg::Screen::kCrest;
 int scroll = 0, table_rows = 0, own_row = 0;
+// Konferenz page chosen with Up/Down (kickoff order) and the page and page
+// count of the last bind.
+int conference_page = 0, shown_page = 0, shown_pages = 0;
 int64_t input_at = 0, scroll_at = 0, render_at = 0, boot_at = 0;
-bool good = false, manual = false, scroll_down = true;
+bool good = false, manual = false, scroll_down = true, paged = false;
 std::size_t input_count = 0;
 uint32_t generation = UINT32_MAX, image_revision = 0, network_epoch = 0;
 hw::DisplayProfile profile{};
@@ -46,7 +50,6 @@ std::array<InputPolicy, hw::kMaxInputs> buttons{};
 StaticQueue_t action_buffer;
 uint32_t action_storage[cfg::kEventUiActionSlots];
 QueueHandle_t actions = nullptr;
-uint16_t reset_remaining = 0;
 void onAction(events::Event, uint32_t action, void*) {
   if (xQueueSend(actions, &action, 0) != pdPASS)
     ESP_LOGW("input", "pending action dropped");
@@ -94,6 +97,7 @@ void changeScreen(int step) {
   manual = true;
   scroll = 0;
   scroll_down = true;
+  paged = false;
   input_at = timekeeping::monotonicMs();
 }
 void action(Action input) {
@@ -105,11 +109,21 @@ void action(Action input) {
     selected = default_screen;
     scroll = 0;
     scroll_down = true;
+    paged = false;
   } else if (input == Action::kShowIp) {
     boot_at = input_at;
   } else if (input == Action::kToggleDirection) {
     scroll_down = !scroll_down;
     scroll_at = input_at;
+  } else if (selected == cfg::Screen::kLiveMulti &&
+             (input == Action::kUp || input == Action::kDown)) {
+    // Page-wise from the page on screen, in kickoff order (OQ-140).
+    conference_page = std::clamp(
+        (paged ? conference_page : shown_page) +
+            (input == Action::kDown ? 1 : -1),
+        0, std::max(0, shown_pages - 1));
+    paged = true;
+    manual = true;
   } else if (selected == cfg::Screen::kTable &&
              (input == Action::kUp || input == Action::kDown)) {
     scroll += input == Action::kDown ? 1 : -1;
@@ -129,12 +143,18 @@ void bind(const football::Snapshot& data, void* raw_context) {
   display_kickoff = {};
   const auto utc = context.utc;
   const bool valid = context.valid;
-  bool window = model.demo || (valid && football::conferenceWindow(
-                                            data, utc, model.window_before,
-                                            model.window_after));
+  // Konferenz members; the demo shows every match in kickoff order.
+  football::ConferenceList members;
+  if (model.demo) {
+    members = football::conferenceAll(data);
+  } else if (valid) {
+    members = football::conferenceMembers(
+        data, utc,
+        {model.window_before, model.window_after, cfg::kWholeMatchdayDefault});
+  }
+  // Every active competition opens the Konferenz (OQ-146).
+  const bool window = members.count > 0;
   bool own_window = false;
-  uint8_t conference_route = 0;
-  bool have_conference = false;
   const football::Match* own_match = nullptr;
   for (unsigned i = 0; i < data.match_count; ++i) {
     const auto& match = data.matches[i];
@@ -142,10 +162,6 @@ void bind(const football::Snapshot& data, void* raw_context) {
         (model.demo && match.own) ||
         (valid && football::matchWindow(match, utc, model.window_before,
                                         model.window_after));
-    if (active && !have_conference) {
-      conference_route = match.route;
-      have_conference = true;
-    }
     if (own(match) &&
         (own_match == nullptr || (active && !own_window) ||
          (!own_window && match.kickoff.valid() && own_match->kickoff.valid() &&
@@ -155,7 +171,6 @@ void bind(const football::Snapshot& data, void* raw_context) {
       own_window |= active;
     }
   }
-  if (own_window && own_match) conference_route = own_match->route;
   const bool chosen = input_count && manual &&
                       model.screens[static_cast<unsigned>(selected)].enabled;
   auto navigation = resolve(model, {data.configured, window, own_window, manual,
@@ -264,55 +279,32 @@ void bind(const football::Snapshot& data, void* raw_context) {
   } else if (selected == cfg::Screen::kLiveMulti) {
     snprintf(view.title, sizeof(view.title), "%s",
              translated("Konferenz", "Conference"));
-    std::array<uint8_t, cfg::kMatches> order{};
-    const football::Match* conference_own = nullptr;
-    for (unsigned i = 0; i < data.match_count; ++i) {
-      const auto& m = data.matches[i];
-      if (m.route != conference_route || !m.own) continue;
-      if (!conference_own ||
-          (m.kickoff.valid() && conference_own->kickoff.valid() &&
-           std::llabs(m.kickoff.value - utc) <
-               std::llabs(conference_own->kickoff.value - utc)))
-        conference_own = &m;
-    }
-    unsigned conference_count = 0;
-    for (unsigned i = 0; i < data.match_count; ++i) {
-      const auto& match = data.matches[i];
-      if (&match == conference_own ||
-          (match.route == conference_route &&
-           (!valid || !match.kickoff.valid() ||
-            std::llabs(match.kickoff.value - utc) <=
-                cfg::kConferenceHorizonHours * 3600LL)))
-        order[conference_count++] = i;
-    }
-    std::sort(order.begin(), order.begin() + conference_count,
-              [&](uint8_t a, uint8_t b) {
-                return data.matches[a].score_changed_ms >
-                       data.matches[b].score_changed_ms;
-              });
-    const unsigned limit =
-        std::min<unsigned>(model.visible_matches, conference_count);
-    const unsigned centre = limit / 2;
-    unsigned next = 0;
-    for (unsigned row = 0; row < limit; ++row) {
-      const football::Match* match = nullptr;
-      if (conference_own && row == centre)
-        match = conference_own;
-      else {
-        while (next < conference_count &&
-               &data.matches[order[next]] == conference_own)
-          ++next;
-        if (next < conference_count) match = &data.matches[order[next++]];
-      }
-      if (!match) break;
+    football::ConferenceRequest request;
+    request.mode = cfg::kConferenceModeDefault;
+    request.pin_own = model.pin_own_match;
+    request.manual = paged;
+    request.per_page = model.visible_matches;
+    request.page = paged ? static_cast<unsigned>(conference_page)
+                         : static_cast<unsigned>(now / cfg::kConferencePageMs);
+    const auto page = football::conferencePage(data, members, request);
+    shown_page = page.page;
+    shown_pages = page.pages;
+    view.page = page.page;
+    view.pages = page.pages;
+    if (page.pages > 1)
+      snprintf(view.title, sizeof(view.title), "%s · %u/%u",
+               translated("Konferenz", "Conference"), page.page + 1u,
+               static_cast<unsigned>(page.pages));
+    for (unsigned row = 0; row < page.row_count; ++row) {
+      const auto& match = data.matches[page.rows[row]];
       char score[24];
-      scoreText(score, sizeof(score), match->principal);
+      scoreText(score, sizeof(score), match.principal);
       char home[21], away[21];
-      prefix<20>(home, name(match->home));
-      prefix<20>(away, name(match->away));
+      prefix<20>(home, name(match.home));
+      prefix<20>(away, name(match.away));
       snprintf(view.rows[row].text, sizeof(view.rows[row].text), "%s %s %s",
                home, score, away);
-      view.rows[row].own = own(*match);
+      view.rows[row].own = own(match);
       ++view.row_count;
     }
     if (!view.row_count)
@@ -374,7 +366,6 @@ void input(std::size_t index, bool active) {
       events::post(events::Event::kUiAction, static_cast<uint32_t>(semantic));
   }
 }
-void resetProgress(uint16_t remaining_s) { reset_remaining = remaining_s; }
 void poll() {
   const int64_t now = timekeeping::monotonicMs();
   uint32_t pending;
@@ -391,6 +382,7 @@ void poll() {
       now - input_at >= model.manual_return_s * 1000) {
     manual = false;
     scroll = 0;
+    paged = false;
   }
   if (model.scroll_reset_s > 0 &&
       now - scroll_at >= model.scroll_reset_s * 1000)
@@ -441,12 +433,6 @@ void poll() {
                net.ap_ip);
     else if (net.connected)
       snprintf(view.badge, sizeof(view.badge), "%s", net.ip);
-  }
-  if (reset_remaining) {
-    snprintf(view.badge, sizeof(view.badge), "%s\n%u s",
-             translated("Einstellungen zurücksetzen", "Reset settings"),
-             reset_remaining);
-    view.badge_bottom = false;
   }
   display::setBrightness(view.night ? model.night_brightness
                                     : model.brightness);

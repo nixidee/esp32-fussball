@@ -15,6 +15,8 @@ struct ViewModel {
       status[64]{};
   std::array<Row, 9> rows{};
   uint8_t row_count = 0;
+  // Konferenz page and page count (dots); pages 0 or 1 = no dots.
+  uint8_t page = 0, pages = 0;
   char image[64]{}, badge[64]{};
   bool night = false, badge_bottom = false;
   uint32_t image_revision = 0;

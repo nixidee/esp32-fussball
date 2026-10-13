@@ -15,7 +15,6 @@ struct Status {
 esp_err_t init(const hw::DisplayProfile& display, std::size_t inputs);
 void input(std::size_t index, bool active);
 void poll();
-void resetProgress(uint16_t remaining_s);
 bool healthy();
 // Screen shown by the last poll(); readable from any task.
 Status status();

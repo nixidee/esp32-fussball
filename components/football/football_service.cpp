@@ -878,7 +878,9 @@ void reconcile(Snapshot& next, const Snapshot& old, int64_t utc) {
   for (unsigned i = 0; i < next.match_count; ++i) {
     auto& m = next.matches[i];
     m.fetched_ms = next.fetched_ms;
-    if (m.phase == Phase::kFinished) m.finished_at = {utc, Source::kEstimated};
+    // First seen finished: now, or the expected end when the match was never
+    // seen running (e.g. after a restart) (W22).
+    bool seen_running = false, finished_before = false;
     for (unsigned j = 0; j < old.match_count; ++j) {
       const auto& prior = old.matches[j];
       if (m.route != prior.route || m.provider != prior.provider ||
@@ -889,7 +891,9 @@ void reconcile(Snapshot& next, const Snapshot& old, int64_t utc) {
           (m.principal.home.value != prior.principal.home.value ||
            m.principal.away.value != prior.principal.away.value))
         m.score_changed_ms = next.fetched_ms;
-      if (prior.finished_at.valid()) m.finished_at = prior.finished_at;
+      seen_running = running(prior);
+      finished_before = prior.finished_at.valid();
+      if (finished_before) m.finished_at = prior.finished_at;
       if (!baseline && !m.events_truncated && !prior.events_truncated) {
         for (unsigned e = 0; e < prior.event_count; ++e) {
           const auto& previous = old.events[prior.events[e]];
@@ -914,6 +918,12 @@ void reconcile(Snapshot& next, const Snapshot& old, int64_t utc) {
         }
       }
       break;
+    }
+    if (m.phase == Phase::kFinished && !finished_before) {
+      int64_t at = utc;
+      if (!seen_running && m.kickoff.valid())
+        at = std::min(at, m.kickoff.value + cfg::kExpectedMatchMinutes * 60);
+      m.finished_at = {at, Source::kEstimated};
     }
   }
 }

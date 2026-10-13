@@ -27,3 +27,13 @@ env.BuildSources(
     str(core_root),
     src_filter="+<health_meter.cpp>",
 )
+
+# Pure football model and Konferenz logic; the provider and service files
+# require IDF.
+football_root = project_root / "components" / "football"
+env.Append(CPPPATH=[str(football_root / "include")])
+env.BuildSources(
+    str(Path(env.subst("$BUILD_DIR")) / "pure" / "football"),
+    str(football_root),
+    src_filter="+<football_model.cpp> +<conference.cpp>",
+)

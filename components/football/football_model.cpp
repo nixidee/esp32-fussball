@@ -154,17 +154,35 @@ void estimate(Match& m, int64_t now) {
         Source::kEstimated};
   }
 }
-bool matchWindow(const Match& m, int64_t utc, uint16_t before, uint16_t after) {
-  if (!m.kickoff.valid() || m.phase == Phase::kPostponed ||
-      m.phase == Phase::kCancelled || m.phase == Phase::kAbandoned)
-    return false;
-  const int64_t start = m.kickoff.value - before * 60;
-  const int64_t maximum =
+bool scheduled(const Match& m) {
+  return m.kickoff.valid() && m.phase != Phase::kPostponed &&
+         m.phase != Phase::kCancelled && m.phase != Phase::kAbandoned;
+}
+bool running(const Match& m) {
+  return m.phase == Phase::kLive || m.phase == Phase::kHalfTime ||
+         m.phase == Phase::kExtraTime || m.phase == Phase::kPenalties;
+}
+int64_t matchEnd(const Match& m, uint16_t after) {
+  const int64_t latest =
       m.kickoff.value + (cfg::kUnknownMatchEndMinutes + after) * 60;
-  const int64_t end = m.finished_at.valid()
-                          ? std::min(maximum, m.finished_at.value + after * 60)
-                          : maximum;
-  return utc >= start && utc < end;
+  if (m.finished_at.valid())
+    return std::min(latest, m.finished_at.value + after * 60);
+  // Only a running phase reported by the provider extends the expected end
+  // (extra time, penalties, delays); an estimated phase does not.
+  if (running(m) && confirmed(m.phase_source)) return latest;
+  return m.kickoff.value + (cfg::kExpectedMatchMinutes + after) * 60;
+}
+bool sameRound(const Match& a, const Match& b) {
+  if (a.route != b.route || a.provider != b.provider) return false;
+  if (a.round.valid() && b.round.valid()) return a.round.value == b.round.value;
+  if (!a.round_label.empty() && !b.round_label.empty())
+    return a.round_label == b.round_label;
+  return a.kickoff.valid() && b.kickoff.valid() &&
+         a.kickoff.value / 86400 == b.kickoff.value / 86400;
+}
+bool matchWindow(const Match& m, int64_t utc, uint16_t before, uint16_t after) {
+  if (!scheduled(m)) return false;
+  return utc >= m.kickoff.value - before * 60 && utc < matchEnd(m, after);
 }
 bool conferenceWindow(const Snapshot& data, int64_t utc, uint16_t before,
                       uint16_t after) {
@@ -174,25 +192,9 @@ bool conferenceWindow(const Snapshot& data, int64_t utc, uint16_t before,
     int64_t start = INT64_MAX, end = 0;
     for (unsigned j = 0; j < data.match_count; ++j) {
       const auto& m = data.matches[j];
-      if (m.route != anchor.route || m.provider != anchor.provider ||
-          !m.kickoff.valid() || m.phase == Phase::kPostponed ||
-          m.phase == Phase::kCancelled || m.phase == Phase::kAbandoned)
-        continue;
-      bool same_round;
-      if (anchor.round.valid() && m.round.valid())
-        same_round = anchor.round.value == m.round.value;
-      else if (!anchor.round_label.empty() && !m.round_label.empty())
-        same_round = anchor.round_label == m.round_label;
-      else
-        same_round = anchor.kickoff.value / 86400 == m.kickoff.value / 86400;
-      if (!same_round) continue;
+      if (!scheduled(m) || !sameRound(anchor, m)) continue;
       start = std::min(start, m.kickoff.value - before * 60);
-      const auto maximum =
-          m.kickoff.value + (cfg::kUnknownMatchEndMinutes + after) * 60;
-      end = std::max(end,
-                     m.finished_at.valid()
-                         ? std::min(maximum, m.finished_at.value + after * 60)
-                         : maximum);
+      end = std::max(end, matchEnd(m, after));
     }
     if (utc >= start && utc < end) return true;
   }
