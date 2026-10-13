@@ -2,6 +2,22 @@
 #include "esp_err.h"
 #include "football_model.h"
 namespace football {
+// Why the next scheduled provider round starts when it does (Web UI
+// overview). kNone until the first round has been scheduled.
+enum class Cadence : uint8_t {
+  kNone,
+  kLive,        // a match in its window is running (kPollLiveS)
+  kPrematch,    // a match window is open before kickoff (kPollPrematchS)
+  kPostmatch,   // a match in its window has finished (kPollPostmatchS)
+  kIdle,        // no match window open (kPollIdleS)
+  kWindow,      // the next match window opens before the interval ends
+  kBudget,      // a daily cap stretches the interval
+  kBudgetUsed,  // a daily cap is used up; retried after kProviderRateRetryS
+  kRetry,       // a failed competition or round is retried
+  kWaiting,     // no network or no valid time: starts once both are there
+  kUpdateTest   // paused while a new firmware is in its update test
+};
+const char* cadenceName(Cadence cadence);
 struct Status {
   uint32_t revision, requests[cfg::kProviderCount], generation;
   // Monotonic time of the oldest data shown (a failed competition keeps
@@ -12,9 +28,15 @@ struct Status {
   // data (or none) until a later fetch succeeds.
   uint8_t error_routes;
   bool stale, busy;
+  // Not every match fitted the match list; it holds the nearest ones.
+  bool matches_truncated;
   Text<96> error;
   Cause cause;  // stable key of 'error'
   Text<96> routing_notice;
+  // Monotonic time the next round is due (0 = none scheduled: kNone,
+  // kWaiting, kUpdateTest) and why. An owner refresh starts earlier.
+  int64_t next_ms;
+  Cadence cadence;
 };
 struct SelectionRequest {
   cfg::Provider provider = cfg::Provider::kOpenLigaDb;

@@ -47,9 +47,9 @@ void init();
 // the C library parses the rule.
 void applySettings();
 
-// Sets the wall clock (UTC) and marks it valid; logs and counts the first set
-// and every jump above cfg::kTimeJumpThresholdS. ESP_FAIL: the clock refused the
-// value, nothing changed.
+// Sets the wall clock (UTC) and marks it valid; logs and counts the first
+// set and every jump above cfg::kTimeJumpThresholdS. ESP_FAIL: the clock
+// refused the value, nothing changed.
 esp_err_t setTime(const timeval& utc, Source source);
 
 Status status();

@@ -151,6 +151,14 @@ struct FixturePair {
 };
 
 // Role per input slot of a profile with `inputs` inputs (cfg::inputRoleDefault).
+using RequestLimits = std::array<uint16_t, cfg::kProviderCount>;
+constexpr RequestLimits requestLimits(
+    const uint16_t (&values)[cfg::kProviderCount]) noexcept {
+  RequestLimits limits{};
+  for (std::size_t i = 0; i < limits.size(); ++i) limits[i] = values[i];
+  return limits;
+}
+
 using InputRoles = std::array<cfg::InputRole, hw::kMaxInputs>;
 constexpr InputRoles inputRolesDefault(std::size_t inputs) noexcept {
   InputRoles roles{};
@@ -206,7 +214,6 @@ struct Model {
   uint16_t ip_badge_s = cfg::kIpBadgeDefaultS;
   uint16_t window_before = cfg::kMatchWindowDefaultMinutes;
   uint16_t window_after = cfg::kMatchWindowDefaultMinutes;
-  uint16_t api_daily_budget = cfg::kApiFootballDailyBudgetDefault;
 
   // Format 3 lists. The first active competition supplies the league table.
   List<Competition, cfg::kCompetitionMax> competitions;
@@ -217,6 +224,11 @@ struct Model {
   // Format 5 (stored after pin_own_match). Input slots after the profile's
   // inputs are stored but unused.
   InputRoles input_roles = inputRolesDefault(hw::kMaxInputs);
+
+  // Format 7, indexed by cfg::Provider: requests per UTC day (0 = no cap)
+  // and the minimum spacing between two request starts in seconds.
+  RequestLimits daily_requests = requestLimits(cfg::kDailyRequestsDefault);
+  RequestLimits request_spacing_s = requestLimits(cfg::kRequestSpacingDefaultS);
 
   bool operator==(const Model& other) const noexcept = default;
 };

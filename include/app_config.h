@@ -163,10 +163,14 @@ inline constexpr TimeTest kTimeTest = TimeTest::kNone;
 // and one role byte per input slot; older records are read with the defaults
 // of the missing fields. Format 6 drops the crest image reference of formats
 // 3 to 5 (the crest is a protected image with its own file); the reference
-// read from an older record is handed to the image service once. Formats 1
-// (core only), 2 (lists as fixed slots), 3, 4 and 5 are still read and
-// converted in RAM; the next save writes format 6. Loading never writes NVS.
-inline constexpr uint16_t kSettingsFormatVersion = 6;
+// read from an older record is handed to the image service once. Format 7
+// replaces the API-Football daily budget among the scalars with a daily cap
+// and a request spacing per provider at the end; an older record's budget
+// becomes API-Football's cap, the other providers take the defaults. Formats
+// 1 (core only), 2 (lists as fixed slots), 3, 4, 5 and 6 are still read and
+// converted in RAM; the next save writes format 7. Loading never writes NVS.
+inline constexpr uint16_t kSettingsFormatVersion = 7;
+inline constexpr uint16_t kSettingsRoleFormatVersion = 6;
 inline constexpr uint16_t kSettingsModeFormatVersion = 5;
 inline constexpr uint16_t kSettingsPinFormatVersion = 4;
 inline constexpr uint16_t kSettingsLegacyFormatVersion = 1;
@@ -341,7 +345,11 @@ inline constexpr uint32_t kWifiScanDeadlineMs = 15000;
 inline constexpr uint32_t kWifiIpDeadlineMs = 30000;
 inline constexpr uint32_t kWifiMissingScanMs = 20000;
 inline constexpr uint32_t kWifiFallbackMs = 300000;
+// Longest time a phone on the setup AP postpones home-network attempts.
+inline constexpr uint32_t kWifiApClientHoldMs = 300000;
 inline constexpr uint32_t kWifiAuthRetryMs[] = {10000, 30000, 60000};
+// Retry delay after a radio reconfiguration failed in the WiFi driver.
+inline constexpr uint32_t kWifiRadioRetryMs = 10000;
 // Station modem sleep (IDF default WIFI_PS_MIN_MODEM) is off: the device is
 // mains powered, and in modem sleep the AP holds downlink frames until the
 // next DTIM beacon, which adds latency to every TCP round trip.
@@ -351,12 +359,19 @@ inline constexpr uint16_t kPollIdleS = 21600;
 inline constexpr uint16_t kPollPrematchS = 300;
 inline constexpr uint16_t kPollLiveS = 60;
 inline constexpr uint16_t kPollPostmatchS = 300;
-// Default of the API-Football daily request budget setting (api_daily_budget).
-inline constexpr uint16_t kApiFootballDailyBudgetDefault = 100;
-inline constexpr uint32_t kProviderMinIntervalMs[] = {5000, 6000, 30000, 6000};
+// Defaults of the per-provider request limits (settings daily_requests and
+// request_spacing_s), provider order OpenLigaDB, API-Football, ESPN,
+// football-data.org. Provider documentation checked 2026-10-13: OpenLigaDB
+// 60 requests per minute and IP, no quota; API-Football free plan 100
+// requests per day; ESPN publishes no limit (unofficial interface);
+// football-data.org free tier 10 calls per minute, no daily quota. A daily
+// cap of 0 means none: no counter and no NVS write. The spacings are the
+// earlier device policy (OQ-170).
+inline constexpr uint16_t kDailyRequestsDefault[] = {0, 100, 0, 0};
+inline constexpr uint16_t kRequestSpacingDefaultS[] = {5, 6, 30, 6};
 inline constexpr uint16_t kFixtureHorizonDays = 7;
-// Fixtures of other clubs kept around now by providers without a round
-// filter (provider_mappers.cpp keep(); W86 is reworked in R3).
+// Fixtures of other clubs outside the current round kept around now
+// (football::keepFixture()): catch-up fixtures and Konferenz blocks.
 inline constexpr uint16_t kConferenceHorizonHours = 36;
 // Latest end of a match the provider reports as still running.
 inline constexpr uint16_t kUnknownMatchEndMinutes = 240;
@@ -416,18 +431,20 @@ inline constexpr Range kBrightnessRange{0, 100}, kRotationRange{0, 3};
 inline constexpr Range kVisibleMatchesRange{1, 5}, kTableWindowRange{1, 9};
 inline constexpr Range kReturnTimeRange{0, 4000}, kScrollRepeatRange{100, 2000};
 inline constexpr Range kSlideshowRange{3, 3600}, kDayMinutesRange{0, 1439};
-inline constexpr Range kMatchWindowRange{0, 180},
-    kApiFootballDailyBudgetRange{1, 10000};
+inline constexpr Range kMatchWindowRange{0, 180};
+// Per-provider daily cap (0 = none) and minimum request spacing in seconds.
+inline constexpr Range kDailyRequestsRange{0, 65535},
+    kRequestSpacingRange{1, 3600};
 inline constexpr Range kTextScaleRange{70, 130};
 inline constexpr uint8_t kTextScaleDefault = 100;
-// Daily request cap the budget ledger applies to providers without a daily
-// budget setting (OpenLigaDB, ESPN, football-data.org); a safety bound only.
-inline constexpr uint16_t kUnbudgetedDailyRequestCap = 10000;
 inline constexpr std::size_t kProviderHeaderBytes = 8192;
 inline constexpr std::size_t kProviderWireOverheadBytes = 32768;
 inline constexpr uint16_t kProviderWaitSliceMs = 100;
 inline constexpr uint16_t kProviderErrorRetryS = 60, kProviderRateRetryS = 300;
-inline constexpr uint16_t kCatchupRefreshS = 300;
+// Maximum age of reused OpenLigaDB data: a full refresh of the round (and of
+// another round with a fixture in its match window) is forced after this
+// time even with an unchanged change date.
+inline constexpr uint16_t kOpenLigaDbFullRefreshS = 3600;
 inline constexpr uint16_t kNetworkPublishMs = 1000;
 inline constexpr uint8_t kScanEntries = 16, kApClients = 2, kApChannel = 1;
 inline constexpr uint8_t kApIp[] = {192, 168, 4, 1};
@@ -449,9 +466,19 @@ inline constexpr char kLegacyImageNames[][12] = {
     "crest",  "slide1",      "slide2",     "slide3", "slide4",
     "slide5", "live_single", "live_multi", "table",  "slideshow"};
 inline constexpr std::size_t kProviderCount = 4;
+static_assert(sizeof(kDailyRequestsDefault) / sizeof(uint16_t) ==
+                  kProviderCount &&
+              sizeof(kRequestSpacingDefaultS) / sizeof(uint16_t) ==
+                  kProviderCount);
+// Daily request counters: one record per provider with a daily cap, so a
+// damaged record affects only its provider. The single record of earlier
+// firmware ("credits", all providers) is read once for API-Football.
 inline constexpr char kBudgetNvsNamespace[] = "provider_budget",
-                      kBudgetNvsKey[] = "credits";
-inline constexpr uint32_t kBudgetRecordMagic = 0x46554231;
+                      kBudgetLegacyNvsKey[] = "credits";
+inline constexpr char kBudgetNvsKeys[][16] = {"openligadb", "api_football",
+                                              "espn", "football_data"};
+inline constexpr uint32_t kBudgetLegacyMagic = 0x46554231,
+                          kBudgetRecordMagic = 0x46554232;
 inline constexpr uint8_t kBudgetReservationRequests = 8;
 inline constexpr char kSelectionCountryDefault[] = "Germany";
 // The OpenLigaDB competition list loads one season. Without a season in the

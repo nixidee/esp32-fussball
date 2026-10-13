@@ -167,6 +167,9 @@ struct Snapshot {
   // Monotonic time of the next attempt after a failed one; 0 = none.
   int64_t retry_ms = 0;
   bool stale = true, configured = false;
+  // A match did not fit the full match list (matchSlot); the list holds
+  // the matches nearest to the time of the fetch.
+  bool matches_truncated = false;
   Text<96> routing_notice;
   Text<96> error;
   Cause error_cause = Cause::kNone;
@@ -224,17 +227,37 @@ uint32_t fingerprint(std::string_view value);
 // of the added events. A full event list sets 'events_truncated'.
 void mergeEvents(Snapshot& primary, Match& a, const Snapshot& secondary,
                  const Match& b, bool swapped);
-// Appends 'source', a match of 'from', with its events to 'target'.
-// 'own_events_only' skips events of another provider (fallback events merged
-// into a primary match); 'skip_removed' skips removal markers. A full event
-// pool sets 'events_truncated'. False when the match list is full.
+// Which fixtures of a provider response a competition keeps: 'team' is the
+// own club's id, 'round' the current round (0 = the provider has none).
+struct FixtureFilter {
+  const char* team = "";
+  uint16_t round = 0;
+};
+// True for a match of the current round, an own-club match within
+// kFixtureHorizonDays and any other match within kConferenceHorizonHours of
+// 'now' (UTC; 0 keeps every match). Other clubs' fixtures outside the
+// current round are catch-up fixtures and form Konferenz blocks too.
+bool keepFixture(const Match& match, int64_t now, FixtureFilter filter);
+// A slot for 'candidate' at the end of 'target's match list. A full list
+// makes room by removing, with its events, the other club's match whose
+// kickoff is farthest from 'utc' when 'candidate' is the own club's match
+// or kicks off nearer to 'utc'; a match without kickoff counts as farthest.
+// Own matches are never removed; 'utc' 0 removes nothing. nullptr when the
+// candidate does not fit. Every lost match sets 'matches_truncated'.
+Match* matchSlot(Snapshot& target, const Match& candidate, int64_t utc);
+// Appends 'source', a match of 'from', with its events to 'target' through
+// matchSlot(). 'own_events_only' skips events of another provider (fallback
+// events merged into a primary match); 'skip_removed' skips removal
+// markers. A full event pool sets 'events_truncated'. False when the match
+// did not fit.
 bool appendMatch(Snapshot& target, const Snapshot& from, const Match& source,
-                 bool own_events_only = false, bool skip_removed = false);
+                 int64_t utc, bool own_events_only = false,
+                 bool skip_removed = false);
 // Keeps the published data of competition 'route' after its fetch failed:
 // copies its matches from 'from' into 'target' with their events (removal
 // markers excluded), estimated again at 'utc', and its fetch time; with
-// 'table', also the league table when 'target' has none. False when the
-// match list is full.
+// 'table', also the league table when 'target' has none. False when a match
+// did not fit; the others are copied.
 bool carryRoute(Snapshot& target, const Snapshot& from, uint8_t route,
                 bool table, int64_t utc);
 // Monotonic time of the oldest data in 'data': the earliest non-zero route

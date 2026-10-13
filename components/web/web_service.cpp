@@ -31,6 +31,7 @@
 #include "network_service.h"
 #include "ota_service.h"
 #include "provider_client.h"
+#include "request_budget.h"
 #include "session_table.h"
 #include "settings_json.h"
 #include "settings_store.h"
@@ -346,7 +347,7 @@ bool sameName(const char* text, std::string_view name) {
          strncasecmp(text, name.data(), name.size()) == 0;
 }
 // The Host header names this device and an Origin header, if sent, is this
-// device's own page (CSRF protection, docs/NETWORK.md).
+// device's own page (CSRF protection, docs/API.md).
 bool origin(httpd_req_t* req) {
   char host[96]{}, request_origin[128]{};
   if (httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) != ESP_OK ||
@@ -496,7 +497,7 @@ esp_err_t page(httpd_req_t* req) {
 }
 
 // ---- Reading ---------------------------------------------------------------
-// Read endpoints need no session (docs/NETWORK.md); a token the request does
+// Read endpoints need no session (docs/API.md); a token the request does
 // carry is accepted and moves the expiry of its session.
 esp_err_t getSession(httpd_req_t* req) {
   Request request(req);
@@ -546,6 +547,8 @@ esp_err_t getStatus(httpd_req_t* req) {
   out["ip"] = net.ip;
   out["ap_ip"] = net.ap_ip;
   out["network"] = network::stateName(net.state);
+  out["network_reason"] =
+      network::reasonName(network::offlineReason(net.state));
   out["ap"] = net.ap;
   out["rssi"] = net.rssi;
   out["time_valid"] = timekeeping::status().valid;
@@ -578,6 +581,9 @@ esp_err_t getStatus(httpd_req_t* req) {
   out["data_error"] = data.error.data;
   out["data_error_code"] = football::causeKey(data.cause);
   out["routing_notice"] = data.routing_notice.data;
+  out["matches_truncated"] = data.matches_truncated;
+  out["next_request_ms"] = data.next_ms;
+  out["next_request_reason"] = football::cadenceName(data.cadence);
   auto counts = out["requests"].to<JsonArray>();
   for (auto count : data.requests) counts.add(count);
   // What the display shows and why (OQ-91). 'screen' is the index of the
@@ -905,6 +911,8 @@ esp_err_t reset(httpd_req_t* req) {
   else if (in["images"].as<bool>())
     err = images::removeAll();
   if (err == ESP_OK) err = settings::reset();
+  // The guard keeps the provider worker from storing a counter meanwhile.
+  if (err == ESP_OK) err = football::budget::erase();
   if (err != ESP_OK) return failed(req, err);
   ota::reboot();
   return ok(req, d.doc);

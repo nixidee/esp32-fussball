@@ -1,81 +1,106 @@
 #include "request_budget.h"
 
-#include <algorithm>
-
+#include "budget_ledger.h"
+#include "esp_log.h"
 #include "nvs.h"
 
 namespace football::budget {
 namespace {
-struct Ledger {
-  uint32_t magic, day, reserved[cfg::kProviderCount];
-};
-Ledger ledger{};
-uint32_t credits[cfg::kProviderCount]{};
-bool ready = false;
-esp_err_t store(const Ledger& next) {
+constexpr unsigned kApiFootball =
+    static_cast<unsigned>(cfg::Provider::kApiFootball);
+Counter counters[cfg::kProviderCount];
+// The record of earlier firmware is still stored (it is read only while
+// API-Football has no record of its own).
+bool legacy_stored = false;
+
+// Reads one blob; 'buffer' receives at most 'size' bytes.
+Load read(nvs_handle_t handle, const char* key, void* buffer, std::size_t size,
+          std::size_t* length) {
+  *length = size;
+  const auto err = nvs_get_blob(handle, key, buffer, length);
+  if (err == ESP_ERR_NVS_NOT_FOUND) return Load::kMissing;
+  return err == ESP_OK ? Load::kValid : Load::kDamaged;
+}
+
+esp_err_t store(unsigned index, const Record& next) {
   nvs_handle_t handle;
   auto err = nvs_open(cfg::kBudgetNvsNamespace, NVS_READWRITE, &handle);
   if (err != ESP_OK) return err;
-  err = nvs_set_blob(handle, cfg::kBudgetNvsKey, &next, sizeof(next));
+  err = nvs_set_blob(handle, cfg::kBudgetNvsKeys[index], &next, sizeof(next));
+  if (err == ESP_OK && index == kApiFootball && legacy_stored) {
+    const auto erased = nvs_erase_key(handle, cfg::kBudgetLegacyNvsKey);
+    if (erased == ESP_OK || erased == ESP_ERR_NVS_NOT_FOUND)
+      legacy_stored = false;
+  }
   if (err == ESP_OK) err = nvs_commit(handle);
   nvs_close(handle);
   return err;
 }
 }  // namespace
+
 esp_err_t init() {
   nvs_handle_t handle;
   auto err = nvs_open(cfg::kBudgetNvsNamespace, NVS_READONLY, &handle);
-  if (err == ESP_ERR_NVS_NOT_FOUND) {
-    ready = true;
-    return ESP_OK;
-  }
+  if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_OK;  // nothing stored yet
+  // Without a readable namespace every counter starts empty; storing the
+  // first reservation then reports the error for its provider only.
   if (err != ESP_OK) return err;
-  std::size_t length = sizeof(ledger);
-  err = nvs_get_blob(handle, cfg::kBudgetNvsKey, &ledger, &length);
-  nvs_close(handle);
-  if (err == ESP_ERR_NVS_NOT_FOUND) {
-    ledger = {};
-    ready = true;
-    return ESP_OK;
+  for (unsigned i = 0; i < cfg::kProviderCount; ++i) {
+    Record stored{};
+    std::size_t length = 0;
+    auto state =
+        read(handle, cfg::kBudgetNvsKeys[i], &stored, sizeof(stored), &length);
+    Record record{};
+    // A missing record and a failed read are different: only a blob that
+    // exists but cannot be read or checked is damaged.
+    if (state == Load::kValid) state = parse(&stored, length, &record);
+    if (state == Load::kMissing && i == kApiFootball) {
+      LegacyRecord legacy{};
+      state = read(handle, cfg::kBudgetLegacyNvsKey, &legacy, sizeof(legacy),
+                   &length);
+      legacy_stored = state != Load::kMissing;
+      if (state == Load::kValid)
+        state = parseLegacy(&legacy, length, i, &record);
+    }
+    counters[i].load(state, record);
+    if (state == Load::kDamaged)
+      ESP_LOGE("provider",
+               "request counter %s unreadable: used up for today, new "
+               "counter tomorrow",
+               cfg::kBudgetNvsKeys[i]);
   }
-  if (err != ESP_OK || length != sizeof(ledger) ||
-      ledger.magic != cfg::kBudgetRecordMagic)
-    return ESP_ERR_INVALID_STATE;
-  ready = true;
+  nvs_close(handle);
   return ESP_OK;
 }
+
 esp_err_t admit(cfg::Provider provider, uint32_t day, uint32_t limit) {
-  if (!ready) return ESP_ERR_INVALID_STATE;
   const auto index = static_cast<unsigned>(provider);
   if (index >= cfg::kProviderCount) return ESP_ERR_INVALID_ARG;
-  if (day > ledger.day) {
-    Ledger next{};
-    next.magic = cfg::kBudgetRecordMagic;
-    next.day = day;
-    auto err = store(next);
-    if (err != ESP_OK) return err;
-    ledger = next;
-    for (auto& n : credits) n = 0;
+  if (limit == 0) return ESP_OK;
+  Record next{};
+  switch (counters[index].admit(day, limit, &next)) {
+    case Counter::Verdict::kAllowed: return ESP_OK;
+    case Counter::Verdict::kUsedUp: return ESP_ERR_NOT_ALLOWED;
+    case Counter::Verdict::kStore: break;
   }
-  // A backward clock correction cannot reset or move the durable day back.
-  if (credits[index] && ledger.reserved[index] - credits[index] < limit) {
-    --credits[index];
-    return ESP_OK;
-  }
-  if (ledger.reserved[index] >= limit) return ESP_ERR_NOT_ALLOWED;
-  const auto count = std::min<uint32_t>(cfg::kBudgetReservationRequests,
-                                        limit - ledger.reserved[index]);
-  auto next = ledger;
-  next.reserved[index] += count;
-  const auto err = store(next);
-  if (err != ESP_OK) return err;
-  ledger = next;
-  credits[index] = count - 1;
-  return ESP_OK;
+  const auto err = store(index, next);
+  if (err == ESP_OK) counters[index].commit(next);
+  return err;
 }
+
 uint32_t remaining(cfg::Provider provider, uint32_t limit) {
   const auto index = static_cast<unsigned>(provider);
-  const auto used = ledger.reserved[index] - credits[index];
-  return !ready || used >= limit ? 0 : limit - used;
+  return index < cfg::kProviderCount ? counters[index].remaining(limit) : 0;
+}
+
+esp_err_t erase() {
+  nvs_handle_t handle;
+  auto err = nvs_open(cfg::kBudgetNvsNamespace, NVS_READWRITE, &handle);
+  if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_OK;
+  if (err != ESP_OK) return err;
+  err = nvs_erase_all(handle);
+  if (err == ESP_OK) err = nvs_commit(handle);
+  nvs_close(handle);
+  return err;
 }
 }  // namespace football::budget

@@ -78,7 +78,8 @@ void storePrepared(SettingsTest test) {
       seal(record, cfg::kSettingsFormatVersion + 1);
       return storeRaw(record, "sample with format version + 1");
     case SettingsTest::kShorterRecord: {
-      // Without the last input role (the last field, format 5).
+      // Without the last byte: since format 7 half of the last request
+      // spacing (football-data), so the record ends inside its last field.
       const auto shorter = record.first(used - 1);
       seal(shorter);
       return storeRaw(shorter, "sample without its last field");

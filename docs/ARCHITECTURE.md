@@ -57,7 +57,7 @@
 |---|---|---|
 | Provider | HTTP request, parse, map to canonical model, report capabilities | Decide when to poll, know about screens |
 | Repository | Hold current snapshot, detect changes (e.g. `lastScoreChangeAt`) | Network I/O |
-| Scheduler | Choose polling interval per state, enforce request budget | Parsing |
+| Scheduler | Choose polling interval per state, enforce the per-provider request limits | Parsing |
 | Screen-mode resolver | Pure function: (time, data state, settings, inputs available) → screen set + default | LVGL, I/O |
 | Presenter | Build a view model for one screen from snapshot + settings | Draw |
 | View | Create LVGL objects from layout tokens, render view model, emit `UiAction` | Business logic, data access |
@@ -95,7 +95,7 @@
   uploads. Scan/selection/refresh requests signal their owning service.
   The static debug worker permits one fixed in-flight message. Heavy admission
   serializes provider TLS/JSON with image mutation and OTA.
-- Settings live behind a mutex. `settings::current()` returns a 1,956-byte
+- Settings live behind a mutex. `settings::current()` returns a 1,968-byte
   owned copy on the C6 (it lives on the caller's stack). NVS saves/reset use a second mutex and execute in the
   caller task. They post coalesced `kSettingsChanged` notifications.
 - State notifications and semantic input actions use the existing bounded
@@ -118,7 +118,7 @@ marks. Previously measured boot/core marks below do not apply to the new load.
 | HTTP server | 5 | 10,240 B | REST/upload worker |
 | `taskLVGL` | 4 | 7,168 B | Existing LVGL port |
 | `provider` | 3 | 12,800 B, static | Fetch/parser/composition |
-| `portal_dns` | 2 | 2,048 B, static | Captive DNS |
+| `portal_dns` | 2 | 2,048 B, static | Captive DNS (512 B query buffer static, outside the stack) |
 | `web_debug` | 2 | 4,096 B, static | Controlled live stream |
 | `main` | 1 | 8,704 B | App/service loop |
 | mDNS | 1 | 4,096 B | Managed component |
@@ -258,8 +258,11 @@ C-library APIs and `esp_timer_get_time()` for monotonic milliseconds.
 - Validity begins false on every boot. A successful `setTime()` records the
   source, monotonic set time and set count, then posts `kTimeChanged`.
   Zone changes post the same event; subscribers fetch the current state.
+  The step count rises only for the first valid set, a zone change and a
+  jump above `kTimeJumpThresholdS` (2 s); the provider service starts a new
+  baseline only when it changed, not at every SNTP resync.
 - A settings event callback only raises an atomic flag. The app task copies
-  the settings (1,956 B in this candidate), applies a changed zone and updates diagnostics;
+  the settings (1,968 B in this candidate), applies a changed zone and updates diagnostics;
   this work runs outside the `events` task.
 - Civil windows follow local time, including midnight and skipped/repeated
   daylight-saving hours. Delays and deadlines use monotonic time.
@@ -511,16 +514,16 @@ shape the image design:
   (temporary file, then rename), otherwise a replacement during a redraw fails.
 This is integration evidence only, not the supported-maximum envelope.
 
-### Current compiled resource ledger — 2026-10-13 (settings format 6, image roles, font set 12/14/18/48, display design renderer, start screen, automatic season)
+### Current compiled resource ledger — 2026-10-13 (settings format 7, next-round reason, image roles, font set 12/14/18/48, display design renderer, start screen, automatic season)
 
 | Item | C6 candidate | Growth over the accepted core image |
 |---|---|---|
-| Firmware binary | 1,576,656 B | +1,060,352 B |
-| PlatformIO flash report | 1,575,900 B, 85.9% of 1,835,008 B | +1,060,236 B |
-| Static data/BSS | 201,452 B | +153,232 B |
+| Firmware binary | 1,583,680 B | +1,067,376 B |
+| PlatformIO flash report | 1,582,932 B, 86.3% of 1,835,008 B | +1,067,268 B |
+| Static data/BSS | 202,400 B | +154,180 B |
 | Linked DIRAM, official IDF size report | not re-measured (266,066 B at the 2026-10-10 image) | — |
 | Football snapshots | 3 × 27,200 B = 81,600 B | Included above |
-| Settings model / longest encoded record | 1,952 / 1,941 B | Format 6 (variable length, ceiling 2,048 B); formats 1 to 5 are converted in RAM without an NVS rewrite (the crest id of formats 3 to 5 is handed to the image service once, which saves format 6) |
+| Settings model / longest encoded record | 1,968 / 1,955 B | Format 7 (variable length, ceiling 2,048 B); formats 1 to 6 are converted in RAM without an NVS rewrite (the crest id of formats 3 to 5 is handed to the image service once, which saves the current format) |
 | UI view model / draw list / text store | 1,852 / 2,016 / 1,280 B | Static owned view; 72 draw items of 28 B; view and draw list are initialised data (also stored in flash) |
 | Parser live allocation cap | 24,576 B including custom headers | Libc metadata additional |
 | JPEG validation workspace | 4,096 B static | Included above |
@@ -536,7 +539,7 @@ Runtime initialization of large snapshot defaults, shared stock aliases/font
 roles and unused C6 SDK speed/protocol features reduced the first complete
 build's 94.3% occupancy to 81.8% at the settings-format-3 build.
 
-The image fits the OTA slot and is 10,991 B above the 85% reserve line
+The image fits the OTA slot and is 23,175 B above the 85% reserve line
 (1,559,757 B) using the PlatformIO report; the line may be exceeded during
 the display redesign, and the savings are decided at alpha from a size map. Settings format 3 added 3,706 B flash
 and 620 B static RAM over the preceding build; the later Web UI rewrite, API
@@ -565,7 +568,12 @@ role upload, copy/reset endpoint) added 1,310 B flash and no static RAM; the
 image page role tiles (replace, copy from the library, restore, delete-all
 resets) added 1,200 B flash and no static RAM (embedded page 55,814 B gzip);
 removing the upload buttons from the display page saved 320 B flash (embedded
-page 55,496 B gzip).
+page 55,496 B gzip). Settings format 7 with a daily cap and a minimum spacing
+per provider (one request counter per provider, Web UI fields) added 2,140 B
+flash and 96 B static RAM over the preceding build (embedded page 56,782 B
+gzip, +686 B; the settings model grew by 16 B per copy). The next-round
+time and reason in `/status` and the Web UI overview added 1,132 B flash and
+8 B static RAM (embedded page 57,364 B gzip, +582 B).
 No flash-reserve gate is
 accepted. Free heap is not derivable from the static figures: dynamic stacks,
 network, TLS, parser, DMA and library charges must still be accounted for. Peak heap,

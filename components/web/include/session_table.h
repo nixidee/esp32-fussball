@@ -1,4 +1,4 @@
-// Login sessions of the Web API (docs/NETWORK.md). Pure C++ without ESP-IDF
+// Login sessions of the Web API (docs/API.md). Pure C++ without ESP-IDF
 // calls: the caller supplies the token text and the monotonic time, so the
 // rules run in the host tests.
 //

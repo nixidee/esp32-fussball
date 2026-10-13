@@ -642,11 +642,26 @@ void bind(const football::Snapshot& data, void* raw_context) {
     no_badge = true;
   } else if (data_screen && data.fetched_ms == 0 && !model.demo) {
     // Data never loaded: say why instead of an empty screen.
-    if (!context.connected)
+    if (!context.connected) {
+      // Why, from the connection state (docs/UI.md "State cards").
+      const auto why = network::offlineReason(context.net->state);
       cardText(translated("Kein WLAN", "No WiFi"),
-               translated("Heimnetz nicht erreichbar", "Home network not found"),
-               translated("Neuer Versuch läuft", "Retrying"), Tone::kWarn);
-    else if (!valid)
+               why == network::Reason::kNotFound
+                   ? translated("Netz nicht gefunden", "Network not found")
+               : why == network::Reason::kPassword
+                   ? translated("Passwort falsch?", "Wrong password?")
+               : why == network::Reason::kSetup
+                   ? translated("Setup-Netz aktiv", "Setup network on")
+                   : translated("Verbinde …", "Connecting …"),
+               why == network::Reason::kSetup
+                   ? nullptr
+                   : translated("Neuer Versuch läuft", "Retrying"),
+               Tone::kWarn);
+      if (context.ap && why != network::Reason::kSetup)
+        prefix<sizeof(view.card.hints[0]) - 1>(
+            view.card.hints[view.card.hint_count++],
+            translated("Setup-Netz aktiv", "Setup network on"));
+    } else if (!valid)
       cardText(translated("Warte auf Uhrzeit", "Waiting for time"),
                translated("Zeitserver wird gefragt", "Asking the time server"),
                nullptr, Tone::kWarn);

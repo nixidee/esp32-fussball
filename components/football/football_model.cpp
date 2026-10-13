@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <utility>
@@ -59,19 +60,23 @@ const char* phaseName(Phase phase) {
   return "unknown";
 }
 Capabilities capabilities(cfg::Provider p) {
+  // Default request spacing (the device uses the saved one per provider).
+  const auto default_spacing = [](unsigned i) {
+    return cfg::kRequestSpacingDefaultS[i] * 1000u;
+  };
   switch (p) {
     case cfg::Provider::kOpenLigaDb:
       return {true, false, false, false, false,
-              true, true,  false, false, cfg::kProviderMinIntervalMs[0]};
+              true, true,  false, false, default_spacing(0)};
     case cfg::Provider::kApiFootball:
       return {true, true, true, true,  true,
-              true, true, true, false, cfg::kProviderMinIntervalMs[1]};
+              true, true, true, false, default_spacing(1)};
     case cfg::Provider::kEspn:
       return {true, true, true,  true,  true,
-              true, true, false, false, cfg::kProviderMinIntervalMs[2]};
+              true, true, false, false, default_spacing(2)};
     case cfg::Provider::kFootballData:
       return {true, true, false, false, false,
-              true, true, true,  false, cfg::kProviderMinIntervalMs[3]};
+              true, true, true,  false, default_spacing(3)};
   }
   return {};
 }
@@ -262,10 +267,71 @@ uint32_t fingerprint(std::string_view text) {
   for (unsigned char c : text) h = (h ^ c) * 16777619;
   return h;
 }
+bool keepFixture(const Match& m, int64_t now, FixtureFilter filter) {
+  if (m.id.empty()) return false;
+  const bool own = std::string_view(filter.team) == m.home.id.data ||
+                   std::string_view(filter.team) == m.away.id.data;
+  if (m.round.valid() && filter.round && m.round.value == filter.round)
+    return true;
+  if (!m.kickoff.valid()) return own;
+  if (now == 0) return true;
+  return std::llabs(now - m.kickoff.value) <=
+         (own ? cfg::kFixtureHorizonDays * 86400LL
+              : cfg::kConferenceHorizonHours * 3600LL);
+}
+namespace {
+// Removes match 'index' and its events from 'data'; later events and
+// matches move down, so every event index stays valid.
+void dropMatch(Snapshot& data, unsigned index) {
+  auto& victim = data.matches[index];
+  while (victim.event_count) {
+    unsigned last = 0;
+    for (unsigned i = 1; i < victim.event_count; ++i)
+      if (victim.events[i] > victim.events[last]) last = i;
+    const unsigned gone = victim.events[last];
+    victim.events[last] = victim.events[--victim.event_count];
+    for (unsigned e = gone + 1; e < data.event_count; ++e)
+      data.events[e - 1] = data.events[e];
+    --data.event_count;
+    for (unsigned m = 0; m < data.match_count; ++m)
+      for (unsigned i = 0; i < data.matches[m].event_count; ++i)
+        if (data.matches[m].events[i] > gone) --data.matches[m].events[i];
+  }
+  for (unsigned m = index + 1; m < data.match_count; ++m)
+    data.matches[m - 1] = data.matches[m];
+  --data.match_count;
+}
+uint64_t distance(const Match& m, int64_t utc) {
+  if (!m.kickoff.valid()) return UINT64_MAX;
+  const int64_t d = m.kickoff.value - utc;
+  return d < 0 ? 0 - static_cast<uint64_t>(d) : static_cast<uint64_t>(d);
+}
+}  // namespace
+Match* matchSlot(Snapshot& target, const Match& candidate, int64_t utc) {
+  if (target.match_count >= target.matches.size()) {
+    unsigned victim = target.match_count;
+    uint64_t farthest = 0;
+    for (unsigned i = 0; utc && i < target.match_count; ++i) {
+      const auto& m = target.matches[i];
+      const auto d = distance(m, utc);
+      if (!m.own && (victim == target.match_count || d > farthest)) {
+        victim = i;
+        farthest = d;
+      }
+    }
+    target.matches_truncated = true;
+    if (victim == target.match_count ||
+        (!candidate.own && distance(candidate, utc) >= farthest))
+      return nullptr;
+    dropMatch(target, victim);
+  }
+  return &target.matches[target.match_count++];
+}
 bool appendMatch(Snapshot& target, const Snapshot& from, const Match& source,
-                 bool own_events_only, bool skip_removed) {
-  if (target.match_count >= target.matches.size()) return false;
-  auto& match = target.matches[target.match_count++];
+                 int64_t utc, bool own_events_only, bool skip_removed) {
+  auto* slot = matchSlot(target, source, utc);
+  if (slot == nullptr) return false;
+  auto& match = *slot;
   match = source;
   match.event_count = 0;
   for (unsigned i = 0; i < source.event_count; ++i) {
@@ -284,9 +350,13 @@ bool appendMatch(Snapshot& target, const Snapshot& from, const Match& source,
 }
 bool carryRoute(Snapshot& target, const Snapshot& from, uint8_t route,
                 bool table, int64_t utc) {
+  bool complete = true;
   for (unsigned i = 0; i < from.match_count; ++i) {
     if (from.matches[i].route != route) continue;
-    if (!appendMatch(target, from, from.matches[i], false, true)) return false;
+    if (!appendMatch(target, from, from.matches[i], utc, false, true)) {
+      complete = false;
+      continue;
+    }
     estimate(target.matches[target.match_count - 1], utc);
   }
   if (table && target.table_count == 0 && from.table_count) {
@@ -295,7 +365,7 @@ bool carryRoute(Snapshot& target, const Snapshot& from, uint8_t route,
   }
   if (route < target.route_fetched_ms.size())
     target.route_fetched_ms[route] = from.route_fetched_ms[route];
-  return true;
+  return complete;
 }
 int64_t oldestFetch(const Snapshot& data) {
   int64_t oldest = 0;

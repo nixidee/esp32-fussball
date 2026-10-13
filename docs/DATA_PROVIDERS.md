@@ -1,235 +1,448 @@
 # Data providers
 
-Four adapters and per-competition routing are implemented in the 0.1.0-dev
-candidate. Public endpoint research was refreshed on 2026-10-10; OpenLigaDB's
-published request guidance was rechecked on 2026-10-12. The C6 build
-compiles. Firmware requests and keyed-provider coverage have not been accepted
-on the device. Provider plans, quotas and supported competitions can change.
+Reference for the football data providers: who supplies what, their limits
+and conditions, all endpoints with measured sizes, and the research results.
 
-## Sources and capabilities
+Related documents:
 
-| Provider | Authentication | Adapter data | Limits / acceptance |
+- [DATA_MODEL.md](DATA_MODEL.md) — what the device stores, which provider
+  fills which field, where it is shown.
+- [DATA_FLOW.md](DATA_FLOW.md) — which requests the firmware sends today, how
+  it maps, combines, caches and publishes the data, and its request bounds.
+- [API.md](API.md) — the device's own REST API (not a provider).
+
+All checks were made on **2026-10-13** with public requests from a desktop
+machine unless stated otherwise. Provider plans, coverage, identifiers and
+limits change; recheck before relying on a value.
+
+## 1. Priority
+
+ESPN and OpenLigaDB are the primary providers; request planning is designed
+for them. API-Football and football-data.org stay supported by the firmware
+and are not removed, but they are not refined further now and their limits
+are not part of the current planning:
+
+- API-Football free plan: 100 requests per day, which is not enough for live
+  polling of more than one match.
+- football-data.org free plan: scores and schedules are delayed, no goal
+  scorers, cards or substitutions, and only four of the relevant
+  competitions.
+
+## 2. Providers
+
+| Provider | Kind | Key | Base URL |
 |---|---|---|---|
-| OpenLigaDB | none | competitions, teams, round/season fixtures, table, goals | community data; phase/minute estimated when absent |
-| API-Football | x-apisports-key | competitions, teams, fixtures, standings, own-club goals/cards/substitutions/VAR | configured daily budget; actual competition/tier coverage needs a key |
-| ESPN site API | explicit opt-in, no key | competitions, teams, current-day scores, own schedules, table, supplied event details | unofficial interface, no stability contract |
-| football-data.org v4 | X-Auth-Token | competitions, teams, fixtures, standings, supplied score phases | actual account permissions/coverage need a key; no fabricated minute/events |
+| OpenLigaDB | community-maintained open data (ODbL 1.0) | none | `https://api.openligadb.de` |
+| ESPN site API | unofficial interface of espn.com, no contract; used only after an explicit opt-in in the settings | none | `https://site.api.espn.com`, `https://site.web.api.espn.com`, `https://sports.core.api.espn.com` |
+| API-Football (API-Sports) | commercial API, free plan | `x-apisports-key` header | `https://v3.football.api-sports.io` |
+| football-data.org v4 | commercial API, free plan | `X-Auth-Token` header | `https://api.football-data.org/v4` |
 
-Capability flags describe mapper potential rather than proof that any particular
-fixture includes a field. Injury is a canonical event type and an ESPN detail
-may carry it; no general injury-feed coverage is promised. Club crests are
-uploaded user assets; provider SVG/large PNG files are not decoded by firmware.
-The interface also reports each provider's configured minimum request interval.
-Its crest-import flag is false while automatic browser import remains deferred.
+### Legend
 
-The 2026-10-08 coverage research found OpenLigaDB German leagues down to
-Regionalliga Nord, Nordost and Bayern, plus DFB-Pokal and UEFA data; it did not
-confirm current RL West/Südwest coverage. Use the live competition list rather
-than that historical snapshot as an availability guarantee. Optional paid/free
-plan prices and exact account quotas are deliberately not hard-coded here.
-
-## OpenLigaDB
-
-Base: [OpenLigaDB API](https://api.openligadb.de/).
-
-| Path | Use |
+| Mark | Meaning |
 |---|---|
-| /getavailableleagues/{season} | competition selection for one season (football entries only) |
-| /getavailableteams/{league}/{season} | club selection |
-| /getmatchdata/{league} | current provider season when configuration leaves it empty |
-| /getcurrentgroup/{league} | current round identity |
-| /getlastchangedate/{league}/{season}/{round} | cheap change check |
-| /getmatchdata/{league}/{season}/{round} | all fixtures of the current round |
-| /getmatchesbyteamid/{club}/{weeks}/{weeks} | own club's fixtures around today, filtered to this competition and season |
-| /getbltable/{league}/{season} | primary league table |
+| ✓ | verified with a real response on the check date |
+| (✓) | available, but incomplete or limited (see note) |
+| ✗ | verified as not available |
+| € | only in a paid plan (price in the cell) |
+| ? | not verified (documentation not reachable or a key is needed) |
+| doc | taken from the provider documentation, not from a real response |
 
-The competition list requests one season: the one typed in the setup wizard's
-season field, otherwise the current season derived from the device clock
-(from July the season named after the current year, before that the previous
-year's). Entries of other sports (ice hockey, test data) are skipped. Some
-competition shortcuts contain spaces or umlauts; every identifier is
-percent-encoded (RFC 3986) when it is placed into a request URL, at all
-providers.
+### How sizes were measured
 
-The [official API description](https://api.openligadb.de/swagger/v1/swagger.json)
-states a limit of 60 requests per minute per IP and recommends polling the
-change date before fetching complete data. The local minimum request spacing
-is five seconds; this is a conservative device policy, not an upstream limit.
-Other clients sharing the same public IP also count toward the upstream limit.
+Sizes are uncompressed response bodies; the firmware does not send
+`Accept-Encoding`, so the device receives uncompressed bodies. Reference
+requests: Bundesliga 2026/27, Werder Bremen (OpenLigaDB team 134, ESPN team
+137). Sizes of the keyed providers were not measured.
 
-A full refresh of the first table-bearing route with a club needs five
-requests with an explicit season (round, change date, round fixtures, club
-fixtures, table), or six when it first discovers the season. At five-second
-spacing the last request starts at least 20 or 25 seconds after the first;
-network and processing time are additional. Typical bodies were 7–18 KB for a
-round, about 4 KB for the club and about 4 KB for the table (public responses,
-2026-10-12); the former season stream was about 300 KB and grew with every
-matchday. Publication waits for every active
-competition, its required fallback requests and the table to succeed. There
-is currently no early publication of the first competition.
+## 3. Limits
 
-The RAM cache reuses primary-provenance data only when the round/change date
-match, no new baseline is required and the full fetch is less than five minutes
-old. The season is cached for six hours. Caches are not persisted across boots;
-a save that changes provider settings (competitions, sources, fixture pairs,
-keys, ESPN opt-in, demo mode) clears them and the published snapshot, other
-saves keep both. Network changes
-and successful time synchronizations require a new baseline. Fallback sources
-do not use this cache. Because pre/post-match delays already wait five minutes
-after completion, their next cycle repeats the full round/club/table fetch
-even when the round's change date is unchanged. The club request covers the
-own club's fixtures outside the polled round (cup and catch-up matches within
-the seven-day horizon); other clubs' catch-up fixtures outside the round are
-not kept.
+| | OpenLigaDB | ESPN | API-Football (free) | football-data.org (free) |
+|---|---|---|---|---|
+| **Time limit** | 60 per minute per IP (doc) | none published | ? not published where checked; secondary sources: 10 per minute | 10 per minute (doc); 20–120 per minute in paid plans |
+| **Daily limit** | none (~86,400 at 60/min) | none published (unknown) | **100 per day** (doc), reset 00:00 UTC | none for registered clients (~14,400 at 10/min); without a key 100 per 24 h (doc), **50 measured** |
+| Key / account | no | no | yes | yes (without a key only area and competition lists) |
+| Other rules | "please fetch sparingly"; poll `getlastchangedate` before full data | unofficial; may change or block without notice | quota counter in response headers | scores and schedules **delayed**; bans clients that poll too often |
 
-Results use the provider's semantic
-[resultTypeKind contract](https://github.com/OpenLigaDB/OpenLigaDB-Samples/discussions/136).
-Unknown kinds stay unavailable. Public DFB 2024 responses confirmed that
-AfterPenalties contains the combined result; a known AfterExtraTime base is
-subtracted for the separate shootout tally. The research also found inconsistent
-older regulation fields, so fixture tests must preserve and exercise those
-source contradictions rather than silently relabel them.
+Time limits of OpenLigaDB, ESPN and football-data.org count per IP address
+or account: other devices or programs behind the same internet connection or
+with the same key use the same budget. Figures in brackets ("~N") are
+extrapolations, not published quotas.
 
-## API-Football
+## 4. Competition coverage
 
-Base: [API-Sports football documentation](https://www.api-football.com/documentation-v3).
+Cell content: the provider's identifier when available. OpenLigaDB
+identifiers are community entries; the list contains many test, duplicate
+and abandoned entries, and the identifiers below are the ones with real data
+on the check date. They can change every season.
 
-Selection requests use leagues?country=... (default Germany; World for
-international competitions) and teams?league=...&season=.... Country is a
-bounded selection argument, not a second persistent configuration field.
-An empty season is resolved once with leagues?id=...&current=true (one
-request, the season marked current; cached per competition and source for six
-hours, cleared when provider settings change). A club list request with an empty season
-resolves it the same way; the setup wizard passes the season of the picked
-competition list entry, so that lookup is normally not needed. Match requests use
-fixtures?league=...&season=...&from=...&to=..., then primary-league standings.
-Own retained fixtures additionally request fixtures/events?fixture=....
+### 4.1 German club competitions
 
-Every attempt, including selections, consumes the local budget before TLS
-starts. A durable 24-byte NVS ledger reserves up to eight attempts at once.
-Restarting loses unused credits and cannot replenish the day. Moving the clock
-backward cannot reopen a spent day. Budget-storage failures refuse requests.
-Normal settings resets retain this ledger.
+| Competition | OpenLigaDB | ESPN | API-Football | football-data.org |
+|---|---|---|---|---|
+| Bundesliga | ✓ `bl1` | ✓ `ger.1` | ? | ✓ `BL1` (free) |
+| 2. Bundesliga | ✓ `bl2` | ✓ `ger.2` | ? | € `BL2` (49 €/month) |
+| 3. Liga | ✓ `bl3` | ✗ | ? | € `BL3` (99 €/month) |
+| Regionalliga Nord (level 4) | (✓) `rln` – no goal minutes, no scorers | ✗ | ? | € `RLN` (199 €/month) |
+| Regionalliga Nordost (level 4) | (✓) `rlno` – almost no goal minutes or scorers | ✗ | ? | € `RNO` (199 €/month) |
+| Regionalliga Bayern, West, Südwest (level 4) | ✗ (`regio-bayern` empty) | ✗ | ? | € `RBY`, `RLW`, `RSW` (199 €/month) |
+| Oberliga (level 5) | (✓) only NOFV Nord/Süd listed (`nofvon`, `nofvos`), data not checked | ✗ | ? | ✗ |
+| DFB-Pokal | ✓ `dfb` | ✓ `ger.dfb_pokal` | ? | € `DFB` (49 €/month) |
+| Landespokal | ✗ | ✗ | ? | ✗ |
+| DFL Supercup | ✓ `BLSupercup` | ✓ `ger.super_cup` | ? | € `GSC` (199 €/month) |
+| Relegation Bundesliga / 2. Bundesliga | (✓) `rel` (season 2025 = May 2026: the 2 matches; extra-time result missing, see 6.3) | ✓ `ger.playoff.relegation` (May 2026, with goals and cards) | ? | € `BLREL` (199 €/month) |
+| Relegation 2. Bundesliga / 3. Liga | ✗ no entry found | ✓ `ger.2.promotion.relegation` (May 2026, with goals and cards) | ? | € (in `BLREL`, not checked) |
 
-Live polling stretches conservatively according to observed requests per refresh
-and remaining credits. This cannot control other devices sharing a provider
-account/IP. No keyed API request or paid-tier coverage was tested in this session.
+### 4.2 International club competitions
 
-## ESPN
+| Competition | OpenLigaDB | ESPN | API-Football | football-data.org |
+|---|---|---|---|---|
+| Champions League | ✓ `ucl` (`ucl2026` is an incomplete duplicate) | ✓ `uefa.champions` | ? | ✓ `CL` (free) |
+| Europa League | ✓ `uel2026` (`uel` holds the 2025 knockout phase) | ✓ `uefa.europa` | ? | € `EL` (49 €/month) |
+| Conference League | ✓ `uecl2026` (first match 2026-10-15) | ✓ `uefa.europa.conf` | ? | € `UCL` (199 €/month) |
+| UEFA Super Cup | ✗ | ✓ `uefa.super_cup` | ? | € `ESC` (199 €/month) |
+| Qualifying rounds | not checked | `uefa.champions_qual`, `uefa.europa_qual`, `uefa.europa.conf_qual` listed, data not checked | ? | € `CLQ` (49 €/month), `ELQ` (99 €/month), `COLQ` (199 €/month) |
 
-Selection: site.api.espn.com/apis/site/v2/leagues/dropdown and
-.../sports/soccer/{slug}/teams. Scores: the same site's scoreboard?dates=YYYYMMDD.
-Own fixtures: teams/{id}/schedule, both past results and fixture=true upcoming
-schedule, then bounded local horizon filtering. Table:
-site.web.api.espn.com/apis/v2/sports/soccer/{slug}/standings.
-A configured season is forwarded to supported route/team endpoints.
+### 4.3 National team (Germany)
 
-Public research verified nested standings entries, integral floating-point
-statistics, score strings on scoreboards, score objects on schedules and dates
-without seconds. Multi-day scoreboard ranges repeatedly returned HTTP 400,
-so the adapter uses a single UTC day plus the club schedules. Rich details
-use semantic event flags/text; unknown fields stay unavailable. A public 2022
-World Cup final response confirmed principal 3:3 and separate shootoutScore 4:2.
-No numeric status/result ID is treated as a semantic constant.
+| Competition | OpenLigaDB | ESPN | API-Football | football-data.org |
+|---|---|---|---|---|
+| World Cup | ✓ `wm26` (2026, complete; `wm2026_xlife`, `WC2026`, `dfb-wm26` are duplicates or empty) | ✓ `fifa.world` | ? | ✓ `WC` (free) |
+| World Cup qualifying (UEFA) | not checked | ✓ `fifa.worldq.uefa` | ? | € `QUFA` (199 €/month) |
+| European Championship | not checked (next tournament 2028) | ✓ `uefa.euro` (latest season 2024) | ? | ✓ `EC` (free, latest season 2024) |
+| EURO qualifying | not checked | ✓ `uefa.euroq` | ? | € `ECQ` (199 €/month) |
+| Nations League | ✓ `nla` (League A 2026; `unl` empty) | ✓ `uefa.nations` | ? | € `UNL` (199 €/month) |
+| Friendlies | (✓) `DFBN` (6 matches) and `DFBNAT2526` (season 2025, 2 matches), user-maintained | ✓ `fifa.friendly` (all national teams) | ? | € `IFL` (199 €/month) |
+| Women's EURO | (✓) `Fef` (2025) | not checked | ? | ? |
 
-Public research is not firmware/device acceptance. Unofficial endpoint changes,
-event direction/coverage, empty schedules and season transitions need recorded
-fixtures and operational tests before release.
+### 4.4 Result for the target competitions (ESPN + OpenLigaDB)
 
-## football-data.org
+| Target | Covered by | Restriction |
+|---|---|---|
+| Bundesliga, 2. Bundesliga | both | – |
+| 3. Liga | OpenLigaDB only | no minute, no cards, no substitutions; 81 % of goals with minute, 65 % with scorer (6.2) |
+| Level 4 (Regionalliga) | OpenLigaDB only, Nord and Nordost only | no goal minutes or scorers; the other three Regionalligen are not covered |
+| DFB-Pokal, DFL Supercup | both | – |
+| Relegation | ESPN for both relegations; OpenLigaDB only Bundesliga / 2. Bundesliga | OpenLigaDB extra-time result missing (6.3) |
+| Champions, Europa, Conference League | both | UEFA Super Cup and qualifying only ESPN |
+| World Cup / EURO qualifying | ESPN | OpenLigaDB not checked |
+| Friendlies of the national team | ESPN (`fifa.friendly`, all nations); OpenLigaDB user entries | OpenLigaDB entries are incomplete and change per season |
 
-Base: [v4 documentation](https://docs.football-data.org/general/v4/).
+## 5. Live score and event coverage
 
-Selection uses competitions and competitions/{id}/teams. Routes use
-competitions/{id}/matches with a bounded date range and standings. The optional
-configured season is forwarded; an empty one selects the provider's current
-season. Competition selection reads the supplied current-season start year.
+### 5.1 Per provider
 
-Every value of the v4 match status table is mapped (lookup table checked
-2026-10-13; the match page lists nine of its eleven values): SCHEDULED and
-TIMED → Scheduled, IN_PLAY → Live, PAUSED → HalfTime, EXTRA_TIME → ExtraTime,
-PENALTY_SHOOTOUT → Penalties, FINISHED → Finished, SUSPENDED and POSTPONED →
-Postponed, CANCELLED → Cancelled, AWARDED → Abandoned. The documentation does
-not describe SUSPENDED and AWARDED; they follow API-Football's SUSP and AWD.
-Any other value stays Unknown.
+| Data | OpenLigaDB | ESPN scoreboard | ESPN match summary | API-Football | football-data.org free |
+|---|---|---|---|---|---|
+| Live score | ✓ (entered by the community, delay unknown) | ✓ | ✓ | ? doc | (✓) **delayed**, amount not published |
+| Live status / phase | (✓) only a "finished" flag | ✓ | ✓ | ? doc (status codes) | (✓) delayed |
+| Minute | ✗ | ✓ `displayClock` | ✓ | ? doc (`elapsed`) | ? doc (`minute`, `injuryTime`) |
+| Round number / label | ✓ `group` | ✗ | ✗ | (✓) doc: text label only (`league.round`) | ✓ doc (`matchday`, `stage`) |
+| Half-time score | ✓ | ✗ | ✓ | ? doc | ✓ doc |
+| Score after regulation / extra time | ✓ (extra time incomplete, 6.3) | ✗ (only principal score and status `STATUS_FINAL_AET`) | ✓ | ? doc | ✓ doc |
+| Penalty shootout tally | ✓ (combined with earlier goals, 6.3) | ✓ `shootoutScore` | ✓ | ? doc | ✓ doc |
+| Goals (scorer, minute) | ✓ (quality differs, 5.2) | ✓ | ✓ | ? doc | € (29 €/month) |
+| Own goal / penalty flag | ✓ | ✓ | ✓ | ? doc | € |
+| Missed penalty | ✗ | ✗ in the samples | ? | ? doc | € |
+| Yellow card | ✗ | ✓ | ✓ | ? doc | € |
+| Second yellow / red card | ✗ | ✓ red only | ✓ | ? doc | € |
+| Substitutions | ✗ | ✗ | ✓ | ? doc | € |
+| Whistles (kick-off, half-time, 2nd half, full time) | ✗ | ✗ only as status | ✓ (with wall-clock time) | ✗ only as status changes (doc) | ✗ |
+| VAR | ✗ | ✗ | ✗ in the sample | ? doc | ✗ |
+| Delays, injuries | ✗ | ✗ | ✓ start/end of a delay | ? | ✗ |
+| Size per request | 25 B (change check), 1.6 KB (one match), 18 KB (round) | 2–127 KB (one day, one competition) | 179–398 KB (one finished match) | ? | ? |
 
-The [overtime contract](https://docs.football-data.org/general/v4/overtime.html)
-distinguishes regularTime, additional extraTime and penalties. Principal goals
-use regulation plus extra-time goals; shootout-inclusive fullTime is not ordinary
-goals. The [competition filters](https://docs.football-data.org/general/v4/competition.html)
-define season selection. Key/account permission errors remain explicit.
+The ESPN match summary exceeds the device's 256 KiB body limit for ordinary
+requests (bounds in [DATA_FLOW.md](DATA_FLOW.md)).
 
-## Polling and request bounds
+### 5.2 Quality per competition (verified samples)
 
-| Situation | Delay after a completed refresh |
-|---|---|
-| Outside relevant windows | 6 hours, shortened to the next known window start |
-| Before kickoff / between same-round fixtures | 5 minutes |
-| Active fixture | 60 seconds |
-| Confirmed post-match window | 5 minutes |
-| Ordinary error | 60 seconds |
-| HTTP 429 / exhausted budget / timeout | 5 minutes |
+**OpenLigaDB, finished matches of the 2026/27 season:**
 
-Individual requests additionally respect conservative minimum spacing:
-OpenLigaDB 5 seconds, ESPN 30 seconds; API-Football/football-data 6 seconds.
-Spacing is shared by all requests of one provider, including selections and
-multiple competitions, and is measured between request starts. These values
-are compile-time defaults, not currently saved/editable settings. A
-multi-request refresh therefore takes time beyond the configured delay.
-These are local policy values, not provider service-level guarantees.
+| Competition | Finished | Goal lists complete | Goals with minute | Goals with scorer |
+|---|---|---|---|---|
+| Bundesliga | 45 | 45/45 | 172/172 | 172/172 |
+| 2. Bundesliga | 63 | 63/63 | 203/204 | 203/204 |
+| 3. Liga | 80 | 80/80 | 221/272 | 178/272 |
+| DFB-Pokal | 32 | 32/32 | 148/177 | 177/177 |
+| Champions League | 18 | 18/18 | 69/69 | 69/69 |
+| Europa League | 18 | 18/18 | 47/47 | 47/47 |
+| Regionalliga Nord | 106 | 106/106 | **0/409** | **0/409** |
+| Regionalliga Nordost | 108 | 108/108 | 10/342 | 11/342 |
+| Nations League A | 32 | 32/32 | 97/97 | 96/97 |
+| World Cup 2026 | 104 | 103/104 | 307/333 | 332/333 |
 
-HTTPS verifies the configured common-root IDF CA bundle and requires a valid
-clock. No redirect
-is followed automatically. One heavy operation token serializes TLS/parsing
-with uploads, image validation/deletion and OTA. A routine LVGL JPEG redraw can
-still overlap TLS inside its fixed pool; that overlap needs device measurement.
+How fast scores are entered during a live match was not measured; it depends
+on the community and differs by competition.
 
-The client checks a 30-second monotonic request deadline across asynchronous
-DNS, incremental TLS connection/handshake, headers, framing and reads; socket
-wait slices are at most one second. One fixed token-protected DNS job runs in
-the existing lwIP thread. Numeric IPv4 connection retains the original hostname
-for certificate verification and SNI. No other task closes a live TLS handle.
-SDK scheduling and cryptographic step duration still require measurement;
-this is not a measured hard real-time bound. Generation/epoch checks prevent
-obsolete publication.
+**ESPN scoreboard, event types seen** (finished matches on the sample day):
 
-The deadline is not a rate limit and was not sized for large bodies; it
-bounds stalled or trickling transfers and how long TLS memory and the heavy
-operation token are held.
+| Competition | Sample | Event types |
+|---|---|---|
+| Bundesliga | 2026-09-19, 5 matches | goal (incl. header, volley), penalty, yellow |
+| DFB-Pokal | 2026-08-22 and 23, 22 matches | goal, own goal, penalty (incl. shootout), yellow, red |
+| DFL Supercup | 2026, 1 match | goal, yellow, red |
+| Relegation Bundesliga / 2. Bundesliga | May 2026, 2 matches | goals and cards (2nd leg after extra time) |
+| UEFA Super Cup | 2026, 1 match | goal, yellow |
+| Champions / Europa / Conference League | no finished match on the sampled days | not sampled |
+| Nations League | 10 matches | goal (header, volley), own goal, penalty, yellow, red |
+| World Cup | final 2026 | goal, yellow, red |
+| World Cup qualifying | 4 matches | goal (header, volley), penalty, yellow, red |
+| European Championship | final 2024 | goal, yellow |
+| EURO qualifying | 3 matches | goal, penalty, yellow, red |
+| Friendlies | 10 matches | goal (header, free kick), penalty, yellow, red |
 
-Ordinary bodies, including all OpenLigaDB match requests, are limited to
-256 KiB; selection lists and OpenLigaDB season discovery to 1 MiB.
-Headers are 8 KiB, additional wire/framing allowance 32 KiB, JSON nesting 16,
-and live parser allocations 24 KiB including the custom allocation headers
-(libc allocator overhead is additional). Elements are mapped and released one
-at a time. All discarded fields still count toward byte/depth validation.
-Malformed, excessive or incomplete responses fail their competition: it keeps
-its last published data, marked stale, while other competitions publish their
-new data; a response is never published partially.
+Every sampled ESPN competition showed the same event types on the scoreboard
+(goals, penalties, own goals, yellow and red cards); none had substitutions.
+For ESPN the competition therefore makes no difference; for OpenLigaDB the
+quality table above does.
 
-## Combining providers
+## 6. OpenLigaDB
 
-Each route may have one alternate provider. Up to eight explicit fixture
-pairs bind primary and secondary IDs to a configured competition/season/club.
-Enabling a pair certifies that identity and home/away order were verified.
-Names/search suggestions do not certify it.
+### 6.1 General
 
-Confirmed primary fields win. A matched fallback fills missing/estimated
-status, minute, kickoff and scores, plus richer events. Scored goals (goal,
-own goal, penalty goal) of the alternate match are dropped when the primary
-match has a scored goal; its missed penalties are dropped when the primary
-match has a missed penalty of its own. A missed penalty alone therefore does
-not suppress the alternate goals. Swapped home/away order also
-swaps every supplied score pair. Fields retain the supplying provider.
-A primary-route failure can use the whole alternate route with its own IDs
-and a fallback notice; there is no automatic cross-source identity claim.
+- Open community database, no registration, no key, no quota. Data licence
+  ODbL 1.0. Description: `https://api.openligadb.de/swagger/v1/swagger.json`.
+- Published limit: **60 requests per minute per IP**. The provider asks to
+  fetch sparingly and to poll `getlastchangedate` before fetching full data.
+- Data is entered by volunteers; completeness differs a lot by competition
+  (5.2). No minute, no live status, no cards, no substitutions, no whistles.
+- Seasons are named by the starting year (2026 = 2026/27).
+- Some league shortcuts contain spaces or umlauts and must be URL-encoded.
+- The league list also contains other sports (ice hockey) and test entries.
 
-## Verification still required
+### 6.2 Endpoints
 
-Recorded fixtures must cover missing/null/real-zero values, all score phases,
-duplicate/corrected/removed events, own goals, substitutions, source conflicts,
-capacity overflow, UTF-8 and season rollover. Network checks cover trickled
-headers/body, framing, TLS/DNS failure, 429, cancellation, budgets across reset/
-clock changes and configuration while a request runs. Real keys and maximum
-configured data are required for coverage and resource acceptance. None of
-these suites was run for this candidate.
+All `GET` without headers. Example values: `bl1`, season `2026`, round `7`,
+team `134` (Werder Bremen), league id from the match data.
+
+| Endpoint | Returns | Example | Size |
+|---|---|---|---|
+| `/getavailableleagues` | all leagues of all seasons | `/getavailableleagues` | 123,425 B |
+| `/getavailableleagues/{season}` | leagues of one season | `/getavailableleagues/2025` | 7,874 B |
+| `/getavailablesports` | sports | `/getavailablesports` | 504 B |
+| `/getavailablegroups/{league}/{season}` | all rounds of the season | `/getavailablegroups/bl1/2026` | 2,125 B |
+| `/getcurrentgroup/{league}` | current round | `/getcurrentgroup/bl1` | 60 B |
+| `/getavailableteams/{league}/{season}` | teams with short name and crest URL | `/getavailableteams/bl1/2026` | 3,033 B |
+| `/getmatchdata/{matchId}` | one match | `/getmatchdata/77186` | 1,583 B |
+| `/getmatchdata/{league}/{season}/{round}` | one round | `/getmatchdata/bl1/2026/7` | 17,947 B |
+| `/getmatchdata/{league}/{season}` | whole season | `/getmatchdata/bl1/2026` | 299,650 B (bl3: 426,737 B; about twice as large in May) |
+| `/getmatchdata/{league}/{season}/{teamFilter}` | season matches of a team (name filter) | `/getmatchdata/bl1/2026/Werder` | not measured |
+| `/getmatchdata/{teamId1}/{teamId2}` | all matches between two teams | `/getmatchdata/134/40` | not measured |
+| `/getmatchdata/{league}` | current round, no season; works, but is **not** in the API description | `/getmatchdata/bl1` | 17,947 B |
+| `/getlastchangedate/{league}/{season}/{round}` | last change of a round | `/getlastchangedate/bl1/2026/7` | 25 B |
+| `/getnextmatchbyleagueteam/{leagueId}/{teamId}` | next match of a team | `/getnextmatchbyleagueteam/4741/134` | 829 B |
+| `/getlastmatchbyleagueteam/{leagueId}/{teamId}` | last match of a team | `/getlastmatchbyleagueteam/4741/134` | 2,093 B |
+| `/getnextmatchbyleagueshortcut/{league}` | next match of the league | `/getnextmatchbyleagueshortcut/bl1` | not measured |
+| `/getlastmatchbyleagueshortcut/{league}` | last match of the league | `/getlastmatchbyleagueshortcut/bl1` | not measured |
+| `/getmatchesbyteamid/{teamId}/{weeksPast}/{weeksFuture}` | a team's matches in all competitions | `/getmatchesbyteamid/134/1/1` | 2,925 B |
+| `/getmatchesbyteam/{teamFilter}/{weeksPast}/{weeksFuture}` | same, by name filter | `/getmatchesbyteam/Werder/1/1` | not measured |
+| `/getbltable/{league}/{season}` | league table | `/getbltable/bl1/2026` | 4,382 B |
+| `/getgrouptable/{league}/{season}` | group tables (tournaments) | `/getgrouptable/wm26/2026` | not measured |
+| `/getgoalgetters/{league}/{season}` | scorer list | `/getgoalgetters/bl1/2026` | 7,346 B |
+| `/getresultinfos/{leagueId}` | result types used by a league | `/getresultinfos/4741` | not measured |
+| `/getresulttypes` | result kinds (half-time, end result …) | `/getresulttypes` | not measured |
+
+Further measured sizes: `rel` season 2025 (whole season, 2 matches) 3,321 B;
+`DFBNAT2526` season 2025 (2 matches) 4,198 B.
+
+The league id (e.g. 4741) is not the shortcut; it is the `leagueId` of the
+match data.
+
+Match fields: `matchID`, `matchDateTimeUTC`, `leagueId`, `leagueShortcut`,
+`leagueSeason`, `group` (`groupName`, `groupOrderID`), `team1`/`team2`
+(`teamId`, `teamName`, `shortName`, `teamIconUrl`), `matchIsFinished`,
+`lastUpdateDateTime` (without a time zone in some responses), `matchResults`
+(one entry per result kind), `goals` (`goalID`, `matchMinute`,
+`goalGetterName`, `scoreTeam1/2`, `isPenalty`, `isOwnGoal`, `isOvertime`),
+`location`, `numberOfViewers`.
+
+### 6.3 Result kinds and known data errors
+
+- Results carry a semantic
+  [`resultTypeKind`](https://github.com/OpenLigaDB/OpenLigaDB-Samples/discussions/136)
+  (half-time, after 90 minutes, after extra time, after penalties). Numeric
+  result ids differ per league and are not a contract.
+- Public DFB-Pokal 2024 responses: the result after penalties is the combined
+  total (earlier goals plus the shootout).
+- Older seasons have inconsistent regulation fields.
+- **Relegation of season 2025 (May 2026), 2nd leg** (Paderborn – Wolfsburg, 2:1 after extra time
+  at ESPN): OpenLigaDB holds only "after 90 minutes 2:1"; the result after
+  extra time is missing, and the 100th-minute goal is marked
+  `isOvertime: false`. Extra-time results of OpenLigaDB are therefore not
+  reliable. Goal minutes differ by one minute from ESPN (39' vs 38').
+
+## 7. ESPN site API
+
+### 7.1 General
+
+- Unofficial interface used by espn.com; no key, no published limit, no
+  stability contract. It can change or block at any time.
+- `abbreviation` is not reliable (e.g. "MUN" for Bayern München);
+  `shortDisplayName` is usable ("Leverkusen", "Hamburg"), but partly English
+  ("Cologne").
+- No round number or round label on the scoreboard; the season calendar of
+  the scoreboard lists dates only.
+- A substitution detail names both players without saying who comes on.
+- Extra time is visible only as the status (`STATUS_FINAL_AET`); there are no
+  separate regulation or extra-time scores on the scoreboard. The shootout
+  tally is separate (`shootoutScore`; 2022 World Cup final: 3:3, shootout
+  4:2).
+
+### 7.2 Scoreboard date forms
+
+| `dates=` | Result | Example (ger.1) |
+|---|---|---|
+| none | today (provider time zone) | 14,410 B on a day without a match |
+| `YYYYMMDD` | one day | 2–127 KB (67,169 B for 6 Bundesliga matches, 126,690 B for 11 cup matches) |
+| `YYYYMM` | one month | 202610: 34 matches, 346,375 B |
+| `YYYY` | the first 100 matches of the year | 2026: 1,047,452 B |
+| `YYYYMMDD-YYYYMMDD` | HTTP 400 | day ranges do not work |
+
+### 7.3 Endpoints
+
+All `GET` without headers. `{slug}` from section 4, e.g. `ger.1`.
+
+| Endpoint | Returns | Example | Size |
+|---|---|---|---|
+| `site.api…/apis/site/v2/leagues/dropdown?sport=soccer&limit=1000` | all competitions with slugs | `https://site.api.espn.com/apis/site/v2/leagues/dropdown?sport=soccer&limit=1000` | 577,429 B |
+| `site.api…/apis/site/v2/sports/soccer/{slug}/scoreboard[?dates=…]` | matches with score, status, minute, goals and cards (`details`); league calendar | `…/soccer/ger.1/scoreboard?dates=20261017` | see 7.2 |
+| `site.api…/v2/sports/soccer/{slug}/summary?event={id}` | one match: key events (incl. substitutions and whistles), lineups, commentary, statistics, odds, news | `…/soccer/ger.1/summary?event=401884788` | 179,575–398,053 B |
+| `site.api…/v2/sports/soccer/{slug}/teams` | teams with short names and logos | `…/soccer/ger.1/teams` | 22,041 B |
+| `site.api…/v2/sports/soccer/{slug}/teams/{id}` | one team | `…/soccer/ger.1/teams/137` | 20,250 B |
+| `site.api…/v2/sports/soccer/{slug}/teams/{id}/schedule` | the team's results | `…/teams/137/schedule` | 46,005 B |
+| `site.api…/v2/sports/soccer/{slug}/teams/{id}/schedule?fixture=true` | the team's upcoming matches | `…/teams/137/schedule?fixture=true` | 237,915 B (29 matches) |
+| `site.api…/v2/sports/soccer/{slug}/teams/{id}/roster` | squad | `…/teams/137/roster` | 220,499 B |
+| `site.api…/v2/sports/soccer/{slug}/news` | news | `…/soccer/ger.1/news` | 20,996 B |
+| `site.web.api…/apis/v2/sports/soccer/{slug}/standings` | table (`?season=` optional) | `https://site.web.api.espn.com/apis/v2/sports/soccer/ger.1/standings` | 64,095 B |
+| `sports.core.api…/v2/sports/soccer/leagues/{slug}/events?dates=A-B` | list of match links in a date range | `https://sports.core.api.espn.com/v2/sports/soccer/leagues/ger.1/events?dates=20261001-20261031&limit=100` | 3,771 B (`$ref` link list) |
+| `sports.core.api…/…/events/{id}/competitions/{id}/status` | status, clock and added time of one match | `…/events/401884788/competitions/401884788/status` | 343 B |
+
+`site.api…/v2/sports/soccer/{slug}/standings` returns an empty object; tables
+come only from `site.web.api`. The core API returns links that need one
+further request per match; it was only probed.
+
+Event types: scoreboard `details` contain goal (incl. header, volley, free
+kick), penalty scored, own goal, yellow card and red card. The summary
+`keyEvents` additionally contain kickoff, half-time, start of the 2nd half,
+end of regular time, substitution (both players, with reason) and start/end
+of a delay, each with match clock and wall-clock time.
+
+Response details: nested standings entries with integral floating-point
+statistics; score strings on scoreboards and score objects on schedules;
+dates without seconds.
+
+## 8. API-Football (API-Sports)
+
+Supported, not refined now (section 1).
+
+- Commercial API, account and key needed (`x-apisports-key`). The
+  documentation (`https://www.api-football.com/documentation-v3`) is behind a
+  browser check and could not be read on the check date; everything marked
+  "doc" comes from earlier checks or secondary sources and is **not
+  verified**.
+- Free plan: **100 requests per day**, reset 00:00 UTC. Quota headers
+  `x-ratelimit-requests-limit`, `x-ratelimit-requests-remaining`; per minute
+  `x-ratelimit-limit`, `x-ratelimit-remaining`. Per-minute limit of the free
+  plan not verified (secondary source: 10).
+- Without a key: HTTP 403 with
+  `{"errors":{"token":"Missing application key, …"}}` (verified).
+- Coverage per league (events, lineups, standings) is reported in the
+  `coverage` object of `/leagues`.
+- Round: only a text label (`league.round`, e.g. "Regular Season - 7", doc),
+  no round number. Teams in match data have no short name.
+
+Endpoints (doc, not verified), all `GET` with the key header:
+
+| Endpoint | Returns | Example |
+|---|---|---|
+| `/status` | account, plan, quota used today | `/status` |
+| `/leagues` | leagues and cups with seasons and coverage | `/leagues?country=Germany`, `/leagues?id=78&current=true` |
+| `/teams` | teams (with a 3-letter `code`) | `/teams?league=78&season=2026` |
+| `/standings` | tables | `/standings?league=78&season=2026` |
+| `/fixtures/rounds` | rounds of a season | `/fixtures/rounds?league=78&season=2026` |
+| `/fixtures` | matches by league, team, date range, id, or all live | `/fixtures?league=78&season=2026&from=2026-10-13&to=2026-10-20`, `/fixtures?team=162&next=5`, `/fixtures?live=all`, `/fixtures?id=…` |
+| `/fixtures/events` | goals, cards, substitutions, VAR of a match | `/fixtures/events?fixture=…` |
+| `/fixtures/lineups`, `/fixtures/statistics`, `/fixtures/players`, `/fixtures/headtohead` | further match data | – |
+| `/timezone`, `/countries`, `/leagues/seasons`, `/teams/statistics`, `/teams/seasons`, `/teams/countries`, `/venues`, `/injuries`, `/predictions`, `/coachs`, `/players`, `/players/squads`, `/players/topscorers`, `/transfers`, `/trophies`, `/sidelined`, `/odds` | further data, not needed | – |
+
+The ids in the examples (league 78, team 162) come from secondary sources;
+the firmware takes ids from `/leagues` and `/teams` at setup.
+
+## 9. football-data.org v4
+
+Supported, not refined now (section 1).
+
+- Commercial API by one maintainer; key in `X-Auth-Token`. Without a key
+  only `/areas` and `/competitions` work (other resources: HTTP 403,
+  verified). Anonymous limit: documentation 100 per 24 h, header on the check
+  date **50** (`X-Requests-Available: 49` after the first request,
+  `X-RequestCounter-Reset: 86400`).
+- Free plan (pricing page, verified): 12 competitions, **scores and
+  schedules delayed**, league tables, **10 requests per minute**. Relevant
+  free competitions: Bundesliga, Champions League, World Cup, European
+  Championship.
+- Goal scorers, cards and substitutions need at least "Free + Deep Data"
+  (29 €/month). Coverage tiers: 49 €/month = 2. Bundesliga, DFB-Pokal, Europa
+  League; 99 €/month = 3. Liga; 199 €/month = Regionalliga, Conference
+  League, Nations League, super cups, friendlies. The tier per competition is
+  the `plan` field of `/competitions` (verified).
+- Response headers: `X-Requests-Available` (documented as
+  `X-RequestsAvailable`), `X-RequestCounter-Reset`, `X-Authenticated-Client`.
+- Clients that poll too often are banned (documentation).
+- Date ranges exclude `dateTo`. Match lists hide goals, bookings,
+  substitutions and lineups unless `X-Unfold-Goals`, `X-Unfold-Bookings`,
+  `X-Unfold-Subs`, `X-Unfold-Lineups: true` are sent.
+- Match statuses: SCHEDULED, TIMED, IN_PLAY, PAUSED, EXTRA_TIME,
+  PENALTY_SHOOTOUT, FINISHED, SUSPENDED, POSTPONED, CANCELLED, AWARDED; the
+  match page describes nine of them (SUSPENDED and AWARDED are not
+  described).
+- [Overtime contract](https://docs.football-data.org/general/v4/overtime.html):
+  `regularTime`, additional `extraTime` goals and `penalties` are separate;
+  `fullTime` includes the shootout goals.
+- Round: `matchday` (number) and `stage` (text, e.g. `REGULAR_SEASON`, doc).
+
+Endpoints, all `GET` with the key header:
+
+| Endpoint | Returns | Example |
+|---|---|---|
+| `/areas`, `/areas/{id}` | countries and continents | `/v4/areas/{areaId}` |
+| `/competitions` | competitions with plan and current season (works without key) | `/v4/competitions` (73,804 B) |
+| `/competitions/{code}` | one competition | `/v4/competitions/BL1` |
+| `/competitions/{code}/standings` | table (`?season=`, `?matchday=`) | `/v4/competitions/BL1/standings` |
+| `/competitions/{code}/matches` | matches (`dateFrom`, `dateTo`, `matchday`, `status`, `stage`, `season`) | `/v4/competitions/BL1/matches?dateFrom=2026-10-13&dateTo=2026-10-20` |
+| `/competitions/{code}/teams` | teams with `shortName`, `tla`, crest | `/v4/competitions/BL1/teams` |
+| `/competitions/{code}/scorers` | top scorers | `/v4/competitions/BL1/scorers` |
+| `/matches` | matches of all permitted competitions (`date`, `dateFrom`, `dateTo`, `competitions`, `ids`, `status`) | `/v4/matches?date=TODAY` |
+| `/matches/{id}`, `/matches/{id}/head2head` | one match, earlier meetings | `/v4/matches/{matchId}` |
+| `/teams/{id}`, `/teams/{id}/matches` | a team; its matches in all competitions | `/v4/teams/{teamId}/matches?dateFrom=2026-10-13&dateTo=2026-10-20` |
+| `/persons/{id}`, `/persons/{id}/matches`, `/trends/` | players, form data (paid add-on) | – |
+
+Competition ids (e.g. BL1 = 2002) are verified from `/competitions`.
+
+## 10. Open checks
+
+**OpenLigaDB**
+- How quickly scores and goals are entered during live matches, per
+  competition (only finished matches were checked).
+- Whether `getlastchangedate` changes reliably on every score change.
+- Data of `nofvon`/`nofvos`, of EURO and World Cup qualifying entries, and
+  whether a 2. Bundesliga / 3. Liga relegation entry appears.
+- League identifiers for the next season.
+
+**ESPN**
+- Whether ESPN limits or blocks request rates.
+- Scoreboard event types on Champions, Europa and Conference League days.
+- Whether the scoreboard ever contains substitutions.
+- A smaller source for substitutions and whistles than the match summary
+  (for example the core API per-match resources).
+- Stability of the date forms in 7.2.
+- Round information: whether any ESPN endpoint supplies the matchday number.
+
+**API-Football** (needs a key): per-minute limit, current-season coverage of
+the free plan, league ids and `coverage`, events in `fixtures?id=` and
+`fixtures?live=all`, event fields, response sizes.
+
+**football-data.org** (needs a key): delay of the free plan, `minute` and
+`injuryTime` in the free plan, response sizes, the anonymous daily limit,
+`shortName` and `tla` in real responses, the real `stage` values.

@@ -9,11 +9,11 @@ and pending device acceptance are recorded separately below.
 
 | Page | Content |
 |---|---|
-| Overview | Current screen/reason, own match or kickoff, global data age, source/match count/error per competition, warnings and refresh/next/IP actions |
+| Overview | Current screen/reason, own match or kickoff, global data age, next provider round and its reason, source/match count/error per competition, warnings and refresh/next/IP actions |
 | Competitions | Ordered active/paused entries, add/edit wizard, provider competition/club lists, fallback explanation, move/remove, saved-competition fixture picker |
 | Display | Situation defaults, four screen styles, background/image references, ordered slideshow (the crest is one possible slide), brightness/night/rotation, badges and expert scroll controls |
 | Images | Revisioned thumbnails, usage, quota, upload/replace editor, confirmed real deletion, and the crest and standard background (replace, copy from the library, restore the factory image) |
-| Settings | WiFi scan and credentials, hostname/antenna, provider keys/opt-in/budget, time/language/access and expert diagnostics |
+| Settings | WiFi scan and credentials, hostname/antenna, provider keys/opt-in and request limits (daily cap, minimum spacing) per provider, time/language/access and expert diagnostics |
 | System | Firmware/update, backup/import, restart, separate image-storage repair, delete user images, factory reset and live diagnostics |
 
 The page starts with session discovery. Without an admin password it obtains
@@ -26,8 +26,8 @@ Short notices appear at a fixed position near the bottom of the window, in the
 browser's top layer so they stay visible above open dialogs; browsers without
 that layer show them as an ordinary fixed element.
 System diagnostics label provider request attempts as "since restart". The
-API-Football daily budget is a separate setting; the boot counter is not
-displayed as daily consumption or as a fraction of that budget.
+daily caps are separate settings; the boot counter is not displayed as daily
+consumption or as a fraction of a cap.
 
 The overview shows the current screen as a schematic SVG disc that follows the
 display renderer: the same text roles and font steps for the display size and
@@ -112,10 +112,24 @@ API-Football also stores no season for a picked competition, so the device
 follows its current season automatically; the season shown in the list is only
 passed to the club list request. An expert season override is stored as typed.
 Provider keys and ESPN opt-in must be saved before their provider can be used.
+Each provider card on the settings page also holds that provider's two request
+limits: the maximum requests per day (0 = no daily cap) and the minimum
+interval between requests in seconds. The change list and error messages name
+the provider of a limit.
 When the device runs on initial values because its stored settings were
 invalid, damaged, unreadable or not storable, the overview shows a warning;
 for an invalid or damaged record the first save asks before it overwrites
-the stored settings.
+the stored settings. When the shared match list could not hold every match,
+the overview says that not all matches were loaded and that the matches
+nearest in time are shown. While the device is not connected to the home
+network the overview shows "Kein WLAN" with the reason the display card
+shows (network not found, wrong password, setup network on, connecting).
+Below the data age the overview shows when the next provider round is due
+("in 45 s" up to two minutes ahead, otherwise the browser's clock time) and
+why: match live, before kickoff, after the final whistle, no match window
+open, match window opens, requests spread over the daily limit, daily limit
+reached, retry after an error, waiting for WiFi and time, update test
+running.
 The device refuses a save in which an active competition (primary source or
 active fallback) uses a provider without its key or opt-in, including a save
 that removes a key still in use; the page then marks that source's provider.
@@ -153,8 +167,8 @@ the switch that pins the own match in the conference: when it is on, the own
 match stands in the first row of every conference page; when it is off, it
 takes its normal place in the order. Display, provider-budget and diagnostics settings whose
 meaning is not obvious have a help text, including the device-specific
-conditions (for example the API-Football daily budget and its reset at 00:00
-UTC, or the scroll reset that only applies to devices with exactly two
+conditions (for example a provider's daily cap, 0 for no cap, and its reset
+at 00:00 UTC, or the scroll reset that only applies to devices with exactly two
 buttons).
 
 The display page only selects images; it has no upload. Each of the first
@@ -233,7 +247,9 @@ Export optionally includes secrets with an explicit notice. Import checks size,
 JSON shape, types and the same validation rules before confirmation (an old
 matchday default of Own match is converted to Conference first; the crest
 choice of an older backup is dropped, and the result message says so,
-because the crest is an image role now and images are not in the backup); successful
+because the crest is an image role now and images are not in the backup; the
+API-Football daily budget of an older backup becomes API-Football's daily cap,
+and the result message says so as well); successful
 import refreshes the settings and session state instead of rewriting an old
 draft. Restart and factory reset are separate confirmed actions. Factory reset
 requires the device name and explains how to reconnect to setup afterwards.
@@ -267,4 +283,4 @@ acceptance. On a display without adjustable backlight (C6 with GC9A01) the
 night mode turns the background almost black, shows images at 20 % opacity
 and dims all colours according to the night brightness; the day brightness is
 stored but only takes effect with an adjustable backlight. See UI.md and
-NETWORK.md for the display and server contracts.
+NETWORK.md and API.md for the display and server contracts.

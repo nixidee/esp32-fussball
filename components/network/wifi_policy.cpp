@@ -15,9 +15,29 @@ const char* stateName(State s) {
   }
   return "unknown";
 }
+Reason offlineReason(State s) {
+  switch (s) {
+    case State::kConnected: return Reason::kNone;
+    case State::kWaitSsid: return Reason::kNotFound;
+    case State::kBackoffAuth: return Reason::kPassword;
+    case State::kApOnly: return Reason::kSetup;
+    default: return Reason::kConnecting;
+  }
+}
+const char* reasonName(Reason r) {
+  switch (r) {
+    case Reason::kNone: return "";
+    case Reason::kConnecting: return "connecting";
+    case Reason::kNotFound: return "not_found";
+    case Reason::kPassword: return "password";
+    case Reason::kSetup: return "setup_ap";
+  }
+  return "";
+}
 void WifiPolicy::start(bool credentials, int64_t now) {
   state_ = credentials ? State::kIdle : State::kApOnly;
   ap_ = !credentials;
+  held_ = false;
   retries_ = 0;
   due_ = since_ = failed_since_ = now;
 }
@@ -30,6 +50,7 @@ void WifiPolicy::scanDone(bool success, bool found, int64_t now) {
 void WifiPolicy::gotIp(int64_t now) {
   state_ = State::kConnected;
   ap_ = false;
+  held_ = false;
   retries_ = 0;
   failed_since_ = now;
 }
@@ -71,9 +92,20 @@ Command WifiPolicy::poll(int64_t now, bool client, uint32_t jitter) {
     lost(false, false, now);
     return Command::kDisconnect;
   }
+  // A phone on the setup AP postpones attempts, because a scan moves the
+  // radio away from the AP channel, but for at most kWifiApClientHoldMs;
+  // then the plan continues until the AP has no client again.
   if (client && ap_) {
-    due_ = now + cfg::kWifiMissingScanMs;
-    return Command::kNone;
+    if (!held_) {
+      held_ = true;
+      held_since_ = now;
+    }
+    if (now - held_since_ < cfg::kWifiApClientHoldMs) {
+      due_ = now + cfg::kWifiMissingScanMs;
+      return Command::kNone;
+    }
+  } else {
+    held_ = false;
   }
   if (now < due_) return Command::kNone;
   if (state_ == State::kConnecting) {

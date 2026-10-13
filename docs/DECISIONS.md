@@ -192,7 +192,7 @@ validation and temporary image replacement space have resource costs that
 must be measured. The design must pass power-loss, reset, failed trial and
 older-firmware boot tests. No concrete buffer/quota/deadline values are
 selected here. Product contracts are detailed in [CONFIGURATION.md](CONFIGURATION.md),
-[NETWORK.md](NETWORK.md) and [WEB_UI.md](WEB_UI.md).
+[NETWORK.md](NETWORK.md), [API.md](API.md) and [WEB_UI.md](WEB_UI.md).
 
 **Refinement:** ADR-016 selects a dedicated versioned OTA descriptor and the
 image replacement direction.
@@ -643,7 +643,10 @@ was requested.
   Disable unused C6 SDK IPv6/enterprise/IRAM speed options to reduce memory;
   throughput/RF acceptance is pending. Retain all public planned C6 features.
 - Pin ArduinoJson 7.4.3 and mDNS 1.14.0 after primary registry checks on
-  2026-10-10. Keep the previously accepted platform/IDF/LVGL/port/LittleFS
+  2026-10-10. The host test environment uses the same ArduinoJson version
+  (PlatformIO registry checked 2026-10-13) so the provider mappers, declared
+  in their own header without ESP-IDF types, are tested with recorded
+  responses; the firmware is unaffected. Keep the previously accepted platform/IDF/LVGL/port/LittleFS
   pins. Pillow 12.3.0 is a host asset-generation tool, not device code.
 - Bound browser debug to one client, one 256-byte in-flight record, once per
   second, with a static 4 KB producer stack and explicit drop/disconnect.
@@ -861,6 +864,24 @@ the heavy-operation token are held; it is not a rate limit. Station modem
 sleep, previously the unchosen ESP-IDF default, is now off on every profile.
 Flash +838 B, static RAM unchanged. Device transfer times are not yet measured.
 
+### OpenLigaDB season once a day, change date per round, one-hour maximum age · 2026-10-13
+
+Other clubs' catch-up fixtures outside the current round are wanted in the
+Konferenz. OpenLigaDB has no date-range request (API description checked
+2026-10-13), so the primary source streams the whole season once per
+competition and UTC day (572,116 B for the Bundesliga on 2026-10-13, 1 MiB
+body class) instead of that cycle's round and club requests. OpenLigaDB
+routes now keep other clubs' fixtures outside the round within 36 hours, as
+the other providers already did. A failed
+stream drops only those fixtures and is retried in the next cycle. Reused
+data is refreshed after one hour at the latest (previously five minutes).
+Another round with a retained fixture inside its match window gets its own
+change-date check, so a running catch-up fixture is not frozen while the
+current round is unchanged. Rejected: one request per other club (many
+requests) and fetching every other round in every cycle (more requests).
+C6 flash +1,758 B, static RAM +320 B (round marks). Transfer time of the
+season stream on the device is not measured.
+
 ## ADR-026 — Settings format 4: Konferenz pin switch, matchday without own match · Accepted 2026-10-12 · record extended by ADR-027
 
 **Context:** the owner wants the own match pinned in the Konferenz to be
@@ -1026,3 +1047,50 @@ competition), embedded page −282 B gzip. Provider task stack peak estimated (u
 +250 B on the resolving path (URL buffers); the measured minimum is part of
 the provider stack acceptance on the device. Season rollover itself is not yet
 observed with real provider data.
+
+## ADR-030 — Request limits per provider, settings format 7 · Accepted 2026-10-13
+
+**Context:** the owner decided that every provider has its own limits, with
+defaults taken from the provider's documentation, described and editable by
+the user, and that each limit counts only for its own provider. Before, only
+API-Football had a stored daily budget; the other providers ran through the
+same single counter record with a fixed safety ceiling and wrote to NVS every
+eight requests, an unreadable record stopped every provider, and the minimum
+request spacing was a compile-time value.
+
+**Decision:**
+- Two settings per provider, in provider order (OpenLigaDB, API-Football,
+  ESPN, football-data.org): the daily cap (`daily_requests`, 0–65535,
+  default 0 / 100 / 0 / 0) and the minimum spacing between request starts
+  (`request_spacing_s`, 1–3600 s, default 5 / 6 / 30 / 6). A cap of 0 means
+  no daily cap: no counter and no NVS write for that provider.
+- Settings format 7 stores both lists (8 bytes each) at the end of the record
+  and removes the budget value from the scalars. Formats 2 to 6 read their
+  stored budget as API-Football's cap; every other limit keeps its default.
+- One 12-byte NVS record per capped provider (namespace `provider_budget`,
+  one key per provider) with the same reservation scheme as before (blocks of
+  up to eight requests, lost on reboot, a backward clock never reopens a
+  day). The single record of earlier firmware is read once for API-Football
+  and removed when that provider's first new record is stored.
+- A damaged or unreadable record blocks only its provider for the current
+  UTC day; the next day writes a new record. The settings reset in the Web UI
+  erases every record.
+- Every capped provider spreads its remaining requests over the rest of the
+  match coverage; the slowest provider sets the poll interval.
+- A shorter JSON list in a REST save or import replaces only its first
+  entries. The Web UI converts the budget of an older backup into
+  API-Football's cap.
+
+**Alternatives:** keep one record for all providers (one damaged record
+stops every provider, more NVS writes); keep the spacing at compile time (no
+user correction when a provider changes its limits); separate JSON keys per
+provider (more schema and validation code than one list per limit).
+
+**Cost and boundary:** model 1968 B (+16 B), longest record 1955 B (+14 B),
+JSON +37 B with the defaults. C6 build: flash +2,140 B (1,581,800 B,
+86.2 %), static RAM +96 B, embedded page +686 B gzip (56,782 B). The limits
+are local: they cannot account for other devices sharing an account or IP
+address. API-Football's per-minute limit could not be checked on 2026-10-13.
+Host tests cover the format-7 layout, the older-format reads, the counter
+rules and the Web UI fields; the NVS behaviour on the device is not yet
+checked.

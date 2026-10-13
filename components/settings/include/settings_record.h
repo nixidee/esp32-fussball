@@ -10,16 +10,19 @@
 //   debug_status_interval_s u16
 //   time_zone      u8 length + 32 bytes     ntp_server     u8 length + 63 bytes
 // Unused bytes after a text are written as zero and ignored when read.
-// Format 6 continues with the secrets, the screen styles, the scalar values
+// Format 7 continues with the secrets, the screen styles, the scalar values
 // and then three lists, each a u8 count followed by that many entries (so the
 // record length varies): slides (u8 each), competitions and fixture pairs
 // (settings_record.cpp shows the entry layouts); then pin_own_match (u8 0/1,
 // since format 4), conference_mode (u8), whole_matchday (u8 0/1) and
 // input_roles (one u8 per input slot, hw::kMaxInputs slots; all three since
-// format 5).
-// Format 5 (a crest image u8 before the lists), format 4 (also without the
-// format-5 fields), format 3 (also without the pin flag), format 2 (lists as
-// fixed slots) and format 1 (core only) are converted when read.
+// format 5), then daily_requests and request_spacing_s (one u16 per provider
+// each, format 7).
+// Format 6 (API-Football's daily cap as the last scalar u16, no request
+// limits at the end), format 5 (also a crest image u8 before the lists),
+// format 4 (also without the format-5 fields), format 3 (also without the
+// pin flag), format 2 (lists as fixed slots) and format 1 (core only) are
+// converted when read.
 
 #pragma once
 
@@ -46,7 +49,7 @@ inline constexpr std::size_t kFixturePairBytes =
     3 + kTextBytes<decltype(FixturePair::primary_id)> +
     kTextBytes<decltype(FixturePair::secondary_id)>;
 inline constexpr std::size_t kScreenBytes = 16;  // 2 flags, 3 colours, 2 u8
-inline constexpr std::size_t kScalarBytes = 7 + 9 + 20;  // flags, u8, u16
+inline constexpr std::size_t kScalarBytes = 7 + 9 + 18;  // flags, u8, u16
 // Longest payload: both lists full.
 inline constexpr std::size_t kMaxPayloadBytes =
     kTextBytes<decltype(Model::wifi_ssid)> +
@@ -62,8 +65,9 @@ inline constexpr std::size_t kMaxPayloadBytes =
     (1 + decltype(Model::slides)::kCapacity) +
     (1 + decltype(Model::competitions)::kCapacity * kCompetitionBytes) +
     (1 + decltype(Model::fixture_pairs)::kCapacity * kFixturePairBytes) +
-    1 +  // format 4: Konferenz pin flag
-    2 + hw::kMaxInputs;  // format 5: mode, whole matchday, input roles
+    1 +                           // format 4: Konferenz pin flag
+    2 + hw::kMaxInputs +          // format 5: mode, whole matchday, input roles
+    2 * 2 * cfg::kProviderCount;  // format 7: daily caps, request spacings
 // Longest record encode() produces (both lists full); a model with shorter
 // lists produces a shorter record.
 inline constexpr std::size_t kMaxRecordBytes = kHeaderBytes + kMaxPayloadBytes;
@@ -102,13 +106,15 @@ void seal(std::span<uint8_t> record,
 // loads only its legacy core within the old size bound; format 2 is converted
 // to lists in RAM (empty slots disappear, filled paused ones stay); format 3
 // keeps the initial pin_own_match, formats 3 and 4 the initial
-// conference_mode, whole_matchday and input_roles. None is rewritten.
+// conference_mode, whole_matchday and input_roles, formats 1 to 6 the
+// initial request limits except API-Football's daily cap (formats 2 to 6
+// store it). None is rewritten.
 // A stored visible_matches / table_window above the display's maximum
 // ('limits') is clamped to it; values outside the general range stay invalid.
 // On any result other than kOk 'model' is unchanged; for kInvalidValue *invalid
 // (if given) names the field. On kOk *crest_image (if given) is the crest
 // image id of a format 3 to 5 record when it is a library id, else 0
-// (format 6 has no such field).
+// (formats 6 and 7 have no such field).
 DecodeResult decode(std::span<const uint8_t> record, Model& model,
                     Field* invalid = nullptr, const Limits& limits = {},
                     uint8_t* crest_image = nullptr) noexcept;

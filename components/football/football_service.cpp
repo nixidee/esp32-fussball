@@ -49,6 +49,9 @@ struct RouteFailure {
 RouteFailure route_failures[cfg::kCompetitionMax];
 uint32_t requests[cfg::kProviderCount]{}, day_requests[cfg::kProviderCount]{};
 int64_t last_request[cfg::kProviderCount]{}, day = 0, due = 0;
+// Why 'due' is when it is (mutex-protected; 'due' is written under the mutex
+// too, read without it only by the provider task).
+Cadence cadence_now = Cadence::kNone;
 uint32_t last_generation = 0, last_epoch = 0;
 // Resolved current season of an empty season setting, per source (0 primary,
 // 1 fallback); valid for kPollIdleS.
@@ -56,11 +59,23 @@ struct SeasonCache {
   char text[cfg::kSeasonMaxBytes + 1]{};
   int64_t at = 0;
 };
+// Change date of another OpenLigaDB round with a retained fixture inside its
+// match window ('round' 0 = free) and when it was last fetched (monotonic ms).
+struct RoundMark {
+  uint16_t round = 0;
+  char change[32]{};
+  int64_t at = 0;
+};
+// OpenLigaDB primary data per competition: change date and round of the last
+// full refresh, the marks of other active rounds and the UTC day ('day') of
+// the last complete season stream (0 = none).
 struct RouteCache {
   SeasonCache seasons[2];
   char change[64]{};
   int round = 0;
   int64_t full_at = 0;
+  RoundMark marks[2];
+  int64_t season_day = 0;
 };
 RouteCache caches[cfg::kCompetitionMax];
 bool baseline = true;
@@ -171,11 +186,10 @@ esp_err_t get(const char* url, const char* array, cfg::Provider p,
                 Cause::kProviderOff);
   const auto index = static_cast<unsigned>(p);
   const auto now = timekeeping::monotonicMs();
-  const unsigned daily_limit = p == cfg::Provider::kApiFootball
-                                   ? m.api_daily_budget
-                                   : cfg::kUnbudgetedDailyRequestCap;
+  // Saved per provider: the daily cap (0 = none) and the request spacing.
+  const unsigned daily_limit = m.daily_requests[index];
   const int64_t remaining =
-      cfg::kProviderMinIntervalMs[index] - (now - last_request[index]);
+      int64_t{m.request_spacing_s[index]} * 1000 - (now - last_request[index]);
   const uint32_t epoch = network::status().epoch;
   const int64_t ready_at =
       now + std::max<int64_t>(0, last_request[index] > 0 ? remaining : 0);
@@ -231,6 +245,12 @@ esp_err_t get(const char* url, const char* array, cfg::Provider p,
   }
   return err;
 }
+// The last get() stopped because settings or the network changed; the
+// whole cycle ends then.
+bool interruption(esp_err_t err) {
+  return failure_code == err && (failure_cause == Cause::kSettings ||
+                                 failure_cause == Cause::kNetwork);
+}
 template <class T>
 void tag(Value<T>& value, cfg::Provider provider) {
   if (value.source == Source::kProvider)
@@ -261,11 +281,13 @@ void tagMatch(Snapshot& data, Match& m, const settings::Source& route) {
     tagScore(event.after, event.provider);
   }
 }
-bool appendRoute(Snapshot& target, Snapshot& from,
-                 const settings::Source& route) {
+// A match that does not fit the full list sets 'matches_truncated'.
+void appendRoute(Snapshot& target, Snapshot& from,
+                 const settings::Source& route, int64_t utc) {
+  target.matches_truncated |= from.matches_truncated;
   for (unsigned i = 0; i < from.match_count; ++i) {
     tagMatch(from, from.matches[i], route);
-    if (!appendMatch(target, from, from.matches[i])) return false;
+    appendMatch(target, from, from.matches[i], utc);
   }
   if (from.table_count) {
     target.table_count = from.table_count;
@@ -280,7 +302,31 @@ bool appendRoute(Snapshot& target, Snapshot& from,
       target.table[i] = row;
     }
   }
-  return true;
+}
+// Copies 'match' of the published snapshot 'prior' into 'target' for a
+// cycle that does not request it again, estimated again at 'utc'. Cached
+// primary values must not retain yesterday's composition: fields supplied by
+// the optional provider are cleared. False when the match did not fit.
+bool carryMatch(Snapshot& target, const Snapshot& prior, Match match,
+                cfg::Provider p, int64_t utc) {
+  auto primary = [&](auto& field) {
+    if (confirmed(field.source) && field.source != providerSource(p))
+      field = {};
+  };
+  primary(match.minute);
+  primary(match.kickoff);
+  for (auto* score : {&match.principal, &match.halftime, &match.regulation,
+                      &match.extra_time, &match.shootout}) {
+    primary(score->home);
+    primary(score->away);
+  }
+  if (confirmed(match.phase_source) &&
+      match.phase_source != providerSource(p)) {
+    match.phase_source = Source::kNone;
+    match.phase = Phase::kUnknown;
+  }
+  estimate(match, utc);
+  return appendMatch(target, prior, match, utc, true);
 }
 struct Mapping {
   Snapshot* out;
@@ -425,38 +471,128 @@ esp_err_t routeFetch(settings::Source route, uint8_t index, bool table_source,
              comp_url, season_text, round);
     err = get(url, nullptr, p, model, generation, changed, timestamp);
     if (err != ESP_OK) return err;
-    if (primary && !baseline && cache.round == round &&
-        strcmp(cache.change, timestamp) == 0 &&
-        timekeeping::monotonicMs() - cache.full_at <
-            cfg::kCatchupRefreshS * 1000LL) {
-      const auto& prior = slots[published];
-      for (unsigned i = 0; i < prior.match_count; ++i) {
-        if (prior.matches[i].route != index || prior.matches[i].provider != p)
-          continue;
-        auto match = prior.matches[i];
-        // Cached primary values must not retain yesterday's composition.
-        // Clear fields whose provenance belongs to the optional provider.
-        auto primary = [&](auto& field) {
-          if (confirmed(field.source) && field.source != providerSource(p))
-            field = {};
-        };
-        primary(match.minute);
-        primary(match.kickoff);
-        for (auto* score :
-             {&match.principal, &match.halftime, &match.regulation,
-              &match.extra_time, &match.shootout}) {
-          primary(score->home);
-          primary(score->away);
-        }
-        if (confirmed(match.phase_source) &&
-            match.phase_source != providerSource(p)) {
-          match.phase_source = Source::kNone;
-          match.phase = Phase::kUnknown;
-        }
-        estimate(match, utc);
-        if (!appendMatch(target, prior, match, true))
-          return ESP_ERR_INVALID_SIZE;
+    const int64_t now_ms = timekeeping::monotonicMs();
+    const auto& prior = slots[published];
+    // Once per UTC day the primary source streams the whole season: the
+    // only OpenLigaDB request with other clubs' fixtures outside the round
+    // (catch-up fixtures for the Konferenz). It replaces this cycle's round
+    // and club requests. A failure drops only those fixtures; the cycle
+    // continues with the round and club requests and the stream is tried
+    // again in the next cycle.
+    bool season_ok = false;
+    if (primary && cache.season_day != day) {
+      snprintf(url, sizeof(url), "https://api.openligadb.de/getmatchdata/%s/%s",
+               comp_url, season_text);
+      err = get(url, "", p, model, generation, consume, &mapping, true);
+      if (err == ESP_OK) {
+        season_ok = true;
+        cache.season_day = day;
+      } else if (interruption(err)) {
+        return err;
+      } else {
+        ESP_LOGW("provider", "season stream failed (%s); round requests",
+                 reason(err));
+        target.reset();
       }
+    }
+    const bool reuse =
+        !season_ok && primary && !baseline && cache.round == round &&
+        strcmp(cache.change, timestamp) == 0 &&
+        now_ms - cache.full_at < cfg::kOpenLigaDbFullRefreshS * 1000LL;
+    if (!season_ok && !reuse) {
+      // The round request and the club's fixture request cover the current
+      // round and the club's fixtures within kFixtureHorizonDays, including
+      // its catch-up fixtures outside the round.
+      snprintf(url, sizeof(url),
+               "https://api.openligadb.de/getmatchdata/%s/%s/%d", comp_url,
+               season_text, round);
+      err = get(url, "", p, model, generation, consume, &mapping);
+      if (err == ESP_OK && own_team[0]) {
+        const unsigned weeks = (cfg::kFixtureHorizonDays + 6) / 7;
+        LeagueRows rows{&mapping, competition, atoi(season_text)};
+        snprintf(url, sizeof(url),
+                 "https://api.openligadb.de/getmatchesbyteamid/%s/%u/%u",
+                 team_url, weeks, weeks);
+        err = get(url, "", p, model, generation, consumeLeague, &rows);
+      }
+      if (err != ESP_OK) return err;
+    }
+    if (primary) {
+      // Other rounds with a retained fixture inside its match window: their
+      // own change date decides whether that round is fetched again. Each
+      // match of 'target' and of this route in 'prior' adds at most one.
+      uint16_t rounds[2 * cfg::kMatches];
+      bool fetched[2 * cfg::kMatches]{};
+      unsigned count = 0;
+      const auto note = [&](const Match& m) {
+        if (!m.round.valid() || m.round.value == round ||
+            !matchWindow(m, utc, model.window_before, model.window_after))
+          return;
+        for (unsigned i = 0; i < count; ++i)
+          if (rounds[i] == m.round.value) return;
+        rounds[count++] = m.round.value;
+      };
+      const auto ours = [&](const Match& m) {
+        return m.route == index && m.provider == p;
+      };
+      for (unsigned i = 0; i < target.match_count; ++i) note(target.matches[i]);
+      for (unsigned i = 0; i < prior.match_count; ++i)
+        if (ours(prior.matches[i])) note(prior.matches[i]);
+      for (auto& mark : cache.marks) {
+        bool active = false;
+        for (unsigned i = 0; i < count; ++i) active |= rounds[i] == mark.round;
+        if (!active) mark = {};
+      }
+      for (unsigned i = 0; i < count; ++i) {
+        char stamp[64]{};
+        snprintf(url, sizeof(url),
+                 "https://api.openligadb.de/getlastchangedate/%s/%s/%u",
+                 comp_url, season_text, static_cast<unsigned>(rounds[i]));
+        err = get(url, nullptr, p, model, generation, changed, stamp);
+        if (err != ESP_OK) return err;
+        RoundMark* mark = nullptr;
+        for (auto& m : cache.marks)
+          if (m.round == rounds[i]) mark = &m;
+        for (auto& m : cache.marks)
+          if (mark == nullptr && m.round == 0) mark = &m;
+        const bool unchanged =
+            !baseline && mark != nullptr && mark->round == rounds[i] &&
+            strcmp(mark->change, stamp) == 0 &&
+            now_ms - mark->at < cfg::kOpenLigaDbFullRefreshS * 1000LL;
+        if (!season_ok && !unchanged) {
+          snprintf(url, sizeof(url),
+                   "https://api.openligadb.de/getmatchdata/%s/%s/%u", comp_url,
+                   season_text, static_cast<unsigned>(rounds[i]));
+          err = get(url, "", p, model, generation, consume, &mapping);
+          if (err != ESP_OK) return err;
+          fetched[i] = true;
+        }
+        // Without a free mark (or with an over-long date) the round is
+        // fetched again in every cycle.
+        if ((season_ok || fetched[i]) && mark != nullptr &&
+            strlen(stamp) < sizeof(mark->change)) {
+          mark->round = rounds[i];
+          memcpy(mark->change, stamp, strlen(stamp) + 1);
+          mark->at = timekeeping::monotonicMs();
+        }
+      }
+      // Published fixtures this cycle did not request again stay. A full
+      // refresh replaces the current round and the club's fixtures; a round
+      // fetched above replaces that round.
+      for (unsigned i = 0; !season_ok && i < prior.match_count; ++i) {
+        const auto& m = prior.matches[i];
+        if (!ours(m) || !keepFixture(m, utc, mapping.filter)) continue;
+        bool skip = false;
+        for (unsigned j = 0; j < target.match_count && !skip; ++j)
+          skip = target.matches[j].id == m.id;
+        for (unsigned j = 0; j < count && !skip; ++j)
+          skip = fetched[j] && m.round.valid() && m.round.value == rounds[j];
+        if (!reuse)
+          skip |= m.own || (m.round.valid() && m.round.value == round);
+        if (!skip) carryMatch(target, prior, m, p, utc);
+      }
+    }
+    if (reuse) {
       if (table_source && prior.table_count &&
           prior.table[0].team.provider == p) {
         target.table = prior.table;
@@ -464,23 +600,7 @@ esp_err_t routeFetch(settings::Source route, uint8_t index, bool table_source,
       }
       return ESP_OK;
     }
-    // keep() retains the current round and the club's fixtures within
-    // kFixtureHorizonDays. The round request and the club's fixture request
-    // cover exactly that, including catch-up fixtures outside the round,
-    // without streaming the whole season (about 300 KB for bl1).
-    snprintf(url, sizeof(url),
-             "https://api.openligadb.de/getmatchdata/%s/%s/%d", comp_url,
-             season_text, round);
-    err = get(url, "", p, model, generation, consume, &mapping);
-    if (err == ESP_OK && own_team[0]) {
-      const unsigned weeks = (cfg::kFixtureHorizonDays + 6) / 7;
-      LeagueRows rows{&mapping, competition, atoi(season_text)};
-      snprintf(url, sizeof(url),
-               "https://api.openligadb.de/getmatchesbyteamid/%s/%u/%u",
-               team_url, weeks, weeks);
-      err = get(url, "", p, model, generation, consumeLeague, &rows);
-    }
-    if (table_source && err == ESP_OK) {
+    if (table_source) {
       mapping.table = true;
       snprintf(url, sizeof(url), "https://api.openligadb.de/getbltable/%s/%s",
                comp_url, season_text);
@@ -872,8 +992,7 @@ esp_err_t routedFetch(uint8_t route, bool table_source,
   auto err = routeFetch(competition.primary, route, table_source, model,
                         generation, route_scratch, utc);
   const bool primary_ok = err == ESP_OK;
-  if (primary_ok && !appendRoute(target, route_scratch, competition.primary))
-    return ESP_ERR_INVALID_SIZE;
+  if (primary_ok) appendRoute(target, route_scratch, competition.primary, utc);
   bool mapped = false;
   for (const auto& pair : model.fixture_pairs)
     mapped |= pair.active && pair.competition == route;
@@ -894,8 +1013,7 @@ esp_err_t routedFetch(uint8_t route, bool table_source,
   if (primary_ok)
     compose(target, route_scratch, model, route, table_source);
   else {
-    if (!appendRoute(target, route_scratch, fallback))
-      return ESP_ERR_INVALID_SIZE;
+    appendRoute(target, route_scratch, fallback, utc);
     target.routing_notice.assign("fallback active");
   }
   return ESP_OK;
@@ -962,7 +1080,7 @@ void reconcile(Snapshot& next, const Snapshot& old, int64_t utc) {
 void worker(void*) {
   // Copied again only when one of the two settings generations changes. Saves
   // that keep the data generation (display-only changes) keep data and caches;
-  // changed match windows or API budget only trigger a new refresh.
+  // changed match windows or request limits only trigger a new refresh.
   uint32_t settings_seen = settings::generation();
   settings::Model model;
   reload(model);
@@ -973,11 +1091,12 @@ void worker(void*) {
     if (const auto seen = settings::generation();
         seen != settings_seen || generation != last_generation) {
       settings_seen = seen;
-      const auto before = model.window_before, after = model.window_after,
-                 budget = model.api_daily_budget;
+      const auto before = model.window_before, after = model.window_after;
+      const auto daily = model.daily_requests;
+      const auto spacing = model.request_spacing_s;
       reload(model);
       if (model.window_before != before || model.window_after != after ||
-          model.api_daily_budget != budget)
+          model.daily_requests != daily || model.request_spacing_s != spacing)
         requested.store(true);
     }
     // Only a clock step (first valid time, zone change, jump above
@@ -1011,10 +1130,16 @@ void worker(void*) {
     }
     time_t utc = 0;
     const bool clock_valid = timekeeping::utcNow(utc);
-    if (ota::trial()) continue;
+    if (ota::trial()) {
+      lock();
+      cadence_now = Cadence::kUpdateTest;
+      unlock();
+      continue;
+    }
     if ((!network::ready() || !clock_valid) && !model.demo) {
       // Under the mutex, like select(), so a new request cannot be lost.
       lock();
+      cadence_now = Cadence::kWaiting;
       if (selecting.load()) {
         selection_state.busy = false;
         selection_state.count = 0;
@@ -1045,14 +1170,15 @@ void worker(void*) {
     // failed competitions at once.
     if (requested.exchange(false))
       for (auto& failure : route_failures) failure.retry_at = 0;
-    const uint32_t api_before =
-        requests[static_cast<unsigned>(cfg::Provider::kApiFootball)];
+    uint32_t requests_before[cfg::kProviderCount];
+    std::copy(std::begin(requests), std::end(requests), requests_before);
     auto& candidate = slots[1 - published];
     candidate.reset();
     candidate.generation = generation;
     // A failed competition keeps its earlier data, marked stale, and is
     // fetched again after its own retry delay while the others are published
-    // (W81). A capacity overflow or an interrupted round (settings or network
+    // (W81). A full match list keeps the matches nearest to now and marks
+    // the data (matchSlot). An interrupted round (settings or network
     // changed) publishes nothing, as does a round in which every active
     // competition failed.
     esp_err_t err = ESP_OK;
@@ -1078,8 +1204,7 @@ void worker(void*) {
             candidate.route_fetched_ms[i] = timekeeping::monotonicMs();
             continue;
           }
-          aborted = err == ESP_ERR_INVALID_SIZE ||
-                    settings::dataGeneration() != generation ||
+          aborted = settings::dataGeneration() != generation ||
                     network::status().epoch != epoch;
           failure.reason = reason(err);
           failure.cause = causeOf(err);
@@ -1092,20 +1217,32 @@ void worker(void*) {
         }
         failed |= 1u << i;
         if (!first_failure) first_failure = &failure;
-        if (!aborted &&
-            !carryRoute(candidate, slots[published], i, table, utc)) {
-          err = ESP_ERR_INVALID_SIZE;
-          aborted = true;
-        }
+        if (!aborted) carryRoute(candidate, slots[published], i, table, utc);
       }
     }
     if (!aborted) err = ESP_OK;
     int64_t retry_at = 0;
+    Cadence retry_cadence = Cadence::kRetry;
     for (const auto& failure : route_failures)
-      if (failure.retry_at && (retry_at == 0 || failure.retry_at < retry_at))
+      if (failure.retry_at && (retry_at == 0 || failure.retry_at < retry_at)) {
         retry_at = failure.retry_at;
+        retry_cadence = failure.cause == Cause::kBudget ? Cadence::kBudgetUsed
+                                                        : Cadence::kRetry;
+      }
     uint16_t interval = cfg::kPollIdleS;
+    Cadence cadence = Cadence::kIdle;
+    // A shorter interval wins; on a tie the first reason stays.
+    const auto faster = [&](uint16_t value, Cadence why) {
+      if (value < interval ||
+          (value == interval && cadence == Cadence::kIdle)) {
+        interval = value;
+        cadence = why;
+      }
+    };
+    // Ends the wait earlier than 'interval': a match window opens or a
+    // failed competition is retried.
     int64_t next_window_ms = cfg::kPollIdleS * 1000LL;
+    Cadence window_cadence = Cadence::kIdle;
     const char* failed_text = nullptr;
     Cause failed_cause = Cause::kNone;
     const bool published_now = !aborted && (fetched || !failed) &&
@@ -1124,42 +1261,50 @@ void worker(void*) {
       reconcile(candidate, slots[published], utc);
       if (conferenceWindow(candidate, utc, model.window_before,
                            model.window_after))
-        interval = cfg::kPollPrematchS;
+        faster(cfg::kPollPrematchS, Cadence::kPrematch);
       for (unsigned i = 0; i < candidate.match_count; ++i) {
         auto& m = candidate.matches[i];
         if (m.kickoff.valid() && m.phase == Phase::kScheduled) {
           const int64_t until =
               m.kickoff.value - model.window_before * 60 - utc;
-          if (until > 0)
-            next_window_ms = std::min(next_window_ms, until * 1000);
+          if (until > 0 && until * 1000 < next_window_ms) {
+            next_window_ms = until * 1000;
+            window_cadence = Cadence::kWindow;
+          }
         }
-        if (matchWindow(m, utc, model.window_before, model.window_after))
-          interval = std::min<uint16_t>(
-              interval, m.phase == Phase::kFinished    ? cfg::kPollPostmatchS
-                        : m.phase == Phase::kScheduled ? cfg::kPollPrematchS
-                                                       : cfg::kPollLiveS);
+        if (!matchWindow(m, utc, model.window_before, model.window_after))
+          continue;
+        if (m.phase == Phase::kFinished)
+          faster(cfg::kPollPostmatchS, Cadence::kPostmatch);
+        else if (m.phase == Phase::kScheduled)
+          faster(cfg::kPollPrematchS, Cadence::kPrematch);
+        else
+          faster(cfg::kPollLiveS, Cadence::kLive);
       }
-      const uint32_t cost =
-          requests[static_cast<unsigned>(cfg::Provider::kApiFootball)] -
-          api_before;
-      const auto credits = budget::remaining(cfg::Provider::kApiFootball,
-                                             model.api_daily_budget);
-      if (cost && credits && interval != cfg::kPollIdleS) {
-        int64_t coverage = 0;
-        for (unsigned i = 0; i < candidate.match_count; ++i) {
-          const auto& m = candidate.matches[i];
-          if (m.kickoff.valid() &&
-              matchWindow(m, utc, model.window_before, model.window_after))
-            coverage = std::max(
-                coverage,
-                m.kickoff.value +
-                    (cfg::kUnknownMatchEndMinutes + model.window_after) * 60 -
-                    utc);
-        }
-        interval = static_cast<uint16_t>(std::min<int64_t>(
-            cfg::kPollIdleS,
-            std::max<int64_t>(interval,
-                              (coverage * cost + credits - 1) / credits)));
+      // Every provider with a daily cap spreads its remaining requests over
+      // the active match windows; the slowest provider sets the interval.
+      int64_t coverage = 0;
+      for (unsigned i = 0; i < candidate.match_count; ++i) {
+        const auto& m = candidate.matches[i];
+        if (m.kickoff.valid() &&
+            matchWindow(m, utc, model.window_before, model.window_after))
+          coverage = std::max(
+              coverage,
+              m.kickoff.value +
+                  (cfg::kUnknownMatchEndMinutes + model.window_after) * 60 -
+                  utc);
+      }
+      for (unsigned p = 0; p < cfg::kProviderCount; ++p) {
+        const uint32_t cost = requests[p] - requests_before[p];
+        const auto limit = model.daily_requests[p];
+        const auto credits =
+            limit ? budget::remaining(static_cast<cfg::Provider>(p), limit) : 0;
+        if (!cost || !credits || interval == cfg::kPollIdleS) continue;
+        const int64_t spread = (coverage * cost + credits - 1) / credits;
+        if (spread <= interval) continue;
+        interval =
+            static_cast<uint16_t>(std::min<int64_t>(cfg::kPollIdleS, spread));
+        cadence = Cadence::kBudget;
       }
       candidate.revision = slots[published].revision + 1;
       published = 1 - published;
@@ -1173,6 +1318,8 @@ void worker(void*) {
         interval = err == ESP_ERR_TIMEOUT || err == ESP_ERR_NOT_ALLOWED
                        ? cfg::kProviderRateRetryS
                        : cfg::kProviderErrorRetryS;
+        cadence =
+            err == ESP_ERR_NOT_ALLOWED ? Cadence::kBudgetUsed : Cadence::kRetry;
       } else if (failed && !fetched) {
         // Every active competition failed; each keeps its own retry delay.
         failed_text = first_failure->reason;
@@ -1185,6 +1332,7 @@ void worker(void*) {
         failed_text = reason(err);
         failed_cause = causeOf(err);
         interval = cfg::kProviderErrorRetryS;
+        cadence = Cadence::kRetry;
       }
       lock();
       slots[published].stale = true;
@@ -1194,17 +1342,19 @@ void worker(void*) {
       unlock();
     }
     // The earliest retry of a failed competition also ends the wait.
-    if (!aborted && retry_at)
-      next_window_ms =
-          std::min(next_window_ms, retry_at - timekeeping::monotonicMs());
+    if (!aborted && retry_at &&
+        retry_at - timekeeping::monotonicMs() < next_window_ms) {
+      next_window_ms = retry_at - timekeeping::monotonicMs();
+      window_cadence = retry_cadence;
+    }
+    if (next_window_ms < interval * 1000LL) cadence = window_cadence;
+    lock();
     due = timekeeping::monotonicMs() +
           std::max<int64_t>(0, std::min<int64_t>(interval * 1000LL,
                                                  next_window_ms));
-    if (!published_now) {
-      lock();
-      slots[published].retry_ms = due;
-      unlock();
-    }
+    cadence_now = cadence;
+    if (!published_now) slots[published].retry_ms = due;
+    unlock();
     busy.store(false);
   }
 }
@@ -1213,7 +1363,7 @@ esp_err_t init() {
   mutex = xSemaphoreCreateMutexStatic(&mutex_buffer);
   const auto budget_error = budget::init();
   if (budget_error != ESP_OK)
-    ESP_LOGE("provider", "daily budget unavailable: %s",
+    ESP_LOGE("provider", "request counters unreadable: %s",
              esp_err_to_name(budget_error));
   const auto subscription = events::subscribe(
       events::Event::kTimeChanged,
@@ -1247,10 +1397,32 @@ Status status() {
   s.error = data.error;
   s.cause = data.error_cause;
   s.routing_notice = data.routing_notice;
+  s.matches_truncated = data.matches_truncated;
   s.error_routes = error_routes;
+  s.cadence = cadence_now;
+  const bool scheduled = cadence_now != Cadence::kNone &&
+                         cadence_now != Cadence::kWaiting &&
+                         cadence_now != Cadence::kUpdateTest;
+  s.next_ms = scheduled ? due : 0;
   unlock();
   s.busy = busy.load();
   return s;
+}
+const char* cadenceName(Cadence cadence) {
+  switch (cadence) {
+    case Cadence::kNone: return "none";
+    case Cadence::kLive: return "live";
+    case Cadence::kPrematch: return "prematch";
+    case Cadence::kPostmatch: return "postmatch";
+    case Cadence::kIdle: return "idle";
+    case Cadence::kWindow: return "window";
+    case Cadence::kBudget: return "budget";
+    case Cadence::kBudgetUsed: return "budget_used";
+    case Cadence::kRetry: return "retry";
+    case Cadence::kWaiting: return "waiting";
+    case Cadence::kUpdateTest: return "update_test";
+  }
+  return "none";
 }
 void read(Reader reader, void* context) {
   if (mutex == nullptr) return;

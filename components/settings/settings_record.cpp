@@ -191,8 +191,9 @@ void readScreens(Reader& reader, Model& model, bool with_image) {
   }
 }
 
-// 7 flags, 9 u8 values, 10 u16 values (formats 2 and 3).
-void readScalars(Reader& reader, Model& model) {
+// 7 flags, 9 u8 values, 9 u16 values; formats 2 to 6 add the API-Football
+// daily budget as a tenth u16 value, which becomes its daily cap.
+void readScalars(Reader& reader, Model& model, bool budget) {
   reader.flag(Field::kApplication, model.espn_opt_in);
   reader.flag(Field::kApplication, model.demo);
   reader.flag(Field::kApplication, model.backgrounds);
@@ -213,9 +214,17 @@ void readScalars(Reader& reader, Model& model) {
   for (auto* value :
        {&model.manual_return_s, &model.scroll_reset_s, &model.scroll_repeat_ms,
         &model.slideshow_s, &model.night_start, &model.night_end,
-        &model.ip_badge_s, &model.window_before, &model.window_after,
-        &model.api_daily_budget})
+        &model.ip_badge_s, &model.window_before, &model.window_after})
     reader.u16(*value);
+  if (budget)
+    reader.u16(model.daily_requests[static_cast<unsigned>(
+        cfg::Provider::kApiFootball)]);
+}
+
+// Format 7 tail: daily cap and request spacing per provider.
+void readRequestLimits(Reader& reader, Model& model) {
+  for (auto* values : {&model.daily_requests, &model.request_spacing_s})
+    for (auto& value : *values) reader.u16(value);
 }
 
 void writeScalars(Writer& writer, const Model& model) {
@@ -236,12 +245,10 @@ void writeScalars(Writer& writer, const Model& model) {
   for (uint16_t value :
        {model.manual_return_s, model.scroll_reset_s, model.scroll_repeat_ms,
         model.slideshow_s, model.night_start, model.night_end, model.ip_badge_s,
-        model.window_before, model.window_after, model.api_daily_budget})
+        model.window_before, model.window_after})
     writer.u16(value);
 }
 
-// Formats 3 to 6 after the secrets: screens, scalars, crest image (formats
-// 3 to 5 only) and the lists.
 // Format 5 tail; validate() rejects unknown mode and role values.
 void readFormat5(Reader& reader, Model& model) {
   uint8_t value = 0;
@@ -252,10 +259,11 @@ void readFormat5(Reader& reader, Model& model) {
     if (reader.u8(value)) role = static_cast<cfg::InputRole>(value);
 }
 
-// Formats 3 to 5 store a crest image id after the scalars ('crest' given).
-void readLists(Reader& reader, Model& model, uint8_t* crest) {
+// Formats 3 to 7 after the secrets: screens, scalars (with the budget up to
+// format 6), crest image (formats 3 to 5 only, 'crest' given) and the lists.
+void readLists(Reader& reader, Model& model, uint8_t* crest, bool budget) {
   readScreens(reader, model, true);
-  readScalars(reader, model);
+  readScalars(reader, model, budget);
   if (crest != nullptr) reader.u8(*crest);
 
   uint8_t count = 0;
@@ -323,7 +331,7 @@ void readSlots(Reader& reader, Model& model) {
     }
   }
   readScreens(reader, model, false);
-  readScalars(reader, model);
+  readScalars(reader, model, true);
 
   for (unsigned i = 0; i < kSlotRoutes; ++i) {
     Source fallback;
@@ -432,6 +440,8 @@ std::size_t encode(const Model& model,
   writer.flag(model.whole_matchday);
   for (const auto role : model.input_roles)
     writer.u8(static_cast<uint8_t>(role));
+  for (const auto* values : {&model.daily_requests, &model.request_spacing_s})
+    for (const uint16_t value : *values) writer.u16(value);  // format 7
   const auto used = static_cast<std::size_t>(writer.position() - out.data());
   seal(out.first(used));
   return used;
@@ -460,8 +470,9 @@ DecodeResult decode(std::span<const uint8_t> record, Model& model,
   const bool lists = version == cfg::kSettingsListFormatVersion;
   const bool pin = version == cfg::kSettingsPinFormatVersion;
   const bool mode = version == cfg::kSettingsModeFormatVersion;
+  const bool roles = version == cfg::kSettingsRoleFormatVersion;
   const bool current = version == cfg::kSettingsFormatVersion;
-  if (!current && !legacy && !slots && !lists && !pin && !mode)
+  if (!current && !legacy && !slots && !lists && !pin && !mode && !roles)
     return DecodeResult::kUnknownVersion;
   if (legacy && record.size() > cfg::kSettingsLegacyMaxRecordBytes)
     return DecodeResult::kTooLong;
@@ -478,12 +489,15 @@ DecodeResult decode(std::span<const uint8_t> record, Model& model,
     if (slots)
       readSlots(reader, candidate);
     else
-      readLists(reader, candidate, current ? nullptr : &crest);
+      readLists(reader, candidate, current || roles ? nullptr : &crest,
+                !current);
     // Format 3 ends before the pin flag, format 4 before the format-5
-    // fields; missing fields keep their initial values.
-    if (pin || mode || current)
+    // fields, formats 5 and 6 before the request limits; missing fields keep
+    // their initial values.
+    if (pin || mode || roles || current)
       reader.flag(Field::kApplication, candidate.pin_own_match);
-    if (mode || current) readFormat5(reader, candidate);
+    if (mode || roles || current) readFormat5(reader, candidate);
+    if (current) readRequestLimits(reader, candidate);
   }
   DecodeResult result = reader.result();
   Field bad = reader.invalidField();

@@ -33,7 +33,7 @@ no automatic cycling between screens. Manual navigation returns after
 
 The relevant-matchday default applies while the Konferenz has at least one
 member; membership follows kickoff blocks of every active competition,
-including overruns (rules in [DATA_MODEL.md](DATA_MODEL.md)). Own cup/catch-up
+including overruns (rules in [DATA_MODEL.md](DATA_MODEL.md#72-konferenz)). Own cup/catch-up
 windows are independent. A missing final status cannot leave a window open
 indefinitely.
 
@@ -49,7 +49,7 @@ indefinitely.
   page while it is a member and counts towards the rows per page. Off: it is
   a normal row in kickoff or activity order, drawn in the accent colour.
 - **Show own match for the whole matchday** (default off): see
-  [DATA_MODEL.md](DATA_MODEL.md).
+  [DATA_MODEL.md](DATA_MODEL.md#72-konferenz).
 - Up/Down move one page in kickoff order, also in One page mode, and stop
   automatic paging until the manual return; with no Up/Down or Scroll input
   there is no manual paging.
@@ -146,7 +146,7 @@ hints, and a coloured ring:
 | Situation | Card | Ring |
 |---|---|---|
 | Not configured, setup network on | "Einrichtung", "Mit WLAN verbinden:", "» network name", "dann im Browser öffnen:", setup IP | accent |
-| No data loaded yet, no WiFi | "Kein WLAN", "Heimnetz nicht erreichbar", "Neuer Versuch läuft" | warning |
+| No data loaded yet, no WiFi | "Kein WLAN" with the reason: "Netz nicht gefunden" (saved network not seen), "Passwort falsch?" (authentication retry), "Setup-Netz aktiv" (setup network only) or "Verbinde …" (scanning, connecting or retry); hint "Neuer Versuch läuft" (not with the setup network only) and "Setup-Netz aktiv" while the setup network runs alongside | warning |
 | No data loaded yet, no valid time | "Warte auf Uhrzeit", "Zeitserver wird gefragt" | warning |
 | No data loaded yet | "Keine Daten" with the provider error and "Neuer Versuch HH:MM" (next attempt), or "Lade Daten" before the first answer | error / neutral |
 | Own match screen without an own match | "Eigenes Spiel", "Kein Spiel" | neutral |
@@ -185,7 +185,8 @@ to selected local civil time; retries and freshness use monotonic time.
 The event pool retains up to 12 records per match and 32 across the snapshot.
 The Own match highlight band rotates through that bounded list every five
 seconds. It displays the event type and player; supplied substitution in/out
-names can appear together. A one-line rotating band keeps every retained
+names appear as "out > in", a substitution without direction (ESPN) as
+"A / B". A one-line rotating band keeps every retained
 highlight accessible without a larger object tree. Removed records are
 excluded; truncation and reconciliation behaviour is defined in the model.
 

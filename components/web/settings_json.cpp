@@ -34,8 +34,7 @@ using namespace ArduinoJson;
   X(night_end);               \
   X(ip_badge_s);              \
   X(window_before);           \
-  X(window_after);            \
-  X(api_daily_budget);
+  X(window_after);
 #define TEXTS(X) \
   X(wifi_ssid);  \
   X(hostname);   \
@@ -96,6 +95,22 @@ bool listOf(const Context& c, const FieldPath& at, JsonVariantConst rows,
   if (!rows.is<JsonArrayConst>()) return c.reject(at, Reason::kType);
   return rows.size() <= capacity || c.reject(at, Reason::kTooMany);
 }
+// A per-provider list (index = cfg::Provider) replaces the first entries;
+// the entries after it keep theirs.
+bool applyLimits(const Context& c, const char* name, JsonVariantConst rows,
+                 settings::RequestLimits& target) {
+  if (rows.isNull()) return true;
+  const auto list = FieldPath().key(name);
+  if (!listOf(c, list, rows, target.size())) return false;
+  unsigned n = 0;
+  for (JsonVariantConst row : rows.as<JsonArrayConst>()) {
+    if (!row.is<uint16_t>())
+      return c.reject(list.withIndex(n),
+                      row.is<long long>() ? Reason::kRange : Reason::kType);
+    target[n++] = row.as<uint16_t>();
+  }
+  return true;
+}
 void sourceJson(JsonObject out, const settings::Source& source) {
   out["provider"] = static_cast<unsigned>(source.provider);
   out["competition"] = std::string_view(source.competition.view());
@@ -136,6 +151,12 @@ void settingsJson(JsonObject out, const settings::Model& m, bool secrets) {
   // Every stored slot; the schema's "inputs" says how many the device has.
   auto roles = out["input_roles"].to<JsonArray>();
   for (const auto role : m.input_roles) roles.add(static_cast<unsigned>(role));
+  for (auto [name, values] :
+       {std::pair{"daily_requests", &m.daily_requests},
+        std::pair{"request_spacing_s", &m.request_spacing_s}}) {
+    auto row = out[name].to<JsonArray>();
+    for (const auto value : *values) row.add(value);
+  }
   auto competitions = out["competitions"].to<JsonArray>();
   for (const auto& entry : m.competitions) {
     auto item = competitions.add<JsonObject>();
@@ -182,9 +203,9 @@ bool applyJson(JsonObjectConst in, settings::Model& m,
     SECRETS(KNOWN)
 #undef KNOWN
     for (const char* other :
-         {"competitions", "fixture_pairs", "slides", "screens",
-          "idle_screen", "matchday_screen", "own_match_screen",
-          "conference_mode", "input_roles"})
+         {"competitions", "fixture_pairs", "slides", "screens", "idle_screen",
+          "matchday_screen", "own_match_screen", "conference_mode",
+          "input_roles", "daily_requests", "request_spacing_s"})
       known |= strcmp(name, other) == 0;
     // Redacted exports carry only these boolean markers; they never clear a
     // key.
@@ -232,6 +253,11 @@ bool applyJson(JsonObjectConst in, settings::Model& m,
       m.input_roles[n++] = static_cast<cfg::InputRole>(row.as<uint8_t>());
     }
   }
+  if (!applyLimits(c, "daily_requests", in["daily_requests"],
+                   m.daily_requests) ||
+      !applyLimits(c, "request_spacing_s", in["request_spacing_s"],
+                   m.request_spacing_s))
+    return false;
   // A list in the input replaces the whole list; absent keys of an entry
   // take the defaults of a new entry.
   if (!in["competitions"].isNull()) {
@@ -399,6 +425,7 @@ void schemaJson(JsonObject out, const settings::Limits& limits) {
   bounded("ip_badge_s", cfg::kReturnTimeRange);
   bounded("window_before", cfg::kMatchWindowRange);
   bounded("window_after", cfg::kMatchWindowRange);
-  bounded("api_daily_budget", cfg::kApiFootballDailyBudgetRange);
+  bounded("daily_requests", cfg::kDailyRequestsRange);
+  bounded("request_spacing_s", cfg::kRequestSpacingRange);
 }
 }  // namespace web

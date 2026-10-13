@@ -31,7 +31,7 @@ environments below.
 |---|---|---|
 | `xiao_esp32c6_gc9a01` | Seeed XIAO ESP32-C6 + 1.28" GC9A01 round display | current implementation candidate compiled; earlier boot/display/input acceptance only; current device acceptance pending; default env |
 | `waveshare_esp32s3_lcd128` | Waveshare ESP32-S3-LCD-1.28 | paused; last build and boot log before the display code (P1.2); not built with the display code yet; if the first log lines are missing after upload, press RST |
-| `native` | Host computer, unit tests only | existing SafeArea, settings, event, file, timekeeping and health suites; earlier macOS acceptance; new candidate suites not run |
+| `native` | Host computer, unit tests only | pure-logic suites (list in the testing notes); the provider mapper suite uses ArduinoJson 7.4.3, the version the firmware pins; all suites pass on macOS for the current candidate |
 
 | Task | Command |
 |---|---|
@@ -220,7 +220,10 @@ ESPN (unofficial, opt-in) and football-data.org. Keyed providers require owner
 credentials and tier/coverage acceptance. Up to three competitions (each with
 an optional fallback source at another provider) and up to eight explicit
 verified fixture pairs are stored as lists with fixed maxima.
-Contracts and limits: [docs/DATA_PROVIDERS.md](docs/DATA_PROVIDERS.md).
+Provider coverage, limits and endpoints:
+[docs/DATA_PROVIDERS.md](docs/DATA_PROVIDERS.md); what the firmware requests
+and how it maps and combines the data: [docs/DATA_FLOW.md](docs/DATA_FLOW.md);
+the stored data and where it is shown: [docs/DATA_MODEL.md](docs/DATA_MODEL.md).
 
 ## Documentation
 | File | Content |
@@ -229,8 +232,10 @@ Contracts and limits: [docs/DATA_PROVIDERS.md](docs/DATA_PROVIDERS.md).
 | [docs/HARDWARE.md](docs/HARDWARE.md) | Boards, displays, pinouts, profile system |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Config file, `secrets.h`, settings, factory reset |
 | [docs/UI.md](docs/UI.md) | Screens, navigation, round display rules, overlays |
-| [docs/NETWORK.md](docs/NETWORK.md) | WiFi behaviour, setup AP, time service, REST API, OTA |
+| [docs/NETWORK.md](docs/NETWORK.md) | WiFi behaviour, setup AP, time service, web server, OTA |
 | [docs/WEB_UI.md](docs/WEB_UI.md) | Web interface tabs, image editor |
-| [docs/DATA_PROVIDERS.md](docs/DATA_PROVIDERS.md) | Data APIs compared |
-| [docs/DATA_MODEL.md](docs/DATA_MODEL.md) | Provider-independent data model |
+| [docs/API.md](docs/API.md) | Device REST API: endpoints, status fields, sessions, error codes |
+| [docs/DATA_MODEL.md](docs/DATA_MODEL.md) | Data sets, definitions, fields per provider, usage per screen, capacities, gaps |
+| [docs/DATA_FLOW.md](docs/DATA_FLOW.md) | Requests, filtering, mapping, combining, caches, publication, request bounds |
+| [docs/DATA_PROVIDERS.md](docs/DATA_PROVIDERS.md) | Provider coverage, limits, conditions, endpoints, research |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | Architecture decisions (ADRs) |

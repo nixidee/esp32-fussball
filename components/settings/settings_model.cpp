@@ -309,6 +309,21 @@ bool checkInputs(Checker& check, const Model& model, std::size_t inputs) {
   return true;
 }
 
+// Daily caps and request spacings per provider (OQ-170).
+bool checkRequestLimits(Checker& check, const Model& model) {
+  const auto each = [&](const char* name, const RequestLimits& values,
+                        cfg::Range range) {
+    for (unsigned i = 0; i < values.size(); ++i)
+      if (!range.contains(values[i]))
+        return check.fail(FieldPath().with(name).withIndex(i), Reason::kRange);
+    return true;
+  };
+  return each("daily_requests", model.daily_requests,
+              cfg::kDailyRequestsRange) &&
+         each("request_spacing_s", model.request_spacing_s,
+              cfg::kRequestSpacingRange);
+}
+
 }  // namespace
 
 const char* reasonName(Reason reason) noexcept {
@@ -362,9 +377,8 @@ bool validate(const Model& model, Field* invalid, Violation* violation,
     // While other matches run the own club does not play (OQ-122).
     const cfg::Range matchday{static_cast<uint16_t>(cfg::Screen::kLiveMulti),
                               screens.max};
-    ok = check.invalid("admin_password",
-                       model.admin_password.view().find('\0') ==
-                           std::string_view::npos) &&
+    ok = check.invalid("admin_password", model.admin_password.view().find(
+                                             '\0') == std::string_view::npos) &&
          check.invalid("api_football_key",
                        isHeaderValue(model.api_football_key.view())) &&
          check.invalid("football_data_key",
@@ -390,8 +404,6 @@ bool validate(const Model& model, Field* invalid, Violation* violation,
                      model.window_before) &&
          check.range("window_after", cfg::kMatchWindowRange,
                      model.window_after) &&
-         check.range("api_daily_budget", cfg::kApiFootballDailyBudgetRange,
-                     model.api_daily_budget) &&
          check.range("idle_screen", screens,
                      static_cast<unsigned>(model.idle_screen)) &&
          check.range("matchday_screen", matchday,
@@ -402,8 +414,8 @@ bool validate(const Model& model, Field* invalid, Violation* violation,
                      {0, static_cast<uint16_t>(cfg::ConferenceMode::kOnePage)},
                      static_cast<unsigned>(model.conference_mode)) &&
          checkInputs(check, model, limits.inputs) &&
-         checkSources(check, model) && checkPairs(check, model) &&
-         checkImages(check, model);
+         checkRequestLimits(check, model) && checkSources(check, model) &&
+         checkPairs(check, model) && checkImages(check, model);
   }
   if (ok) return true;
   if (invalid != nullptr) *invalid = bad;

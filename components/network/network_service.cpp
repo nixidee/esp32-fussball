@@ -47,13 +47,16 @@ UserScanState scan_state = UserScanState::kIdle;  // protected by mux
 int64_t user_scan_at = 0;
 bool started = false, ap_on = false, scanning = false, user_scan = false;
 bool sntp_on = false, configured_radio = false, mdns_ready = false;
-int64_t published_at = 0;
+// A failed radio reconfiguration is retried from poll() at this time.
+int64_t published_at = 0, radio_retry_at = 0;
 AccessPoint results[cfg::kScanEntries]{};
 std::size_t result_count = 0;
 char ntp_server[cfg::kNtpServerMaxChars + 1]{};
 StaticTask_t dns_tcb;
 StackType_t dns_stack[cfg::kDnsStackBytes / sizeof(StackType_t)];
 int dns_fd = -1;
+// Query buffer of the portal DNS task, static instead of on its 2 KB stack.
+uint8_t dns_packet[512];
 
 bool userScanBusy(UserScanState state) {
   return state == UserScanState::kQueued || state == UserScanState::kRunning;
@@ -124,13 +127,16 @@ void dns(void*) {
   const int fd = dns_fd;
   timeval timeout{1, 0};
   setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-  uint8_t packet[512];
+  uint8_t* const packet = dns_packet;
   for (;;) {
     sockaddr_in source{};
     socklen_t length = sizeof(source);
-    int n = recvfrom(fd, packet, sizeof(packet) - 16, 0,
+    int n = recvfrom(fd, packet, sizeof(dns_packet) - 16, 0,
                      reinterpret_cast<sockaddr*>(&source), &length);
-    if (n < 17 || !status().ap || packet[4] != 0 || packet[5] != 1) continue;
+    // A standard query (QR 0, opcode 0) with exactly one question.
+    if (n < 17 || !status().ap || (packet[2] & 0xF8) != 0 || packet[4] != 0 ||
+        packet[5] != 1)
+      continue;
     int end = 12;
     while (end < n && packet[end] != 0) {
       const int size = packet[end];
@@ -140,13 +146,16 @@ void dns(void*) {
       }
       end += size + 1;
     }
-    if (end + 5 != n || packet[end + 1] != 0 || packet[end + 2] != 1 ||
-        packet[end + 3] != 0 || packet[end + 4] != 1)
-      continue;
+    if (end + 5 > n || packet[end + 3] != 0 || packet[end + 4] != 1) continue;
+    // Class IN. Type A gets the AP address; every other type (AAAA, HTTPS)
+    // an empty answer, so a phone does not wait for its lookup to time out.
+    // Records after the question (an EDNS option) are not answered.
+    const bool a = packet[end + 1] == 0 && packet[end + 2] == 1;
+    n = end + 5;
     packet[2] = 0x81;
     packet[3] = 0x80;
     packet[6] = 0;
-    packet[7] = 1;
+    packet[7] = a ? 1 : 0;
     packet[8] = packet[9] = packet[10] = packet[11] = 0;
     uint8_t answer[] = {0xc0,
                         0x0c,
@@ -164,9 +173,11 @@ void dns(void*) {
                         cfg::kApIp[1],
                         cfg::kApIp[2],
                         cfg::kApIp[3]};
-    memcpy(packet + n, answer, sizeof(answer));
-    sendto(fd, packet, n + sizeof(answer), 0,
-           reinterpret_cast<sockaddr*>(&source), length);
+    if (a) {
+      memcpy(packet + n, answer, sizeof(answer));
+      n += sizeof(answer);
+    }
+    sendto(fd, packet, n, 0, reinterpret_cast<sockaddr*>(&source), length);
   }
 }
 // Once at init: gpio_config reserves output pins, and configuring a reserved
@@ -200,6 +211,52 @@ void sntp() {
   sntp_on = err == ESP_OK;
   if (err != ESP_OK) ESP_LOGE(kTag, "SNTP init: %s", esp_err_to_name(err));
 }
+// Driver steps of a radio reconfiguration; 'step' names the failed one.
+esp_err_t configureRadio(const settings::Model& model, const char*& step) {
+  esp_err_t err;
+  step = "antenna";
+  if ((err = antenna(model.external_antenna)) != ESP_OK) return err;
+  wifi_config_t station{};
+  memcpy(station.sta.ssid, model.wifi_ssid.data.data(), model.wifi_ssid.length);
+  memcpy(station.sta.password, model.wifi_password.data.data(),
+         model.wifi_password.length);
+  station.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+  station.sta.threshold.authmode = WIFI_AUTH_OPEN;
+  step = "mode";
+  if ((err = esp_wifi_set_mode(WIFI_MODE_APSTA)) != ESP_OK) return err;
+  step = "station config";
+  if ((err = esp_wifi_set_config(WIFI_IF_STA, &station)) != ESP_OK) return err;
+  wifi_config_t access{};
+  uint8_t mac[6];
+  esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
+  snprintf(reinterpret_cast<char*>(access.ap.ssid), sizeof(access.ap.ssid),
+           "%s-%02X%02X%02X", cfg::kApNamePrefix, mac[3], mac[4], mac[5]);
+  access.ap.ssid_len = strlen(reinterpret_cast<char*>(access.ap.ssid));
+  memcpy(access.ap.password, model.ap_password.data.data(),
+         model.ap_password.length);
+  access.ap.authmode =
+      model.ap_password.empty() ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
+  access.ap.max_connection = cfg::kApClients;
+  access.ap.channel = cfg::kApChannel;
+  step = "AP config";
+  if ((err = esp_wifi_set_config(WIFI_IF_AP, &access)) != ESP_OK) return err;
+  char hostname[64]{};
+  memcpy(hostname, model.hostname.data.data(), model.hostname.length);
+  esp_netif_set_hostname(sta, hostname);
+  if (mdns_ready) mdns_hostname_set(hostname);
+  policy.start(!model.wifi_ssid.empty(), timekeeping::monotonicMs());
+  ap_on = policy.ap();
+  clients.store(0);
+  lost_ip.store(false);
+  got_ip.store(false);
+  scan_done.store(-1);
+  step = "mode";
+  if ((err = esp_wifi_set_mode(ap_on ? WIFI_MODE_APSTA : WIFI_MODE_STA)) !=
+      ESP_OK)
+    return err;
+  step = "start";
+  return esp_wifi_start();
+}
 }  // namespace
 esp_err_t init() {
   applied = settings::current();
@@ -229,10 +286,12 @@ esp_err_t init() {
   if ((err = esp_wifi_set_ps(cfg::kWifiPowerSave ? WIFI_PS_MIN_MODEM
                                                  : WIFI_PS_NONE)) != ESP_OK)
     return err;
-  ESP_ERROR_CHECK(
-      esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, event, nullptr));
-  ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
-                                             event, nullptr));
+  if ((err = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, event,
+                                        nullptr)) != ESP_OK)
+    return err;
+  if ((err = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, event,
+                                        nullptr)) != ESP_OK)
+    return err;
   started = true;
   applySettings();
   dns_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -259,7 +318,9 @@ esp_err_t init() {
   if ((err = mdns_hostname_set(hostname)) != ESP_OK) return err;
   return mdns_service_add(nullptr, "_http", "_tcp", 80, nullptr, 0);
 }
-bool healthy() { return started && mdns_ready && dns_fd >= 0; }
+bool healthy() {
+  return started && configured_radio && mdns_ready && dns_fd >= 0;
+}
 void applySettings() {
   if (!started) return;
   auto model = settings::current();
@@ -295,47 +356,26 @@ void applySettings() {
     esp_netif_sntp_deinit();
     sntp_on = false;
   }
-  ESP_ERROR_CHECK(antenna(model.external_antenna));
   applied = model;
-  wifi_config_t station{};
-  memcpy(station.sta.ssid, model.wifi_ssid.data.data(), model.wifi_ssid.length);
-  memcpy(station.sta.password, model.wifi_password.data.data(),
-         model.wifi_password.length);
-  station.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
-  station.sta.threshold.authmode = WIFI_AUTH_OPEN;
-  ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
-  ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &station));
-  wifi_config_t access{};
-  uint8_t mac[6];
-  esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
-  snprintf(reinterpret_cast<char*>(access.ap.ssid), sizeof(access.ap.ssid),
-           "%s-%02X%02X%02X", cfg::kApNamePrefix, mac[3], mac[4], mac[5]);
-  access.ap.ssid_len = strlen(reinterpret_cast<char*>(access.ap.ssid));
-  memcpy(access.ap.password, model.ap_password.data.data(),
-         model.ap_password.length);
-  access.ap.authmode =
-      model.ap_password.empty() ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
-  access.ap.max_connection = cfg::kApClients;
-  access.ap.channel = cfg::kApChannel;
-  ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &access));
-  char hostname[64]{};
-  memcpy(hostname, model.hostname.data.data(), model.hostname.length);
-  esp_netif_set_hostname(sta, hostname);
-  if (mdns_ready) mdns_hostname_set(hostname);
-  policy.start(!model.wifi_ssid.empty(), timekeeping::monotonicMs());
-  ap_on = policy.ap();
-  clients.store(0);
-  lost_ip.store(false);
-  got_ip.store(false);
-  scan_done.store(-1);
-  ESP_ERROR_CHECK(esp_wifi_set_mode(ap_on ? WIFI_MODE_APSTA : WIFI_MODE_STA));
-  ESP_ERROR_CHECK(esp_wifi_start());
-  configured_radio = true;
+  const char* step = "";
+  const esp_err_t err = configureRadio(model, step);
+  configured_radio = err == ESP_OK;
+  if (err != ESP_OK) {
+    // No reboot: the stored settings would fail again at boot. poll()
+    // retries; until then the network is not healthy (OTA trial).
+    radio_retry_at = timekeeping::monotonicMs() + cfg::kWifiRadioRetryMs;
+    ESP_LOGE(kTag, "radio %s: %s; retry in %lu s", step, esp_err_to_name(err),
+             static_cast<unsigned long>(cfg::kWifiRadioRetryMs / 1000));
+  }
   publish();
 }
 void poll() {
   if (!started) return;
   const int64_t now = timekeeping::monotonicMs();
+  if (!configured_radio) {
+    if (now >= radio_retry_at) applySettings();
+    return;
+  }
   if (got_ip.exchange(false)) {
     policy.gotIp(now);
     sntp();
@@ -384,6 +424,9 @@ void poll() {
     ap_on = policy.ap();
     const auto err = esp_wifi_set_mode(ap_on ? WIFI_MODE_APSTA : WIFI_MODE_STA);
     if (err != ESP_OK) ESP_LOGE(kTag, "mode: %s", esp_err_to_name(err));
+    // The driver does not document a disconnect event for the clients of
+    // an AP it stops; a stale count would postpone the next fallback.
+    if (!ap_on) clients.store(0);
   }
   esp_err_t err = ESP_OK;
   if (command == Command::kScan) {

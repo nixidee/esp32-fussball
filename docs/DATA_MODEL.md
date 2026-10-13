@@ -1,194 +1,299 @@
-# Canonical football data
+# Data model
 
-Implementation: `components/football/include/football_model.h`, provider
-mappers and `football_service.cpp`. Current C6 source compiles; fixture,
-concurrency and maximum-load acceptance remain open.
+What the device stores about football: every data set and record, the
+meaning of each field, whether it is required, which provider fills it,
+where it is shown and under which conditions, the capacities, and the known
+gaps.
 
-## Identity, values and ownership
+Related documents:
 
-A provider ID is meaningful only with its provider and configured competition.
-Settings own an ordered list of up to three competitions (primary source,
-optional fallback source, stored display names); matches refer to a competition
-by its list position (the field is still called `route`). The first active
-competition supplies the league table. There is no separate heap-allocated
-competition graph. Teams, names,
-scores and events are copied into the snapshot and never borrow JSON storage.
+- [DATA_FLOW.md](DATA_FLOW.md) — how the data is requested, mapped,
+  combined, cached and published.
+- [DATA_PROVIDERS.md](DATA_PROVIDERS.md) — provider coverage, limits and
+  endpoints.
+- [UI.md](UI.md) — screen layout; [API.md](API.md) — the device REST API.
 
-`Value<T>` contains a value and source: None, Estimated or a confirmed
-provider. None means unavailable; genuine zero remains valid. Kickoff and
-provider-change instants use UTC seconds. Fetch and score-change times use
-monotonic milliseconds, so wall-clock corrections do not reorder freshness
-or recent-score sorting. A finished time observed locally is explicitly estimated.
+Implementation: `components/football/include/football_model.h`,
+`components/settings/include/settings_model.h`, limits in
+`include/app_config.h`. The C6 source compiles; fixture, concurrency and
+maximum-load acceptance remain open.
 
-IDs accept at most 32 bytes and reject overflow or embedded NUL. Display names
-accept 64 bytes, short names 24; displayed prefixes end at complete UTF-8
-characters. Unknown glyphs use the font fallback. Numeric conversion accepts
-integral JSON numbers and decimal strings, rejects booleans, null, fractions,
-overflow and invalid ranges. Goals are 0–99; minutes 0–240; added minutes
-0–120. Table points and goal difference can be negative within ±10000.
+## 1. Data sets
 
-## Fixed records
+| Data set | Content | Where / lifetime | Size (C6) |
+|---|---|---|---|
+| Competition list | up to 3 entries: active flag, primary source, optional fallback source, display names of competition and club | settings (NVS), persistent | part of the settings record ([CONFIGURATION.md](CONFIGURATION.md)) |
+| Fixture pairs | up to 8 links of a primary and a fallback match id | settings (NVS), persistent | part of the settings record |
+| Snapshot | matches, table rows, events and state of all competitions | RAM: 2 published slots + 1 route scratch, rebuilt every round, lost on reboot | 27,200 B each, 81,504 B together |
+| Selection page | one page of a provider's competition or club list for the setup wizard | RAM, per request | 64 entries of 131 B |
+| Display view model | what one screen shows, copied from the snapshot | RAM | 1,420 B |
+| REST overview | own match and per-competition state, computed from the snapshot | per request | – |
+| Core data (competition, teams, short names, rounds) | **does not exist**: names arrive with every match response, nothing is stored | – | – |
 
-| Record | Content | C6 compiler size |
+## 2. Definitions
+
+| Term | Meaning |
+|---|---|
+| Competition | one entry of the competition list: a league, cup or tournament at one provider (plus optional fallback). Matches refer to it by list position (field `route`). |
+| Tracked club / own club | the club id of the competition entry's source. Every entry needs one today. |
+| Own match | a match of the tracked club. The Own match screen shows the one in its window, else the one with the kickoff nearest to now. |
+| Table competition | the first active competition of the list; only it has a table. |
+| Round | the provider's matchday or cup round (number and/or label). |
+| Matchday window | from the first kickoff through the last finish of a round, plus configurable offsets; it sets the polling cadence. |
+| Konferenz block | all retained matches of all active competitions with the same kickoff time (section 7.2). |
+| Provenance | every value records its source: None (unavailable), Estimated, or the provider that supplied it. |
+| Principal score | the ordinary goals of the match (after extra time when played), never including shootout goals. |
+
+## 3. Identity and values
+
+- A provider id is meaningful only with its provider and competition. Ids
+  are at most 32 bytes; overflow or an embedded NUL is rejected.
+- `Value<T>` holds a value and its source. None means unavailable; a real
+  zero stays valid. Missing values are shown as `--`, never as 0.
+- Kickoff and provider-change instants are UTC seconds. Fetch and
+  score-change times are monotonic milliseconds, so clock corrections do not
+  reorder freshness. A finished time observed locally is marked estimated.
+- Display names hold 64 bytes, short names 24; displayed prefixes end at
+  complete UTF-8 characters; unknown glyphs use the font fallback.
+- Numbers accept integral JSON numbers and decimal strings; booleans, null,
+  fractions, overflow and out-of-range values are rejected. Goals 0–99,
+  minutes 0–240, added minutes 0–120, table points and difference ±10,000.
+- Teams, names, scores and events are copied into the snapshot; nothing
+  borrows JSON storage.
+
+## 4. Records and fields
+
+Columns: **Req.** = the record is dropped without the field.
+Provider columns: ✓ filled, (✓) partly, ✗ never, E = estimated by the
+device. OL = OpenLigaDB, ES = ESPN, AF = API-Football, FD =
+football-data.org. Mapping details: [DATA_FLOW.md](DATA_FLOW.md).
+
+### 4.1 Competition entry (settings)
+
+| Field | Meaning | Req. | Used for |
+|---|---|---|---|
+| `active` | entry is fetched and shown | – | all screens; the first active entry is the table competition |
+| `primary` / `fallback` | provider, competition id, season (empty = current), club id | primary competition and club id | requests; club id marks own matches |
+| `fallback_active` | use the fallback source | – | combining (DATA_FLOW section 6) |
+| `competition_name` | display name | – | Own match caption, Table title, start screen |
+| `team_name` | club display name | – | start screen title |
+
+### 4.2 Team (124 B)
+
+| Field | Meaning | Req. | OL | ES | AF | FD | Shown |
+|---|---|---|---|---|---|---|---|
+| `provider`, `id` | identity | id | ✓ | ✓ | ✓ | ✓ | – (own-club test) |
+| `name` | full name (64 B) | – | ✓ | ✓ | ✓ | ✓ | when no short name |
+| `short_name` | short name (24 B); full name when the provider has none | – | ✓ `shortName` | ✓ `shortDisplayName` (partly English) | ✗ → full name | ✓ `shortName` (doc) | Own match, Konferenz, Table |
+
+### 4.3 Match (456 B)
+
+| Field | Meaning | Req. | OL | ES | AF | FD | Shown / used |
+|---|---|---|---|---|---|---|---|
+| `provider`, `route`, `id` | identity: provider, competition position, match id | id | ✓ | ✓ | ✓ | ✓ | fixture pairs, reconciliation |
+| `round` | round number | – | ✓ | ✗ | ✗ | ✓ `matchday` | Own match caption "N. Spieltag" when no label; window grouping |
+| `round_label` | round text | – | ✓ `groupName` | ✗ | ✓ `league.round` | ✓ `stage` | Own match caption (preferred over the number) |
+| `home`, `away` | teams | id | ✓ | ✓ | ✓ | ✓ | Own match, Konferenz, REST |
+| `kickoff` | UTC kickoff | – | ✓ | ✓ | ✓ | ✓ | windows, Konferenz blocks, time before kickoff, date pill, countdown, REST |
+| `finished_at` | first time seen finished (estimated) | – | E | E | E | E | Konferenz block end |
+| `provider_changed` | provider's last change time | – | ✓ (only with time zone) | ✗ | ✗ | ✓ | **not used** |
+| `phase` + source | Unknown … Abandoned (section 5) | – | (✓) finished flag, otherwise E | ✓ | ✓ | ✓ | pill, windows, Konferenz order and centre, rim, REST |
+| `minute` | match minute | – | E (`~`) | ✓ | ✓ | ✗ | pill, rim, REST |
+| `principal` | ordinary goals | – | ✓ | ✓ | ✓ | ✓ | score centre, Konferenz, REST, goal flash |
+| `halftime` | half-time score | – | ✓ | ✗ | ✓ | ✓ | **not shown** |
+| `regulation` | score after 90 minutes | – | ✓ | ✗ | ✓ | ✓ | **not shown** |
+| `extra_time` | score after extra time | – | (✓) incomplete at times | ✗ | ✓ | ✓ | **not shown** (feeds `principal`) |
+| `shootout` | shootout tally | – | ✓ (derived) | ✓ | ✓ | ✓ | pill "i.E. 4 : 2" |
+| `events[12]`, `event_count` | indices into the event pool | – | own club only | own club only | own club only | ✗ | Own match highlight line |
+| `events_truncated` | more than 12 events or pool full | – | – | – | – | – | disables removal detection; **not shown** |
+| `own` | match of the tracked club | – | ✓ | ✓ | ✓ | ✓ | accent colour, own match choice |
+| `score_changed_ms` | last principal score change | – | – | – | – | – | Konferenz goal flash (120 s), One-page order |
+| `fetched_ms` | fetch time of its competition | – | – | – | – | – | **not used** (the snapshot time is used instead) |
+
+### 4.4 MatchEvent (224 B)
+
+| Field | Meaning | OL | ES | AF | FD | Shown |
+|---|---|---|---|---|---|---|
+| `type` | Goal, OwnGoal, PenaltyGoal, PenaltyMissed, Yellow, YellowRed, Red, Substitution, Injury, VAR | goals only | goals, cards, (substitution, injury, VAR if supplied) | all | ✗ | highlight line label |
+| `minute` | minute | (✓) | ✓ | ✓ | ✗ | highlight line |
+| `added` | added minutes | ✗ | ✗ | ✓ | ✗ | **not shown** |
+| `actor_team`, `beneficiary` | team that acted / that profits (own goal) | derived | ✓ | ✓ | ✗ | **not shown** |
+| `player` | player (substitution at ESPN: "A / B") | ✓ | ✓ | ✓ | ✗ | highlight line |
+| `player_in`, `player_out` | substitution direction | ✗ | ✗ | ✓ | ✗ | highlight "out > in" |
+| `detail` | provider text | ✗ | ✓ | ✓ | ✗ | **not shown** |
+| `after` | score after the event | ✓ | ✗ | ✗ | ✗ | merge, identity; **not shown** |
+| `shootout` | shootout kick | ✗ | ✓ | ✓ | ✗ | label "Elfmeterschießen" |
+| `identity`, `revision`, `removed` | supplied id or hash; change counter; withdrawn | – | – | – | – | removed events are hidden |
+
+### 4.5 Standing (162 B)
+
+| Field | OL | ES | AF | FD | Shown |
+|---|---|---|---|---|---|
+| `team` | ✓ | ✓ | ✓ | ✓ | Table name |
+| `position` | E (row order) | ✓ | ✓ | ✓ | Table "#" |
+| `played` | ✓ | ✓ | ✓ | ✓ | Table "Sp" |
+| `points` | ✓ | ✓ | ✓ | ✓ | Table "Pkt" |
+| `difference` | ✓ | ✓ | ✓ | ✓ | Table "Diff" |
+| `won`, `drawn`, `lost`, `goals_for`, `goals_against` | ✓ | ✓ | ✓ | ✓ | **not shown** |
+| `own` | – | – | – | – | Table accent row, scroll position |
+
+### 4.6 Snapshot state
+
+| Field | Meaning | Shown |
 |---|---|---|
-| Team | provider, owned ID, name, short name | 124 B |
-| Match | provider/route/ID, numeric and textual round, teams, timestamps, phase/minute, five scores, event indices, own flag | 456 B |
-| MatchEvent | provider, 32-bit identity/revision, type, minute/added time, actor/beneficiary, player/in/out/detail, score after, removed/shootout flags | 224 B |
-| Standing | owned team, own flag, position and eight statistics with validity | 162 B |
-| Selection | owned ID, provider season, name | 131 B |
-| Snapshot | 32 matches, 32 table rows, 32 events, counts, generation/revision/freshness per competition/errors/next retry | 27200 B |
+| `match_count`, `table_count`, `event_count` | used places | – |
+| `generation`, `revision` | settings generation and publication counter | – |
+| `fetched_ms`, `route_fetched_ms[]` | oldest and per-competition fetch time | status band "Stand HH:MM", REST `last_update_ms` |
+| `stale` | a competition shows earlier data, or age > 15 minutes | status band, REST |
+| `retry_ms` | next attempt after a failure | "Keine Daten" card, REST |
+| `error`, `error_cause`, `error_routes` | first failure text and cause, failed competitions | status band, cards, REST |
+| `routing_notice` | fallback in use or fallback failed | REST only |
+| `matches_truncated` | not every match fitted | REST / Web UI |
+| `configured` | at least one active competition | setup card, stock image |
 
-Limits live in `app_config.h`. Each match references at most 12 events in the
-shared 32-entry pool. Rich events are retained for the tracked club across its
-competitions; conference matches use score changes. After 12 events the oldest
-entry for that match is reused and truncation is flagged. A full global pool
-flags truncation without overflowing. Removal detection is disabled for
-truncated lists, so eviction cannot pretend that a goal was withdrawn.
-
-Relevant match/table overflow rejects the complete new publication and keeps
-the previous snapshot with an error/stale indication. Duplicate fixture IDs
-within a competition are ignored. Selection uses a separate 64-entry page and an
-explicit more flag; it is not an unbounded team cache.
-
-Provider-operation failures pair their diagnostic text with the canonical
-`Cause` enum. Status and selection expose its stable translation key (see
-[NETWORK.md](NETWORK.md)); a successful operation clears previous errors.
-The snapshot's single fetch time measures the age of the whole publication,
-not an independent age per competition. The added cause fits the existing
-C6 snapshot alignment; the record size above is unchanged.
-
-## Match phases and scores
+## 5. Match phases and scores
 
 Phases: Unknown, Scheduled, Live, HalfTime, ExtraTime, Penalties, Finished,
-Postponed, Cancelled and Abandoned. Status and minute have independent
-provenance. Missing status remains unknown or explicitly estimated; elapsed
-time never proves a final result.
+Postponed, Cancelled, Abandoned. Status and minute have independent
+provenance. A missing status stays Unknown or explicitly estimated; elapsed
+time never proves a final result. Postponed, cancelled and abandoned matches
+are excluded from windows and Konferenz blocks.
 
-Principal goals, half-time, regulation totals, totals after extra time and
-shootout tallies are separate. Shootout goals are never added to principal
-goals. Incomplete pairs display an unknown score.
+Principal goals, half-time, regulation, after-extra-time totals and the
+shootout tally are separate values. Shootout goals are never added to the
+principal score. An incomplete pair is shown as unknown.
 
-OpenLigaDB maps semantic `resultTypeKind`, not numeric result IDs. Its result
-after penalties includes the earlier goals; the mapper subtracts the known
-after-extra-time total to obtain a shootout tally. If that base is unavailable
-or subtraction would be negative, the tally remains unavailable. Unknown
-result kinds are not reassigned by name/order. football-data's additional
-extra-time goals are added to regulation; its shootout-inclusive fullTime
-is not used as ordinary goals. ESPN's separate shootoutScore is retained.
+OpenLigaDB has no live clock; its phase and minute are estimated from the
+kickoff (rules in [DATA_FLOW.md](DATA_FLOW.md)) and the minute is shown with
+`~`.
 
-OpenLigaDB lacks a live clock: before kickoff status is estimated Scheduled;
-minutes 0–45 after kickoff are estimated Live, minutes 46–60 estimated
-HalfTime (shown as half time), later minutes subtract the 15-minute break.
-Estimated minutes are marked with `~`. After four hours without a confirmed final status phase becomes
-Unknown and the bounded window expires. Postponed/cancelled/abandoned fixtures
-are excluded from active windows.
+## 6. Events and corrections
 
-## Events and corrections
+Actual event coverage depends on provider and competition
+([DATA_PROVIDERS.md](DATA_PROVIDERS.md)). Actor and beneficiary are separate;
+an unknown reference stays empty. A supplied event id is preferred, else a
+deterministic hash; a revision hash tracks score, detail and player changes.
+Events missing from a complete later list become one-publication removal
+records. The first fetch, a reconnect, a provider settings change and a
+clock step establish a baseline and do not replay historical goals. The
+32-bit hashes are bounded; collision and correction fixtures still need
+tests.
 
-Types: Goal, OwnGoal, PenaltyGoal, PenaltyMissed, Yellow, YellowRed, Red,
-Substitution, Injury and VAR. Actual availability depends on the response and
-provider coverage. Actor and beneficiary are separate; an unknown reference
-stays empty. OpenLigaDB beneficiaries are derived only when consecutive
-reported scores identify a single increment.
+## 7. Usage per screen
 
-A supplied event ID is preferred. Otherwise a deterministic hash of type,
-minute, added time, team/player/substitution and shootout identity is used.
-Revision hashes include score/detail/player changes. Events missing from a
-complete later list become one-publication removal records. These 32-bit
-hashes are bounded representations; collision/correction fixtures still need
-tests. Richer provider event semantics require keyed/recorded acceptance.
+### 7.1 Own match
 
-The first fetch, reconnect, provider-data settings change and time-change
-notification establish a baseline. They do not replay historical goals.
-Later principal-value changes update monotonic score-change time; switching
-provenance alone does not count as a score change.
+- Shows the own match in its window (kickoff minus the before offset until
+  the end plus the after offset), else the own match with the kickoff nearest
+  to now; without any own match the card "Eigenes Spiel / Kein Spiel".
+- Caption: competition display name · round label, else "N. Spieltag", else
+  nothing (ESPN has neither, so the caption is only the competition name).
+- Centre: principal score, before kickoff the local kickoff time.
+- Pill: minute (`~` when estimated), "Halbzeit", "Elfmeterschießen",
+  "Beendet", or the shootout tally; before kickoff a date pill and a
+  countdown line.
+- Highlight line: the retained events of this match, rotating every five
+  seconds, without removed ones. With OpenLigaDB only goals appear; with
+  football-data.org none.
+- Rim: progress from the minute and phase.
 
-## Relevant fixtures and matchday windows
+### 7.2 Konferenz
 
-Own fixtures are retained within seven days on either side of current UTC.
-OpenLigaDB additionally retains the provider's current round. Other providers
-retain conference fixtures within 36 hours. Filtering happens while streaming
-a response; discarded bytes still count toward transport limits.
+A block is every retained match of every active competition with the same
+kickoff time; postponed, cancelled and abandoned matches and matches without
+a kickoff never take part. A block's matches are shown from kickoff minus the
+before offset until the block ends (the latest expected end of its matches
+plus the after offset) or the next block's before offset starts, whichever is
+first. A match that overruns into the next block (it finished after that
+start, or is still running) stays until its own end plus the after offset.
+The expected end is the final whistle when known; a provider-reported
+running phase allows up to 240 minutes after kickoff; otherwise 115 minutes
+after kickoff are assumed. A match first seen as finished without having
+been seen running gets an estimated final whistle of the earlier of now and
+kickoff plus 115 minutes. With "show own match for the whole matchday" on,
+the own match also stays from its kickoff while any other shown match
+belongs to the same matchday (same round of the same competition; without
+round data the same UTC date). Members are listed in kickoff order. The
+relevant-matchday default screen applies while at least one match is a
+member. Own cup or catch-up matches have their own windows and can select
+Own match outside the league window.
 
-For the polling cadence, the configured competition conference windows span
-the first kickoff through the last finish of each relevant round, including
-gaps between fixtures. Round number is preferred, then supplied round text;
-without either, UTC date is the grouping boundary. Each fixture's unknown end
-is capped at kickoff plus 240 minutes. Configurable before/after offsets
-default to 30 minutes.
+Each row shows team short names, the principal score once started, else the
+kickoff time or "--:--"; the own match in the accent colour; a goal flash
+for 120 seconds after a score change. No events are shown. Without members:
+the card "Keine Spiele im Zeitfenster" with the next kickoff.
 
-The Konferenz screen shows kickoff blocks instead. A block is every retained
-match of every active competition with the same kickoff time; postponed,
-cancelled and abandoned matches and matches without a kickoff never take
-part. A block's matches are shown from kickoff minus the before offset until
-the block ends (the latest expected end of its matches plus the after
-offset) or the next block's before offset starts, whichever is first. A
-match that overruns into the next block (it finished after that start, or is
-still running) stays until its own end plus the after offset. The expected
-end is the final whistle when known; a provider-reported running phase
-allows up to 240 minutes after kickoff; otherwise 115 minutes after kickoff
-are assumed. A match first seen as finished without having been seen
-running gets an estimated final whistle of the earlier of now and kickoff
-plus 115 minutes. With "show own match for the whole matchday" on, the own
-match also stays from its kickoff while any other shown match belongs to the
-same matchday (same round of the same competition, by the same round rules
-as above). Members are listed in kickoff order. The relevant-matchday default
-screen applies while at least one match is a member.
-Own cup/catch-up matches have their own windows and can select Own match even
-outside the league window. This date fallback is a bounded implementation
-choice, not a claim that every provider supplies complete round metadata.
+### 7.3 Table
 
-Season comes from the selected provider. An empty season means the provider's
-current season. OpenLigaDB and API-Football need it in their URLs, so the
-device resolves it with one request (OpenLigaDB: current match metadata;
-API-Football: the league's season marked current) and caches it per competition
-and source for six hours; football-data.org and ESPN select their current
-season themselves when it is left out. No rule guesses a
-season from the local calendar. Season rollover, empty competitions and delayed
-fixtures remain required acceptance cases.
+Only the table competition (first active entry). Title: its display name.
+Columns position, name, played, difference, points; columns are dropped from
+the right when the name would get too short. The rows around the own club are
+shown; all accepted rows (up to 32) are reachable by scrolling. Without a
+table: a card.
 
-## Publication and readers
+### 7.4 Other users
 
-One provider worker owns publication. Two static snapshot slots and one reusable
-route scratch snapshot cost **81504 B** together. Runtime constructors place
-them in BSS rather than embedding mostly empty images in flash.
+- **Start screen:** club display name and the first active competition's
+  provider name.
+- **Status band / state cards:** stale state, fetch time, error, next retry.
+- **REST status:** own match (competition, phase, kickoff, goals, minute,
+  team names) and per competition the match count, provider and error flag
+  ([API.md](API.md)). Tables and events are not exposed.
 
-A reader executes a short callback under the repository mutex and copies into
-its own fixed view/status model; it performs no I/O, LVGL work, allocation or
-blocking calls there. It retains no snapshot reference. The presenter view
-model is 1420 B on C6. The writer may reuse the old slot after publication
-because every read has already released its protected copy.
+## 8. Capacities
 
-Every request carries the provider-data generation of the settings and the
-network epoch. Changed provider settings (see the configuration
-documentation), network loss/reconnect or deadline expiration invalidate work before publication.
-A competition whose fetch fails keeps its previously published matches,
-events (without removal markers, estimated again) and, for the first active
-competition, the league table, together with the time of its last successful
-fetch; the other competitions publish their new data in the same snapshot.
-Such a snapshot is marked stale, carries the error and cause of the first
-failed competition and the monotonic time of its next attempt (`retry_ms`).
-A failed competition is fetched again after its own retry delay (one minute,
-five minutes after a rate limit or a used budget); until then later rounds
-carry its earlier data without a request. A requested refresh, a settings
-save or a network or time change retries it at once. When every active
-competition fails, when the match list overflows or when settings or the
-network change during the round, nothing is published: the previous snapshot
-remains available with stale/error state and `retry_ms` (0 after a success),
-which the display shows on the "Keine Daten" card. The "as of" time on the
-display and the data age in the status API are the oldest competition fetch
-time. A stale age of 15 minutes is also reported independently of request
-failure.
+| Item | Limit | Shared by |
+|---|---|---|
+| Competitions | 3 (`kCompetitionMax`) | – |
+| Matches | 32 per snapshot | all competitions |
+| Table rows | 32 per snapshot | the table competition only |
+| Events | 32 per snapshot, 12 per match | own matches of all competitions |
+| Fixture pairs | 8 | all competitions |
+| Selection page | 64 entries | – |
+| Kept matches | own ±7 days; others: OpenLigaDB current round, otherwise ±36 hours | – |
 
-Cross-provider fields use explicit fixture mappings and precedence from
-[DATA_PROVIDERS.md](DATA_PROVIDERS.md). Valid primary values win; a fallback
-never guesses a common ID from similar names.
+Overflow handling (eviction of the farthest other match, truncation flags,
+table overflow) is described in [DATA_FLOW.md](DATA_FLOW.md).
 
-## Acceptance boundary
+## 9. Data needed but not in the model
 
-Compiler sizes establish fixed storage only. No current host fixture suite,
-slow-reader stress, event reconciliation, source-conflict, clock/season
-transition or device maximum-load run has been performed for this model.
-Those checks must include all three resident snapshots, JSON/TLS, task stacks,
-JPEG redraws and local Web access; earlier integration evidence does not
-certify this candidate.
+| Data | Status |
+|---|---|
+| Competition kind (league / cup / tournament), list of rounds | not stored |
+| Stored team list, own short names, crest reference | not stored; names come with every match response |
+| Whistles (kick-off, half-time, 2nd half, full time, extra time) | only derived from the phase |
+| Delays | not in the model |
+| Tables of further competitions, group tables | only one table (table competition) |
+
+## 10. Known gaps at a glance
+
+**Stored but never shown or used:** `halftime`, `regulation`,
+`extra_time` (only feed the principal score and fallback filling),
+`provider_changed`, `Match.fetched_ms`, event `added`, `detail`,
+`actor_team`, `beneficiary`, `after`, table `won`, `drawn`, `lost`,
+`goals_for`, `goals_against`, `events_truncated` (on screen),
+`routing_notice` (on screen).
+
+**Provider-dependent display differences:**
+
+- ESPN: no round, so no round in the Own match caption and matchday grouping
+  by UTC date; substitutions without direction ("A / B"); no half-time or
+  extra-time scores.
+- OpenLigaDB: no minute (estimated), no cards or substitutions; extra-time
+  result can be missing; table position from row order; 3. Liga and
+  Regionalliga goal data incomplete.
+- API-Football: round only as provider text, no short names.
+- football-data.org: caption shows `stage` text instead of "N. Spieltag"
+  when `stage` is supplied (provider value format not verified), no events.
+
+**Structural limits against the target use (several leagues, national
+team, competitions without an own club):**
+
+- At most 3 competitions.
+- Every competition needs a club; a competition without an own club is not
+  possible.
+- Only one table (first active competition).
+- All competitions share 32 matches; full Bundesliga + 2. + 3. Liga
+  matchdays alone are 28 matches.
+- Events only for the own club; Konferenz matches have scores only.
+- No per-competition choice of screens; no matchday screen.

@@ -28,14 +28,20 @@ env.BuildSources(
     src_filter="+<health_meter.cpp>",
 )
 
-# Pure football model and Konferenz logic; the provider and service files
-# require IDF.
+# Pure football model, Konferenz logic and provider JSON mappers (ArduinoJson
+# from lib_deps); the HTTP client and service files require IDF.
 football_root = project_root / "components" / "football"
 env.Append(CPPPATH=[str(football_root / "include")])
+# The library finder adds lib_deps paths only to the test sources.
+libdeps = Path(env.subst("$PROJECT_LIBDEPS_DIR")) / env.subst("$PIOENV")
+env.Append(CPPPATH=[str(libdeps / "ArduinoJson" / "src")])
 env.BuildSources(
     str(Path(env.subst("$BUILD_DIR")) / "pure" / "football"),
     str(football_root),
-    src_filter="+<football_model.cpp> +<conference.cpp>",
+    src_filter=(
+        "+<football_model.cpp> +<conference.cpp> +<provider_mappers.cpp>"
+        " +<budget_ledger.cpp>"
+    ),
 )
 
 # Pure input state machine and role mapping; the rest of the UI needs LVGL.
@@ -45,4 +51,13 @@ env.BuildSources(
     str(Path(env.subst("$BUILD_DIR")) / "pure" / "ui"),
     str(ui_root),
     src_filter="+<input_policy.cpp>",
+)
+
+# Pure Wi-Fi connection policy; the network service needs IDF.
+network_root = project_root / "components" / "network"
+env.Append(CPPPATH=[str(network_root / "include")])
+env.BuildSources(
+    str(Path(env.subst("$BUILD_DIR")) / "pure" / "network"),
+    str(network_root),
+    src_filter="+<wifi_policy.cpp>",
 )

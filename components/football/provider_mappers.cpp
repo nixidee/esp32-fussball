@@ -1,11 +1,11 @@
+#include "provider_mappers.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
-
-#include "provider_client.h"
 namespace football {
 using ArduinoJson::JsonVariantConst;
 namespace {
@@ -60,19 +60,6 @@ Team team(JsonVariantConst v, const char* id_key = "id",
   if (t.short_name.empty()) t.short_name.assign(t.name.data);
   return t;
 }
-bool keep(const Match& m, int64_t now, FixtureFilter filter) {
-  if (m.id.empty()) return false;
-  const bool own = std::string_view(filter.team) == m.home.id.data ||
-                   std::string_view(filter.team) == m.away.id.data;
-  if (m.round.valid() && filter.round && m.round.value == filter.round)
-    return true;
-  if (!m.kickoff.valid()) return own;
-  if (now == 0) return true;
-  return std::llabs(now - m.kickoff.value) <=
-         (own            ? cfg::kFixtureHorizonDays * 86400LL
-          : filter.round ? 0
-                         : cfg::kConferenceHorizonHours * 3600LL);
-}
 bool duplicate(const Snapshot& out, const Match& m) {
   for (unsigned i = 0; i < out.match_count; ++i)
     if (out.matches[i].route == m.route && out.matches[i].id == m.id)
@@ -80,13 +67,12 @@ bool duplicate(const Snapshot& out, const Match& m) {
   return false;
 }
 Match* addMatch(Snapshot& out, Match& m, int64_t now, FixtureFilter filter) {
-  if (!keep(m, now, filter)) return nullptr;
+  if (!keepFixture(m, now, filter)) return nullptr;
   for (unsigned i = 0; i < out.match_count; ++i)
     if (out.matches[i].route == m.route && out.matches[i].id == m.id)
       return nullptr;
-  if (out.match_count >= out.matches.size()) return nullptr;
-  auto* result = &out.matches[out.match_count++];
-  *result = m;
+  auto* result = matchSlot(out, m, now);
+  if (result != nullptr) *result = m;
   return result;
 }
 void appendEvent(Snapshot& out, Match& m, MatchEvent& e) {
@@ -177,9 +163,7 @@ bool mapOpenLigaMatch(JsonVariantConst row, Snapshot& out, uint8_t route,
     m.phase_source = Source::kProvider;
   } else if (now > 0)
     estimate(m, now);
-  const bool relevant = keep(m, now, filter);
   if (duplicate(out, m)) return true;
-  if (relevant && out.match_count >= out.matches.size()) return false;
   auto* match = addMatch(out, m, now, filter);
   if (match == nullptr) return true;
   // Conference effects use score changes. Reserve rich event storage for
@@ -320,8 +304,6 @@ bool mapMatch(JsonVariantConst row, Snapshot& out, cfg::Provider p,
           std::string_view(filter.team) == m.away.id.data;
   if (m.id.empty()) return false;
   if (duplicate(out, m)) return true;
-  if (keep(m, now, filter) && out.match_count >= out.matches.size())
-    return false;
   auto* match = addMatch(out, m, now, filter);
   if (match != nullptr && match->own && p == cfg::Provider::kEspn) {
     for (JsonVariantConst detail :
@@ -384,11 +366,17 @@ bool mapEvent(JsonVariantConst row, Snapshot& out, Match& m, cfg::Provider p) {
     else
       return true;
     id(e.actor_team, row["team"]["id"]);
-    e.player.assign(text(row["athletesInvolved"][0]["displayName"]));
+    const char* first = text(row["athletesInvolved"][0]["displayName"]);
     if (e.type == EventType::kSubstitution) {
-      // Keep both names without inferring the direction from array order.
-      e.detail.assign(type);
-    }
+      // Both names in array order, "A / B": ESPN does not say who comes on,
+      // so player_in/player_out stay empty. Cut at a whole UTF-8 character.
+      const char* second = text(row["athletesInvolved"][1]["displayName"]);
+      char both[sizeof(e.player.data) + 1];
+      snprintf(both, sizeof(both), *first && *second ? "%s / %s" : "%s%s",
+               first, second);
+      e.player.assign(both);
+    } else
+      e.player.assign(first);
     e.detail.assign(type);
     auto clock = text(row["clock"]["displayValue"]);
     char* end;

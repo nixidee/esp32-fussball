@@ -1,8 +1,9 @@
 // Host acceptance for the settings model, its limits, the initial values and
-// the stored record: format 6 (variable length, lists, Konferenz pin flag,
-// Konferenz mode, whole-matchday flag, input roles) and the conversion of the
-// older formats 1 to 5, including the crest image id of formats 3 to 5
-// (docs/CONFIGURATION.md).
+// the stored record: format 7 (variable length, lists, Konferenz pin flag,
+// Konferenz mode, whole-matchday flag, input roles, request limits per
+// provider) and the conversion of the older formats 1 to 6, including the
+// crest image id of formats 3 to 5 and the API-Football daily budget of
+// formats 2 to 6 (docs/CONFIGURATION.md).
 
 #include <unity.h>
 
@@ -32,8 +33,8 @@ using settings::kMaxRecordBytes;
 using settings::Model;
 using settings::Presets;
 
-// A record has exactly its used length (format 6 varies, formats 1 and 2 are
-// built by the tests themselves, formats 3 to 5 from format 6 by
+// A record has exactly its used length (format 7 varies, formats 1 and 2 are
+// built by the tests themselves, formats 3 to 6 from format 7 by
 // olderFormat()).
 using Record = std::vector<uint8_t>;
 
@@ -52,7 +53,9 @@ constexpr std::size_t kCoreBytes = 335;
 // Format 3 continues with the secrets, the screens, the scalar values, the
 // crest image and then the lists; format 4 appends the pin flag, format 5
 // the Konferenz mode, the whole-matchday flag and the input roles; format 6
-// drops the crest image, so its lists start where the crest image was.
+// drops the crest image, so its lists start where the crest image was;
+// format 7 moves the API-Football daily budget (the last scalar u16 of
+// formats 2 to 6) into the request limits at the end of the record.
 constexpr std::size_t kAdminAt = kCoreBytes;
 constexpr std::size_t kApiKeyAt = kAdminAt + 1 + 64;
 constexpr std::size_t kFootballKeyAt = kApiKeyAt + 1 + 96;
@@ -61,19 +64,28 @@ constexpr std::size_t kScreenBytes = 16;
 constexpr std::size_t kScalarsAt = kScreensAt + 4 * kScreenBytes;
 constexpr std::size_t kLanguageAt = kScalarsAt + 7;
 constexpr std::size_t kSlideshowAt = kScalarsAt + 16 + 2 * 3;
-constexpr std::size_t kCrestAt = kScalarsAt + 7 + 9 + 2 * 10;  // formats 3-5
-constexpr std::size_t kSlidesAt = kCrestAt;  // format 6: count, then one byte each
+constexpr std::size_t kBudgetAt = kScalarsAt + 7 + 9 + 2 * 9;  // formats 2-6
+constexpr std::size_t kCrestAt = kBudgetAt + 2;                // formats 3-5
+// Format 7: the slide count, then one byte per slide.
+constexpr std::size_t kSlidesAt = kBudgetAt;
 constexpr std::size_t kSourceBytes = 1 + 33 + 17 + 33;
 constexpr std::size_t kCompetitionBytes = 2 + 2 * kSourceBytes + 33 + 33;
 constexpr std::size_t kPairBytes = 3 + 33 + 33;
-// Format 5 and 6 tail after the pin flag: mode, whole matchday, eight input roles.
+// Formats 5 to 7, after the pin flag: mode, whole matchday, eight input
+// roles.
 constexpr std::size_t kFormat5TailBytes = 1 + 1 + 8;
-// Lists empty plus the pin flag and the format-5 tail: the shortest record.
-constexpr std::size_t kEmptyListsBytes = kSlidesAt + 3 + 1 + kFormat5TailBytes;
+// Format 7 end: a daily cap and a request spacing (u16) per provider.
+constexpr std::size_t kLimitsBytes = 2 * 2 * cfg::kProviderCount;
+// Lists empty plus the pin flag, the format-5 tail and the request limits:
+// the shortest record.
+constexpr std::size_t kEmptyListsBytes =
+    kSlidesAt + 3 + 1 + kFormat5TailBytes + kLimitsBytes;
 // The model is copied onto task stacks (settings::current(), HTTP handlers):
 // growth is a stack budget change, see docs/ARCHITECTURE.md. Format 5 added
-// 10 bytes of fields and 2 bytes of padding (1,944 -> 1,956).
-constexpr std::size_t kModelBytesBudget = 1956;
+// 10 bytes of fields and 2 bytes of padding (1,944 -> 1,956); format 7
+// replaced the 2-byte budget with 16 bytes of request limits (net +14,
+// 1,956 -> 1,968 with padding).
+constexpr std::size_t kModelBytesBudget = 1968;
 
 Model defaults() { return initialValues({}); }
 
@@ -177,17 +189,22 @@ DecodeResult decodeInto(std::span<const uint8_t> record, Model& model,
   return decode(record, model, invalid);
 }
 
-// The record of format 3, 4 or 5 for the format-6 bytes 'current' of the
-// same model: the crest image id before the lists, without the fields the
+// The record of format 3, 4, 5 or 6 for the format-7 bytes 'current' of the
+// same model: API-Football's daily cap as the budget after the scalars, the
+// crest image id (formats 3 to 5) before the lists, without the fields the
 // format did not have yet.
 Record olderFormat(const Record& current, uint16_t version,
                    uint8_t crest = cfg::kStockImageId) {
-  std::size_t end = current.size();
+  std::size_t end = current.size() - kLimitsBytes;
+  // daily_requests[1] (API-Football), right after daily_requests[0].
+  const std::size_t budget = end + 2;
   if (version < 5) end -= kFormat5TailBytes;
   if (version < 4) end -= 1;  // the pin flag
-  Record record(current.begin(), current.begin() + kCrestAt);
-  record.push_back(crest);
-  record.insert(record.end(), current.begin() + kCrestAt,
+  Record record(current.begin(), current.begin() + kBudgetAt);
+  record.insert(record.end(), current.begin() + budget,
+                current.begin() + budget + 2);
+  if (version < 6) record.push_back(crest);
+  record.insert(record.end(), current.begin() + kSlidesAt,
                 current.begin() + end);
   settings::seal(record, version);
   return record;
@@ -265,7 +282,8 @@ void secrets(Out& out, const Model& model) {
       .text(model.football_data_key.view(), 64);
 }
 
-// 7 flags, 9 u8 values and 10 u16 values: formats 2 and 3.
+// 7 flags, 9 u8 values and 10 u16 values (the last one the API-Football
+// daily budget, format 7's daily_requests[1]): formats 2 to 6.
 void scalars(Out& out, const Model& model) {
   out.u8(model.espn_opt_in)
       .u8(model.demo)
@@ -292,7 +310,7 @@ void scalars(Out& out, const Model& model) {
       .u16(model.ip_badge_s)
       .u16(model.window_before)
       .u16(model.window_after)
-      .u16(model.api_daily_budget);
+      .u16(model.daily_requests[1]);
 }
 
 // Format 2 kept three routes, their fallbacks and eight fixture mappings as
@@ -417,12 +435,12 @@ void testListContainer() {
   TEST_ASSERT_FALSE(a == b);
 }
 
-void testFormat6Layout() {
+void testFormat7Layout() {
   TEST_ASSERT_EQUAL_size_t(8, kHeaderBytes);
   // Pinned: the longest record is the NVS blob ceiling, a memory budget item.
-  TEST_ASSERT_EQUAL_size_t(1941, kMaxRecordBytes);
+  TEST_ASSERT_EQUAL_size_t(1955, kMaxRecordBytes);
   TEST_ASSERT_TRUE(kMaxRecordBytes <= cfg::kSettingsMaxRecordBytes);
-  TEST_ASSERT_EQUAL_size_t(676, kEmptyListsBytes);
+  TEST_ASSERT_EQUAL_size_t(690, kEmptyListsBytes);
 
   Model model = defaults();
   model.admin_password.assign("pw");
@@ -459,6 +477,8 @@ void testFormat6Layout() {
                        cfg::InputRole::kMandatory, cfg::InputRole::kDown,
                        cfg::InputRole::kUp,     cfg::InputRole::kOff,
                        cfg::InputRole::kOff,    cfg::InputRole::kOff};
+  model.daily_requests = {0, 0x0201, 7, 65535};
+  model.request_spacing_s = {1, 6, 0x0E10, 30};
   TEST_ASSERT_TRUE(settings::validate(model));
 
   const Record record = encoded(model);
@@ -466,7 +486,7 @@ void testFormat6Layout() {
       kEmptyListsBytes + 2 + kCompetitionBytes + kPairBytes;
   TEST_ASSERT_EQUAL_size_t(expected, record.size());
 
-  TEST_ASSERT_EQUAL_HEX8(0x06, record[0]);  // version 6
+  TEST_ASSERT_EQUAL_HEX8(0x07, record[0]);  // version 7
   TEST_ASSERT_EQUAL_HEX8(0x00, record[1]);
   const std::size_t payload = expected - kHeaderBytes;
   TEST_ASSERT_EQUAL_HEX8(payload & 0xff, record[2]);
@@ -529,14 +549,21 @@ void testFormat6Layout() {
   // Format 4: the pin flag after the lists (default on).
   const std::size_t pin = pairs + 1 + kPairBytes;
   TEST_ASSERT_EQUAL_HEX8(1, record[pin]);
-  // Formats 5 and 6: mode, whole matchday and one role byte per input slot
-  // close the record.
+  // Formats 5 to 7: mode, whole matchday and one role byte per input slot.
   TEST_ASSERT_EQUAL_HEX8(1, record[pin + 1]);  // One page
   TEST_ASSERT_EQUAL_HEX8(1, record[pin + 2]);  // whole matchday on
   const uint8_t roles[] = {4, 0, 1, 3, 2, 0, 0, 0};
   for (std::size_t i = 0; i < sizeof(roles); ++i)
     TEST_ASSERT_EQUAL_HEX8(roles[i], record[pin + 3 + i]);
-  TEST_ASSERT_EQUAL_size_t(pin + 1 + kFormat5TailBytes, record.size());
+  // Format 7: the daily caps, then the request spacings, one little-endian
+  // u16 per provider in provider order, close the record.
+  const std::size_t limits = pin + 1 + kFormat5TailBytes;
+  const uint8_t limit_bytes[] = {0x00, 0x00, 0x01, 0x02, 0x07, 0x00,
+                                 0xFF, 0xFF, 0x01, 0x00, 0x06, 0x00,
+                                 0x10, 0x0E, 0x1E, 0x00};
+  for (std::size_t i = 0; i < sizeof(limit_bytes); ++i)
+    TEST_ASSERT_EQUAL_HEX8(limit_bytes[i], record[limits + i]);
+  TEST_ASSERT_EQUAL_size_t(limits + kLimitsBytes, record.size());
 
   // CRC over header bytes 0..3 followed by the payload.
   std::vector<uint8_t> covered(record.begin(), record.begin() + 4);
@@ -842,9 +869,9 @@ void testDamagedHeaders() {
   TEST_ASSERT_EQUAL(DecodeResult::kChecksumMismatch,
                     decodeInto(record, loaded));
 
-  // Formats 1 to 6 are known; any other version is not.
+  // Formats 1 to 7 are known; any other version is not.
   record = encoded(original);
-  for (const uint16_t version : {uint16_t{0}, uint16_t{7}, uint16_t{0xFFFF}}) {
+  for (const uint16_t version : {uint16_t{0}, uint16_t{8}, uint16_t{0xFFFF}}) {
     settings::seal(record, version);
     TEST_ASSERT_EQUAL(DecodeResult::kUnknownVersion,
                       decodeInto(record, loaded));
@@ -890,9 +917,9 @@ void testFormat1IsMigrated() {
   loaded = defaults();
   TEST_ASSERT_EQUAL(DecodeResult::kTooLong, decodeInto(record, loaded));
 
-  // The next save writes format 6 with the same values.
+  // The next save writes format 7 with the same values.
   const Record saved = encoded(stored);
-  TEST_ASSERT_EQUAL_HEX8(6, saved[0]);
+  TEST_ASSERT_EQUAL_HEX8(7, saved[0]);
 }
 
 void testFormat2IsConvertedToLists() {
@@ -976,9 +1003,9 @@ void testFormat2IsConvertedToLists() {
   TEST_ASSERT_EQUAL_size_t(2, loaded.competitions.size());
   TEST_ASSERT_EQUAL_size_t(2, loaded.fixture_pairs.size());
 
-  // The next save writes format 6 and reads back the same.
+  // The next save writes format 7 and reads back the same.
   const Record saved = encoded(loaded);
-  TEST_ASSERT_EQUAL_HEX8(6, saved[0]);
+  TEST_ASSERT_EQUAL_HEX8(7, saved[0]);
   Model again = defaults();
   TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(saved, again));
   TEST_ASSERT_TRUE(again == expected);
@@ -1430,11 +1457,11 @@ void testMatchdayScreenWithoutOwnMatch() {
 
 // OQ-123/OQ-126: format 4 stores the Konferenz pin flag after the lists; a
 // format-3 record (the same bytes without it) loads the initial value.
-// Formats 5 and 6 keep the flag at that place, followed by their tail.
+// Formats 5 to 7 keep the flag at that place, followed by their tail.
 void testPinOwnMatchFormats() {
   TEST_ASSERT_TRUE(defaults().pin_own_match);
   const auto pinAt = [](const Record& r) {
-    return r.size() - 1 - kFormat5TailBytes;
+    return r.size() - 1 - kFormat5TailBytes - kLimitsBytes;
   };
 
   Model stored = withLists();
@@ -1460,9 +1487,9 @@ void testPinOwnMatchFormats() {
   TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(record, loaded));
   TEST_ASSERT_TRUE(loaded.pin_own_match);
 
-  // The next save writes format 6 with the flag.
+  // The next save writes format 7 with the flag.
   record = encoded(loaded);
-  TEST_ASSERT_EQUAL_HEX8(6, record[0]);
+  TEST_ASSERT_EQUAL_HEX8(7, record[0]);
   TEST_ASSERT_EQUAL_HEX8(1, record[pinAt(record)]);
 
   // Only 0 and 1 are a flag.
@@ -1508,7 +1535,7 @@ void testFormat5Fields() {
                            loaded, nullptr, {}, &crest));
   TEST_ASSERT_TRUE(loaded == stored);
   TEST_ASSERT_EQUAL_UINT8(cfg::kStockImageId, crest);
-  // Format 6 has no crest image id.
+  // Format 7 has no crest image id.
   crest = 4;
   loaded = defaults();
   TEST_ASSERT_EQUAL(DecodeResult::kOk,
@@ -1516,7 +1543,7 @@ void testFormat5Fields() {
   TEST_ASSERT_EQUAL_UINT8(cfg::kStockImageId, crest);
 
   // Format 4: the pin flag is read, the tail fields keep the initial values.
-  const std::size_t tail = record.size() - kFormat5TailBytes;
+  const std::size_t tail = record.size() - kFormat5TailBytes - kLimitsBytes;
   crest = cfg::kStockImageId;
   Record format4 = olderFormat(record, 4, 2);
   loaded = defaults();
@@ -1545,6 +1572,77 @@ void testFormat5Fields() {
     loaded = defaults();
     TEST_ASSERT_EQUAL(DecodeResult::kInvalidValue, decodeInto(bad, loaded));
   }
+}
+
+// OQ-170: format 7 stores a daily cap (0 = none) and a request spacing per
+// provider at the end; formats 2 to 6 stored only API-Football's daily
+// budget after the scalars, which becomes its daily cap.
+void testRequestLimits() {
+  const Model initial = defaults();
+  const settings::RequestLimits caps{0, 100, 0, 0};
+  const settings::RequestLimits spacings{5, 6, 30, 6};
+  TEST_ASSERT_TRUE(initial.daily_requests == caps);
+  TEST_ASSERT_TRUE(initial.request_spacing_s == spacings);
+
+  Model stored = withLists();
+  stored.daily_requests = {500, 250, 0, 65535};
+  stored.request_spacing_s = {1, 60, 3600, 12};
+  TEST_ASSERT_TRUE(settings::validate(stored));
+  Record record = encoded(stored);
+  Model loaded = defaults();
+  TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(record, loaded));
+  TEST_ASSERT_TRUE(loaded == stored);
+
+  // Formats 6 and 5: the budget is API-Football's cap, the rest initial.
+  for (const uint16_t version : {uint16_t{6}, uint16_t{5}}) {
+    loaded = defaults();
+    TEST_ASSERT_EQUAL(DecodeResult::kOk,
+                      decodeInto(olderFormat(record, version), loaded));
+    TEST_ASSERT_EQUAL_UINT16(250, loaded.daily_requests[1]);
+    TEST_ASSERT_EQUAL_UINT16(0, loaded.daily_requests[0]);
+    TEST_ASSERT_EQUAL_UINT16(0, loaded.daily_requests[3]);
+    TEST_ASSERT_TRUE(loaded.request_spacing_s == spacings);
+    TEST_ASSERT_TRUE(loaded.competitions == stored.competitions);
+    TEST_ASSERT_TRUE(loaded.input_roles == stored.input_roles);
+  }
+  // A format-6 record with trailing bytes does not read them as limits.
+  Record format6 = olderFormat(record, 6);
+  format6.insert(format6.end(), kLimitsBytes, 0x01);
+  settings::seal(format6, 6);
+  loaded = defaults();
+  TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(format6, loaded));
+  TEST_ASSERT_TRUE(loaded.request_spacing_s == spacings);
+
+  // A format-7 record that ends before the limits keeps the initial ones;
+  // one that ends inside a value is partial.
+  Record cut = record;
+  cut.resize(record.size() - kLimitsBytes);
+  settings::seal(cut);
+  loaded = defaults();
+  TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(cut, loaded));
+  TEST_ASSERT_TRUE(loaded.daily_requests == caps);
+  cut = record;
+  cut.resize(record.size() - 1);
+  settings::seal(cut);
+  loaded = defaults();
+  TEST_ASSERT_EQUAL(DecodeResult::kPartialField, decodeInto(cut, loaded));
+
+  // Spacing 1..3600 s; a stored 0 rejects the record.
+  settings::Violation why;
+  Model model = defaults();
+  model.request_spacing_s[2] = 0;
+  TEST_ASSERT_FALSE(settings::validate(model, nullptr, &why));
+  TEST_ASSERT_EQUAL_STRING("request_spacing_s[2]", why.path.data());
+  TEST_ASSERT_EQUAL(settings::Reason::kRange, why.reason);
+  model.request_spacing_s[2] = 3601;
+  TEST_ASSERT_FALSE(settings::validate(model, nullptr, &why));
+  Record bad = encoded(stored);
+  bad[bad.size() - 2] = 0;  // the last spacing, football-data.org
+  bad[bad.size() - 1] = 0;
+  settings::seal(bad);
+  loaded = defaults();
+  TEST_ASSERT_EQUAL(DecodeResult::kInvalidValue, decodeInto(bad, loaded));
+  TEST_ASSERT_TRUE(loaded == defaults());
 }
 
 // OQ-141/OQ-150: the initial roles follow the profile's input count; exactly
@@ -1764,7 +1862,9 @@ void testSameProviderData() {
   other.brightness = static_cast<uint8_t>(base.brightness == 1 ? 2 : 1);
   other.language = static_cast<uint8_t>(1 - base.language);
   other.window_before = static_cast<uint16_t>(base.window_before + 1);
-  other.api_daily_budget = static_cast<uint16_t>(base.api_daily_budget + 1);
+  other.daily_requests[1] = static_cast<uint16_t>(base.daily_requests[1] + 1);
+  other.request_spacing_s[0] =
+      static_cast<uint16_t>(base.request_spacing_s[0] + 1);
   other.competitions[0].competition_name.assign("Erste Liga");
   other.competitions[0].team_name.assign("Other name");
   TEST_ASSERT_TRUE(settings::sameProviderData(base, other));
@@ -1946,7 +2046,7 @@ int main() {
   RUN_TEST(testCrc32KnownVector);
   RUN_TEST(testDefaults);
   RUN_TEST(testListContainer);
-  RUN_TEST(testFormat6Layout);
+  RUN_TEST(testFormat7Layout);
   RUN_TEST(testFullModelUsesTheMaximumRecord);
   RUN_TEST(testRoundTrip);
   RUN_TEST(testShorterRecordKeepsInitialValues);
@@ -1980,6 +2080,7 @@ int main() {
   RUN_TEST(testPinOwnMatchFormats);
   RUN_TEST(testFormat5Fields);
   RUN_TEST(testInputRoles);
+  RUN_TEST(testRequestLimits);
   RUN_TEST(testSameProviderData);
   RUN_TEST(testProviderAccess);
   RUN_TEST(testDropMissingImages);

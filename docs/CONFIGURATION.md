@@ -1,6 +1,6 @@
 # Configuration
 
-Implementation state: 0.1.0-dev, 2026-10-13 (settings format 6). All planned settings groups are
+Implementation state: 0.1.0-dev, 2026-10-13 (settings format 7). All planned settings groups are
 connected to the device services and offline Web UI. The current C6 build
 compiles; new fields, persistence interruptions and runtime controls still
 require acceptance. Historical core-service tests do not certify this extension.
@@ -26,8 +26,7 @@ alternate source (provider, competition, season, club), the fixture pairs,
 either provider key, the ESPN opt-in or demo mode. Only that counter discards
 the fetched data and caches and interrupts a running provider request.
 Display names and every display, network or time setting keep the shown data;
-a changed match window or API-Football daily budget only starts a new
-refresh.
+a changed match window or request limit only starts a new refresh.
 
 ## Optional bootstrap
 
@@ -61,7 +60,7 @@ location label, such as `Europe/Berlin`, rather than a POSIX rule.
 
 The Web UI reads `GET /api/v1/schema`; it does not maintain another defaults
 table. Every rejected value is answered with the name of its field and the
-reason (see [NETWORK.md](NETWORK.md)). Partial settings requests retain omitted fields, including secrets.
+reason (see [API.md](API.md)). Partial settings requests retain omitted fields, including secrets.
 Unknown keys, incorrect types, malformed array lengths and invalid values
 are rejected before a whole-model save.
 
@@ -100,16 +99,23 @@ are rejected before a whole-model save.
 | Night mode / window | on / 23:00–07:00 | local civil time; equal endpoints mean empty; requires valid clock |
 | IP badge | 60 seconds, top | 0–4000 seconds, 0 permanent; setup AP permanent by default |
 | Match window before / after | 30 / 30 minutes | 0–180 minutes |
-| API-Football daily budget | 100 requests | 1–10000; durable reservations count every attempted request |
+| Daily request cap per provider | 0 / 100 / 0 / 0 requests | 0–65535 per provider; 0 = no daily cap (no counter, no storage write); a cap counts every attempted request through durable reservations and resets at 00:00 UTC |
+| Minimum request spacing per provider | 5 / 6 / 30 / 6 seconds | 1–3600 seconds per provider |
 | Console status | on, 30 seconds | existing stored interval limits; browser stream is separate |
 
 Screen indices are Own match 0, Conference 1, Table 2, Crest/slideshow 3.
 Provider indices are OpenLigaDB 0, API-Football 1, ESPN 2, football-data 3.
-Minimum request spacing is currently a compile-time policy in `app_config.h`:
-5 / 6 / 30 / 6 seconds in that provider order. It applies to every request
-start, including selection lists, and is separate from both the post-refresh
-poll delay and API-Football's stored daily budget. It is not yet an editable
-runtime setting.
+The two request limits are lists in that provider order (JSON
+`daily_requests` and `request_spacing_s`); a shorter list in a REST save or
+import replaces only its first entries. The minimum spacing applies to every
+request start of that provider, including selection lists, and is separate
+from the post-refresh poll delay. Every provider with a daily cap spreads its
+remaining requests over the rest of the match coverage; the slowest provider
+sets the poll interval. Defaults follow the providers' published limits
+(checked 2026-10-13): API-Football's free plan allows 100 requests per day,
+football-data.org's free tier 10 per minute, OpenLigaDB 60 per minute per IP
+address without a daily quota; ESPN publishes no limit. The spacings are the
+earlier fixed values.
 An empty season means the provider's current season at every provider; the
 device resolves it at runtime (see the data provider documentation). For
 OpenLigaDB the competition list
@@ -146,10 +152,10 @@ meanwhile.
 
 ## Record format and consistent saves
 
-Current format is **6**, with explicit little-endian encoding, not a structure
+Current format is **7**, with explicit little-endian encoding, not a structure
 memory dump. The record has a variable length: each list stores only its
 entries. The longest possible record (every list full, every text at capacity)
-is **1941 bytes**, pinned by a host test; a record without lists is 676 bytes.
+is **1955 bytes**, pinned by a host test; a record without lists is 690 bytes.
 The reader accepts at most 2048 bytes (`kSettingsMaxRecordBytes`). Header:
 16-bit format, 16-bit payload length and IEEE CRC32 over the first four bytes
 plus payload.
@@ -171,14 +177,16 @@ Text fields are one length byte followed by their capacity.
 | 271 | 64 | NTP server |
 | 335 | 227 | admin password (65), API-Football key (97), football-data key (65) |
 | 562 | 64 | four screen styles, 16 bytes each (two switches, three colours, text scale, image) |
-| 626 | 36 | seven switches, nine one-byte values (language, brightness, rotation, counts, screen defaults), ten 16-bit timing/budget values |
-| 662 | 1 + n | slides: count (0–5), then one byte each (0 = crest, else library id) |
+| 626 | 34 | seven switches, nine one-byte values (language, brightness, rotation, counts, screen defaults), nine 16-bit timing values |
+| 660 | 1 + n | slides: count (0–5), then one byte each (0 = crest, else library id) |
 | next | 1 + 236 n | competitions: count (0–3); each two switches, primary and fallback source (84 bytes each: provider, competition, season, club), competition name (33), club name (33) |
 | next | 1 + 69 n | fixture pairs: count (0–8); each two switches, competition index, primary ID (33), secondary ID (33) |
 | next | 1 | format 4: pin own match in the conference (0/1) |
 | next | 1 | format 5: conference mode (0 All pages, 1 One page) |
 | next | 1 | format 5: show own match for the whole matchday (0/1) |
 | next | 8 | format 5: input roles, one byte per input slot (0 Off, 1 Mandatory, 2 Up, 3 Down, 4 Scroll) |
+| next | 8 | format 7: daily request cap per provider, 16 bits each (0 = no cap) |
+| next | 8 | format 7: minimum request spacing per provider in seconds, 16 bits each |
 
 A missing tail at a list or field boundary retains initial values; a stored
 count of zero replaces a preset or initial list by an empty one. Ending inside
@@ -187,14 +195,20 @@ same-format tail is ignored within the reader limit.
 
 The decoder also accepts the older formats and converts them in RAM:
 
-- **Format 5** has one more byte, the crest image id, between the scalar
-  values and the slides. The crest is no longer a setting: a library id
+- **Format 6** stores the API-Football daily budget as a tenth 16-bit value
+  in the scalars (slides at 662) and has no request limits at the end. That
+  value becomes API-Football's daily cap; the other caps and every spacing
+  keep their initial values. A format-6 record with bytes after the input
+  roles ignores them.
+- **Format 5** has the format-6 layout with one more byte, the crest image
+  id, between the scalar values and the slides. The crest is no longer a setting: a library id
   there is handed to the image service, which copies that image once as the
   replacement of the crest role (outside an OTA trial; retried while the
-  display is busy or an upload runs) and then saves the settings in format 6. The library image stays.
+  display is busy or an upload runs) and then saves the settings in the
+  current format. The library image stays.
   If the image no longer exists, or the copy fails for lack of storage, the
   crest role keeps its factory image and the record is still saved in
-  format 6; the image stays in the library. A crest id outside the library
+  the current format; the image stays in the library. A crest id outside the library
   range is ignored instead of rejecting the record. Formats 3 and 4 carry the
   same byte and are handled the same way.
 - **Format 4** has the same layout without the ten format-5 bytes; conference
@@ -219,7 +233,7 @@ Conference in every format; everything else in the record is kept. A backup
 file with that value is converted the same way by the Web UI before import.
 
 Loading never rewrites NVS. The next explicit save, after any OTA trial,
-writes format 6 (the crest migration above saves once by itself). The old firmware cannot read a newer record and uses initial
+writes format 7 (the crest migration above saves once by itself). The old firmware cannot read a newer record and uses initial
 values after a manual USB downgrade; no reverse migration or automatic
 downgrade write is performed.
 
@@ -234,7 +248,7 @@ before the first save overwrites a rejected or damaged record.
 
 The established NVS startup recovery erases the entire NVS partition only
 for `NO_FREE_PAGES` or `NEW_VERSION_FOUND`, with an error log. That also
-clears radio calibration and provider-budget records. Other NVS errors
+clears radio calibration and the request counters. Other NVS errors
 retain RAM defaults and refuse persistent saves.
 
 ## Reset and firmware updates
@@ -251,18 +265,27 @@ be uploaded through the Web UI.
 There is no input gesture that resets settings; the reset is available in
 the Web UI only.
 
-The provider-budget namespace is retained by normal settings/image resets.
-Its 24-byte durable ledger reserves blocks of up to eight attempts before
-network I/O. Unused reserved credits are lost on reboot; a backward clock
-correction does not replenish them. Advancing to a later UTC day starts a
-new ledger. Failed storage refuses provider requests rather than bypassing
-the budget. This is a local limit, not a shared-IP provider quota guarantee.
+Request counters live in their own NVS namespace (`provider_budget`), one
+12-byte record per provider with a daily cap (magic, UTC day, reserved
+requests). A provider with cap 0 has no counter and causes no write. Before
+network I/O a counter reserves blocks of up to eight requests; unused
+reserved requests are lost on reboot, and a backward clock correction never
+reopens a day. A later UTC day starts a new count. A record that cannot be
+stored refuses that provider's request rather than bypassing the cap. A
+damaged or unreadable record blocks only its own provider for the current
+day; the next UTC day writes a new record. The single 24-byte record of
+earlier firmware (key `credits`) is read once for API-Football while that
+provider has no record of its own and removed when the first new record is
+stored. The settings reset in the Web UI also erases every counter, so a
+damaged counter can always be cleared without a serial tool. This is a local
+limit, not a guarantee against other devices sharing the provider quota or
+IP address.
 
 Routine firmware OTA preserves LittleFS. The browser OTA gate accepts an
 image whose declared settings format is equal to or newer than the running one
 and refuses an older one, because every firmware imports all older formats and
-an older image could not read the stored record. Format-6 firmware is therefore
-accepted by browser OTA from format-3 to format-5 firmware. (Historical: the first
+an older image could not read the stored record. Format-7 firmware is therefore
+accepted by browser OTA from format-3 to format-6 firmware. (Historical: the first
 format-3 image had to be installed by USB, because the format-2 firmware's
 gate demanded an equal format.) A USB downgrade to older firmware selects its
 initial values once a newer format has been saved. Trial firmware refuses
@@ -277,23 +300,27 @@ and must be uploaded again into the library.
 ## Resources and acceptance
 
 Compiler sizes (host compiler; the same method gave the documented 1736 bytes
-for the format-2 model): Model 1952 bytes, longest encoded record 1941 bytes
-(format 6; removing the crest byte saved 1 byte of record and 4 bytes of
-model including padding; the format-5 fields added 10 bytes to model and
+for the format-2 model): Model 1968 bytes, longest encoded record 1955 bytes
+(format 7; the request limits added 14 bytes of record and 16 bytes of model
+including padding; removing the crest byte in format 6 saved 1 byte of record
+and 4 bytes of model including padding; the format-5 fields added 10 bytes to model and
 record, plus 2 bytes of model padding; the format-4 pin switch fit into
 existing padding).
 The stored model and network's applied copy are fixed RAM; every
 `settings::current()` copy puts about 1.9 KB on the caller's stack (220 bytes
-more than the format-2 model). Save allocates the longest record size (1941 bytes)
+more than the format-2 model). Save allocates the longest record size (1955 bytes)
 temporarily; load allocates at most 2048 bytes. These costs are additional to
-NVS page/index heap. A 1941-byte blob uses roughly 63 NVS entries, about 126
+NVS page/index heap. A 1955-byte blob uses roughly 63 NVS entries, about 126
 while replacing it; these are layout estimates, not measured full-storage
 acceptance. The partition remains 20 KB. A full model serialized to 3,906 bytes
 of JSON (4,358 with secrets, host measurement for format 3); the pin switch
 adds 21 bytes (`"pin_own_match":true,`, computed) and format 5 adds 75 bytes
 (`"conference_mode":0,`, `"whole_matchday":false,`,
 `"input_roles":[1,2,3,0,0,0,0,0],`, computed); format 6 removes
-`"crest_image":0,` (16 bytes, computed), within the 8,192-byte API
+`"crest_image":0,` (16 bytes, computed); format 7 replaces
+`"api_daily_budget":100,` (23 bytes) by `"daily_requests":[0,100,0,0],` and
+`"request_spacing_s":[5,6,30,6],` (60 bytes with the defaults, at most 86
+with every value at its maximum, computed), within the 8,192-byte API
 body limit. The schema repeats them in its defaults and adds `"inputs":3,`
 (11 bytes), the number of inputs of the device.
 
