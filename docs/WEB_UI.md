@@ -29,10 +29,19 @@ System diagnostics label provider request attempts as "since restart". The
 API-Football daily budget is a separate setting; the boot counter is not
 displayed as daily consumption or as a fraction of that budget.
 
-The overview uses only actual API data. While the first provider cycle has not
-published a snapshot it says that data is loading. It does not invent live
-scores or a table for the display preview. Display-style previews are explicitly
-samples, not screenshots of the physical panel.
+The overview shows the current screen as a schematic disc drawn with the
+renderer's geometry (round or rectangular, device resolution), the saved
+colours, text size and background/slide image, the status line and the IP
+badge as the display would show them. The own match uses the device's real
+data (teams, score, minute or kickoff, phase). Values the status API does not
+report — conference rows, table rows and the event line — are drawn as example
+values, and the caption names them as such. The kickoff is shown in the
+browser's time zone. The preview is explicitly a schematic, not a screenshot;
+it does not show approximate-value markers or night dimming. Below it, one
+sentence explains why this screen is shown (own match, matchday, idle with the
+next own kickoff, manual choice with its return time, setup). While the first
+provider cycle has not published a snapshot the overview says that data is
+loading.
 
 Theme follows the browser by default; a manual light/dark choice is stored only
 in the browser. Form/navigation text follows the draft language choice. Status
@@ -46,6 +55,10 @@ client validates all fields against schema byte capacities, numeric bounds,
 list maxima and the firmware's source/pair/image relationships before sending.
 An empty number is an error, not zero. Server errors open the relevant page and
 identify the field. The server remains authoritative.
+
+A control that cannot be used is disabled with a visible reason next to it
+(for example a full list, a missing save, a full image library or an
+incomplete wizard step), so a greyed-out button is never left unexplained.
 
 A listed competition always needs competition/club ids, including when paused.
 An active fallback needs a complete source from another provider. Active pairs
@@ -84,6 +97,13 @@ wizard takes it from the provider result and permits an expert override. It
 does not promise automatic empty-season resolution before that service exists.
 Provider keys and ESPN opt-in must be saved before their provider can be used.
 
+Competition entries that are new, moved or changed show a notice that the
+device fetches them, and fixture pairs can be created for them, only after the
+global save. Removing a competition asks for confirmation, names it and the
+number of fixture pairs removed with it, and takes effect on save. The wizard
+asks for a country filter only for API-Football, whose competition list
+supports it; the Next button shows why it is not yet available.
+
 Fixture picking uses unchanged saved competitions at their saved indices.
 New, edited or reordered competitions require the global save first. It loads
 primary and fallback fixtures with ids, labels and kickoff, clears stale picks
@@ -91,6 +111,34 @@ on reload and requires current valid selections before accepting. A home/away
 swap suggestion remains explicitly reviewable; the firmware never equates
 provider identities by similar names. Moving/removing competitions updates
 pair indices in the draft.
+
+## Display page
+
+Situation defaults (outside matchdays, matchday, own match) list only enabled
+screens. A stored choice whose screen has since been switched off stays
+visible as "(off)", together with the note which screen the display uses
+instead. Own match is not offered for the matchday situation, because the own
+club does not play then; an imported backup with that value is changed to
+Conference before validation.
+
+Each of the four screen cards has an enable switch, a live schematic preview
+with example values that follows every draft change (colours, text size,
+background, crest and slides), a background-image choice and a colour group.
+The global background switch sits above the cards; while it is off, the
+per-screen choices keep their values and say so. The conference card holds
+the switch that pins the own match in the conference. It is stored, but the
+current display always keeps the own match in the middle row, so it has no
+visible effect yet. Display, provider-budget and diagnostics settings whose
+meaning is not obvious have a help text, including the device-specific
+conditions (for example the API-Football daily budget and its reset at 00:00
+UTC, or the scroll reset that only applies to devices with exactly two
+buttons).
+
+The crest field and each screen's background field offer "Upload new image"
+next to their choice (slides are added from the library list). It opens the image editor for that field; after a successful upload
+the new library image is assigned to the field in the draft and the page
+returns to it. "Back to display" leaves the editor without changes. The
+assignment is saved with the global save like any other draft change.
 
 ## Image editor and storage
 
@@ -139,7 +187,8 @@ scripts/build_assets.py. Automatic provider-crest import is still deferred.
 ## System and diagnostics
 
 Export optionally includes secrets with an explicit notice. Import checks size,
-JSON shape, types and the same validation rules before confirmation; successful
+JSON shape, types and the same validation rules before confirmation (an old
+matchday default of Own match is converted to Conference first); successful
 import refreshes the settings and session state instead of rewriting an old
 draft. Restart and factory reset are separate confirmed actions. Factory reset
 requires the device name and explains how to reconnect to setup afterwards.

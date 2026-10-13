@@ -1,6 +1,6 @@
 # Configuration
 
-Implementation state: 0.1.0-dev, 2026-10-12 (settings format 3). All planned settings groups are
+Implementation state: 0.1.0-dev, 2026-10-12 (settings format 4). All planned settings groups are
 connected to the device services and offline Web UI. The current C6 build
 compiles; new fields, persistence interruptions and runtime controls still
 require acceptance. Historical core-service tests do not certify this extension.
@@ -71,7 +71,8 @@ are rejected before a whole-model save.
 | Screens / backgrounds | all enabled / on | four styles; at least one screen enabled |
 | Background / text / accent | `#101820` / `#ffffff` / `#49cba0` | RGB colours per screen |
 | Text scale | 100% | 70–130%, selects bounded compiled font roles |
-| Defaults outside / matchday / own game | Table / Conference / Own match | enabled available screen |
+| Defaults outside / matchday / own game | Table / Conference / Own match | enabled available screen; while other matches run, Own match is not selectable (the own club is not playing then) |
+| Pin own match in the conference | on | switch; stored and offered in the Web UI, but the current display always keeps the own match in the middle row, so switching it off has no visible effect yet |
 | Manual return / scroll-direction reset | 60 / 20 seconds | 0–4000; 0 disables the corresponding timeout |
 | Scroll repetition | 250 ms | 100–2000 ms |
 | Visible conference / table rows | 5 / 5 (240 px round: 4 / 5) | 1–5 / 1–9 (240 px round: 1–4 / 1–7); the display profile sets the upper limits, the schema reports them, the API rejects more, stored values above them are clamped when loaded; all stored table rows remain reachable |
@@ -118,10 +119,10 @@ meanwhile.
 
 ## Record format and consistent saves
 
-Current format is **3**, with explicit little-endian encoding, not a structure
+Current format is **4**, with explicit little-endian encoding, not a structure
 memory dump. The record has a variable length: each list stores only its
 entries. The longest possible record (every list full, every text at capacity)
-is **1931 bytes**, pinned by a host test; a record without lists is 666 bytes.
+is **1932 bytes**, pinned by a host test; a record without lists is 667 bytes.
 The reader accepts at most 2048 bytes (`kSettingsMaxRecordBytes`). Header:
 16-bit format, 16-bit payload length and IEEE CRC32 over the first four bytes
 plus payload.
@@ -148,6 +149,7 @@ Text fields are one length byte followed by their capacity.
 | 663 | 1 + n | slides: count (0–5), then one byte each (0 = crest, else library id) |
 | next | 1 + 236 n | competitions: count (0–3); each two switches, primary and fallback source (84 bytes each: provider, competition, season, club), competition name (33), club name (33) |
 | next | 1 + 69 n | fixture pairs: count (0–8); each two switches, competition index, primary ID (33), secondary ID (33) |
+| next | 1 | format 4: pin own match in the conference (0/1) |
 
 A missing tail at a list or field boundary retains initial values; a stored
 count of zero replaces a preset or initial list by an empty one. Ending inside
@@ -155,6 +157,9 @@ a field fails; a count above the list capacity rejects the record; an unknown
 same-format tail is ignored within the reader limit.
 
 The decoder also accepts the older formats and converts them in RAM:
+
+- **Format 3** has the same layout without the final pin flag; the flag keeps
+  its initial value (on).
 
 - **Format 2** (1720 bytes) stored three routes, three fallbacks and eight
   fixture mappings as fixed slots with an enabled flag each. A complete route
@@ -167,8 +172,12 @@ The decoder also accepts the older formats and converts them in RAM:
   The 238- and 335-byte core layouts therefore remain readable, and newly added
   fields keep initial values.
 
+A stored matchday default of Own match (allowed up to format 3) is read as
+Conference in every format; everything else in the record is kept. A backup
+file with that value is converted the same way by the Web UI before import.
+
 Loading never rewrites NVS. The next explicit save, after any OTA trial,
-writes format 3. The old firmware cannot read a newer record and uses initial
+writes format 4. The old firmware cannot read a newer record and uses initial
 values after a manual USB downgrade; no reverse migration or automatic
 downgrade write is performed.
 
@@ -207,11 +216,12 @@ the budget. This is a local limit, not a shared-IP provider quota guarantee.
 Routine firmware OTA preserves LittleFS. The browser OTA gate accepts an
 image whose declared settings format is equal to or newer than the running one
 and refuses an older one, because every firmware imports all older formats and
-an older image could not read the stored record. The first format-3 image is
-installed by USB, since the previous firmware's gate demands an equal format.
-A USB downgrade to older firmware selects its initial values once format 3 has
-been saved. Trial firmware refuses settings and image writes (and the removal
-of legacy image files) until local boot acceptance, so automatic rollback can
+an older image could not read the stored record. Format-4 firmware is therefore
+accepted by browser OTA from format-3 firmware. (Historical: the first
+format-3 image had to be installed by USB, because the format-2 firmware's
+gate demanded an equal format.) A USB downgrade to older firmware selects its
+initial values once a newer format has been saved. Trial firmware refuses
+settings and image writes (and the removal of legacy image files) until local boot acceptance, so automatic rollback can
 still read the untouched record and files. Rollback does not undo shared
 storage after an accepted image has subsequently saved new settings.
 
@@ -222,21 +232,23 @@ and must be uploaded again into the library.
 ## Resources and acceptance
 
 Compiler sizes (host compiler; the same method gave the documented 1736 bytes
-for the format-2 model): Model 1944 bytes, longest encoded record 1931 bytes.
+for the format-2 model): Model 1944 bytes, longest encoded record 1932 bytes
+(format 4; the pin switch fits into existing padding of the model and adds one record byte).
 The stored model and network's applied copy are fixed RAM; every
 `settings::current()` copy puts about 1.9 KB on the caller's stack (208 bytes
-more than before). Save allocates the longest record size (1931 bytes)
+more than before). Save allocates the longest record size (1932 bytes)
 temporarily; load allocates at most 2048 bytes. These costs are additional to
-NVS page/index heap. A 1931-byte blob uses roughly 63 NVS entries, about 126
+NVS page/index heap. A 1932-byte blob uses roughly 63 NVS entries, about 126
 while replacing it; these are layout estimates, not measured full-storage
-acceptance. The partition remains 20 KB. A full model serializes to 3,906 bytes
-of JSON (4,358 with secrets, host measurement), within the 8,192-byte API body
-limit.
+acceptance. The partition remains 20 KB. A full model serialized to 3,906 bytes
+of JSON (4,358 with secrets, host measurement for format 3); the pin switch
+adds 21 bytes (`"pin_own_match":true,`, computed), within the 8,192-byte API
+body limit.
 
 The earlier 238-byte layout passed C6 store selectors on 2026-10-09 and
 30 reset-button interruptions; supply removal remains untested. The host
-tests (`pio test -e native -f test_settings`) cover the format-3 layout, the
-longest record, the conversion of formats 1 and 2, list limits and the image
+tests (`pio test -e native -f test_settings`) cover the format-4 layout, the reading of
+format-3 records, the longest record, the conversion of formats 1 and 2, list limits and the image
 reference cleanup. They do not certify device behaviour: the migration of a
 real format-2 record, full/corrupt storage, real power loss, resets and OTA
 rollback still require tests on the device. Current store selectors remain

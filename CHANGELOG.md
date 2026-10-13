@@ -45,12 +45,21 @@ acceptance remain pending. No release or device upload is implied.
   football entries; picking keeps a single marked entry and the correct name.
 - WiFi modem sleep is off; it was the unchosen ESP-IDF default.
 - Page notices are readable in both themes and stay visible above dialogs.
+- Settings format 4: new switch "pin own match in the Konferenz" (default on;
+  display effect follows with the display redesign). The matchday default no
+  longer offers Own match; a stored or imported value becomes Konferenz.
+- Web UI completed to the approved design: schematic round/rectangular
+  previews of the current screen and of every screen card, a reason line for
+  the shown screen, a visible reason on every disabled control, upload of a
+  new crest/background image directly from its field, situation choices
+  limited to enabled screens, explained competition save/delete flow, country
+  filter only for API-Football and help texts for non-obvious settings.
 
 Versions follow MAJOR.MINOR.PATCH. Development candidates add `-dev`; the
 release guard accepts plain versions only. `VERSION` is authoritative. Settings
 record format and stable hardware/layout identity are versioned independently:
 an application version change alone does not change their compatibility.
 
-The current C6 candidate fits its OTA slot at 84.6% (1,552,320 B reported flash),
-with unchanged 197,380 B static RAM. The embedded UI is 41,727 B gzip.
+The current C6 candidate fits its OTA slot at 85.0% (1,559,248 B reported flash),
+with unchanged 197,380 B static RAM. The embedded UI is 48,481 B gzip.
 Runtime reserves, browser/device acceptance and visual polish are still pending.

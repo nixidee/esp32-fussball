@@ -175,6 +175,7 @@ struct Model {
   bool ip_badge_ap_permanent = cfg::kIpBadgeApPermanentDefault;
   bool ip_badge_bottom = cfg::kIpBadgeBottomDefault;
   bool browser_debug = cfg::kBrowserDebugDefault;
+  bool pin_own_match = cfg::kPinOwnMatchDefault;  // format 4
   uint8_t language = cfg::kLanguageDefault;  // 0 German, 1 English
   uint8_t brightness = cfg::kBrightnessDefault;
   uint8_t night_brightness = cfg::kNightBrightnessDefault;

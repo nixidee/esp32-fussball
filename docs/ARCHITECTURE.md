@@ -508,16 +508,16 @@ shape the image design:
   (temporary file, then rename), otherwise a replacement during a redraw fails.
 This is integration evidence only, not the supported-maximum envelope.
 
-### Current compiled resource ledger — 2026-10-12 (settings format 3)
+### Current compiled resource ledger — 2026-10-12 (settings format 4)
 
 | Item | C6 candidate | Growth over the accepted core image |
 |---|---|---|
-| Firmware binary | 1,502,208 B | +985,904 B |
-| PlatformIO flash report | 1,501,454 B, 81.8% of 1,835,008 B | +985,790 B |
-| Static data/BSS | 194,516 B | +146,296 B |
+| Firmware binary | 1,560,000 B | +1,043,696 B |
+| PlatformIO flash report | 1,559,248 B, 85.0% of 1,835,008 B | +1,043,584 B |
+| Static data/BSS | 197,380 B | +149,160 B |
 | Linked DIRAM, official IDF size report | not re-measured (266,066 B at the 2026-10-10 image) | — |
 | Football snapshots | 3 × 27,168 B = 81,504 B | Included above |
-| Settings model / longest encoded record | 1,944 / 1,931 B | Format 3 (variable length, ceiling 2,048 B); formats 1 and 2 are converted in RAM without an NVS rewrite |
+| Settings model / longest encoded record | 1,944 / 1,932 B | Format 4 (variable length, ceiling 2,048 B); formats 1 to 3 are converted in RAM without an NVS rewrite |
 | UI view model | 1,416 B | Static owned view |
 | Parser live allocation cap | 24,576 B including custom headers | Libc metadata additional |
 | JPEG validation workspace | 4,096 B static | Included above |
@@ -531,11 +531,14 @@ still needs a device log). Assertions are silent in release builds. No
 partitions, public features or library versions were removed to fit the slot.
 Runtime initialization of large snapshot defaults, shared stock aliases/font
 roles and unused C6 SDK speed/protocol features reduced the first complete
-build's 94.3% occupancy to the current 81.8%.
+build's 94.3% occupancy to 81.8% at the settings-format-3 build.
 
-The image fits the OTA slot and is about 58.3 KB below the 85% reserve line
+The image fits the OTA slot and is 509 B below the 85% reserve line
 (1,559,757 B) using the PlatformIO report. Settings format 3 added 3,706 B flash
-and 620 B static RAM over the preceding build. No flash-reserve gate is
+and 620 B static RAM over the preceding build; the later Web UI rewrite, API
+and provider changes grew flash to 84.6%, and settings format 4 with the
+completed Web UI added 6,928 B flash (6,754 B of it embedded page gzip) and no
+static RAM. No flash-reserve gate is
 accepted. Free heap is not derivable from the static figures: dynamic stacks,
 network, TLS, parser, DMA and library charges must still be accounted for. Peak heap,
 largest block, 25% stack reserves, LVGL fragmentation, ten-socket concurrency,

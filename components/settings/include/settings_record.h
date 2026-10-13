@@ -14,8 +14,9 @@
 // the crest image and then three lists, each a u8 count followed by that many
 // entries (so the record length varies): slides (u8 each), competitions and
 // fixture pairs (settings_record.cpp shows the entry layouts).
-// Format 2 (lists as fixed slots) and format 1 (core only) are converted when
-// read.
+// Format 4 appends one flag after the lists: pin_own_match (u8 0/1).
+// Format 3 (without that flag), format 2 (lists as fixed slots) and format 1
+// (core only) are converted when read.
 
 #pragma once
 
@@ -57,7 +58,8 @@ inline constexpr std::size_t kMaxPayloadBytes =
     cfg::kScreenCount * kScreenBytes + kScalarBytes + 1 +
     (1 + decltype(Model::slides)::kCapacity) +
     (1 + decltype(Model::competitions)::kCapacity * kCompetitionBytes) +
-    (1 + decltype(Model::fixture_pairs)::kCapacity * kFixturePairBytes);
+    (1 + decltype(Model::fixture_pairs)::kCapacity * kFixturePairBytes) +
+    1;  // format 4: Konferenz pin flag
 // Longest record encode() produces (both lists full); a model with shorter
 // lists produces a shorter record.
 inline constexpr std::size_t kMaxRecordBytes = kHeaderBytes + kMaxPayloadBytes;
@@ -94,8 +96,8 @@ void seal(std::span<uint8_t> record,
 // On entry 'model' holds the initial values. Fields missing from a shorter
 // record keep them; trailing fields of a longer record are ignored. Format 1
 // loads only its legacy core within the old size bound; format 2 is converted
-// to lists in RAM (empty slots disappear, filled paused ones stay). Neither
-// is rewritten.
+// to lists in RAM (empty slots disappear, filled paused ones stay); format 3
+// keeps the initial pin_own_match. None is rewritten.
 // A stored visible_matches / table_window above the display's maximum
 // ('limits') is clamped to it; values outside the general range stay invalid.
 // On any result other than kOk 'model' is unchanged; for kInvalidValue *invalid

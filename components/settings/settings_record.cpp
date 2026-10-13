@@ -416,6 +416,7 @@ std::size_t encode(const Model& model,
     writer.text(pair.primary_id);
     writer.text(pair.secondary_id);
   }
+  writer.flag(model.pin_own_match);  // format 4
   const auto used = static_cast<std::size_t>(writer.position() - out.data());
   seal(out.first(used));
   return used;
@@ -440,7 +441,8 @@ DecodeResult decode(std::span<const uint8_t> record, Model& model,
   const auto version = readU16(record.data() + kVersionOffset);
   const bool legacy = version == cfg::kSettingsLegacyFormatVersion;
   const bool slots = version == cfg::kSettingsSlotFormatVersion;
-  if (version != cfg::kSettingsFormatVersion && !legacy && !slots)
+  const bool lists = version == cfg::kSettingsListFormatVersion;
+  if (version != cfg::kSettingsFormatVersion && !legacy && !slots && !lists)
     return DecodeResult::kUnknownVersion;
   if (legacy && record.size() > cfg::kSettingsLegacyMaxRecordBytes)
     return DecodeResult::kTooLong;
@@ -457,6 +459,9 @@ DecodeResult decode(std::span<const uint8_t> record, Model& model,
       readSlots(reader, candidate);
     else
       readLists(reader, candidate);
+    // Format 3 ends before the pin flag and keeps the initial value.
+    if (version == cfg::kSettingsFormatVersion)
+      reader.flag(Field::kApplication, candidate.pin_own_match);
   }
   DecodeResult result = reader.result();
   Field bad = reader.invalidField();
@@ -467,6 +472,10 @@ DecodeResult decode(std::span<const uint8_t> record, Model& model,
   if (cfg::kTableWindowRange.contains(candidate.table_window))
     candidate.table_window =
         std::min(candidate.table_window, limits.table_window_max);
+  // Earlier firmware allowed the own-match screen while other matches run;
+  // such a record keeps everything else and shows the Konferenz (OQ-122).
+  if (candidate.matchday_screen == cfg::Screen::kLiveSingle)
+    candidate.matchday_screen = cfg::Screen::kLiveMulti;
   if (result == DecodeResult::kOk &&
       !validate(candidate, &bad, nullptr, limits))
     result = DecodeResult::kInvalidValue;

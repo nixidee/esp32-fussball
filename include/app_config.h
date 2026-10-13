@@ -152,12 +152,14 @@ inline constexpr TimeTest kTimeTest = TimeTest::kNone;
 
 // ---- Settings record -------------------------------------------------------
 // Format 3 stores the lists (competitions, fixture pairs, slides) as a count
-// followed by that many entries, so the record length varies. Formats 1 (core
-// only) and 2 (lists as fixed slots) are still read and converted in RAM; the
-// next save writes format 3. Loading never writes NVS.
-inline constexpr uint16_t kSettingsFormatVersion = 3;
+// followed by that many entries, so the record length varies. Format 4 appends
+// the Konferenz pin flag; a format-3 record is read with its default. Formats 1
+// (core only), 2 (lists as fixed slots) and 3 are still read and converted in
+// RAM; the next save writes format 4. Loading never writes NVS.
+inline constexpr uint16_t kSettingsFormatVersion = 4;
 inline constexpr uint16_t kSettingsLegacyFormatVersion = 1;
 inline constexpr uint16_t kSettingsSlotFormatVersion = 2;
+inline constexpr uint16_t kSettingsListFormatVersion = 3;
 inline constexpr std::size_t kSettingsLegacyMaxRecordBytes = 1024;
 inline constexpr std::size_t kSettingsLegacyCoreRecordBytes = 335;
 // Longest stored record that is read (newer firmware may have appended
@@ -255,7 +257,9 @@ inline constexpr bool kEntryActiveDefault = true,
                       kNightEnabledDefault = true,
                       kIpBadgeApPermanentDefault = true,
                       kIpBadgeBottomDefault = false,
-                      kBrowserDebugDefault = false;
+                      kBrowserDebugDefault = false,
+                      // Konferenz keeps the own match in a fixed row (OQ-123).
+                      kPinOwnMatchDefault = true;
 inline constexpr uint8_t kLanguageDefault = 0, kRotationDefault = 0;
 inline constexpr std::size_t kScreenCount = 4;
 // List maxima of the settings model (target capacities; ordered lists without

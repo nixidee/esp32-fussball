@@ -18,6 +18,7 @@ using namespace ArduinoJson;
   X(ip_badge_ap_permanent);   \
   X(ip_badge_bottom);         \
   X(browser_debug);           \
+  X(pin_own_match);           \
   X(language);                \
   X(brightness);              \
   X(night_brightness);        \

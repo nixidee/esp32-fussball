@@ -78,9 +78,8 @@ void storePrepared(SettingsTest test) {
       seal(record, cfg::kSettingsFormatVersion + 1);
       return storeRaw(record, "sample with format version + 1");
     case SettingsTest::kShorterRecord: {
-      // Without the fixture pairs (the last field: count and entries).
-      const auto shorter = record.first(
-          used - (1 + model.fixture_pairs.size() * kFixturePairBytes));
+      // Without the Konferenz pin flag (the last field, format 4).
+      const auto shorter = record.first(used - 1);
       seal(shorter);
       return storeRaw(shorter, "sample without its last field");
     }

@@ -718,7 +718,7 @@ The format-2 correction artifact, before subsequent network fixes, was
 flash reserve goal is missed by 46,904 B. No device/storage write or behavioural
 test was performed for this correction.
 
-## ADR-024 — Settings format 3: lists, image library, equal-or-newer OTA gate · Accepted 2026-10-12
+## ADR-024 — Settings format 3: lists, image library, equal-or-newer OTA gate · Accepted 2026-10-12 · record extended by ADR-026
 
 **Context:** the fixed slots of format 2 (three routes, three fallbacks, eight
 mappings, each with an enabled flag) show empty entries in the interface, cap
@@ -860,3 +860,39 @@ deadline is unchanged: it limits stalled transfers and how long TLS memory and
 the heavy-operation token are held; it is not a rate limit. Station modem
 sleep, previously the unchosen ESP-IDF default, is now off on every profile.
 Flash +838 B, static RAM unchanged. Device transfer times are not yet measured.
+
+## ADR-026 — Settings format 4: Konferenz pin switch, matchday without own match · Accepted 2026-10-12
+
+**Context:** the owner wants the own match pinned in the Konferenz to be
+optional (default on), and the matchday default ("while other matches run")
+offered Own match although the own club does not play in that situation; that
+choice came with an unreviewed snapshot and had no defined meaning. The Web UI
+was completed to the approved design in the same step.
+
+**Decision:**
+- Format 4 appends one byte, `pin_own_match` (0/1), after the fixture pairs.
+  The record stays positional, so a format change is required. Format-3
+  records are read with the flag at its initial value (on); formats 1 and 2
+  convert as before. The next explicit save writes format 4.
+- `matchday_screen` no longer accepts Own match. A stored value of Own match
+  (any format) is read as Konferenz in RAM, without discarding the record;
+  the Web UI converts an imported backup the same way before validation.
+- The browser OTA gate of ADR-024 accepts format-4 firmware from format-3
+  firmware; it refuses the older firmware afterwards (downgrade only by USB,
+  which then starts with initial values once format 4 has been saved).
+- The switch is stored and offered in the Web UI; the display effect follows
+  with the display redesign. Until then the own match stays pinned regardless
+  of the switch.
+
+**Alternative:** append the byte to format 3 without a new number (older
+firmware would stay installable by browser, but the format number would not
+show the extension).
+
+**Cost and boundary:** model unchanged at 1944 B (the flag fits existing
+padding); longest record 1932 B (+1 B transient on save); JSON +21 B. C6 build
+including the Web UI completion, against the OpenLigaDB/modem-sleep build
+above: firmware.bin +6,928 B, flash 1,559,248 B (85.0 %, about 500 B below the
+85 % line), static RAM unchanged at 197,380 B, embedded page 48,481 B gzip
+(+6,754 B). The page is sent from flash without a heap copy. Host settings
+tests cover the format-4 layout, the format-3 read path and the matchday
+conversion; device behaviour is not yet checked.

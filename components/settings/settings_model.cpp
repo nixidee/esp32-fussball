@@ -302,6 +302,9 @@ bool validate(const Model& model, Field* invalid, Violation* violation,
         std::min<uint16_t>(cfg::kTableWindowRange.max,
                            limits.table_window_max)};
     const cfg::Range screens{0, static_cast<uint16_t>(cfg::kScreenCount - 1)};
+    // While other matches run the own club does not play (OQ-122).
+    const cfg::Range matchday{static_cast<uint16_t>(cfg::Screen::kLiveMulti),
+                              screens.max};
     ok = check.invalid("admin_password",
                        model.admin_password.view().find('\0') ==
                            std::string_view::npos) &&
@@ -334,7 +337,7 @@ bool validate(const Model& model, Field* invalid, Violation* violation,
                      model.api_daily_budget) &&
          check.range("idle_screen", screens,
                      static_cast<unsigned>(model.idle_screen)) &&
-         check.range("matchday_screen", screens,
+         check.range("matchday_screen", matchday,
                      static_cast<unsigned>(model.matchday_screen)) &&
          check.range("own_match_screen", screens,
                      static_cast<unsigned>(model.own_match_screen)) &&

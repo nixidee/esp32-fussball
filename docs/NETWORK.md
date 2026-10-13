@@ -305,11 +305,11 @@ image; if no previous bootable image exists, the fallback is a reboot path,
 not a promised recovery image.
 
 Valid format-1 and format-2 settings are converted in RAM without a write. The
-next explicit save writes format 3, which an older firmware cannot read. Browser
-OTA therefore refuses an image with an older settings format and accepts an
-equal or newer one (a newer image migrates the stored settings). The first
-format-3 image is installed by USB, because the running firmware's gate still
-demands an equal format. A manual USB downgrade after a new save selects
+next explicit save writes the current format (4), which an older firmware
+cannot read. Browser OTA therefore refuses an image with an older settings
+format and accepts an equal or newer one (a newer image migrates the stored
+settings). Historical: the first format-3 image had to be installed by USB,
+because the format-2 firmware's gate still demanded an equal format. A manual USB downgrade after a new save selects
 old-firmware initial values.
 
 NVS and LittleFS are shared between slots. Until trial confirmation, persistent

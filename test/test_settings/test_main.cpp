@@ -1,6 +1,6 @@
 // Host acceptance for the settings model, its limits, the initial values and
-// the stored record: format 3 (variable length, lists) and the conversion of
-// the older formats 1 and 2 (docs/CONFIGURATION.md).
+// the stored record: format 4 (variable length, lists, Konferenz pin flag)
+// and the conversion of the older formats 1, 2 and 3 (docs/CONFIGURATION.md).
 
 #include <unity.h>
 
@@ -30,7 +30,7 @@ using settings::kMaxRecordBytes;
 using settings::Model;
 using settings::Presets;
 
-// A record has exactly its used length (format 3 varies, formats 1 and 2 are
+// A record has exactly its used length (format 4 varies, formats 1 to 3 are
 // built by the tests themselves).
 using Record = std::vector<uint8_t>;
 
@@ -47,7 +47,7 @@ constexpr std::size_t kTimeZoneAt = 238;
 constexpr std::size_t kNtpServerAt = 271;
 constexpr std::size_t kCoreBytes = 335;
 // Format 3 continues with the secrets, the screens, the scalar values, the
-// crest image and then the lists.
+// crest image and then the lists; format 4 appends the pin flag.
 constexpr std::size_t kAdminAt = kCoreBytes;
 constexpr std::size_t kApiKeyAt = kAdminAt + 1 + 64;
 constexpr std::size_t kFootballKeyAt = kApiKeyAt + 1 + 96;
@@ -61,8 +61,8 @@ constexpr std::size_t kSlidesAt = kCrestAt + 1;  // count, then one byte each
 constexpr std::size_t kSourceBytes = 1 + 33 + 17 + 33;
 constexpr std::size_t kCompetitionBytes = 2 + 2 * kSourceBytes + 33 + 33;
 constexpr std::size_t kPairBytes = 3 + 33 + 33;
-// Lists empty: the shortest format-3 record.
-constexpr std::size_t kEmptyListsBytes = kSlidesAt + 3;
+// Lists empty plus the pin flag: the shortest format-4 record.
+constexpr std::size_t kEmptyListsBytes = kSlidesAt + 3 + 1;
 // The model is copied onto task stacks (settings::current(), HTTP handlers):
 // growth is a stack budget change, see docs/ARCHITECTURE.md.
 constexpr std::size_t kModelBytesBudget = 1944;
@@ -395,12 +395,12 @@ void testListContainer() {
   TEST_ASSERT_FALSE(a == b);
 }
 
-void testFormat3Layout() {
+void testFormat4Layout() {
   TEST_ASSERT_EQUAL_size_t(8, kHeaderBytes);
   // Pinned: the longest record is the NVS blob ceiling, a memory budget item.
-  TEST_ASSERT_EQUAL_size_t(1931, kMaxRecordBytes);
+  TEST_ASSERT_EQUAL_size_t(1932, kMaxRecordBytes);
   TEST_ASSERT_TRUE(kMaxRecordBytes <= cfg::kSettingsMaxRecordBytes);
-  TEST_ASSERT_EQUAL_size_t(666, kEmptyListsBytes);
+  TEST_ASSERT_EQUAL_size_t(667, kEmptyListsBytes);
 
   Model model = defaults();
   model.admin_password.assign("pw");
@@ -439,7 +439,7 @@ void testFormat3Layout() {
       kEmptyListsBytes + 2 + kCompetitionBytes + kPairBytes;
   TEST_ASSERT_EQUAL_size_t(expected, record.size());
 
-  TEST_ASSERT_EQUAL_HEX8(0x03, record[0]);  // version 3
+  TEST_ASSERT_EQUAL_HEX8(0x04, record[0]);  // version 4
   TEST_ASSERT_EQUAL_HEX8(0x00, record[1]);
   const std::size_t payload = expected - kHeaderBytes;
   TEST_ASSERT_EQUAL_HEX8(payload & 0xff, record[2]);
@@ -499,7 +499,10 @@ void testFormat3Layout() {
   TEST_ASSERT_EQUAL_UINT8(0, record[pairs + 3]);  // competition index
   expectText(record, pairs + 4, "100", 32);
   expectText(record, pairs + 4 + 33, "200", 32);
-  TEST_ASSERT_EQUAL_size_t(pairs + 1 + kPairBytes, record.size());
+  // Format 4: the pin flag closes the record (default on).
+  const std::size_t pin = pairs + 1 + kPairBytes;
+  TEST_ASSERT_EQUAL_HEX8(1, record[pin]);
+  TEST_ASSERT_EQUAL_size_t(pin + 1, record.size());
 
   // CRC over header bytes 0..3 followed by the payload.
   std::vector<uint8_t> covered(record.begin(), record.begin() + 4);
@@ -807,9 +810,9 @@ void testDamagedHeaders() {
   TEST_ASSERT_EQUAL(DecodeResult::kChecksumMismatch,
                     decodeInto(record, loaded));
 
-  // Formats 1, 2 and 3 are known; any other version is not.
+  // Formats 1 to 4 are known; any other version is not.
   record = encoded(original);
-  for (const uint16_t version : {uint16_t{0}, uint16_t{4}, uint16_t{0xFFFF}}) {
+  for (const uint16_t version : {uint16_t{0}, uint16_t{5}, uint16_t{0xFFFF}}) {
     settings::seal(record, version);
     TEST_ASSERT_EQUAL(DecodeResult::kUnknownVersion,
                       decodeInto(record, loaded));
@@ -855,9 +858,9 @@ void testFormat1IsMigrated() {
   loaded = defaults();
   TEST_ASSERT_EQUAL(DecodeResult::kTooLong, decodeInto(record, loaded));
 
-  // The next save writes format 3 with the same values.
+  // The next save writes format 4 with the same values.
   const Record saved = encoded(stored);
-  TEST_ASSERT_EQUAL_HEX8(3, saved[0]);
+  TEST_ASSERT_EQUAL_HEX8(4, saved[0]);
 }
 
 void testFormat2IsConvertedToLists() {
@@ -941,9 +944,9 @@ void testFormat2IsConvertedToLists() {
   TEST_ASSERT_EQUAL_size_t(2, loaded.competitions.size());
   TEST_ASSERT_EQUAL_size_t(2, loaded.fixture_pairs.size());
 
-  // The next save writes format 3 and reads back the same.
+  // The next save writes format 4 and reads back the same.
   const Record saved = encoded(loaded);
-  TEST_ASSERT_EQUAL_HEX8(3, saved[0]);
+  TEST_ASSERT_EQUAL_HEX8(4, saved[0]);
   Model again = defaults();
   TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(saved, again));
   TEST_ASSERT_TRUE(again == expected);
@@ -1367,6 +1370,71 @@ void testDecodeClampsToLimits() {
                     decode(encoded(stored), damaged, &field, round));
 }
 
+// OQ-122: the own-match screen is no choice while other matches run. A
+// stored record from earlier firmware keeps all values and shows the
+// Konferenz instead; new input with that value is rejected.
+void testMatchdayScreenWithoutOwnMatch() {
+  Model stored = withLists();
+  stored.matchday_screen = cfg::Screen::kLiveSingle;
+  stored.idle_screen = cfg::Screen::kLiveSingle;
+  stored.own_match_screen = cfg::Screen::kLiveSingle;
+  Field field = Field::kWifiSsid;
+  TEST_ASSERT_FALSE(settings::validate(stored, &field));
+  TEST_ASSERT_EQUAL(Field::kApplication, field);
+
+  Model loaded = defaults();
+  TEST_ASSERT_EQUAL(DecodeResult::kOk, decode(encoded(stored), loaded));
+  TEST_ASSERT_EQUAL(cfg::Screen::kLiveMulti, loaded.matchday_screen);
+  TEST_ASSERT_EQUAL(cfg::Screen::kLiveSingle, loaded.idle_screen);
+  TEST_ASSERT_EQUAL(cfg::Screen::kLiveSingle, loaded.own_match_screen);
+  TEST_ASSERT_TRUE(loaded.competitions == stored.competitions);
+
+  stored.matchday_screen = cfg::Screen::kCrest;
+  TEST_ASSERT_TRUE(settings::validate(stored));
+}
+
+// OQ-123/OQ-126: format 4 stores the Konferenz pin flag as its last byte; a
+// format-3 record (the same bytes without it) loads the initial value.
+void testPinOwnMatchFormats() {
+  TEST_ASSERT_TRUE(defaults().pin_own_match);
+
+  Model stored = withLists();
+  stored.pin_own_match = false;
+  Record record = encoded(stored);
+  TEST_ASSERT_EQUAL_HEX8(0, record.back());
+  Model loaded = defaults();
+  TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(record, loaded));
+  TEST_ASSERT_TRUE(loaded == stored);
+
+  // Format 3: without the flag, the stored value cannot win.
+  record.pop_back();
+  settings::seal(record, 3);
+  loaded = defaults();
+  TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(record, loaded));
+  TEST_ASSERT_TRUE(loaded.pin_own_match);
+  TEST_ASSERT_TRUE(loaded.competitions == stored.competitions);
+  TEST_ASSERT_TRUE(loaded.fixture_pairs == stored.fixture_pairs);
+
+  // A format-3 record with trailing bytes does not read them as the flag.
+  record.push_back(0);
+  settings::seal(record, 3);
+  loaded = defaults();
+  TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(record, loaded));
+  TEST_ASSERT_TRUE(loaded.pin_own_match);
+
+  // The next save writes format 4 with the flag.
+  record = encoded(loaded);
+  TEST_ASSERT_EQUAL_HEX8(4, record[0]);
+  TEST_ASSERT_EQUAL_HEX8(1, record.back());
+
+  // Only 0 and 1 are a flag.
+  record = encoded(stored);
+  record.back() = 2;
+  settings::seal(record);
+  loaded = defaults();
+  TEST_ASSERT_EQUAL(DecodeResult::kInvalidValue, decodeInto(record, loaded));
+}
+
 void testValidateLists() {
   using cfg::Provider;
   const auto invalid = [](const Model& model) {
@@ -1612,7 +1680,7 @@ int main() {
   RUN_TEST(testCrc32KnownVector);
   RUN_TEST(testDefaults);
   RUN_TEST(testListContainer);
-  RUN_TEST(testFormat3Layout);
+  RUN_TEST(testFormat4Layout);
   RUN_TEST(testFullModelUsesTheMaximumRecord);
   RUN_TEST(testRoundTrip);
   RUN_TEST(testShorterRecordKeepsInitialValues);
@@ -1642,6 +1710,8 @@ int main() {
   RUN_TEST(testLimitsAreStrict);
   RUN_TEST(testInitialValuesFollowLimits);
   RUN_TEST(testDecodeClampsToLimits);
+  RUN_TEST(testMatchdayScreenWithoutOwnMatch);
+  RUN_TEST(testPinOwnMatchFormats);
   RUN_TEST(testDropMissingImages);
   RUN_TEST(testPresetsOverrideDefaults);
   RUN_TEST(testInvalidPresetsKeepDefaults);
