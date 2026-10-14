@@ -1,9 +1,12 @@
-// Settings store (docs/CONFIGURATION.md): one NVS record, loaded at boot,
-// copied to readers, saved all-or-nothing, reset by erasing its namespace.
-// Initial values are the secrets.h presets over the app_config.h defaults.
+// Settings store (docs/CONFIGURATION.md): two NVS records in one namespace,
+// the settings and the competitions (with their fixture pairs, OQ-200), each
+// loaded at boot, copied to readers and saved all-or-nothing; reset erases
+// the namespace. Initial values are the secrets.h presets over the
+// app_config.h defaults.
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 #include "esp_err.h"
@@ -21,7 +24,7 @@ void init(const Limits& limits = {});
 // The limits given to init(); validation of every save uses them.
 const Limits& limits();
 
-// Copy of the current settings (short lock; sizeof(Model) is about 1.9 KB on
+// Copy of the current settings (short lock; sizeof(Model) is about 0.8 KB on
 // the caller's stack, pinned by the host test).
 Model current();
 
@@ -60,14 +63,48 @@ Origin origin();
 const char* originName(Origin origin) noexcept;
 
 // Validates and stores the complete model, then makes it current.
+// 'check_access' (a change by the user) also requires every active
+// competition to use only providers this model enables (checkProviderAccess);
+// internal saves keep an older record's values.
 // ESP_ERR_INVALID_ARG: a value violates its limits, nothing stored; *violation
 // (if given) names the first offending field.
 // ESP_ERR_INVALID_STATE: NVS unusable, or the stored record could not be
 // read at boot (only reset() may replace it).
-// Other errors come from NVS or allocation; the current settings stay.
-esp_err_t save(const Model& model, Violation* violation = nullptr);
+// Other errors come from NVS or allocation; the current settings stay. While
+// the stored settings record has format 2 to 7, the competitions taken from
+// it are written to their own record first; if that fails, nothing is
+// stored.
+esp_err_t save(const Model& model, Violation* violation = nullptr,
+               bool check_access = false);
 
-// Erases the whole settings namespace; the initial values become current.
+// The competition store. Readers copy one entry (about 240 B) or, with
+// competitions(), the whole store (about 2.5 KB) into storage they own.
+std::size_t competitionCount();
+// False if 'index' (list order) or 'id' does not exist; 'out' unchanged.
+bool competitionAt(std::size_t index, Competition& out);
+bool competitionById(uint8_t id, Competition& out);
+void competitions(Competitions& out);
+// Id of the entry at 'index', 0 if none; list position of 'id', -1 if none.
+uint8_t competitionId(std::size_t index);
+int competitionIndex(uint8_t id);
+// Where the current competitions come from (as origin() for the settings).
+// A readable settings record of format 2 to 7 was written last by an older
+// firmware: its competitions replace the competition record at boot (nothing
+// is written) and count as kStored.
+Origin competitionsOrigin();
+
+// Gives new entries (id 0) an id, validates the list and its fixture pairs,
+// requires every active competition to use enabled providers, stores the
+// record and makes it current. On success 'candidate' holds the saved list
+// with its ids. While the stored settings record has format 2 to 7, it is
+// then rewritten in the current format; if that fails, the competitions stay
+// unchanged. Errors as save(); ESP_ERR_INVALID_STATE also if the stored
+// competition record could not be read at boot.
+esp_err_t saveCompetitions(Competitions& candidate,
+                           Violation* violation = nullptr);
+
+// Erases the whole settings namespace (both records); the initial values
+// become current.
 esp_err_t reset();
 
 // Logs the current settings; passwords and the SSID only as set/length.

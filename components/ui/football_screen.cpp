@@ -450,7 +450,11 @@ void conference() {
   const int slots = m.pages > 1 ? std::max<int>(m.slots, rows) : rows;
   const int rows_top = f.cy - slots * pitch / 2;
   captionBand(rows_top - cap - 2 * g, m.caption, f.accent);
-  const int score_w = std::max(width(f.body, "10:10"), width(f.body, "00:00"));
+  // A centre wider than a score ("Sa 15:30" on the matchday screen) widens
+  // the column so that at least its caption-size text fits.
+  int score_w = std::max(width(f.body, "10:10"), width(f.body, "00:00"));
+  for (int i = 0; i < rows; ++i)
+    score_w = std::max(score_w, width(f.cap, m.matches[i].centre));
   const int half = f.area->spanForBand(rows_top, slots * pitch).width / 2;
   const int name_w = half - score_w / 2 - 2 * g;
   uint8_t font = f.body;

@@ -5,7 +5,6 @@
 
 #include "esp_err.h"
 #include "football_model.h"
-#include "provider_mappers.h"
 #include "settings_model.h"
 namespace football {
 // One capped document at a time, released after an array element is mapped.
@@ -21,13 +20,26 @@ class JsonAllocator : public ArduinoJson::Allocator {
 };
 using JsonConsumer = bool (*)(ArduinoJson::JsonVariantConst item,
                               void* context);
-// HTTP status (0 = none received) and body bytes read, for logging only.
+// HTTP status (0 = none received), body bytes read, the stage the request
+// reached ("dns", "tcp", "tls", "http") and the socket's pending error after
+// a failed connect, for logging only.
 struct FetchResult {
   int status = 0;
   std::size_t bytes = 0;
+  const char* stage = "";
+  int socket_error = 0;
 };
+// 'body_limit': the most body bytes read (cfg::kProviderBodyBytes, the
+// owner's selection lists cfg::kSelectionBodyBytes, ESPN match summaries
+// cfg::kProviderSummaryBodyBytes); a longer response fails.
+// 'optional': a response without 'array_key' is valid (no elements), e.g.
+// a provider that leaves out an empty list. 'enough': set by the consumer
+// (through its context) when it needs no further element; the response ends
+// there with success and its rest is not read.
 esp_err_t fetchJson(const char* url, const char* array_key,
                     cfg::Provider provider, const settings::Model& model,
                     uint32_t generation, JsonConsumer consumer, void* context,
-                    bool selection = false, FetchResult* result = nullptr);
+                    std::size_t body_limit = cfg::kProviderBodyBytes,
+                    FetchResult* result = nullptr,
+                    bool optional = false, const bool* enough = nullptr);
 }  // namespace football

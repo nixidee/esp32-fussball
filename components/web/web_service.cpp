@@ -10,6 +10,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <iterator>
+#include <memory>
+#include <new>
 #include <string_view>
 
 #include "app_config.h"
@@ -477,11 +479,18 @@ bool smallInt(JsonVariantConst value, uint32_t max, Reason& why) {
   return text && text.size() == model.admin_password.length &&
          equal(text.c_str(), model.admin_password.data.data(), text.size());
 }
-// The primary provider of competition 'route'; false if there is none.
-[[gnu::noinline]] bool primaryProvider(uint8_t route, cfg::Provider& out) {
-  const auto model = settings::current();
-  if (route >= model.competitions.size()) return false;
-  out = model.competitions[route].primary.provider;
+// The list position ('route' of the data service) and the primary provider
+// of competition 'id'; false if there is none.
+[[gnu::noinline]] bool competitionRoute(uint32_t id, uint8_t& route,
+                                        cfg::Provider& provider) {
+  settings::Competition entry;
+  const int index = id <= UINT8_MAX
+                        ? settings::competitionIndex(static_cast<uint8_t>(id))
+                        : -1;
+  if (index < 0 || !settings::competitionAt(index, entry) || entry.id != id)
+    return false;
+  route = static_cast<uint8_t>(index);
+  provider = entry.primary.provider;
   return true;
 }
 
@@ -575,6 +584,8 @@ esp_err_t getStatus(httpd_req_t* req) {
   out["fs_used"] = usage.used_bytes;
   out["trial"] = ota::trial();
   out["settings_source"] = settings::originName(settings::origin());
+  out["competitions_source"] =
+      settings::originName(settings::competitionsOrigin());
   out["provider_busy"] = data.busy;
   out["last_update_ms"] = data.fetched_ms;
   out["data_stale"] = data.stale;
@@ -598,7 +609,7 @@ esp_err_t getStatus(httpd_req_t* req) {
   auto own = out["own_match"].to<JsonObject>();
   own["present"] = overview.own.present;
   if (overview.own.present) {
-    own["competition"] = overview.own.route;
+    own["competition"] = settings::competitionId(overview.own.route);
     own["phase"] = football::phaseName(overview.own.phase);
     if (overview.own.kickoff) own["kickoff"] = overview.own.kickoff;
     if (overview.own.home_goals >= 0) own["home_goals"] = overview.own.home_goals;
@@ -607,9 +618,13 @@ esp_err_t getStatus(httpd_req_t* req) {
     own["home"] = overview.own.home.data;
     own["away"] = overview.own.away.data;
   }
+  // One row per competition in list order, with its id.
   auto routes = out["competitions"].to<JsonArray>();
   for (std::size_t i = 0; i < cfg::kCompetitionMax; ++i) {
+    const uint8_t id = settings::competitionId(i);
+    if (id == 0) break;
     auto row = routes.add<JsonObject>();
+    row["id"] = id;
     row["matches"] = overview.routes[i].matches;
     row["provider"] = football::providerName(overview.routes[i].provider);
     row["error"] = ((data.error_routes >> i) & 1) != 0;
@@ -676,13 +691,18 @@ esp_err_t getFixtures(httpd_req_t* req) {
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK)
     return invalid(req, Reason::kRequired, "competition required",
                    "competition");
-  uint32_t route = 0;
+  uint32_t id = 0;
   if (httpd_query_key_value(query, "competition", value, sizeof(value)) !=
       ESP_OK)
     return invalid(req, Reason::kRequired, "competition required",
                    "competition");
-  if (!parseUnsigned(value, cfg::kCompetitionMax - 1, route))
+  if (!parseUnsigned(value, UINT8_MAX, id) || id == 0)
     return invalid(req, Reason::kRange, "competition rejected", "competition");
+  uint8_t route = 0;
+  cfg::Provider provider;
+  if (!competitionRoute(id, route, provider))
+    return invalid(req, Reason::kReference, "competition not defined",
+                   "competition");
   if (httpd_query_key_value(query, "source", value, sizeof(value)) != ESP_OK)
     return invalid(req, Reason::kRequired, "source required", "source");
   const bool primary = !strcmp(value, "primary");
@@ -691,14 +711,10 @@ esp_err_t getFixtures(httpd_req_t* req) {
   Doc d;
   auto out = d.doc.to<JsonObject>();
   out["source"] = primary ? "primary" : "fallback";
-  out["competition"] = route;
+  out["competition"] = id;
   auto list = out["items"].to<JsonArray>();
   football::Selection item;
   if (primary) {
-    cfg::Provider provider;
-    if (!primaryProvider(route, provider))
-      return invalid(req, Reason::kReference, "competition not defined",
-                     "competition");
     uint32_t revision;
     const auto count = football::publishedFixtureCount(route, provider, revision);
     out["provider"] = football::providerName(provider);
@@ -725,6 +741,136 @@ esp_err_t getFixtures(httpd_req_t* req) {
       fixtureRow(list, item);
     }
   return json(req, d.doc);
+}
+// ?competition=N: the teams of the competition in the published data with
+// the owner's short names.
+esp_err_t getTeams(httpd_req_t* req) {
+  Request request(req);
+  char query[64], value[16];
+  uint32_t id = 0;
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+      httpd_query_key_value(query, "competition", value, sizeof(value)) !=
+          ESP_OK)
+    return invalid(req, Reason::kRequired, "competition required",
+                   "competition");
+  if (!parseUnsigned(value, UINT8_MAX, id) || id == 0)
+    return invalid(req, Reason::kRange, "competition rejected", "competition");
+  Doc d;
+  auto out = d.doc.to<JsonObject>();
+  out["competition"] = id;
+  out["max"] = cfg::kShortNamesMax;
+  auto list = out["items"].to<JsonArray>();
+  uint32_t revision;
+  const auto count = football::teamCount(static_cast<uint8_t>(id), revision);
+  football::TeamInfo team;
+  for (unsigned i = 0; i < count; ++i) {
+    if (!football::teamAt(static_cast<uint8_t>(id), i, revision, team))
+      return error(req, fault::kChanged);
+    auto row = list.add<JsonObject>();
+    row["provider"] = static_cast<unsigned>(team.provider);
+    row["id"] = team.id;
+    row["short_name"] = team.short_name.data;
+    row["custom"] = team.custom.data;
+  }
+  return json(req, d.doc);
+}
+// One short-name entry {provider, id, name}; the field that is not valid
+// otherwise ('why' and 'field' set).
+bool shortNameValid(JsonObjectConst in, Reason& why, const char*& field) {
+  field = "provider";
+  if (!smallInt(in["provider"], cfg::kProviderCount - 1, why)) return false;
+  field = "id";
+  if (!smallInt(in["id"], UINT32_MAX, why) || in["id"].as<uint32_t>() == 0) {
+    why = in["id"].isNull() ? Reason::kRequired : Reason::kRange;
+    return false;
+  }
+  field = "name";
+  const auto name = in["name"].as<JsonString>();
+  if (!in["name"].is<const char*>()) {
+    why = in["name"].isNull() ? Reason::kRequired : Reason::kType;
+    return false;
+  }
+  why = Reason::kTooLong;
+  if (name.size() > sizeof(football::TeamInfo{}.custom.data) - 1) return false;
+  why = Reason::kInvalid;
+  for (std::size_t i = 0; i < name.size(); ++i) {
+    const auto c = static_cast<unsigned char>(name.c_str()[i]);
+    if (c < 0x20 || c == 0x7f) return false;
+  }
+  return true;
+}
+// {provider, id, name}: sets the owner's short name of a team ("" removes
+// it).
+esp_err_t postTeam(httpd_req_t* req) {
+  Request request(req);
+  Doc d;
+  if (const auto* f = admit(req, d.doc, nullptr, true)) return error(req, *f);
+  const auto in = d.doc.as<JsonObjectConst>();
+  Reason why;
+  const char* field;
+  if (!shortNameValid(in, why, field))
+    return invalid(req, why, "short name rejected", field);
+  const auto name = in["name"].as<JsonString>();
+  network::HeavyGuard guard;
+  if (!guard) return error(req, fault::kBusy);
+  const auto err = football::setShortName(
+      static_cast<cfg::Provider>(in["provider"].as<uint8_t>()),
+      in["id"].as<uint32_t>(), std::string_view(name.c_str(), name.size()));
+  if (err != ESP_OK) return failed(req, err);
+  return ok(req, d.doc);
+}
+// {short_names: [{provider, id, name}]}: replaces every short name (import
+// of a settings export; [] removes them all).
+esp_err_t putTeams(httpd_req_t* req) {
+  Request request(req);
+  Doc d;
+  if (const auto* f = admit(req, d.doc, nullptr, true)) return error(req, *f);
+  const auto in = d.doc.as<JsonObjectConst>();
+  for (const auto key : in)
+    if (strcmp(key.key().c_str(), "short_names"))
+      return invalid(req, Reason::kUnknownKey, "key rejected",
+                     key.key().c_str());
+  const auto list = in["short_names"];
+  if (!list.is<JsonArrayConst>())
+    return invalid(req, list.isNull() ? Reason::kRequired : Reason::kType,
+                   "short names rejected", "short_names");
+  if (list.size() > cfg::kShortNamesMax)
+    return invalid(req, Reason::kTooMany, "too many short names",
+                   "short_names");
+  // The table (1.5 KB) stays off the httpd stack.
+  std::unique_ptr<football::persist::ShortNames> table(
+      new (std::nothrow) football::persist::ShortNames);
+  if (!table) return failed(req, ESP_ERR_NO_MEM);
+  char path[40];
+  unsigned i = 0;
+  for (const auto entry : list.as<JsonArrayConst>()) {
+    Reason why = Reason::kType;
+    const char* field = nullptr;
+    const auto item = entry.as<JsonObjectConst>();
+    if (entry.is<JsonObjectConst>() && shortNameValid(item, why, field)) {
+      const auto name = item["name"].as<JsonString>();
+      const auto provider =
+          static_cast<cfg::Provider>(item["provider"].as<uint8_t>());
+      const auto id = item["id"].as<uint32_t>();
+      // An export carries no empty name and every team once.
+      why = name.size() == 0 ? Reason::kRequired : Reason::kDuplicate;
+      field = name.size() == 0 ? "name" : "id";
+      if (name.size() != 0 && table->find(provider, id) == nullptr) {
+        table->set(provider, id, std::string_view(name.c_str(), name.size()));
+        ++i;
+        continue;
+      }
+    }
+    snprintf(path, sizeof(path),
+             field ? "short_names[%u].%s" : "short_names[%u]", i,
+             field ? field : "");
+    return invalid(req, why, "short name rejected", path);
+  }
+  network::HeavyGuard guard;
+  if (!guard) return error(req, fault::kBusy);
+  const auto err = football::replaceShortNames(*table);
+  if (err != ESP_OK) return failed(req, err);
+  return ok(req, d.doc);
 }
 // Names of the image roles (stock images) in the API (cfg::StockImage order).
 constexpr const char* kStockNames[] = {"crest", "background"};
@@ -864,7 +1010,7 @@ esp_err_t putSettings(httpd_req_t* req) {
   settings::Violation why;
   if (!applyJson(d.doc.as<JsonObjectConst>(), model, &why, settings::limits()))
     return rejected(req, why);
-  const auto err = settings::save(model, &why);
+  const auto err = settings::save(model, &why, true);
   if (err == ESP_ERR_INVALID_ARG) return rejected(req, why);
   if (err != ESP_OK) return failed(req, err);
   // Saving keeps every session; a new password ends the other ones.
@@ -882,8 +1028,64 @@ esp_err_t exportSettings(httpd_req_t* req) {
   if (!flag.isNull() && !flag.is<bool>())
     return invalid(req, Reason::kType, "export options rejected", "secrets");
   const bool secrets = flag.as<bool>();
+  // The competition store (2.5 KB) stays off the httpd stack.
+  std::unique_ptr<settings::Competitions> list(new (std::nothrow)
+                                                   settings::Competitions);
+  if (!list) return failed(req, ESP_ERR_NO_MEM);
+  settings::competitions(*list);
+  std::unique_ptr<football::persist::ShortNames> names(
+      new (std::nothrow) football::persist::ShortNames);
+  if (!names) return failed(req, ESP_ERR_NO_MEM);
+  football::shortNames(*names);
   d.doc.clear();
-  settingsJson(d.doc.to<JsonObject>(), settings::current(), secrets);
+  auto out = d.doc.to<JsonObject>();
+  settingsJson(out, settings::current(), secrets);
+  competitionsJson(out, *list);
+  // The owner's short names, imported through PUT /teams.
+  auto rows = out["short_names"].to<JsonArray>();
+  for (std::size_t i = 0; i < cfg::kShortNamesMax; ++i) {
+    const auto& name = names->at(i);
+    if (name.id == 0) continue;
+    auto row = rows.add<JsonObject>();
+    row["provider"] = static_cast<unsigned>(name.provider);
+    row["id"] = name.id;
+    row["name"] = name.name.data;
+  }
+  return json(req, d.doc);
+}
+// ---- Competitions ----------------------------------------------------------
+// The competition store has its own record and endpoint (OQ-200); the
+// settings JSON does not carry it.
+esp_err_t getCompetitions(httpd_req_t* req) {
+  Request request(req);
+  std::unique_ptr<settings::Competitions> list(new (std::nothrow)
+                                                   settings::Competitions);
+  if (!list) return failed(req, ESP_ERR_NO_MEM);
+  settings::competitions(*list);
+  Doc d;
+  competitionsJson(d.doc.to<JsonObject>(), *list);
+  return json(req, d.doc);
+}
+// A list in the body replaces that list; the answer is the saved store with
+// the ids of new entries.
+esp_err_t putCompetitions(httpd_req_t* req) {
+  Request request(req);
+  Doc d;
+  if (const auto* f = admit(req, d.doc, nullptr, true)) return error(req, *f);
+  std::unique_ptr<settings::Competitions> list(new (std::nothrow)
+                                                   settings::Competitions);
+  if (!list) return failed(req, ESP_ERR_NO_MEM);
+  settings::competitions(*list);
+  settings::Violation why;
+  if (!applyCompetitionsJson(d.doc.as<JsonObjectConst>(), *list, &why))
+    return rejected(req, why);
+  const auto err = settings::saveCompetitions(*list, &why);
+  if (err == ESP_ERR_INVALID_ARG) return rejected(req, why);
+  if (err != ESP_OK) return failed(req, err);
+  d.doc.clear();
+  auto out = d.doc.to<JsonObject>();
+  out["ok"] = true;
+  competitionsJson(out, *list);
   return json(req, d.doc);
 }
 esp_err_t reboot(httpd_req_t* req) {
@@ -913,6 +1115,8 @@ esp_err_t reset(httpd_req_t* req) {
   if (err == ESP_OK) err = settings::reset();
   // The guard keeps the provider worker from storing a counter meanwhile.
   if (err == ESP_OK) err = football::budget::erase();
+  // Kept data and the owner's short names go with the settings.
+  if (err == ESP_OK) football::eraseFiles();
   if (err != ESP_OK) return failed(req, err);
   ota::reboot();
   return ok(req, d.doc);
@@ -929,6 +1133,7 @@ esp_err_t repairImages(httpd_req_t* req) {
   if (!guard) return error(req, fault::kBusy);
   const auto formatted = images::format();
   if (formatted != ESP_OK) return failed(req, formatted);
+  football::filesLost();
   auto model = settings::current();
   esp_err_t saved = ESP_OK;
   if (settings::dropMissingImages(model, images::present()))
@@ -1036,9 +1241,14 @@ esp_err_t dataFixtures(httpd_req_t* req) {
   Doc d;
   if (const auto* f = admit(req, d.doc)) return error(req, *f);
   Reason why;
-  if (!smallInt(d.doc["competition"], cfg::kCompetitionMax - 1, why))
+  if (!smallInt(d.doc["competition"], UINT8_MAX, why))
     return invalid(req, why, "competition rejected", "competition");
-  const auto err = football::selectFixtures(d.doc["competition"].as<uint8_t>());
+  uint8_t route = 0;
+  cfg::Provider provider;
+  if (!competitionRoute(d.doc["competition"].as<uint32_t>(), route, provider))
+    return invalid(req, Reason::kReference, "competition not defined",
+                   "competition");
+  const auto err = football::selectFixtures(route);
   if (err == ESP_ERR_NOT_FINISHED) return error(req, fault::kSelectionBusy);
   if (err == ESP_ERR_INVALID_ARG)
     return invalid(req, Reason::kReference,
@@ -1351,9 +1561,11 @@ constexpr Route kRoutes[] = {
     {"/api/v1/status", HTTP_GET, getStatus, nullptr},
     {"/api/v1/schema", HTTP_GET, getSchema, nullptr},
     {"/api/v1/settings", HTTP_GET, getSettings, nullptr},
+    {"/api/v1/competitions", HTTP_GET, getCompetitions, nullptr},
     {"/api/v1/wifi", HTTP_GET, getWifi, nullptr},
     {"/api/v1/selection", HTTP_GET, getSelection, nullptr},
     {"/api/v1/fixtures", HTTP_GET, getFixtures, nullptr},
+    {"/api/v1/teams", HTTP_GET, getTeams, nullptr},
     {"/api/v1/images", HTTP_GET, getImages, nullptr},
     {"/api/v1/images/file", HTTP_GET, getImageFile, nullptr},
     {"/api/v1/debug", HTTP_GET, debug, debugAdmit},
@@ -1361,11 +1573,15 @@ constexpr Route kRoutes[] = {
     {"/api/v1/logout", HTTP_POST, logout, nullptr},
     {"/api/v1/settings", HTTP_POST, putSettings, nullptr},
     {"/api/v1/settings", HTTP_PUT, putSettings, nullptr},
+    {"/api/v1/competitions", HTTP_POST, putCompetitions, nullptr},
+    {"/api/v1/competitions", HTTP_PUT, putCompetitions, nullptr},
     {"/api/v1/export", HTTP_POST, exportSettings, nullptr},
     {"/api/v1/wifi/scan", HTTP_POST, wifiScan, nullptr},
     {"/api/v1/data/select", HTTP_POST, dataSelect, nullptr},
     {"/api/v1/data/fixtures", HTTP_POST, dataFixtures, nullptr},
     {"/api/v1/data/refresh", HTTP_POST, dataRefresh, nullptr},
+    {"/api/v1/teams", HTTP_POST, postTeam, nullptr},
+    {"/api/v1/teams", HTTP_PUT, putTeams, nullptr},
     {"/api/v1/display", HTTP_POST, postDisplay, nullptr},
     {"/api/v1/images/delete", HTTP_POST, deleteImage, nullptr},
     {"/api/v1/images/repair", HTTP_POST, repairImages, nullptr},

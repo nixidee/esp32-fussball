@@ -1,6 +1,6 @@
 # UI — screens, navigation and overlays
 
-The start screen, all four football screens, the state cards, navigation,
+The start screen, all five football screens, the state cards, navigation,
 the IP chip and night rendering follow the approved display design in
 0.1.0-dev. Current C6 source compiles. Rendered boundary checks and physical
 input/display acceptance remain open. The earlier boot-screen and geometry
@@ -11,9 +11,18 @@ acceptance covers that earlier workload.
 | Screen | Content |
 |---|---|
 | Own match | principal score, supplied/estimated minute or kickoff, teams, separate shootout tally, bounded recent events |
-| Conference | matches of the current kickoff blocks of every active competition; up to the configured rows per page (profile maximum four on 240 round), the own match included; mode All pages or One page; own match pinned as the first row or shown as a normal accent row |
-| Table | profile-limited rows (seven maximum on 240 round) around the club, shifted at edges; all 32 accepted rows reachable by scrolling |
+| Conference | matches of the current kickoff blocks of every competition with the Konferenz switch; up to the configured rows per page (profile maximum four on 240 round), the own match included; mode All pages or One page; own match pinned as the first row or shown as a normal accent row |
+| Matchday | the current matchday of each competition with the Matchday switch, one competition after another, every match with result or kickoff; also without a running match |
+| Table | the tables of the competitions with the Table switch, one after another; profile-limited rows (seven maximum on 240 round) around the own club, without an own club page by page; every stored row reachable by scrolling |
 | Crest / slideshow | the crest role's image (replacement or factory crest); up to five slides (the crest or library images) rotate within this screen |
+
+Screens are listed and stepped through in the order Own match, Konferenz,
+Matchday, Table, Crest / slideshow. Each competition has four switches
+(Own match, Konferenz, Matchday, Table; all on by default) that decide on
+which screens its data appears; a competition is only requested for the
+data its switched-on screens need (see
+[DATA_FLOW.md](DATA_FLOW.md)). Own match needs a club. Matchday and Table
+show the competitions in the order of the competition list.
 
 Each screen has an enable switch, colour/text/accent, background switch and
 text-scale setting. No view fetches data or reads GPIO. The controller copies
@@ -55,6 +64,25 @@ indefinitely.
   there is no manual paging.
 - Rows keep fixed slots while paging, so a shorter last page does not move
   the rows up.
+
+### Matchday and table cycles
+
+- **Matchday**: per competition the first stored matchday that has
+  kickoffs — the current one until it is dropped after it ended, then the
+  next one — in kickoff order, as many matches per page as the Konferenz
+  rows per page. Pages change every 8 seconds; after the last page the
+  next competition follows, wrapping. Up/Down move one page and stop the
+  automatic change until the manual return; past the last (first) page the
+  next (previous) competition follows. Without any match: card "Spieltag /
+  Keine Spiele".
+- **Table**: competitions without a stored table are skipped. Without an
+  own club the table pages every *table step* (default 8 s, 3–600 s) by
+  the number of table rows; after the last page the next competition
+  follows. With an own club the view stays around the club and the next
+  competition follows after one table step. Up/Down move one row and stop
+  the automatic step; past the last (first) row the next (previous)
+  competition follows. With no table at all a card names the first
+  competition.
 
 ## Layout rules
 
@@ -101,7 +129,13 @@ SafeArea; nothing is placed at a fixed pixel position.
   difference, points while fewer than ten letters of the name would fit;
   column titles are shown only when the whole title row fits the chord,
   otherwise only the competition name. Up to five rows use a wider row
-  pitch. A competition without a table shows a card.
+  pitch. A competition without a table shows a card. The rim shows the
+  position of the visible rows in the whole table.
+- **Matchday**: the Konferenz layout. Caption "competition · round" of the
+  first match (round label or "N. Spieltag", else its date), rows as in the Konferenz
+  with result, kickoff time or "--:--"; the own match on a dark row. Below
+  the rows page dots while paging, else the status band; the rim shows the
+  position of the page in the matchday.
 - **Crest / slideshow**: the image, page dots near the bottom rim while
   several slides rotate, and the status band above them; a bottom IP chip
   ends on the status line, so it never covers the dots.
@@ -182,7 +216,7 @@ estimates show `~`. Half-time, full-time and shootout have explicit labels.
 A separate shootout tally does not change ordinary goals. Kickoff is converted
 to selected local civil time; retries and freshness use monotonic time.
 
-The event pool retains up to 12 records per match and 32 across the snapshot.
+The match store keeps up to 12 events per own match and 32 in total.
 The Own match highlight band rotates through that bounded list every five
 seconds. It displays the event type and player; supplied substitution in/out
 names appear as "out > in", a substitution without direction (ESPN) as
@@ -218,8 +252,8 @@ Tasten; exactly one of the device's inputs is Mandatory.
 | Role | Behaviour |
 |---|---|
 | Mandatory | short: next screen; double: previous screen; long: back to the automatic default |
-| Up | Konferenz: previous page; table: scroll up; repeats while held |
-| Down | Konferenz: next page; table: scroll down; repeats while held |
+| Up | Konferenz and Matchday: previous page; table: scroll up; repeats while held |
+| Down | Konferenz and Matchday: next page; table: scroll down; repeats while held |
 | Scroll | while held: Up or Down in the current direction, repeating; every release flips the direction, so a short tap only flips |
 | Off | ignored |
 

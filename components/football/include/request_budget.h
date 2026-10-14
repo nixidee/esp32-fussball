@@ -11,8 +11,13 @@ esp_err_t init();
 // ESP_OK, ESP_ERR_NOT_ALLOWED (the day's cap is reached) or the NVS error
 // that kept the reservation from being stored.
 esp_err_t admit(cfg::Provider provider, uint32_t utc_day, uint32_t limit);
-// Requests left today under 'limit' (> 0).
-uint32_t remaining(cfg::Provider provider, uint32_t limit);
+// Requests left on UTC 'day' under 'limit' (> 0); a day without a request
+// yet has the whole limit.
+uint32_t remaining(cfg::Provider provider, uint32_t utc_day, uint32_t limit);
+// The global daily cap over all providers (0 = none, nothing stored): one
+// more durable counter of the same kind, admitted after the provider's.
+esp_err_t admitGlobal(uint32_t utc_day, uint32_t limit);
+uint32_t remainingGlobal(uint32_t utc_day, uint32_t limit);
 // Settings reset: removes every stored counter (the device restarts next).
 esp_err_t erase();
 }  // namespace football::budget

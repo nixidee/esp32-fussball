@@ -400,6 +400,10 @@ scores and tables; the Web UI does not offer them to the user.
   copying. The display task is the reader of live data; Web handlers read only
   small status/debug data, and selection lists (competitions, teams) come from
   their own bounded requests. No reader leases on snapshot slots.
+  (Historical: since 2026-10-14 the one writer is the provider worker and
+  the published data is the compact match store, a single static object
+  written under a mutex; the presenter builds its view model while holding
+  that mutex. The snapshot copies and their code are deleted.)
 - **Concurrency:** heavy operations (TLS fetch with parsing, JPEG decoding,
   upload handling) run one at a time by default while display, input and
   status stay responsive. An overlap is allowed only where it has been measured
@@ -629,7 +633,9 @@ was requested.
   Model/record are 1,736/1,720 B on C6. Provider identity stays scoped;
   names never establish a cross-source fixture match.
 - Keep three fixed 27,168 B snapshots, one 24 KB capped streaming parser and
-  a 30-second operation deadline with one-second socket waits. Async DNS uses
+  a 30-second operation deadline with one-second socket waits. (Historical:
+  since 2026-10-14 the compact match store replaces the three snapshots;
+  the parser, deadline and socket waits are unchanged.) Async DNS uses
   one fixed record in the existing lwIP thread; incremental TLS preserves
   hostname verification/SNI. No task closes another task's TLS context.
 - Serialize provider TLS/JSON, image mutation and OTA. Normal LVGL JPEG redraw
@@ -646,7 +652,9 @@ was requested.
   2026-10-10. The host test environment uses the same ArduinoJson version
   (PlatformIO registry checked 2026-10-13) so the provider mappers, declared
   in their own header without ESP-IDF types, are tested with recorded
-  responses; the firmware is unaffected. Keep the previously accepted platform/IDF/LVGL/port/LittleFS
+  responses; the firmware is unaffected. (Historical: the provider mappers
+  were deleted on 2026-10-14; the same host version now tests the store
+  mappers and request plans.) Keep the previously accepted platform/IDF/LVGL/port/LittleFS
   pins. Pillow 12.3.0 is a host asset-generation tool, not device code.
 - Bound browser debug to one client, one 256-byte in-flight record, once per
   second, with a static 4 KB producer stack and explicit drop/disconnect.
@@ -721,7 +729,7 @@ The format-2 correction artifact, before subsequent network fixes, was
 flash reserve goal is missed by 46,904 B. No device/storage write or behavioural
 test was performed for this correction.
 
-## ADR-024 — Settings format 3: lists, image library, equal-or-newer OTA gate · Accepted 2026-10-12 · record extended by ADR-026
+## ADR-024 — Settings format 3: lists, image library, equal-or-newer OTA gate · Accepted 2026-10-12 · record extended by ADR-026 · table competition replaced by ADR-033
 
 **Context:** the fixed slots of format 2 (three routes, three fallbacks, eight
 mappings, each with an enabled flag) show empty entries in the interface, cap
@@ -1048,7 +1056,7 @@ competition), embedded page −282 B gzip. Provider task stack peak estimated (u
 the provider stack acceptance on the device. Season rollover itself is not yet
 observed with real provider data.
 
-## ADR-030 — Request limits per provider, settings format 7 · Accepted 2026-10-13
+## ADR-030 — Request limits per provider, settings format 7 · Accepted 2026-10-13 · spacing, record and request spreading replaced by ADR-031
 
 **Context:** the owner decided that every provider has its own limits, with
 defaults taken from the provider's documentation, described and editable by
@@ -1094,3 +1102,147 @@ address. API-Football's per-minute limit could not be checked on 2026-10-13.
 Host tests cover the format-7 layout, the older-format reads, the counter
 rules and the Web UI fields; the NVS behaviour on the device is not yet
 checked.
+
+## ADR-031 — Competition store, request plans, settings format 8 · Accepted 2026-10-14
+
+**Context:** the owner wants the display to show the matches of up to eight
+of their competitions, the own match in detail, compact data, regular core
+data and fixture lists, and request limits that are fully adjustable, both
+per day and per time window (for example 60 requests per minute), plus an
+optional global limit, without flooding any interface. Format 7 stored three
+competitions without identity inside the settings record and one minimum
+spacing per provider; fixture pairs referred to the list position.
+
+**Decision:**
+- The competitions and fixture pairs move into their own NVS record
+  (`competitions`, format 1, at most 2,467 B): up to eight entries, each with
+  a stable id 1–255, four screen switches, an optional club, a primary and an
+  optional fallback source. Fixture pairs name the competition by id. An
+  entry without id gets the next free id; a given id is kept and must be
+  unique.
+- Per provider a request plan: daily cap (unchanged), window limit of N
+  requests per W seconds, and one interval per data type (core data,
+  fixtures, table, live, live table, own-match events). One global limit
+  (daily cap and window limit) over all providers, default off. Defaults
+  follow the providers' published limits; a value of 0 means no limit.
+- A fixed 2-second gap between any two request starts of the device,
+  independent of the limits.
+- Settings format 8 drops the competitions, pairs and spacings and stores the
+  plans and the global limit (at most 803 B). Formats 2 to 7 are read in RAM:
+  their competitions get the ids 1, 2, 3 in list order and their pairs are
+  renumbered; format 7 keeps its daily caps and drops the spacing.
+- Loading never writes NVS (OTA trial and rollback stay possible). A
+  readable older settings record wins over the competition record at boot;
+  the first save writes the competition record first and then the settings
+  record in format 8. Reset erases both records.
+- Own REST endpoint `/competitions` (GET, POST/PUT replace); export and
+  import carry both stores. The Web UI writes the two stores in the order
+  that keeps a provider switch valid.
+- Until the request scheduler counts exact windows, a window limit is
+  enforced as an even spacing (W / N), and the global daily cap and the
+  intervals are stored but not enforced. (Historical: since 2026-10-14 the
+  request scheduler enforces window limits exactly, the global daily cap
+  and the intervals.)
+
+**Alternatives:** keep the competitions in the settings record (a record of
+about 2.6 KB, every settings save rewrites all competitions); refer to
+competitions by list position (a delete or reorder silently moves fixture
+pairs); write the competition record during boot migration (breaks the
+"trial firmware writes nothing" rule and can load stale competitions after a
+downgrade and upgrade).
+
+**Cost and boundary:** settings model 824 B (was 1,968 B), competition store
+2,459 B; JSON `providers` 628 B with defaults (722 B maximum), full
+competitions JSON 5,388 B (7,446 B worst case with escapes), below the
+8,192 B body limit. C6 build: flash +15,216 B (1,598,148 B, 87.1 %), static
+RAM +2,928 B (205,328 B), embedded page +2,671 B gzip (60,035 B). The
+migration at boot and the two-record save order are not host-tested (the
+host tests cover encoding, decoding, validation and the legacy reads); the
+device check that a format-7 device keeps its competitions after the update
+is open. A save that writes the competition record and then fails on the
+settings record leaves the old settings record, which still wins at the next
+boot.
+
+## ADR-032 — Kept football data and own short names on LittleFS · Accepted 2026-10-14
+
+**Context:** the owner wants data shown quickly and few requests, with very
+little memory. Without persistence every reboot showed nothing until the
+next requests and repeated the core data, fixtures and table requests. The
+owner also wants to name teams themselves, across all competitions.
+
+**Decision:**
+- One binary file per active competition (`comp_<id>.bin`): header with a
+  build layout id and the competition's source key, its part of the match
+  store, what its sources resolved and the UTC time each kept data type
+  last completed, CRC-32. Written atomically (temporary file and rename)
+  only for persistence: when the worker is idle, at most every 600 s per
+  competition, never while one of its matches is in its live window.
+- Loaded at boot for active competitions with unchanged sources; the
+  request scheduler then waits for the rest of each saved interval. A file
+  of another layout or source key is ignored and deleted.
+- One file of the owner's short names (`short_names.bin`), keyed by provider
+  and team id, at most 48 names of 26 bytes, applied when a view reads a
+  name; competition files keep only the provider's names.
+- Football files together at most 48 KiB; images come first, so a write
+  leaves the unused part of the image library quota (whole blocks) plus
+  the image reserve free. The first boot of an update writes none.
+  Settings reset deletes them; image repair rewrites them.
+- The settings export carries the short names; an import replaces the
+  whole table with one file write (`PUT /teams`).
+
+**Alternatives:** JSON files (a parser run and a larger file per load);
+several files per competition (more blocks and more partial states); short
+names inside the competition files (lost with a changed competition);
+writing during live play (flash wear for data that change every minute).
+
+**Cost and boundary:** C6 build flash +12,030 B (1,624,064 B, 88.5 %),
+static RAM +2,128 B (150,960 B). An 18-team league with an own match takes
+2,947 B (one 4 KiB block, host measurement); a full short-name file
+1,552 B. The last minutes before a power loss can be missing. The device
+evidence (data after a reboot without a request) is open.
+
+## ADR-033 — Matchday screen, screen switches per competition, table cycle, ESPN substitutions · Accepted 2026-10-14
+
+**Context:** the owner wants to see "nur den letzten bzw. aktuellen
+spieltag und die tabelle aus liga 2 und 3", wants competitions usable only
+for chosen screens ("Schalter je Wettbewerb"), a table that pages by itself
+without an own club ("Automatisch seitenweise"), a live table during
+matches, and ESPN substitutions "Live alle 10 min + nach Abpfiff". Until
+then the first active competition supplied the only table shown, and the
+scoreboard named substitutions only as "A / B".
+
+**Decision:**
+- A fifth screen, Matchday (stored index 4; display order Own match,
+  Konferenz, Matchday, Table, Crest, published as `screen_order`). It shows
+  each Matchday-enabled competition's first stored matchday (current until
+  it expires, then the next) in pages of `visible_matches`, then the next
+  competition in settings order.
+- Each competition has four screen switches (Own match, Konferenz,
+  Matchday, Table). The request plans fetch only the data types the
+  switched-on screens need; each screen reads only its competitions.
+- The Table screen cycles through the Table-enabled competitions with a
+  stored table; without an own club it pages `table_window` rows every
+  `table_page_s` (8 s, 3–600 s). The live table is requested for these
+  competitions while one of their matches is live.
+- The Matchday screen's style and `table_page_s` are a trailing tail of
+  settings format 8 (no new format): an older format-8 record keeps their
+  defaults, older firmware ignores the tail.
+- An ESPN primary with a club and Own match on requests the match summary
+  of its started own match at the events interval and once after the live
+  window ends; only the `keyEvents` substitutions are read (player in and
+  out), stored as their own event origin, with a 512 KiB body cap for this
+  request.
+
+**Alternatives:** a new settings format 9 (one more migration path for 20
+bytes); a Matchday view inside the Konferenz (mixes live blocks with whole
+matchdays); keeping one table competition (the owner's 2. and 3. Liga
+tables would not both show); the ESPN core API `plays` for substitutions
+(1.5 MB for 1000 plays, larger than the summary).
+
+**Cost and boundary:** C6 build flash +5,270 B (1,632,710 B, 89.0 %),
+static RAM +152 B (151,112 B), embedded page +1,074 B gzip (62,843 B);
+settings model 844 B, longest record 821 B. The summary is about 400 KB per
+request and is read in full (only `keyEvents` is parsed into elements); whether it arrives within
+the 30 s request deadline and the provider stack reserve with it are not
+measured on the device. Whether ESPN and OpenLigaDB change their tables
+during a match is not yet checked on a match day.

@@ -110,17 +110,26 @@ struct Source {
   bool operator==(const Source&) const noexcept = default;
 };
 
-// A league or cup the team plays in. 'active' false pauses it (the entry stays
-// complete and visible). The fallback is a second source of another provider.
-// The display names are stored when a competition and club are picked from a
-// provider list (OQ-75); they may be empty.
+// A league or cup, optionally with an own club (OQ-195: an empty team id
+// means no own club). 'active' false pauses it (the entry stays complete and
+// visible). The fallback is a second source of another provider. The display
+// names are stored when a competition and club are picked from a provider
+// list (OQ-75); they may be empty. 'id' is the stable id the competition
+// store assigns (OQ-209; 0 = not stored yet); 'screens' has one bit per
+// cfg::CompetitionScreen (OQ-192).
 struct Competition {
+  uint8_t id = 0;
   bool active = cfg::kEntryActiveDefault;
   bool fallback_active = cfg::kFallbackActiveDefault;
   Source primary;
   Source fallback;
   Bytes<cfg::kDisplayNameMaxBytes> competition_name;
   Bytes<cfg::kDisplayNameMaxBytes> team_name;
+  uint8_t screens = cfg::kCompetitionScreensDefault;
+  bool uses(cfg::CompetitionScreen screen) const noexcept {
+    return (screens >> static_cast<unsigned>(screen)) & 1;
+  }
+  bool hasClub() const noexcept { return !primary.team.empty(); }
   bool operator==(const Competition&) const noexcept = default;
 };
 
@@ -139,8 +148,8 @@ struct ScreenStyle {
 
 const char* fieldName(Field field) noexcept;
 
-// Explicitly verified provider fixture identity of a competition (index into
-// Model::competitions): the match's id at the primary and at the fallback
+// Explicitly verified provider fixture identity of a competition (its id,
+// Competition::id): the match's id at the primary and at the fallback
 // provider; no name/time matching.
 struct FixturePair {
   bool active = cfg::kEntryActiveDefault;
@@ -150,15 +159,59 @@ struct FixturePair {
   bool operator==(const FixturePair&) const noexcept = default;
 };
 
-// Role per input slot of a profile with `inputs` inputs (cfg::inputRoleDefault).
-using RequestLimits = std::array<uint16_t, cfg::kProviderCount>;
-constexpr RequestLimits requestLimits(
-    const uint16_t (&values)[cfg::kProviderCount]) noexcept {
-  RequestLimits limits{};
-  for (std::size_t i = 0; i < limits.size(); ++i) limits[i] = values[i];
-  return limits;
-}
+// The competition store (OQ-200): its own NVS record, not part of Model.
+// Fixture pairs live here too, so a competition and its pairs change in one
+// save. 'next_id' is the id the store tries first for a new entry.
+struct Competitions {
+  List<Competition, cfg::kCompetitionMax> entries;
+  List<FixturePair, cfg::kFixtureMappingMax> pairs;
+  uint8_t next_id = 1;
+  // The entry with this id, or null.
+  const Competition* find(uint8_t id) const noexcept {
+    for (const auto& entry : entries)
+      if (entry.id == id) return &entry;
+    return nullptr;
+  }
+  void clear() noexcept {
+    entries.clear();
+    pairs.clear();
+    next_id = 1;
+  }
+  bool operator==(const Competitions&) const noexcept = default;
+};
 
+// A request limit (OQ-225, OQ-226); every 0 means no limit: at most 'daily'
+// requests per UTC day and at most 'window_requests' requests in any
+// 'window_s' seconds (both set or both 0).
+struct RequestLimit {
+  uint16_t daily = 0;
+  uint16_t window_requests = 0;
+  uint16_t window_s = 0;
+  bool operator==(const RequestLimit&) const noexcept = default;
+};
+
+// Request plan of one provider: its limit and the interval per data type
+// (index cfg::DataType, seconds; OQ-216).
+struct ProviderPlan {
+  RequestLimit limit;
+  std::array<uint32_t, cfg::kDataTypeCount> interval_s{};
+  bool operator==(const ProviderPlan&) const noexcept = default;
+};
+using ProviderPlans = std::array<ProviderPlan, cfg::kProviderCount>;
+constexpr ProviderPlans providerPlansDefault() noexcept {
+  ProviderPlans plans{};
+  for (std::size_t p = 0; p < plans.size(); ++p) {
+    plans[p].limit = {cfg::kDailyRequestsDefault[p],
+                      cfg::kWindowRequestsDefault[p], cfg::kWindowDefaultS[p]};
+    for (std::size_t t = 0; t < cfg::kDataTypeCount; ++t)
+      plans[p].interval_s[t] = cfg::kIntervalDefaultS[t];
+  }
+  return plans;
+}
+// Stable lower-case key of a data type (settings JSON, logs).
+const char* dataTypeName(cfg::DataType type) noexcept;
+
+// Role per input slot of a profile with `inputs` inputs (cfg::inputRoleDefault).
 using InputRoles = std::array<cfg::InputRole, hw::kMaxInputs>;
 constexpr InputRoles inputRolesDefault(std::size_t inputs) noexcept {
   InputRoles roles{};
@@ -215,9 +268,6 @@ struct Model {
   uint16_t window_before = cfg::kMatchWindowDefaultMinutes;
   uint16_t window_after = cfg::kMatchWindowDefaultMinutes;
 
-  // Format 3 lists. The first active competition supplies the league table.
-  List<Competition, cfg::kCompetitionMax> competitions;
-  List<FixturePair, cfg::kFixtureMappingMax> fixture_pairs;
   // Crest screen slideshow in play order: 0 = the crest, else a library id.
   List<uint8_t, cfg::kSlideMax> slides;
 
@@ -225,10 +275,14 @@ struct Model {
   // inputs are stored but unused.
   InputRoles input_roles = inputRolesDefault(hw::kMaxInputs);
 
-  // Format 7, indexed by cfg::Provider: requests per UTC day (0 = no cap)
-  // and the minimum spacing between two request starts in seconds.
-  RequestLimits daily_requests = requestLimits(cfg::kDailyRequestsDefault);
-  RequestLimits request_spacing_s = requestLimits(cfg::kRequestSpacingDefaultS);
+  // Format 8: request plan per provider (index cfg::Provider) and the
+  // optional limit over all providers together (default off, OQ-222).
+  ProviderPlans providers = providerPlansDefault();
+  RequestLimit global_limit;
+  // Format 8 tail after the global limit (an earlier format-8 record ends
+  // before it): the matchday screen's style is screens[cfg::Screen::kMatchday]
+  // above; the table step time follows it (OQ-196).
+  uint16_t table_page_s = cfg::kTablePageDefaultS;
 
   bool operator==(const Model& other) const noexcept = default;
 };
@@ -274,7 +328,7 @@ enum class Reason : uint8_t {
 const char* reasonName(Reason reason) noexcept;
 
 // A JSON path such as "competitions[1].fallback.team" (names as in the
-// settings JSON). Text beyond the buffer is cut, never written past it.
+// settings or competitions JSON). Text beyond the buffer is cut, never written past it.
 class FieldPath {
  public:
   FieldPath& key(const char* name) noexcept {
@@ -331,12 +385,23 @@ bool validate(const Model& model, Field* invalid = nullptr,
               Violation* violation = nullptr,
               const Limits& limits = {}) noexcept;
 
+// True if every competition and fixture pair is within its limits: ids set
+// and unique, the primary competition given, the fallback complete while
+// active and of another provider, the club given at both sources or at
+// neither (OQ-195), screen bits known, pairs referring to an existing
+// competition (by id) whose fallback is active and unique per competition.
+// Otherwise *violation (if given) names the first rejected value in the
+// competitions JSON.
+bool validate(const Competitions& competitions,
+              Violation* violation = nullptr) noexcept;
+
 // True if 'a' and 'b' agree in every value that provider requests or the
-// fetched match data depend on: each competition's active flags and sources
-// (not its display names), the fixture pairs, both provider keys, the ESPN
-// opt-in and demo mode. A save that changes one of them discards the fetched
-// data; any other save keeps it.
+// fetched match data depend on: both provider keys, the ESPN opt-in and demo
+// mode; for the competitions their order, ids, active flags and sources (not
+// display names or screen switches) and the fixture pairs. A save that
+// changes one of them discards the fetched data; any other save keeps it.
 bool sameProviderData(const Model& a, const Model& b) noexcept;
+bool sameProviderData(const Competitions& a, const Competitions& b) noexcept;
 
 // True if the device may request 'provider' with these settings: ESPN needs
 // the opt-in, API-Football and football-data.org need their key.
@@ -345,10 +410,14 @@ bool providerUsable(cfg::Provider provider, const Model& model) noexcept;
 // True if every active competition uses only usable providers (the primary
 // source, and the fallback source while it is active); otherwise
 // *violation (if given) names the first such provider field with kConflict.
-// Checked when settings are changed through the REST API, not when a stored
+// Checked when settings or competitions are changed, not when a stored
 // record is loaded, so an older record keeps its values.
-bool checkProviderAccess(const Model& model,
+bool checkProviderAccess(const Model& model, const Competitions& competitions,
                          Violation* violation = nullptr) noexcept;
+
+// Gives every entry with id 0 an unused id, trying 'next_id' first, and
+// advances 'next_id' past it (1..255, wrapping). Entries with an id keep it.
+void assignIds(Competitions& competitions) noexcept;
 
 // Bit n set = library image n exists (bit 0, the stock image, is ignored).
 using ImageMask = uint16_t;
@@ -387,5 +456,12 @@ inline constexpr FieldMask fieldBit(Field field) noexcept {
 // maximum, OQ-85).
 Model initialValues(const Presets& presets, FieldMask* rejected = nullptr,
                     const Limits& limits = {}) noexcept;
+
+// Writes the competition preset of secrets.h (provider, competition, club,
+// season) into 'out' as the only competition with id 1, or none. An invalid
+// preset is skipped and reported in *rejected as Field::kApplication. 'out'
+// is a parameter so the 2.5 KB store never lands on a caller's stack.
+void initialCompetitions(const Presets& presets, Competitions& out,
+                         FieldMask* rejected = nullptr) noexcept;
 
 }  // namespace settings

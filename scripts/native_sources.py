@@ -28,8 +28,9 @@ env.BuildSources(
     src_filter="+<health_meter.cpp>",
 )
 
-# Pure football model, Konferenz logic and provider JSON mappers (ArduinoJson
-# from lib_deps); the HTTP client and service files require IDF.
+# Pure football core: shared types and parsers, match store and provider
+# mappers (ArduinoJson from lib_deps), scheduler, plans, views and files;
+# the HTTP client and service files require IDF.
 football_root = project_root / "components" / "football"
 env.Append(CPPPATH=[str(football_root / "include")])
 # The library finder adds lib_deps paths only to the test sources.
@@ -39,8 +40,9 @@ env.BuildSources(
     str(Path(env.subst("$BUILD_DIR")) / "pure" / "football"),
     str(football_root),
     src_filter=(
-        "+<football_model.cpp> +<conference.cpp> +<provider_mappers.cpp>"
-        " +<budget_ledger.cpp>"
+        "+<football_model.cpp> +<budget_ledger.cpp> +<match_store.cpp> +<store_mappers.cpp>"
+        " +<request_scheduler.cpp> +<provider_plan.cpp> +<store_views.cpp>"
+        " +<football_files.cpp>"
     ),
 )
 

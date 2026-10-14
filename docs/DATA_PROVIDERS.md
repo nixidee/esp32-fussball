@@ -153,7 +153,8 @@ on the check date. They can change every season.
 | Size per request | 25 B (change check), 1.6 KB (one match), 18 KB (round) | 2–127 KB (one day, one competition) | 179–398 KB (one finished match) | ? | ? |
 
 The ESPN match summary exceeds the device's 256 KiB body limit for ordinary
-requests (bounds in [DATA_FLOW.md](DATA_FLOW.md)).
+requests; the device reads it only for the own match's substitutions, with
+its own 512 KiB limit (bounds in [DATA_FLOW.md](DATA_FLOW.md)).
 
 ### 5.2 Quality per competition (verified samples)
 
@@ -281,9 +282,17 @@ Match fields: `matchID`, `matchDateTimeUTC`, `leagueId`, `leagueShortcut`,
 - `abbreviation` is not reliable (e.g. "MUN" for Bayern München);
   `shortDisplayName` is usable ("Leverkusen", "Hamburg"), but partly English
   ("Cologne").
-- No round number or round label on the scoreboard; the season calendar of
-  the scoreboard lists dates only.
-- A substitution detail names both players without saying who comes on.
+- League matchdays have no number anywhere (checked 2026-10-14 for
+  `ger.1`: site scoreboard, scoreboard header, team schedule, core event and
+  competition; the core `weeks` resource is empty for `ger.1` and `eng.1`;
+  `week=` on the scoreboard returns no match). The season calendar lists the
+  match dates only (7.4).
+- Cups and UEFA competitions carry the round as text: each match has
+  `season.slug` (e.g. `quarterfinals`, `league-phase`), and the scoreboard
+  calendar lists the rounds with label and date range (7.4).
+- A substitution detail names both players without an explicit in/out
+  field; who comes on follows only from the participant order and the text
+  (7.3).
 - Extra time is visible only as the status (`STATUS_FINAL_AET`); there are no
   separate regulation or extra-time scores on the scoreboard. The shootout
   tally is separate (`shootoutScore`; 2022 World Cup final: 3:3, shootout
@@ -293,11 +302,14 @@ Match fields: `matchID`, `matchDateTimeUTC`, `leagueId`, `leagueShortcut`,
 
 | `dates=` | Result | Example (ger.1) |
 |---|---|---|
-| none | today (provider time zone) | 14,410 B on a day without a match |
+| none | the next day with a match (`day.date`), not necessarily today | 14,410 B; on 2026-10-14 it returned 2026-10-16 |
 | `YYYYMMDD` | one day | 2–127 KB (67,169 B for 6 Bundesliga matches, 126,690 B for 11 cup matches) |
 | `YYYYMM` | one month | 202610: 34 matches, 346,375 B |
-| `YYYY` | the first 100 matches of the year | 2026: 1,047,452 B |
-| `YYYYMMDD-YYYYMMDD` | HTTP 400 | day ranges do not work |
+| `YYYY` | the first 100 matches of the calendar year (`limit=` raises it) | 2026: 1,047,452 B; with `limit=1000` 297 matches, 2,947,585 B |
+| `YYYYMMDD-YYYYMMDD` | HTTP 400 | day ranges do not work (also on `site.web.api`) |
+
+`limit=` works on every form (`dates=202610&limit=5`: 53,884 B). The site
+scoreboard costs about 10 KB per match in every form.
 
 ### 7.3 Endpoints
 
@@ -318,19 +330,64 @@ All `GET` without headers. `{slug}` from section 4, e.g. `ger.1`.
 | `sports.core.api…/v2/sports/soccer/leagues/{slug}/events?dates=A-B` | list of match links in a date range | `https://sports.core.api.espn.com/v2/sports/soccer/leagues/ger.1/events?dates=20261001-20261031&limit=100` | 3,771 B (`$ref` link list) |
 | `sports.core.api…/…/events/{id}/competitions/{id}/status` | status, clock and added time of one match | `…/events/401884788/competitions/401884788/status` | 343 B |
 
+| `sports.core.api…/v2/sports/soccer/leagues/{slug}/calendar/ondays` | all match dates of the current season (`eventDate.dates[]`, start of each provider day, e.g. `2026-10-16T07:00Z`); also for cups (checked 2026-10-14: `ger.dfb_pokal` 8 dates, 1,347 B; `uefa.champions` 16, 1,525 B; `fifa.friendly` 59, 1,793 B) | `…/leagues/ger.1/calendar/ondays` | 1,710 B (56 dates) |
+| `sports.core.api…/…/leagues/{slug}/seasons/{year}/types/1/events?limit=400` | links to all matches of the season | `…/leagues/ger.1/seasons/2026/types/1/events?limit=400` | 33,420 B (306 links) |
+| `sports.core.api…/…/leagues/{slug}/events/{id}` | one match (date, teams as links, status as link) | `…/leagues/ger.1/events/401884492` | 9,648 B |
+| `site.web.api…/apis/v2/scoreboard/header?sport=soccer&league={slug}&dates=…` | scoreboard variant | `…&league=ger.1&dates=202610` | 412,961 B (34 matches; larger than the site scoreboard, day ranges silently ignored) |
+| `cdn.espn.com/core/soccer/fixtures?xhr=1&league={slug}` | web page data: matches of the next three match days | `…&league=ger.1` | 162,523 B |
+
 `site.api…/v2/sports/soccer/{slug}/standings` returns an empty object; tables
-come only from `site.web.api`. The core API returns links that need one
+come only from `site.web.api`. A competition without table (cups) has no
+`entries` list in that response. The core API returns links that need one
 further request per match; it was only probed.
 
 Event types: scoreboard `details` contain goal (incl. header, volley, free
 kick), penalty scored, own goal, yellow card and red card. The summary
 `keyEvents` additionally contain kickoff, half-time, start of the 2nd half,
 end of regular time, substitution (both players, with reason) and start/end
-of a delay, each with match clock and wall-clock time.
+of a delay, each with match clock and wall-clock time. In a substitution the
+participants are ordered [player in, player out] and the text reads "X
+replaces Y" (checked 2026-10-13 on one finished Bundesliga match). In the
+398,053 B summary of that match the `keyEvents` start about 298 KB into the
+response and take about 14 KB, so a streamed read must allow more than
+256 KiB.
+
+Smaller sources for substitutions (checked 2026-10-13, same match): the
+core API `…/events/{id}/competitions/{id}/plays?limit=1000` returned
+1,556,167 B for 1000 of 1504 plays and contained one substitution; its
+`type` filter was ignored (same size). `…/competitions/{id}/details`
+returned HTTP 404. The competition resource (8,598 B) contains only links.
+No source smaller than the match summary was found.
 
 Response details: nested standings entries with integral floating-point
 statistics; score strings on scoreboards and score objects on schedules;
 dates without seconds.
+
+### 7.4 Fixtures and rounds (checked 2026-10-14, `ger.1`, season 2026)
+
+- **Match dates of the season:** every scoreboard response carries
+  `leagues[0].calendar`; for leagues it is a list of the season's match
+  dates (`calendarType` `day`, 56 dates for `ger.1`), the same as the core
+  resource `calendar/ondays` (1,710 B). For cups and UEFA competitions it is
+  a list of rounds (`calendarType` `list`) with `label` (e.g. "League
+  Phase", "Second Round"), `detail` (e.g. "Oct 27-28"), `value`,
+  `startDate` and `endDate`.
+- **Matches with times:** only the site scoreboard delivers matches with
+  teams, kickoff and status in one response: per day (`YYYYMMDD`), per
+  month (`YYYYMM`, 34 matches in 346,375 B) or per calendar year
+  (`YYYY` with `limit=`). The whole season is about 3 MB.
+- **Own club:** `teams/{id}/schedule?fixture=true` lists the club's
+  remaining matches of that competition only (29 `ger.1` matches,
+  237,915 B, about 8 KB per match); without `fixture=true` the played ones
+  (46,005 B).
+- **Core API:** day ranges work there (`events?dates=20261016-20261018`:
+  9 links in 1,044 B, one matchday), but each match needs one more request
+  of about 9.6 KB.
+- **Matchday number:** not supplied for leagues (7.1). Postponed matches
+  keep their new date, so counting date blocks does not give a reliable
+  matchday number.
+- **Change check:** no endpoint comparable to OpenLigaDB
+  `getlastchangedate` was found.
 
 ## 8. API-Football (API-Sports)
 
@@ -434,10 +491,11 @@ Competition ids (e.g. BL1 = 2002) are verified from `/competitions`.
 - Whether ESPN limits or blocks request rates.
 - Scoreboard event types on Champions, Europa and Conference League days.
 - Whether the scoreboard ever contains substitutions.
-- A smaller source for substitutions and whistles than the match summary
-  (for example the core API per-match resources).
+- A smaller source for substitutions and whistles than the match summary:
+  core API `plays` and `details` checked 2026-10-13 without success (7.3);
+  other resources not checked.
+- Download time of the ≈ 400 KB match summary on the device.
 - Stability of the date forms in 7.2.
-- Round information: whether any ESPN endpoint supplies the matchday number.
 
 **API-Football** (needs a key): per-minute limit, current-season coverage of
 the free plan, league ids and `coverage`, events in `fixtures?id=` and

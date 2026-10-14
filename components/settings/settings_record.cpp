@@ -7,6 +7,8 @@ namespace settings {
 namespace {
 
 constexpr std::size_t kVersionOffset = 0;
+// List capacity of the competitions in formats 2 to 7.
+constexpr unsigned kLegacyCompetitions = 3;
 constexpr std::size_t kLengthOffset = 2;
 constexpr std::size_t kCrcOffset = 4;
 
@@ -178,17 +180,31 @@ void readSecrets(Reader& reader, Model& model) {
   reader.text(Field::kApplication, model.football_data_key);
 }
 
-// Screen styles; format 2 has no image id.
+// One screen style; format 2 has no image id.
+void readStyle(Reader& reader, ScreenStyle& style, bool with_image) {
+  reader.flag(Field::kApplication, style.enabled);
+  reader.flag(Field::kApplication, style.background);
+  reader.u32(style.colour);
+  reader.u32(style.text);
+  reader.u32(style.accent);
+  reader.u8(style.text_scale);
+  if (with_image) reader.u8(style.image);
+}
+
+// The styles of the first kListedScreens screens, after the secrets.
 void readScreens(Reader& reader, Model& model, bool with_image) {
-  for (auto& style : model.screens) {
-    reader.flag(Field::kApplication, style.enabled);
-    reader.flag(Field::kApplication, style.background);
-    reader.u32(style.colour);
-    reader.u32(style.text);
-    reader.u32(style.accent);
-    reader.u8(style.text_scale);
-    if (with_image) reader.u8(style.image);
-  }
+  for (std::size_t i = 0; i < kListedScreens; ++i)
+    readStyle(reader, model.screens[i], with_image);
+}
+
+void writeStyle(Writer& writer, const ScreenStyle& style) {
+  writer.flag(style.enabled);
+  writer.flag(style.background);
+  writer.u32(style.colour);
+  writer.u32(style.text);
+  writer.u32(style.accent);
+  writer.u8(style.text_scale);
+  writer.u8(style.image);
 }
 
 // 7 flags, 9 u8 values, 9 u16 values; formats 2 to 6 add the API-Football
@@ -217,14 +233,77 @@ void readScalars(Reader& reader, Model& model, bool budget) {
         &model.ip_badge_s, &model.window_before, &model.window_after})
     reader.u16(*value);
   if (budget)
-    reader.u16(model.daily_requests[static_cast<unsigned>(
-        cfg::Provider::kApiFootball)]);
+    reader.u16(model.providers[static_cast<unsigned>(
+        cfg::Provider::kApiFootball)].limit.daily);
 }
 
-// Format 7 tail: daily cap and request spacing per provider.
+// Format 7 tail: daily cap and request spacing per provider. The caps are
+// kept, the spacings are dropped (OQ-225); the window limits keep their
+// defaults.
 void readRequestLimits(Reader& reader, Model& model) {
-  for (auto* values : {&model.daily_requests, &model.request_spacing_s})
-    for (auto& value : *values) reader.u16(value);
+  for (auto& plan : model.providers) reader.u16(plan.limit.daily);
+  uint16_t spacing = 0;
+  for (std::size_t i = 0; i < cfg::kProviderCount; ++i) reader.u16(spacing);
+}
+
+void writeLimit(Writer& writer, const RequestLimit& limit) {
+  writer.u16(limit.daily);
+  writer.u16(limit.window_requests);
+  writer.u16(limit.window_s);
+}
+
+void readLimit(Reader& reader, RequestLimit& limit) {
+  reader.u16(limit.daily);
+  reader.u16(limit.window_requests);
+  reader.u16(limit.window_s);
+}
+
+// Format 8 tail: the plan per provider, then the global limit.
+void readRequestPlans(Reader& reader, Model& model) {
+  for (auto& plan : model.providers) {
+    readLimit(reader, plan.limit);
+    for (auto& interval : plan.interval_s) reader.u32(interval);
+  }
+  readLimit(reader, model.global_limit);
+  // Later format-8 tail: the styles after the listed screens, the table
+  // step time.
+  for (std::size_t i = kListedScreens; i < cfg::kScreenCount; ++i)
+    readStyle(reader, model.screens[i], true);
+  reader.u16(model.table_page_s);
+}
+
+void writeEntry(Writer& writer, const Competition& entry) {
+  writer.flag(entry.active);
+  writer.flag(entry.fallback_active);
+  writeSource(writer, entry.primary);
+  writeSource(writer, entry.fallback);
+  writer.text(entry.competition_name);
+  writer.text(entry.team_name);
+}
+
+void readEntry(Reader& reader, Competition& entry) {
+  reader.flag(Field::kApplication, entry.active);
+  reader.flag(Field::kApplication, entry.fallback_active);
+  readSource(reader, entry.primary);
+  readSource(reader, entry.fallback);
+  reader.text(Field::kApplication, entry.competition_name);
+  reader.text(Field::kApplication, entry.team_name);
+}
+
+void writePair(Writer& writer, const FixturePair& pair) {
+  writer.flag(pair.active);
+  writer.flag(pair.swapped);
+  writer.u8(pair.competition);
+  writer.text(pair.primary_id);
+  writer.text(pair.secondary_id);
+}
+
+void readPair(Reader& reader, FixturePair& pair) {
+  reader.flag(Field::kApplication, pair.active);
+  reader.flag(Field::kApplication, pair.swapped);
+  reader.u8(pair.competition);
+  reader.text(Field::kApplication, pair.primary_id);
+  reader.text(Field::kApplication, pair.secondary_id);
 }
 
 void writeScalars(Writer& writer, const Model& model) {
@@ -259,9 +338,12 @@ void readFormat5(Reader& reader, Model& model) {
     if (reader.u8(value)) role = static_cast<cfg::InputRole>(value);
 }
 
-// Formats 3 to 7 after the secrets: screens, scalars (with the budget up to
-// format 6), crest image (formats 3 to 5 only, 'crest' given) and the lists.
-void readLists(Reader& reader, Model& model, uint8_t* crest, bool budget) {
+// Formats 3 to 8 after the secrets: screens, scalars (with the budget up to
+// format 6), crest image (formats 3 to 5 only, 'crest' given) and the lists;
+// formats 3 to 7 ('competitions' given) also the competitions and fixture
+// pairs, which get the ids 1..n (pairs referred to the list index).
+void readLists(Reader& reader, Model& model, uint8_t* crest, bool budget,
+               Competitions* competitions) {
   readScreens(reader, model, true);
   readScalars(reader, model, budget);
   if (crest != nullptr) reader.u8(*crest);
@@ -273,31 +355,29 @@ void readLists(Reader& reader, Model& model, uint8_t* crest, bool budget) {
     model.slides.count = count;
     reader.endList();
   }
-  if (reader.count(model.competitions.kCapacity, count)) {
-    model.competitions.clear();
+  if (competitions == nullptr) return;
+  // Formats 3 to 7 held at most kLegacyCompetitions competitions.
+  if (reader.count(kLegacyCompetitions, count)) {
+    auto& entries = competitions->entries;
+    entries.clear();
     for (uint8_t i = 0; i < count; ++i) {
-      auto& entry = model.competitions.items[i];
-      reader.flag(Field::kApplication, entry.active);
-      reader.flag(Field::kApplication, entry.fallback_active);
-      readSource(reader, entry.primary);
-      readSource(reader, entry.fallback);
-      reader.text(Field::kApplication, entry.competition_name);
-      reader.text(Field::kApplication, entry.team_name);
+      readEntry(reader, entries.items[i]);
+      entries.items[i].id = static_cast<uint8_t>(i + 1);
     }
-    model.competitions.count = count;
+    entries.count = count;
+    competitions->next_id = static_cast<uint8_t>(count + 1);
     reader.endList();
   }
-  if (reader.count(model.fixture_pairs.kCapacity, count)) {
-    model.fixture_pairs.clear();
+  if (reader.count(competitions->pairs.kCapacity, count)) {
+    auto& pairs = competitions->pairs;
+    pairs.clear();
     for (uint8_t i = 0; i < count; ++i) {
-      auto& pair = model.fixture_pairs.items[i];
-      reader.flag(Field::kApplication, pair.active);
-      reader.flag(Field::kApplication, pair.swapped);
-      reader.u8(pair.competition);
-      reader.text(Field::kApplication, pair.primary_id);
-      reader.text(Field::kApplication, pair.secondary_id);
+      readPair(reader, pairs.items[i]);
+      // An index beyond the list stays invalid (id 0 is never assigned).
+      auto& ref = pairs.items[i].competition;
+      ref = ref < kLegacyCompetitions ? static_cast<uint8_t>(ref + 1) : 0;
     }
-    model.fixture_pairs.count = count;
+    pairs.count = count;
     reader.endList();
   }
 }
@@ -312,7 +392,8 @@ constexpr unsigned kSlotRoutes = 3;
 constexpr unsigned kSlotMappings = 8;
 constexpr uint8_t kNoCompetition = 0xff;
 
-void readSlots(Reader& reader, Model& model) {
+void readSlots(Reader& reader, Model& model, Competitions& competitions) {
+  auto& entries = competitions.entries;
   uint8_t competition_of[kSlotRoutes];
   std::fill(std::begin(competition_of), std::end(competition_of),
             kNoCompetition);
@@ -323,11 +404,13 @@ void readSlots(Reader& reader, Model& model) {
     if (!reader.flag(Field::kApplication, enabled)) break;
     readSource(reader, entry.primary);
     entry.active = enabled;
-    if (!replaced) model.competitions.clear();
+    if (!replaced) entries.clear();
     replaced = true;
     if (entry.primary.complete()) {
-      competition_of[i] = model.competitions.count;
-      model.competitions.push(entry);
+      competition_of[i] = entries.count;
+      entry.id = static_cast<uint8_t>(entries.count + 1);
+      entries.push(entry);
+      competitions.next_id = static_cast<uint8_t>(entries.count + 1);
     }
   }
   readScreens(reader, model, false);
@@ -339,7 +422,7 @@ void readSlots(Reader& reader, Model& model) {
     if (!reader.flag(Field::kApplication, enabled)) break;
     readSource(reader, fallback);
     if (competition_of[i] == kNoCompetition) continue;
-    auto& entry = model.competitions[competition_of[i]];
+    auto& entry = entries[competition_of[i]];
     entry.fallback_active = enabled;
     if (fallback.complete()) entry.fallback = fallback;
   }
@@ -353,12 +436,12 @@ void readSlots(Reader& reader, Model& model) {
     reader.flag(Field::kApplication, pair.swapped);
     reader.text(Field::kApplication, pair.primary_id);
     reader.text(Field::kApplication, pair.secondary_id);
-    if (!replaced) model.fixture_pairs.clear();
+    if (!replaced) competitions.pairs.clear();
     replaced = true;
     if (route < kSlotRoutes && competition_of[route] != kNoCompetition &&
         !pair.primary_id.empty() && !pair.secondary_id.empty()) {
-      pair.competition = competition_of[route];
-      model.fixture_pairs.push(pair);
+      pair.competition = entries[competition_of[route]].id;
+      competitions.pairs.push(pair);
     }
   }
 }
@@ -406,42 +489,24 @@ std::size_t encode(const Model& model,
   writer.text(model.admin_password);
   writer.text(model.api_football_key);
   writer.text(model.football_data_key);
-  for (const auto& style : model.screens) {
-    writer.flag(style.enabled);
-    writer.flag(style.background);
-    writer.u32(style.colour);
-    writer.u32(style.text);
-    writer.u32(style.accent);
-    writer.u8(style.text_scale);
-    writer.u8(style.image);
-  }
+  for (std::size_t i = 0; i < kListedScreens; ++i)
+    writeStyle(writer, model.screens[i]);
   writeScalars(writer, model);
   writer.u8(model.slides.count);
   for (const uint8_t slide : model.slides) writer.u8(slide);
-  writer.u8(model.competitions.count);
-  for (const auto& entry : model.competitions) {
-    writer.flag(entry.active);
-    writer.flag(entry.fallback_active);
-    writeSource(writer, entry.primary);
-    writeSource(writer, entry.fallback);
-    writer.text(entry.competition_name);
-    writer.text(entry.team_name);
-  }
-  writer.u8(model.fixture_pairs.count);
-  for (const auto& pair : model.fixture_pairs) {
-    writer.flag(pair.active);
-    writer.flag(pair.swapped);
-    writer.u8(pair.competition);
-    writer.text(pair.primary_id);
-    writer.text(pair.secondary_id);
-  }
   writer.flag(model.pin_own_match);  // format 4
   writer.u8(static_cast<uint8_t>(model.conference_mode));  // format 5
   writer.flag(model.whole_matchday);
   for (const auto role : model.input_roles)
     writer.u8(static_cast<uint8_t>(role));
-  for (const auto* values : {&model.daily_requests, &model.request_spacing_s})
-    for (const uint16_t value : *values) writer.u16(value);  // format 7
+  for (const auto& plan : model.providers) {  // format 8
+    writeLimit(writer, plan.limit);
+    for (const uint32_t interval : plan.interval_s) writer.u32(interval);
+  }
+  writeLimit(writer, model.global_limit);
+  for (std::size_t i = kListedScreens; i < cfg::kScreenCount; ++i)
+    writeStyle(writer, model.screens[i]);
+  writer.u16(model.table_page_s);
   const auto used = static_cast<std::size_t>(writer.position() - out.data());
   seal(out.first(used));
   return used;
@@ -454,16 +519,28 @@ void seal(std::span<uint8_t> record, uint16_t version) noexcept {
   writeU32(record.data() + kCrcOffset, recordCrc(record));
 }
 
-DecodeResult decode(std::span<const uint8_t> record, Model& model,
-                    Field* invalid, const Limits& limits,
-                    uint8_t* crest_image) noexcept {
+namespace {
+
+// Header checks shared by both records.
+DecodeResult checkHeader(std::span<const uint8_t> record, std::size_t max) {
   if (record.size() < kHeaderBytes) return DecodeResult::kTooShort;
-  if (record.size() > cfg::kSettingsMaxRecordBytes)
-    return DecodeResult::kTooLong;
+  if (record.size() > max) return DecodeResult::kTooLong;
   if (readU16(record.data() + kLengthOffset) != record.size() - kHeaderBytes)
     return DecodeResult::kLengthMismatch;
   if (readU32(record.data() + kCrcOffset) != recordCrc(record))
     return DecodeResult::kChecksumMismatch;
+  return DecodeResult::kOk;
+}
+
+}  // namespace
+
+DecodeResult decode(std::span<const uint8_t> record, Model& model,
+                    Field* invalid, const Limits& limits,
+                    uint8_t* crest_image,
+                    Competitions* competitions) noexcept {
+  if (const auto header = checkHeader(record, cfg::kSettingsMaxRecordBytes);
+      header != DecodeResult::kOk)
+    return header;
   const auto version = readU16(record.data() + kVersionOffset);
   const bool legacy = version == cfg::kSettingsLegacyFormatVersion;
   const bool slots = version == cfg::kSettingsSlotFormatVersion;
@@ -471,13 +548,21 @@ DecodeResult decode(std::span<const uint8_t> record, Model& model,
   const bool pin = version == cfg::kSettingsPinFormatVersion;
   const bool mode = version == cfg::kSettingsModeFormatVersion;
   const bool roles = version == cfg::kSettingsRoleFormatVersion;
+  const bool limited = version == cfg::kSettingsLimitFormatVersion;
   const bool current = version == cfg::kSettingsFormatVersion;
-  if (!current && !legacy && !slots && !lists && !pin && !mode && !roles)
+  if (!current && !legacy && !slots && !lists && !pin && !mode && !roles &&
+      !limited)
     return DecodeResult::kUnknownVersion;
   if (legacy && record.size() > cfg::kSettingsLegacyMaxRecordBytes)
     return DecodeResult::kTooLong;
 
   Model candidate = model;
+  // Formats 2 to 7 carry the competitions; without a target they are read
+  // and checked, then dropped. A list the record holds replaces the target's
+  // list; a record ending before it keeps the target's initial list.
+  Competitions found;
+  if (competitions != nullptr) found = *competitions;
+  const bool carries_competitions = !legacy && !current;
   const auto readable =
       legacy ? std::min(record.size(), cfg::kSettingsLegacyCoreRecordBytes)
              : record.size();
@@ -487,17 +572,19 @@ DecodeResult decode(std::span<const uint8_t> record, Model& model,
   if (!legacy) {
     readSecrets(reader, candidate);
     if (slots)
-      readSlots(reader, candidate);
+      readSlots(reader, candidate, found);
     else
-      readLists(reader, candidate, current || roles ? nullptr : &crest,
-                !current);
+      readLists(reader, candidate,
+                current || limited || roles ? nullptr : &crest, !current &&
+                !limited, carries_competitions ? &found : nullptr);
     // Format 3 ends before the pin flag, format 4 before the format-5
     // fields, formats 5 and 6 before the request limits; missing fields keep
     // their initial values.
-    if (pin || mode || roles || current)
+    if (pin || mode || roles || limited || current)
       reader.flag(Field::kApplication, candidate.pin_own_match);
-    if (mode || roles || current) readFormat5(reader, candidate);
-    if (current) readRequestLimits(reader, candidate);
+    if (mode || roles || limited || current) readFormat5(reader, candidate);
+    if (limited) readRequestLimits(reader, candidate);
+    if (current) readRequestPlans(reader, candidate);
   }
   DecodeResult result = reader.result();
   Field bad = reader.invalidField();
@@ -515,16 +602,84 @@ DecodeResult decode(std::span<const uint8_t> record, Model& model,
   if (result == DecodeResult::kOk &&
       !validate(candidate, &bad, nullptr, limits))
     result = DecodeResult::kInvalidValue;
+  if (result == DecodeResult::kOk && carries_competitions &&
+      !validate(found)) {
+    bad = Field::kApplication;
+    result = DecodeResult::kInvalidValue;
+  }
   if (result != DecodeResult::kOk) {
     if (result == DecodeResult::kInvalidValue && invalid != nullptr)
       *invalid = bad;
     return result;
   }
   model = candidate;
+  if (carries_competitions && competitions != nullptr) *competitions = found;
   // An id outside the library never passed validation; it is dropped.
   if (crest_image != nullptr)
     *crest_image = crest <= cfg::kImageLibraryMax ? crest : cfg::kStockImageId;
   return DecodeResult::kOk;
+}
+
+bool carriesCompetitions(std::span<const uint8_t> record) noexcept {
+  if (record.size() < kHeaderBytes) return false;
+  const auto version = readU16(record.data() + kVersionOffset);
+  return version > cfg::kSettingsLegacyFormatVersion &&
+         version < cfg::kSettingsFormatVersion;
+}
+
+std::size_t encodeCompetitions(
+    const Competitions& competitions,
+    std::span<uint8_t, kMaxCompetitionRecordBytes> out) noexcept {
+  std::fill(out.begin(), out.end(), 0);
+  Writer writer(out.data() + kHeaderBytes);
+  writer.u8(competitions.next_id);
+  writer.u8(competitions.entries.count);
+  for (const auto& entry : competitions.entries) {
+    writer.u8(entry.id);
+    writeEntry(writer, entry);
+    writer.u8(entry.screens);
+  }
+  writer.u8(competitions.pairs.count);
+  for (const auto& pair : competitions.pairs) writePair(writer, pair);
+  const auto used = static_cast<std::size_t>(writer.position() - out.data());
+  seal(out.first(used), cfg::kCompetitionsFormatVersion);
+  return used;
+}
+
+DecodeResult decodeCompetitions(std::span<const uint8_t> record,
+                                Competitions& competitions) noexcept {
+  if (const auto header =
+          checkHeader(record, cfg::kCompetitionsMaxRecordBytes);
+      header != DecodeResult::kOk)
+    return header;
+  if (readU16(record.data() + kVersionOffset) !=
+      cfg::kCompetitionsFormatVersion)
+    return DecodeResult::kUnknownVersion;
+  Competitions candidate;
+  Reader reader(record.subspan(kHeaderBytes));
+  reader.u8(candidate.next_id);
+  uint8_t count = 0;
+  if (reader.count(candidate.entries.kCapacity, count)) {
+    for (uint8_t i = 0; i < count; ++i) {
+      auto& entry = candidate.entries.items[i];
+      reader.u8(entry.id);
+      readEntry(reader, entry);
+      reader.u8(entry.screens);
+    }
+    candidate.entries.count = count;
+    reader.endList();
+  }
+  if (reader.count(candidate.pairs.kCapacity, count)) {
+    for (uint8_t i = 0; i < count; ++i)
+      readPair(reader, candidate.pairs.items[i]);
+    candidate.pairs.count = count;
+    reader.endList();
+  }
+  DecodeResult result = reader.result();
+  if (result == DecodeResult::kOk && !validate(candidate))
+    result = DecodeResult::kInvalidValue;
+  if (result == DecodeResult::kOk) competitions = candidate;
+  return result;
 }
 
 }  // namespace settings

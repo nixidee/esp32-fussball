@@ -10,10 +10,10 @@ and pending device acceptance are recorded separately below.
 | Page | Content |
 |---|---|
 | Overview | Current screen/reason, own match or kickoff, global data age, next provider round and its reason, source/match count/error per competition, warnings and refresh/next/IP actions |
-| Competitions | Ordered active/paused entries, add/edit wizard, provider competition/club lists, fallback explanation, move/remove, saved-competition fixture picker |
-| Display | Situation defaults, four screen styles, background/image references, ordered slideshow (the crest is one possible slide), brightness/night/rotation, badges and expert scroll controls |
+| Competitions | Compact ordered list of active/paused entries with a Details expander (season, fallback, move/edit/short names/remove), add/edit wizard, provider competition/club lists, fallback explanation, saved-competition fixture picker |
+| Display | Situation defaults, five screen styles, background/image references, ordered slideshow (the crest is one possible slide), brightness/night/rotation, badges and expert scroll controls |
 | Images | Revisioned thumbnails, usage, quota, upload/replace editor, confirmed real deletion, and the crest and standard background (replace, copy from the library, restore the factory image) |
-| Settings | WiFi scan and credentials, hostname/antenna, provider keys/opt-in and request limits (daily cap, minimum spacing) per provider, time/language/access and expert diagnostics |
+| Settings | WiFi scan and credentials, hostname/antenna, provider keys/opt-in and request limits (daily cap, window limit) per provider, time/language/access and expert diagnostics |
 | System | Firmware/update, backup/import, restart, separate image-storage repair, delete user images, factory reset and live diagnostics |
 
 The page starts with session discovery. Without an admin password it obtains
@@ -46,13 +46,13 @@ waiting for time, the time of the last data when stale, provider error) and
 the IP chip with its configured duration. The own match uses the device's
 real data (teams, score, minute or kickoff date and countdown, phase). Values
 the status API does not report — the matchday number, the event line,
-conference rows, table rows and the setup network name — are drawn as example
+conference and matchday rows, table rows and the setup network name — are drawn as example
 values, and the caption names them as such. Times are shown in the browser's
 time zone. The preview is explicitly a schematic, not a screenshot; it does
 not show approximate-value markers or night dimming. Below it, one sentence
 explains why this screen is shown (own match, matchday, idle with the next
 own kickoff, manual choice with its return time, setup). While the first
-provider cycle has not published a snapshot the overview says that data is
+provider request has not published data the overview says that data is
 loading.
 
 Theme follows the browser by default; a manual light/dark choice is stored only
@@ -72,7 +72,9 @@ A control that cannot be used is disabled with a visible reason next to it
 (for example a full list, a missing save, a full image library or an
 incomplete wizard step), so a greyed-out button is never left unexplained.
 
-A listed competition always needs competition/club ids, including when paused.
+A listed competition always needs a competition id, including when paused; the
+club is optional (without a club the competition shows conference and table,
+but no own match and no fixture pairs).
 An active fallback needs a complete source from another provider. Active pairs
 must not repeat an id on the same provider side within their competition; ids
 from different providers may be equal. At least one screen remains enabled.
@@ -90,8 +92,21 @@ access: a changed .local hostname is reached by navigation/the displayed link.
 
 ## Competitions and fixture pairs
 
-Lists contain real entries without holes: at most three competitions, eight
-fixture pairs and five slides. The first active competition supplies the table.
+Lists contain real entries without holes: at most eight competitions, eight
+fixture pairs and five slides. The order of the list is the order in which
+the Matchday and Table screens show the competitions. The details of an entry
+hold its four screen switches (Own match, Konferenz, Matchday, Table; a new
+or imported entry has all on, an imported entry keeps the default for each
+switch it does not name); Own match is disabled without a club. The closed
+entry lists the screens it appears on.
+The competitions and fixture pairs are saved through their own endpoint
+(`/api/v1/competitions`) as part of the global save; the device assigns each
+new competition its id, and fixture pairs refer to that id, so moving a
+competition no longer changes its pairs. When the global save changes both
+the settings and the competitions, the page writes first the part that the
+other one needs (for example a newly entered provider key before a
+competition that uses it). A change that both removes one keyed provider and
+moves a competition to another keyed provider must be saved in two steps.
 Chosen provider names are stored for display; ids remain the identity. Names
 exceeding the storage byte capacity can be edited before accepting the wizard.
 Changing a competition clears its previous club selection.
@@ -99,10 +114,15 @@ Changing a competition clears its previous club selection.
 Provider lists are asynchronous, bounded pages. Only successful retrieval
 advances paging; busy jobs are waited for and their errors are translated.
 Search/selection context cannot change underneath a running list request.
-The list search is a case-insensitive substring match on the provider name
-(ASCII and accented Latin capitals such as Ä, Ö, Ü); "Next page" requests the
-provider list again with an offset, because the device does not keep whole
-lists in RAM.
+Typing in the search field only filters the entries already loaded, without
+a request, and the load button then reads "Search"; "No results." appears when
+no loaded entry contains the text. Enter or "Search" asks the device to search
+the provider's whole list. The device search is a case-insensitive substring
+match on the provider name (ASCII and accented Latin capitals such as Ä, Ö,
+Ü); names are the provider's own, so ESPN leagues are found by English names
+("German Bundesliga"). "Next page" requests the same list as the last load,
+with an offset, because the device does not keep whole lists in RAM; a search
+text typed since then keeps filtering the loaded entries.
 For OpenLigaDB the wizard shows a season field above the competition list.
 Empty loads the current season; a picked competition then stores no season,
 so the device follows the season automatically. Another typed season loads
@@ -112,10 +132,16 @@ API-Football also stores no season for a picked competition, so the device
 follows its current season automatically; the season shown in the list is only
 passed to the club list request. An expert season override is stored as typed.
 Provider keys and ESPN opt-in must be saved before their provider can be used.
-Each provider card on the settings page also holds that provider's two request
-limits: the maximum requests per day (0 = no daily cap) and the minimum
-interval between requests in seconds. The change list and error messages name
-the provider of a limit.
+Each provider card on the settings page also holds that provider's request
+limits: the maximum requests per day (0 = no daily cap; when the rest will
+not last until 00:00 UTC, the device requests live table, table, core data,
+fixtures and live scores less often or not at all, the own match last) and a
+window limit,
+at most N requests per window of W seconds (both 0 = no window limit; the
+device never exceeds N in any W seconds). The change list and error messages
+name the provider of a limit. The intervals per data type and the global
+limit over all providers are stored settings, but the page does not show
+them yet; they keep their values on every save.
 When the device runs on initial values because its stored settings were
 invalid, damaged, unreadable or not storable, the overview shows a warning;
 for an invalid or damaged record the first save asks before it overwrites
@@ -127,8 +153,8 @@ shows (network not found, wrong password, setup network on, connecting).
 Below the data age the overview shows when the next provider round is due
 ("in 45 s" up to two minutes ahead, otherwise the browser's clock time) and
 why: match live, before kickoff, after the final whistle, no match window
-open, match window opens, requests spread over the daily limit, daily limit
-reached, retry after an error, waiting for WiFi and time, update test
+open, match window opens, daily limit tight (requests less often or skipped),
+daily limit reached, retry after an error, waiting for WiFi and time, update test
 running.
 The device refuses a save in which an active competition (primary source or
 active fallback) uses a provider without its key or opt-in, including a save
@@ -136,18 +162,28 @@ that removes a key still in use; the page then marks that source's provider.
 
 Competition entries that are new, moved or changed show a notice that the
 device fetches them, and fixture pairs can be created for them, only after the
-global save. Removing a competition asks for confirmation, names it and the
-number of fixture pairs removed with it, and takes effect on save. The wizard
+global save. Removing a competition asks for confirmation, names it and lists
+the fixture pairs removed with it, and takes effect on save. The wizard
 asks for a country filter only for API-Football, whose competition list
 supports it; the Next button shows why it is not yet available.
 
-Fixture picking uses unchanged saved competitions at their saved indices.
-New, edited or reordered competitions require the global save first. It loads
+Fixture picking uses unchanged saved competitions by their ids.
+New or edited competitions require the global save first. It loads
 primary and fallback fixtures with ids, labels and kickoff, clears stale picks
 on reload and requires current valid selections before accepting. A home/away
 swap suggestion remains explicitly reviewable; the firmware never equates
-provider identities by similar names. Moving/removing competitions updates
-pair indices in the draft.
+provider identities by similar names. Removing a competition removes its pairs
+from the draft.
+
+"Kurznamen" in the details of a saved, active competition lists the teams the
+device holds for it (from its matches and table), each with the provider's
+name as placeholder and the owner's short name, if any. "Übernehmen" saves
+one name at once on the device, outside the global draft; an empty field
+removes it. At most 26 bytes per name and 48 names over all competitions;
+a full table or a full device is reported and keeps the previous name. A
+competition without fetched data shows a hint to fetch first. The names
+are part of the settings export; an import replaces all of them (a backup
+without names keeps them). A settings reset deletes them.
 
 ## Display page
 
@@ -158,21 +194,27 @@ instead. Own match is not offered for the matchday situation, because the own
 club does not play then; an imported backup with that value is changed to
 Conference before validation.
 
-Each of the four screen cards has an enable switch, a live schematic preview
+The five screen cards follow the device's screen order (Own match,
+Konferenz, Matchday, Table, Crest and slideshow; `screen_order` of the
+schema). Each card has an enable switch, a live schematic preview
 with example values that follows every draft change (colours, text size,
 background, crest and slides), a background-image choice and a colour group.
 The global background switch sits above the cards; while it is off, the
 per-screen choices keep their values and say so. The conference card holds
 the switch that pins the own match in the conference: when it is on, the own
 match stands in the first row of every conference page; when it is off, it
-takes its normal place in the order. Display, provider-budget and diagnostics settings whose
+takes its normal place in the order. "Matches visible at once" sits on the
+conference card and also sets the matches per page of the Matchday screen;
+it stays editable while either screen is on. The table card holds the table
+rows and the table step (how long a table page or, with an own club, a
+competition stays before the next one). Display, provider-budget and diagnostics settings whose
 meaning is not obvious have a help text, including the device-specific
 conditions (for example a provider's daily cap, 0 for no cap, and its reset
 at 00:00 UTC, or the scroll reset that only applies to devices with exactly two
 buttons).
 
-The display page only selects images; it has no upload. Each of the first
-three screens has a background switch (off) and a choice between the standard
+The display page only selects images; it has no upload. Every screen except
+the crest screen has a background switch (off) and a choice between the standard
 background and a library image. The "Wappen und Diashow" section lists the
 slides in play order; each slide is the crest or a library image, added from
 the library list. The crest itself and the standard background are replaced
@@ -213,6 +255,11 @@ Library quota and temporary filesystem reserve are separate checks. Replacing
 an image subtracts its old size from the library quota, but the old file still
 occupies filesystem space while its replacement is written. The firmware
 performs its own baseline-JPEG, dimensions, complete-decode and quota checks.
+The kept football data and the short names share the partition (at most
+48 KiB, typically one 4 KiB block per competition); the free-space check of
+an upload counts them, the library quota does not. Images come first: the
+device writes a football file only while the unused part of the library
+quota plus the reserve stays free.
 
 | Bound | Current C6 |
 |---|---|
@@ -243,13 +290,19 @@ scripts/build_assets.py. Automatic provider-crest import is still deferred.
 
 ## System and diagnostics
 
-Export optionally includes secrets with an explicit notice. Import checks size,
+Export optionally includes secrets with an explicit notice; it carries the
+settings, the competitions with fixture pairs and the owner's short names.
+Import sends them as up to three requests (settings, competitions, short
+names), each at most the API body limit; it checks size,
 JSON shape, types and the same validation rules before confirmation (an old
 matchday default of Own match is converted to Conference first; the crest
 choice of an older backup is dropped, and the result message says so,
 because the crest is an image role now and images are not in the backup; the
 API-Football daily budget of an older backup becomes API-Football's daily cap,
-and the result message says so as well); successful
+and the result message says so as well; the minimum request spacing of an
+older backup is ignored with a message; competitions of an older backup have
+no ids and get the ids 1, 2, 3 in list order, and their fixture pairs move from
+the list position to that id); successful
 import refreshes the settings and session state instead of rewriting an old
 draft. Restart and factory reset are separate confirmed actions. Factory reset
 requires the device name and explains how to reconnect to setup afterwards.

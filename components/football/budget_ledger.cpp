@@ -67,4 +67,9 @@ uint32_t Counter::remaining(uint32_t limit) const {
   return used >= limit ? 0 : limit - used;
 }
 
+uint32_t Counter::remaining(uint32_t day, uint32_t limit) const {
+  if (!damaged_ && day > record_.day) return limit;
+  return remaining(limit);
+}
+
 }  // namespace football::budget

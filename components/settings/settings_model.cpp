@@ -106,19 +106,53 @@ bool isValidSeason(cfg::Provider provider, std::string_view season) noexcept {
                       [](char c) { return c >= '0' && c <= '9'; }));
 }
 
-bool sameProviderData(const Model& a, const Model& b) noexcept {
-  if (a.competitions.size() != b.competitions.size()) return false;
-  for (std::size_t i = 0; i < a.competitions.size(); ++i) {
-    const auto& x = a.competitions[i];
-    const auto& y = b.competitions[i];
-    if (x.active != y.active || x.fallback_active != y.fallback_active ||
-        !(x.primary == y.primary) || !(x.fallback == y.fallback))
-      return false;
+const char* dataTypeName(cfg::DataType type) noexcept {
+  switch (type) {
+    case cfg::DataType::kCore: return "core";
+    case cfg::DataType::kFixtures: return "fixtures";
+    case cfg::DataType::kTable: return "table";
+    case cfg::DataType::kLive: return "live";
+    case cfg::DataType::kLiveTable: return "live_table";
+    case cfg::DataType::kEvents: return "events";
   }
-  return a.fixture_pairs == b.fixture_pairs &&
-         a.api_football_key == b.api_football_key &&
+  return "unknown";
+}
+
+bool sameProviderData(const Model& a, const Model& b) noexcept {
+  return a.api_football_key == b.api_football_key &&
          a.football_data_key == b.football_data_key &&
          a.espn_opt_in == b.espn_opt_in && a.demo == b.demo;
+}
+
+bool sameProviderData(const Competitions& a, const Competitions& b) noexcept {
+  if (a.entries.size() != b.entries.size()) return false;
+  for (std::size_t i = 0; i < a.entries.size(); ++i) {
+    const auto& x = a.entries[i];
+    const auto& y = b.entries[i];
+    if (x.id != y.id || x.active != y.active ||
+        x.fallback_active != y.fallback_active || !(x.primary == y.primary) ||
+        !(x.fallback == y.fallback))
+      return false;
+  }
+  return a.pairs == b.pairs;
+}
+
+void assignIds(Competitions& competitions) noexcept {
+  const auto used = [&](uint8_t id) {
+    return competitions.find(id) != nullptr;
+  };
+  const auto advance = [](uint8_t id) {
+    return static_cast<uint8_t>(id == 255 ? 1 : id + 1);
+  };
+  if (competitions.next_id == 0) competitions.next_id = 1;
+  for (auto& entry : competitions.entries) {
+    if (entry.id != 0) continue;
+    // At most kCompetitionMax ids are in use, so a free one is found.
+    uint8_t id = competitions.next_id;
+    while (used(id)) id = advance(id);
+    entry.id = id;
+    competitions.next_id = advance(id);
+  }
 }
 
 bool providerUsable(cfg::Provider provider, const Model& model) noexcept {
@@ -134,9 +168,10 @@ bool providerUsable(cfg::Provider provider, const Model& model) noexcept {
   }
 }
 
-bool checkProviderAccess(const Model& model, Violation* violation) noexcept {
-  for (unsigned i = 0; i < model.competitions.size(); ++i) {
-    const auto& entry = model.competitions[i];
+bool checkProviderAccess(const Model& model, const Competitions& competitions,
+                         Violation* violation) noexcept {
+  for (unsigned i = 0; i < competitions.entries.size(); ++i) {
+    const auto& entry = competitions.entries[i];
     if (!entry.active) continue;
     const char* source = nullptr;
     if (!providerUsable(entry.primary.provider, model))
@@ -202,17 +237,21 @@ bool checkSource(Checker& check, const FieldPath& at, const Source& source) {
   return true;
 }
 
-bool checkSources(Checker& check, const Model& model) {
-  for (unsigned i = 0; i < model.competitions.size(); ++i) {
-    const auto& entry = model.competitions[i];
+bool checkSources(Checker& check, const Competitions& competitions) {
+  for (unsigned i = 0; i < competitions.entries.size(); ++i) {
+    const auto& entry = competitions.entries[i];
     FieldPath at;
     at.key("competitions").index(i);
+    if (entry.id == 0) return check.fail(at.with("id"), Reason::kRequired);
+    for (unsigned j = 0; j < i; ++j)
+      if (competitions.entries[j].id == entry.id)
+        return check.fail(at.with("id"), Reason::kDuplicate);
+    if (entry.screens >> cfg::kCompetitionScreenCount)
+      return check.fail(at.with("screens"), Reason::kRange);
     const auto primary = at.with("primary");
     if (entry.primary.competition.empty())
       return check.fail(FieldPath(primary).with("competition"),
                         Reason::kRequired);
-    if (entry.primary.team.empty())
-      return check.fail(FieldPath(primary).with("team"), Reason::kRequired);
     if (!checkSource(check, primary, entry.primary)) return false;
     const auto fallback = at.with("fallback");
     if (!checkSource(check, fallback, entry.fallback)) return false;
@@ -224,8 +263,11 @@ bool checkSources(Checker& check, const Model& model) {
     if (entry.fallback.competition.empty())
       return check.fail(FieldPath(fallback).with("competition"),
                         Reason::kRequired);
-    if (entry.fallback.team.empty())
-      return check.fail(FieldPath(fallback).with("team"), Reason::kRequired);
+    // The fallback names the same club at its provider, or no club.
+    if (entry.fallback.team.empty() != entry.primary.team.empty())
+      return check.fail(FieldPath(fallback).with("team"),
+                        entry.fallback.team.empty() ? Reason::kRequired
+                                                    : Reason::kConflict);
     if (entry.fallback.provider == entry.primary.provider)
       return check.fail(FieldPath(fallback).with("provider"),
                         Reason::kConflict);
@@ -233,12 +275,13 @@ bool checkSources(Checker& check, const Model& model) {
   return true;
 }
 
-bool checkPairs(Checker& check, const Model& model) {
-  for (unsigned i = 0; i < model.fixture_pairs.size(); ++i) {
-    const auto& pair = model.fixture_pairs[i];
+bool checkPairs(Checker& check, const Competitions& competitions) {
+  for (unsigned i = 0; i < competitions.pairs.size(); ++i) {
+    const auto& pair = competitions.pairs[i];
     FieldPath at;
     at.key("fixture_pairs").index(i);
-    if (pair.competition >= model.competitions.size())
+    const auto* entry = competitions.find(pair.competition);
+    if (pair.competition == 0 || entry == nullptr)
       return check.fail(at.with("competition"), Reason::kReference);
     for (const auto& [name, id] :
          {std::pair{"primary_id", &pair.primary_id},
@@ -248,10 +291,10 @@ bool checkPairs(Checker& check, const Model& model) {
         return check.fail(at.with(name), Reason::kInvalid);
     }
     if (!pair.active) continue;
-    if (!model.competitions[pair.competition].fallback_active)
+    if (!entry->fallback_active)
       return check.fail(at.with("competition"), Reason::kConflict);
     for (unsigned j = 0; j < i; ++j) {
-      const auto& other = model.fixture_pairs[j];
+      const auto& other = competitions.pairs[j];
       if (!other.active || other.competition != pair.competition) continue;
       if (other.primary_id == pair.primary_id)
         return check.fail(at.with("primary_id"), Reason::kDuplicate);
@@ -309,19 +352,36 @@ bool checkInputs(Checker& check, const Model& model, std::size_t inputs) {
   return true;
 }
 
-// Daily caps and request spacings per provider (OQ-170).
-bool checkRequestLimits(Checker& check, const Model& model) {
-  const auto each = [&](const char* name, const RequestLimits& values,
-                        cfg::Range range) {
-    for (unsigned i = 0; i < values.size(); ++i)
-      if (!range.contains(values[i]))
-        return check.fail(FieldPath().with(name).withIndex(i), Reason::kRange);
-    return true;
-  };
-  return each("daily_requests", model.daily_requests,
-              cfg::kDailyRequestsRange) &&
-         each("request_spacing_s", model.request_spacing_s,
-              cfg::kRequestSpacingRange);
+// A window limit needs both values or none (OQ-225).
+bool checkLimit(Checker& check, const FieldPath& at, const RequestLimit& limit) {
+  if (!cfg::kDailyRequestsRange.contains(limit.daily))
+    return check.fail(at.with("daily_requests"), Reason::kRange);
+  if (!cfg::kWindowRequestsRange.contains(limit.window_requests))
+    return check.fail(at.with("window_requests"), Reason::kRange);
+  if (!cfg::kWindowRange.contains(limit.window_s))
+    return check.fail(at.with("window_s"), Reason::kRange);
+  if ((limit.window_requests == 0) != (limit.window_s == 0))
+    return check.fail(at.with(limit.window_s == 0 ? "window_s"
+                                                  : "window_requests"),
+                      Reason::kRequired);
+  return true;
+}
+
+// Request plan per provider (OQ-216, OQ-225) and the global limit (OQ-226).
+bool checkRequestPlans(Checker& check, const Model& model) {
+  for (unsigned p = 0; p < model.providers.size(); ++p) {
+    const auto at = FieldPath().with("providers").withIndex(p);
+    const auto& plan = model.providers[p];
+    if (!checkLimit(check, at, plan.limit)) return false;
+    for (unsigned t = 0; t < plan.interval_s.size(); ++t)
+      if (plan.interval_s[t] < cfg::kIntervalMinS ||
+          plan.interval_s[t] > cfg::kIntervalMaxS)
+        return check.fail(at.with("intervals").with(dataTypeName(
+                              static_cast<cfg::DataType>(t))),
+                          Reason::kRange);
+  }
+  return checkLimit(check, FieldPath().with("global_limit"),
+                    model.global_limit);
 }
 
 }  // namespace
@@ -397,6 +457,8 @@ bool validate(const Model& model, Field* invalid, Violation* violation,
          check.range("scroll_repeat_ms", cfg::kScrollRepeatRange,
                      model.scroll_repeat_ms) &&
          check.range("slideshow_s", cfg::kSlideshowRange, model.slideshow_s) &&
+         check.range("table_page_s", cfg::kTablePageRange,
+                     model.table_page_s) &&
          check.range("night_start", cfg::kDayMinutesRange, model.night_start) &&
          check.range("night_end", cfg::kDayMinutesRange, model.night_end) &&
          check.range("ip_badge_s", cfg::kReturnTimeRange, model.ip_badge_s) &&
@@ -414,12 +476,16 @@ bool validate(const Model& model, Field* invalid, Violation* violation,
                      {0, static_cast<uint16_t>(cfg::ConferenceMode::kOnePage)},
                      static_cast<unsigned>(model.conference_mode)) &&
          checkInputs(check, model, limits.inputs) &&
-         checkRequestLimits(check, model) && checkSources(check, model) &&
-         checkPairs(check, model) && checkImages(check, model);
+         checkRequestPlans(check, model) && checkImages(check, model);
   }
   if (ok) return true;
   if (invalid != nullptr) *invalid = bad;
   return false;
+}
+
+bool validate(const Competitions& competitions, Violation* violation) noexcept {
+  Checker check(violation);
+  return checkSources(check, competitions) && checkPairs(check, competitions);
 }
 
 bool dropMissingImages(Model& model, ImageMask present) noexcept {
@@ -503,6 +569,17 @@ Model initialValues(const Presets& presets, FieldMask* rejected,
     preset(model.football_data_key, presets.football_data_key);
   else
     skipped |= fieldBit(Field::kApplication);
+  if (rejected != nullptr) *rejected = skipped;
+  return model;
+}
+
+void initialCompetitions(const Presets& presets, Competitions& competitions,
+                         FieldMask* rejected) noexcept {
+  competitions.clear();
+  FieldMask skipped = 0;
+  auto preset = [&](auto& field, std::string_view value) {
+    if (!field.assign(value)) skipped |= fieldBit(Field::kApplication);
+  };
   Competition entry;
   if (presets.provider == "api-football")
     entry.primary.provider = cfg::Provider::kApiFootball;
@@ -515,15 +592,15 @@ Model initialValues(const Presets& presets, FieldMask* rejected,
   preset(entry.primary.competition, presets.competition);
   preset(entry.primary.team, presets.team);
   preset(entry.primary.season, presets.season);
-  if (entry.primary.complete()) {
-    model.competitions.push(entry);
-    if (!validate(model, nullptr, nullptr, limits)) {
-      model.competitions.clear();
+  if (!entry.primary.competition.empty()) {
+    competitions.entries.push(entry);
+    assignIds(competitions);
+    if (!validate(competitions)) {
+      competitions.clear();
       skipped |= fieldBit(Field::kApplication);
     }
   }
   if (rejected != nullptr) *rejected = skipped;
-  return model;
 }
 
 }  // namespace settings

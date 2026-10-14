@@ -43,6 +43,9 @@ class Counter {
   void commit(const Record& next);
   // Requests left today (0 while damaged or used up).
   uint32_t remaining(uint32_t limit) const;
+  // Requests left on UTC 'day': 'limit' when 'day' is newer than the stored
+  // day (no request on it yet), else remaining(limit).
+  uint32_t remaining(uint32_t day, uint32_t limit) const;
 
  private:
   Record record_{cfg::kBudgetRecordMagic, 0, 0};

@@ -12,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/dns.h"
+#include "lwip/sockets.h"
 #include "lwip/tcpip.h"
 #include "network_service.h"
 #include "settings_store.h"
@@ -31,6 +32,9 @@ struct Transport {
   std::size_t wire_limit, wire_bytes = 0, header_bytes = 0;
   uint32_t ending = 0;
   bool headers = true, failed = false;
+  // Where the request stopped and the socket's pending error, for the log.
+  const char* stage = "dns";
+  int socket_error = 0;
   bool valid() {
     const bool ok = timekeeping::monotonicMs() < deadline &&
                     settings::dataGeneration() == generation && network::ready() &&
@@ -119,20 +123,42 @@ bool resolve(Transport& c, const char* host, char* numeric,
   }
   return false;
 }
+// A failed connect is "tls" once the TCP connection stands (its socket is
+// writable without a pending error), otherwise "tcp".
+int connectFailed(Transport& c) {
+  const int socket = esp_transport_get_socket(c.tls);
+  if (socket < 0) return -1;
+  socklen_t size = sizeof(c.socket_error);
+  if (getsockopt(socket, SOL_SOCKET, SO_ERROR, &c.socket_error, &size) != 0)
+    return -1;
+  fd_set writable;
+  FD_ZERO(&writable);
+  FD_SET(socket, &writable);
+  timeval now{};
+  if (c.socket_error == 0 &&
+      select(socket + 1, nullptr, &writable, nullptr, &now) > 0)
+    c.stage = "tls";
+  return -1;
+}
 int connect(esp_transport_handle_t t, const char* host, int port, int) {
   auto& c = transport(t);
   char numeric[IP4ADDR_STRLEN_MAX]{};
   if (!resolve(c, host, numeric, sizeof(numeric))) return -1;
+  c.stage = "tcp";
   // Keep the original hostname for both certificate verification and SNI.
   esp_transport_ssl_set_common_name(c.tls, host);
   while (c.valid()) {
     const int progress = esp_transport_connect_async(
         c.tls, numeric, port, c.timeout(cfg::kSocketTimeoutMs));
-    if (progress == 1) return c.valid() ? 0 : -1;
-    if (progress < 0) return -1;
+    if (progress == 1) {
+      if (!c.valid()) return -1;
+      c.stage = "http";
+      return 0;
+    }
+    if (progress < 0) return connectFailed(c);
     vTaskDelay(pdMS_TO_TICKS(cfg::kProviderWaitSliceMs));
   }
-  return -1;
+  return connectFailed(c);
 }
 // The async connect leaves the TLS socket non-blocking. A partly received TLS
 // record then reads as 0 (timeout) at once instead of after `timeout`, so
@@ -207,9 +233,13 @@ class Stream {
   }
   int read() {
     const auto c = peek();
+    if (number_ && !numberChar(c)) return -1;
     look_ = -2;
     return c;
   }
+  // While set, the stream ends before the first character that cannot be
+  // part of a number; that character stays unread.
+  void endAfterNumber(bool on) { number_ = on; }
   std::size_t readBytes(char* out, std::size_t n) {
     std::size_t i = 0;
     for (; i < n; ++i) {
@@ -233,6 +263,10 @@ class Stream {
   std::size_t bytes() const { return bytes_; }
 
  private:
+  static bool numberChar(int c) {
+    return (c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' ||
+           c == 'e' || c == 'E';
+  }
   int next() {
     if (timekeeping::monotonicMs() >= deadline_ ||
         settings::dataGeneration() != generation_ || !network::ready() ||
@@ -262,14 +296,36 @@ class Stream {
   int64_t deadline_;
   char buffer_[1024];
   int look_ = -2;
-  bool failed_ = false;
+  bool failed_ = false, number_ = false;
 };
+// Parse one value through the real parser. A number has no end marker, so
+// ArduinoJson reads the character after it and rejects a number that is not
+// the end of its input. The stream therefore ends after a number while it is
+// parsed; the character after it stays in the stream for the caller.
+ArduinoJson::DeserializationError parseValue(Stream& stream,
+                                             ArduinoJson::JsonDocument& doc,
+                                             unsigned nesting) {
+  int c = stream.peek();
+  while (c == ' ' || c == '\r' || c == '\n' || c == '\t') {
+    stream.read();
+    c = stream.peek();
+  }
+  stream.endAfterNumber(c == '-' || (c >= '0' && c <= '9'));
+  const auto err = deserializeJson(
+      doc, stream, ArduinoJson::DeserializationOption::NestingLimit(nesting));
+  stream.endAfterNumber(false);
+  return err;
+}
+// Longest wrapper key the walk accepts (bytes).
+constexpr std::size_t kWalkKeyMax = 95;
 // Walk wrapper JSON without retaining discarded fields. Every scalar still
 // goes through the real parser; depth, bytes, document and string allocation
 // limits apply to all content, including fields outside the selected array.
+// '*enough' set by the consumer ends the walk early with success; the rest
+// of the response is not read.
 bool walk(Stream& stream, const char* wanted, JsonConsumer consume,
-          void* context, JsonAllocator& alloc, unsigned depth, bool& found,
-          bool selected = false) {
+          void* context, JsonAllocator& alloc, const bool* enough,
+          unsigned depth, bool& found, bool selected = false) {
   if (depth > cfg::kJsonDepth) return false;
   int c;
   do {
@@ -292,14 +348,13 @@ bool walk(Stream& stream, const char* wanted, JsonConsumer consume,
     for (;;) {
       if (selected) {
         ArduinoJson::JsonDocument doc(&alloc);
-        if (deserializeJson(doc, stream,
-                            ArduinoJson::DeserializationOption::NestingLimit(
-                                cfg::kJsonDepth - depth)) ||
+        if (parseValue(stream, doc, cfg::kJsonDepth - depth) ||
             !consume(doc.as<ArduinoJson::JsonVariantConst>(), context))
           return false;
-      } else if (!walk(stream, wanted, consume, context, alloc, depth + 1,
-                       found))
+      } else if (!walk(stream, wanted, consume, context, alloc, enough,
+                       depth + 1, found))
         return false;
+      if (enough && *enough) return true;
       c = stream.nonSpace();
       if (c == ']') return true;
       if (c != ',') return false;
@@ -310,18 +365,23 @@ bool walk(Stream& stream, const char* wanted, JsonConsumer consume,
     c = stream.nonSpace();
     if (c == '}') return true;
     // Escaped wrapper keys are rejected rather than matched incorrectly.
+    // The key is compared while it is read: a buffer for it would cost
+    // every nesting level of the walk its size in stack (ESPN match
+    // summaries nest 12 levels deep).
     for (;;) {
       if (c != '"') return false;
-      char key[96]{};
       std::size_t n = 0;
+      bool same = true;
       while ((c = stream.read()) != '"') {
-        if (c < 0 || c == '\\' || c < 32 || n >= sizeof(key) - 1) return false;
-        key[n++] = c;
+        if (c < 0 || c == '\\' || c < 32 || n >= kWalkKeyMax) return false;
+        same = same && static_cast<unsigned char>(wanted[n]) == c;
+        ++n;
       }
       if (stream.nonSpace() != ':') return false;
-      if (!walk(stream, wanted, consume, context, alloc, depth + 1, found,
-                strcmp(key, wanted) == 0))
+      if (!walk(stream, wanted, consume, context, alloc, enough, depth + 1,
+                found, same && wanted[n] == 0))
         return false;
+      if (enough && *enough) return true;
       c = stream.nonSpace();
       if (c == '}') return true;
       if (c != ',') return false;
@@ -329,10 +389,7 @@ bool walk(Stream& stream, const char* wanted, JsonConsumer consume,
     }
   }
   ArduinoJson::JsonDocument doc(&alloc);
-  if (deserializeJson(doc, stream,
-                      ArduinoJson::DeserializationOption::NestingLimit(
-                          cfg::kJsonDepth - depth)))
-    return false;
+  if (parseValue(stream, doc, cfg::kJsonDepth - depth)) return false;
   // A requested array represented by a scalar is a malformed response.
   return !selected;
 }
@@ -367,10 +424,9 @@ void* JsonAllocator::reallocate(void* pointer, std::size_t size) {
 esp_err_t fetchJson(const char* url, const char* array_key,
                     cfg::Provider provider, const settings::Model& model,
                     uint32_t generation, JsonConsumer consume, void* context,
-                    bool selection, FetchResult* result) {
+                    std::size_t limit, FetchResult* result, bool optional,
+                    const bool* enough) {
   esp_http_client_config_t config{};
-  const std::size_t limit =
-      selection ? cfg::kSelectionBodyBytes : cfg::kProviderBodyBytes;
   Transport context_transport{
       esp_transport_ssl_init(), generation, network::status().epoch,
       timekeeping::monotonicMs() + cfg::kOperationDeadlineMs,
@@ -439,14 +495,20 @@ esp_err_t fetchJson(const char* url, const char* array_key,
            consume(doc.as<ArduinoJson::JsonVariantConst>(), context);
     } else {
       bool found = false;
-      ok = walk(stream, array_key, consume, context, allocator, 0, found,
-                array_key[0] == 0) &&
-           found;
+      ok = walk(stream, array_key, consume, context, allocator, enough, 0,
+                found, array_key[0] == 0) &&
+           (found || optional);
     }
-    if (!ok || stream.nonSpace() != -1 || !stream.complete() ||
+    // A walk ended by the consumer leaves the rest unread.
+    const bool rest = !(enough && *enough);
+    if (!ok || (rest && (stream.nonSpace() != -1 || !stream.complete())) ||
         context_transport.failed)
       err = ESP_ERR_INVALID_RESPONSE;
     if (result) result->bytes = stream.bytes();
+  }
+  if (result) {
+    result->stage = context_transport.stage;
+    result->socket_error = context_transport.socket_error;
   }
   esp_http_client_close(client);
   esp_http_client_cleanup(client);

@@ -1,22 +1,11 @@
 #pragma once
-#include <array>
 #include <cstdint>
 #include <cstring>
 #include <string_view>
-#include <type_traits>
 
 #include "app_config.h"
 
 namespace football {
-enum class Source : uint8_t {
-  kNone,
-  kProvider,
-  kEstimated,
-  kOpenLigaDb,
-  kApiFootball,
-  kEspn,
-  kFootballData
-};
 // Why a provider operation failed; the stable key of the error text for the
 // Web UI (REST API). kNone = no error.
 enum class Cause : uint8_t {
@@ -37,19 +26,6 @@ enum class Cause : uint8_t {
   kTooLarge,     // response or result exceeds the device's capacity
   kMemory,       // out of memory
   kOther
-};
-constexpr bool confirmed(Source source) {
-  return source == Source::kProvider || source >= Source::kOpenLigaDb;
-}
-constexpr Source providerSource(cfg::Provider provider) {
-  return static_cast<Source>(3 + static_cast<uint8_t>(provider));
-}
-template <class T>
-struct Value {
-  T value{};
-  Source source = Source::kNone;
-  bool valid() const { return source != Source::kNone; }
-  bool operator==(const Value&) const = default;
 };
 template <std::size_t N>
 struct Text {
@@ -77,17 +53,6 @@ struct Id : Text<cfg::kIdBytes> {
   }
   bool operator==(const Id&) const = default;
 };
-struct Team {
-  cfg::Provider provider = cfg::Provider::kOpenLigaDb;
-  Id id;
-  Text<cfg::kNameBytes> name;
-  Text<24> short_name;
-};
-struct Score {
-  Value<int16_t> home, away;
-  bool valid() const { return home.valid() && away.valid(); }
-  bool operator==(const Score&) const = default;
-};
 enum class Phase : uint8_t {
   kUnknown,
   kScheduled,
@@ -112,156 +77,20 @@ enum class EventType : uint8_t {
   kInjury,
   kVar
 };
-struct MatchEvent {
-  cfg::Provider provider = cfg::Provider::kOpenLigaDb;
-  uint32_t identity = 0, revision = 0;
-  EventType type = EventType::kGoal;
-  Value<int16_t> minute, added;
-  Id actor_team, beneficiary;
-  Text<32> player, player_in, player_out;
-  Text<24> detail;
-  Score after;
-  bool removed = false;
-  bool shootout = false;
-  bool operator==(const MatchEvent&) const = default;
-};
-struct Match {
-  cfg::Provider provider = cfg::Provider::kOpenLigaDb;
-  Id id;
-  uint8_t route = 0;
-  Value<uint16_t> round;
-  Text<32> round_label;
-  Team home, away;
-  Value<int64_t> kickoff, finished_at, provider_changed;
-  Phase phase = Phase::kUnknown;
-  Source phase_source = Source::kNone;
-  Value<int16_t> minute;
-  Score principal, halftime, regulation, extra_time, shootout;
-  std::array<uint8_t, cfg::kMatchEvents>
-      events{};  // indices in snapshot event pool
-  uint8_t event_count = 0;
-  bool events_truncated = false;
-  bool own = false;
-  int64_t score_changed_ms = 0, fetched_ms = 0;
-};
-struct Standing {
-  bool own = false;
-  Team team;
-  Value<int16_t> position, played, won, drawn, lost, goals_for, goals_against,
-      difference, points;
-};
-struct Snapshot {
-  // Runtime construction keeps fixed storage in BSS instead of embedding
-  // three almost-empty 27 KB initial images in the firmware. No heap.
-  Snapshot() noexcept;
-  void reset() noexcept;
-  std::array<Match, cfg::kMatches> matches{};
-  std::array<Standing, cfg::kTableRows> table{};
-  std::array<MatchEvent, cfg::kSnapshotEvents> events{};
-  uint8_t match_count = 0, table_count = 0, event_count = 0;
-  uint32_t generation = 0, revision = 0;
-  int64_t fetched_ms = 0;
-  // Monotonic time of each competition's last successful fetch; a route
-  // carried over after a failed fetch keeps its earlier time. 0 = none.
-  std::array<int64_t, cfg::kCompetitionMax> route_fetched_ms{};
-  // Monotonic time of the next attempt after a failed one; 0 = none.
-  int64_t retry_ms = 0;
-  bool stale = true, configured = false;
-  // A match did not fit the full match list (matchSlot); the list holds
-  // the matches nearest to the time of the fetch.
-  bool matches_truncated = false;
-  Text<96> routing_notice;
-  Text<96> error;
-  Cause error_cause = Cause::kNone;
-};
 struct Selection {
   Id id, season;
   Text<cfg::kNameBytes> name;
-};
-struct Capabilities {
-  bool live, status, minute, cards, substitutions, table, cups, key;
-  // Automatic browser crest import is a retained, deferred enhancement.
-  bool crests = false;
-  uint32_t minimum_interval_ms = 0;
 };
 const char* providerName(cfg::Provider provider);
 // Stable lower-case key of a failure cause (REST API); "" for kNone.
 const char* causeKey(Cause cause);
 // Stable lower-case code of a match phase (REST API).
 const char* phaseName(Phase phase);
-Capabilities capabilities(cfg::Provider provider);
 int64_t parseUtc(const char* text);
 // Phase of an API-Football short status or a football-data.org v4 match
 // status (all eleven values of its lookup table); kUnknown otherwise.
 // Suspended maps to postponed and awarded to abandoned, like API-Football's
 // SUSP and AWD.
 Phase statusPhase(const char* status);
-// Phase and minute from the kickoff alone, for a match without a provider
-// status: scheduled before kickoff, live minutes 0-45, half time minutes
-// 46-60, then live (elapsed minus the break), unknown after
-// kUnknownMatchEndMinutes. A confirmed phase is kept.
-void estimate(Match& match, int64_t utc);
-// A match with a kickoff that is not postponed, cancelled or abandoned.
-bool scheduled(const Match& match);
-// Live, half time, extra time or penalties.
-bool running(const Match& match);
-// End of a match's window: final whistle + after, else the expected end
-// (kExpectedMatchMinutes), else kUnknownMatchEndMinutes while the provider
-// reports it running. Requires a valid kickoff.
-int64_t matchEnd(const Match& match, uint16_t after);
-// Same competition route and round (round number, else round label, else
-// kickoff date in UTC).
-bool sameRound(const Match& a, const Match& b);
-bool matchWindow(const Match& match, int64_t utc, uint16_t before,
-                 uint16_t after);
-// The conference remains active between the first and last fixture of the
-// configured rounds. Own catch-up/next-round fixtures have separate
-// windows.
-bool conferenceWindow(const Snapshot& data, int64_t utc, uint16_t before,
-                      uint16_t after);
 uint32_t fingerprint(std::string_view value);
-// Adds the events of paired match 'b' (fallback source) to match 'a' of the
-// primary snapshot. Scored goals (goal, own goal, penalty goal) of 'b' are
-// dropped when 'a' has a scored goal; missed penalties of 'b' are dropped
-// when 'a' has a missed penalty. 'swapped' exchanges the home and away score
-// of the added events. A full event list sets 'events_truncated'.
-void mergeEvents(Snapshot& primary, Match& a, const Snapshot& secondary,
-                 const Match& b, bool swapped);
-// Which fixtures of a provider response a competition keeps: 'team' is the
-// own club's id, 'round' the current round (0 = the provider has none).
-struct FixtureFilter {
-  const char* team = "";
-  uint16_t round = 0;
-};
-// True for a match of the current round, an own-club match within
-// kFixtureHorizonDays and any other match within kConferenceHorizonHours of
-// 'now' (UTC; 0 keeps every match). Other clubs' fixtures outside the
-// current round are catch-up fixtures and form Konferenz blocks too.
-bool keepFixture(const Match& match, int64_t now, FixtureFilter filter);
-// A slot for 'candidate' at the end of 'target's match list. A full list
-// makes room by removing, with its events, the other club's match whose
-// kickoff is farthest from 'utc' when 'candidate' is the own club's match
-// or kicks off nearer to 'utc'; a match without kickoff counts as farthest.
-// Own matches are never removed; 'utc' 0 removes nothing. nullptr when the
-// candidate does not fit. Every lost match sets 'matches_truncated'.
-Match* matchSlot(Snapshot& target, const Match& candidate, int64_t utc);
-// Appends 'source', a match of 'from', with its events to 'target' through
-// matchSlot(). 'own_events_only' skips events of another provider (fallback
-// events merged into a primary match); 'skip_removed' skips removal
-// markers. A full event pool sets 'events_truncated'. False when the match
-// did not fit.
-bool appendMatch(Snapshot& target, const Snapshot& from, const Match& source,
-                 int64_t utc, bool own_events_only = false,
-                 bool skip_removed = false);
-// Keeps the published data of competition 'route' after its fetch failed:
-// copies its matches from 'from' into 'target' with their events (removal
-// markers excluded), estimated again at 'utc', and its fetch time; with
-// 'table', also the league table when 'target' has none. False when a match
-// did not fit; the others are copied.
-bool carryRoute(Snapshot& target, const Snapshot& from, uint8_t route,
-                bool table, int64_t utc);
-// Monotonic time of the oldest data in 'data': the earliest non-zero route
-// fetch time, else 'fetched_ms'.
-int64_t oldestFetch(const Snapshot& data);
-void demo(Snapshot& out);
 }  // namespace football

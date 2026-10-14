@@ -204,7 +204,8 @@ void runDiagnosticLoop() {
       timekeeping::applySettings();
       health::applySettings();
       network::applySettings();
-      football::refresh();
+      // No football::refresh(): the provider worker applies the new data
+      // generation itself and starts only the changed competitions afresh.
     }
     health::poll();
     network::poll();

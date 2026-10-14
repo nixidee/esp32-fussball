@@ -1,6 +1,5 @@
-// Host checks of the match state derived from provider status strings and
-// from the kickoff alone. They prove only this implementation, not the
-// owner's device acceptance.
+// Host checks of the match state derived from provider status strings.
+// They prove only this implementation, not the owner's device acceptance.
 
 #include <unity.h>
 
@@ -8,9 +7,7 @@
 
 namespace {
 
-using football::Match;
 using football::Phase;
-using football::Source;
 using football::statusPhase;
 
 void expectPhase(Phase expected, const char* status) {
@@ -40,40 +37,6 @@ void test_unknown_status_stays_unknown() {
   expectPhase(Phase::kUnknown, "SOMETHING_NEW");
 }
 
-constexpr int64_t kKickoff = 1'760'000'000;
-
-Match estimated(int64_t minutes) {
-  Match m;
-  m.kickoff = {kKickoff, Source::kProvider};
-  football::estimate(m, kKickoff + minutes * 60);
-  return m;
-}
-
-void test_estimate_first_half() {
-  const auto m = estimated(44);
-  TEST_ASSERT_EQUAL_UINT(static_cast<unsigned>(Phase::kLive),
-                         static_cast<unsigned>(m.phase));
-  TEST_ASSERT_EQUAL_INT16(44, m.minute.value);
-  TEST_ASSERT_EQUAL_UINT(static_cast<unsigned>(Source::kEstimated),
-                         static_cast<unsigned>(m.minute.source));
-}
-
-void test_estimate_half_time() {
-  const auto m = estimated(50);
-  TEST_ASSERT_EQUAL_UINT(static_cast<unsigned>(Phase::kHalfTime),
-                         static_cast<unsigned>(m.phase));
-  TEST_ASSERT_FALSE(m.minute.valid());
-  TEST_ASSERT_EQUAL_UINT(static_cast<unsigned>(Source::kEstimated),
-                         static_cast<unsigned>(m.phase_source));
-}
-
-void test_estimate_second_half() {
-  const auto m = estimated(61);
-  TEST_ASSERT_EQUAL_UINT(static_cast<unsigned>(Phase::kLive),
-                         static_cast<unsigned>(m.phase));
-  TEST_ASSERT_EQUAL_INT16(46, m.minute.value);
-}
-
 }  // namespace
 
 void setUp() {}
@@ -83,8 +46,5 @@ int main() {
   UNITY_BEGIN();
   RUN_TEST(test_football_data_statuses);
   RUN_TEST(test_unknown_status_stays_unknown);
-  RUN_TEST(test_estimate_first_half);
-  RUN_TEST(test_estimate_half_time);
-  RUN_TEST(test_estimate_second_half);
   return UNITY_END();
 }

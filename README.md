@@ -5,16 +5,17 @@ scores, conference view of all running matches, league table and club crest.
 Configured through a built-in web interface.
 
 > **Project status: implementation candidate, 0.1.0-dev.** WiFi/setup AP,
-> all four data adapters, bounded routing, four device screens, navigation,
+> all four data adapters, bounded routing, five device screens, navigation,
 > images, the German/English Web UI, live debug and OTA/rollback are implemented.
 > The active C6 firmware and stock filesystem image build successfully.
 > Device acceptance is pending; provider fixture, browser, maximum-load and
 > long-run tests remain. Earlier boot/core tests
 > do not establish acceptance of these new services.
 >
-> Current C6 size: 1,560,000 B firmware binary, 1,559,248 B PlatformIO flash
-> (85.0% of one OTA slot), 197,380 B static RAM and 48,481 B embedded UI gzip.
-> It fits the slot and is about 0.5 KB below the agreed 85% flash-reserve line.
+> Current C6 size: 1,633,648 B firmware binary, 1,632,894 B PlatformIO flash
+> (89.0% of one OTA slot), 151,112 B static RAM and 63,026 B embedded UI gzip.
+> It fits the slot and is 73,137 B above the 85% flash-reserve line; the
+> savings are decided at alpha from a size map.
 > Peak heap, largest
 > block, stack and LVGL reserves remain unmeasured
 > for the complete candidate. Visual/resource polish and acceptance are next;
@@ -158,8 +159,9 @@ argument to check a range, e.g. `scripts/check_format.py main`.
 ## Development candidate and resources
 
 The C6 candidate uses the existing 4 MB dual-OTA layout, a fixed 32 KB LVGL
-pool and two 9,600 B DMA draw buffers. Three fixed football snapshots consume
-81,504 B; parser allocations are capped at 24 KB. Shared admission prevents
+pool and two 9,600 B DMA draw buffers. One fixed match store holds the
+football data of all competitions in 22,728 B; parser allocations are
+capped at 24 KB. Shared admission prevents
 simultaneous provider TLS/JSON, image mutation and OTA. Normal JPEG redraw
 can overlap provider traffic and still needs peak-memory measurement.
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) records ownership and the current
@@ -196,12 +198,13 @@ The C6 antenna driver is implemented; RF switching has not been tested.
 |---|---|
 | Live (single match) | Your club plays: big score, match minute, teams, highlights |
 | Live (conference) | Match days: the matches of the current kickoff times, your match pinned on top (optional), several pages |
-| Table | Default outside match days: positions around your club |
+| Matchday | The whole current (then next) matchday of each competition, one after another, with results or kickoff times |
+| Table | Default outside match days: positions around your club; the tables of several competitions in turn |
 | Crest / slideshow | Club crest or your own images |
 
 The device picks the screen automatically from the situation (no match,
 matchday, own club playing); which screen is shown in each situation is a
-setting. With inputs (buttons or small touch modules) you can switch screens
+setting, and each competition can be switched on or off per screen. With inputs (buttons or small touch modules) you can switch screens
 and scroll; after a set time the device returns to the default screen.
 Details: [docs/UI.md](docs/UI.md).
 
@@ -217,7 +220,7 @@ Pinouts and wiring: [docs/HARDWARE.md](docs/HARDWARE.md).
 ## Data sources
 Four adapters are implemented: **OpenLigaDB** (default, no key), API-Football,
 ESPN (unofficial, opt-in) and football-data.org. Keyed providers require owner
-credentials and tier/coverage acceptance. Up to three competitions (each with
+credentials and tier/coverage acceptance. Up to eight competitions (each with
 an optional fallback source at another provider) and up to eight explicit
 verified fixture pairs are stored as lists with fixed maxima.
 Provider coverage, limits and endpoints:
