@@ -4,7 +4,7 @@
 // A competition file holds what one competition's requests built up, so a
 // reboot shows it without a request: its matches with their teams and
 // round labels, its table, the own matches' full names and events, its
-// notices, what its sources resolved (season, round, match days) and when
+// notices, what its source resolved (season, round, match days) and when
 // each kept data type last completed (UTC). Layout: header, teams, round
 // labels, matches (an own match is followed by its names and events),
 // table rows, CRC-32 of everything before it. Structures are stored as
@@ -14,7 +14,9 @@
 // a score change is not kept.
 //
 // The short-name file holds the owner's replacements for team short names
-// (ShortNames), per provider and team id.
+// (ShortNames), per provider and team id. It has its own version and
+// layout (kNamesVersion, kNamesLayout; OQ-260), so a change of the
+// competition files keeps it.
 
 #pragma once
 
@@ -26,16 +28,14 @@
 #include "app_config.h"
 #include "match_store.h"
 #include "provider_plan.h"
-#include "request_scheduler.h"
 
 namespace football::persist {
 
-// Data types whose last completed run a file keeps: core data, fixtures,
-// table (the live types follow the live windows).
-inline constexpr std::size_t kKeptTypes = 3;
-static_assert(static_cast<std::size_t>(cfg::DataType::kCore) == 0 &&
-              static_cast<std::size_t>(cfg::DataType::kFixtures) == 1 &&
-              static_cast<std::size_t>(cfg::DataType::kTable) == 2);
+// Data types whose last completed run a file keeps: fixtures, table (the
+// live types follow the live windows).
+inline constexpr std::size_t kKeptTypes = 2;
+static_assert(static_cast<std::size_t>(cfg::DataType::kFixtures) == 0 &&
+              static_cast<std::size_t>(cfg::DataType::kTable) == 1);
 
 // Streams bytes out of or into a file; false on an I/O error.
 using Write = bool (*)(const void* bytes, std::size_t size, void* context);
@@ -51,10 +51,10 @@ struct SavedSource {
 
 struct Saved {
   uint8_t competition = 0;
-  uint32_t route_key = 0;  // the service's key of the competition's sources
+  uint32_t route_key = 0;  // the service's key of the competition's source
   int64_t saved_utc = 0;   // 0 = no valid clock when written
   uint8_t notices = 0;
-  std::array<SavedSource, schedule::kSourceCount> sources{};
+  SavedSource source;
 };
 
 // Writes the file of 'saved.competition' from 'store'; 'write' null only

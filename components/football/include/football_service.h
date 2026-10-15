@@ -1,7 +1,9 @@
 #pragma once
+#include <array>
+
 #include "esp_err.h"
-#include "football_model.h"
 #include "football_files.h"
+#include "football_model.h"
 #include "match_store.h"
 #include "store_views.h"
 namespace football {
@@ -22,22 +24,47 @@ enum class Cadence : uint8_t {
   kUpdateTest   // paused while a new firmware is in its update test
 };
 const char* cadenceName(Cadence cadence);
+// The state of one competition (index = route = position in the competition
+// list) for the display and the Web UI (OQ-278..OQ-282).
+struct CompetitionState {
+  // Monotonic ms of the last successful request (0 = none yet); a failed
+  // competition keeps its earlier data.
+  int64_t fetched_ms = 0;
+  uint8_t id = 0;  // stable competition id, 0 = unused route
+  bool active = false;
+  // kNone: the last request succeeded. Otherwise why the last request
+  // failed, or kUnmaintained: the provider does not maintain the
+  // competition (MatchStore::unmaintained()).
+  Cause cause = Cause::kNone;
+  // Provider of the failed request (or of the unmaintained matches) and the
+  // HTTP status it answered with (0 = no HTTP error status).
+  cfg::Provider provider = cfg::kProviderDefault;
+  uint16_t http = 0;
+  // The last request failed, or a shown match of the competition is in its
+  // live window while its last successful match request is older than
+  // kDataStaleS.
+  bool stale = false;
+};
+using CompetitionStates = std::array<CompetitionState, cfg::kCompetitionMax>;
+// The state of competition 'id' (nullptr = not in the list).
+inline const CompetitionState* findState(const CompetitionStates& states,
+                                         uint8_t id) {
+  for (const auto& state : states)
+    if (id != 0 && state.id == id) return &state;
+  return nullptr;
+}
 struct Status {
+  // False until init() ran: no other field is set.
+  bool started;
   uint32_t revision, requests[cfg::kProviderCount], generation;
   // Monotonic time of the oldest last successful request over the active
   // competitions (a failed competition keeps earlier data); 0 = none yet.
   int64_t fetched_ms;
-  uint8_t matches, rows;
-  // Bit i set: the last request of competition i's primary source failed
-  // and no fallback route stands in; it shows earlier data (or none) until
-  // a later request succeeds.
-  uint8_t error_routes;
+  uint8_t matches;
   bool stale, busy;
   // Not every match fitted the match list; it holds the nearest ones.
   bool matches_truncated;
-  Text<96> error;
-  Cause cause;  // stable key of 'error'
-  Text<96> routing_notice;
+  CompetitionStates competitions;
   // Monotonic time the next request is due (0 = none scheduled: kNone,
   // kWaiting, kUpdateTest, nothing planned) and why. An owner refresh
   // starts earlier.
@@ -47,9 +74,6 @@ struct Status {
 struct SelectionRequest {
   cfg::Provider provider = cfg::Provider::kOpenLigaDb;
   bool teams = false;
-  // Fixtures of the fallback source of competition 'route' (selectFixtures).
-  bool fixtures = false;
-  uint8_t route = 0;
   Id competition, season;
   Text<cfg::kSelectionTextMaxBytes> search;
   Text<cfg::kSelectionTextMaxBytes> country;
@@ -57,13 +81,18 @@ struct SelectionRequest {
 };
 struct SelectionStatus {
   bool busy, more;
-  // The table holds fixtures of competition 'route', not a provider list.
-  bool fixtures;
-  uint8_t route;
   uint16_t count;
   uint32_t revision;
-  Text<96> error;
-  Cause cause;  // stable key of 'error'
+  // Why the last selection failed (kNone = it did not), the provider asked
+  // and its HTTP error status (0 = none), as in CompetitionState.
+  Cause cause;
+  cfg::Provider provider;
+  uint16_t http;
+  // While busy: what holds the next request (kLimit: a window limit,
+  // kRetry: the provider paused us; kNone: nothing) and the monotonic ms it
+  // may run (0 = none).
+  Cadence wait;
+  int64_t wait_ms;
 };
 // What the published data says about the club's current or next match and
 // about each competition (Web UI overview).
@@ -87,8 +116,9 @@ esp_err_t init();
 void refresh();
 Status status();
 // The published data: the compact store with the sources it shows
-// (store_views.h). 'fetched_ms', 'stale', 'error' and 'retry_ms' as in
-// Status; 'names' are the owner's replacements of team short names
+// (store_views.h). 'fetched_ms', 'stale' and 'competitions' as in Status;
+// 'retry_ms' is the monotonic ms of the next retry of a failed competition
+// (0 = none); 'names' are the owner's replacements of team short names
 // (view::teamName()).
 struct Published {
   const MatchStore& store;
@@ -97,8 +127,7 @@ struct Published {
   uint32_t revision, generation;
   bool configured, stale;
   int64_t fetched_ms, retry_ms;
-  const Text<96>& error;
-  Cause cause;
+  const CompetitionStates& competitions;
 };
 // Called while holding the short repository read mutex. Callback must copy
 // into its own fixed model, with no I/O, LVGL, allocation or blocking calls.
@@ -108,26 +137,12 @@ void read(Reader reader, void* context);
 // count per competition of the published data. No provider request.
 Overview overview(int64_t utc);
 esp_err_t select(const SelectionRequest& request);
-// Starts the job that loads the club's matches at the fallback source of
-// competition 'route' into the selection table (pair picker). Entry: id =
-// provider fixture id, season = kickoff in UTC seconds as text (empty if
-// unknown), name = "home - away". Same busy rule and request limits as
-// select(). ESP_ERR_INVALID_ARG: no such competition or no complete
-// fallback source.
-esp_err_t selectFixtures(uint8_t route);
 SelectionStatus selectionStatus();
 bool selectionAt(uint16_t index, uint32_t revision, Selection& out);
-// The club's matches of competition 'route' in the published data that came
-// from 'provider' (the primary source of the competition), in the same entry
-// form as selectFixtures(). 'revision' of the published data guards a
-// consistent read across count and At: At() fails after a newer publication.
-uint16_t publishedFixtureCount(uint8_t route, cfg::Provider provider,
-                               uint32_t& revision);
-bool publishedFixtureAt(uint8_t route, cfg::Provider provider, uint16_t index,
-                        uint32_t revision, Selection& out);
 // Teams of competition 'competition' in the published data (its matches
 // and table rows, every provider) with the owner's short name ("" = none).
-// 'revision' guards a consistent read across count and At, as above.
+// 'revision' of the published data guards a consistent read across count
+// and At: At() fails after a newer publication.
 struct TeamInfo {
   uint32_t id = 0;
   cfg::Provider provider = cfg::Provider::kOpenLigaDb;

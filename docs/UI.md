@@ -50,7 +50,7 @@ indefinitely.
 
 - **All pages** (default): every member in kickoff order. With more members
   than rows, pages change every 8 seconds; the title shows "Konferenz · n/m"
-  and page dots replace the status line.
+  and page dots sit below the rows.
 - **One page**: a single page. Running matches with goals come first, the
   latest goal first; then goalless running matches, finished matches and
   matches not yet started, each in kickoff order.
@@ -67,14 +67,21 @@ indefinitely.
 
 ### Matchday and table cycles
 
-- **Matchday**: per competition the first stored matchday that has
-  kickoffs — the current one until it is dropped after it ended, then the
-  next one — in kickoff order, as many matches per page as the Konferenz
-  rows per page. Pages change every 8 seconds; after the last page the
-  next competition follows, wrapping. Up/Down move one page and stop the
-  automatic change until the manual return; past the last (first) page the
-  next (previous) competition follows. Without any match: card "Spieltag /
-  Keine Spiele".
+- **Matchday**: per competition its selected matchday in kickoff order —
+  with "Current matchday" (default) the running or next one, a finished
+  one until the end of the following local day; with "Next matchday" the
+  next one from midnight after the last kickoff, and a competition without
+  an upcoming stored matchday is skipped — as many matches per page as the
+  Konferenz rows per page. Pages change every 8 seconds; after the last
+  page the next competition follows, wrapping. Down/Up move one page
+  forward/back and stop the automatic change until the manual return; past
+  the last (first) page they move to the next (previous) stored matchday
+  of the same competition (at most the held, the selected and the next
+  one), then to the next competition on page 1 of its selected matchday
+  (the previous competition on the last page of its selected matchday;
+  without a selected one, its last reachable matchday). The automatic
+  cycle shows only the selected matchday. Without any match: card
+  "Spieltag / Keine Spiele".
 - **Table**: competitions without a stored table are skipped. Without an
   own club the table pages every *table step* (default 8 s, 3–600 s) by
   the number of table rows; after the last page the next competition
@@ -100,14 +107,15 @@ SafeArea; nothing is placed at a fixed pixel position.
   font that fits; if none fits, the text is shortened with "…" in the last
   font. A line that still leaves the SafeArea is drawn, but the render is
   reported as failed (UI health), so the overflow is visible in the status.
-- **Content blocks** are centred vertically as a whole; the status band sits
-  directly below the block, the caption band directly above.
+- **Content blocks** are centred vertically as a whole; the status line
+  ("Demo") sits directly below the block, the caption band directly above.
+  The status pill lies over the content (see "Status pill").
 
 ### Screens in detail
 
 - **Own match**: caption "competition · round" (dim; without a round label
   "N. Spieltag"), home name, centre, away name, a status pill, the
-  highlight line and the status band. The centre is the score in the 48 px
+  highlight line and the status line. The centre is the score in the 48 px
   score font, before kickoff the local kickoff time. The pill shows the
   minute ("67'", estimated "~67'"), "Halbzeit", "Elfmeterschießen",
   "Beendet", or the shootout tally ("i.E. 4 : 2"), dim once finished;
@@ -121,7 +129,7 @@ SafeArea; nothing is placed at a fixed pixel position.
   fit). The centre is the score, the kickoff time (dim) or "--:--". The own
   match sits on a dark row, the own club's name in the accent colour; for
   120 seconds after a goal a row is filled with the accent colour. Below
-  the rows: page dots while paging, else the status band. Without members
+  the rows: page dots while paging, else the status line. Without members
   a card "Konferenz / Keine Spiele im Zeitfenster" names the next kickoff.
 - **Table**: a title row ("#", competition name, Pkt/Diff/Sp) and the rows
   around the own club; the own club's row is filled with the accent
@@ -129,15 +137,17 @@ SafeArea; nothing is placed at a fixed pixel position.
   difference, points while fewer than ten letters of the name would fit;
   column titles are shown only when the whole title row fits the chord,
   otherwise only the competition name. Up to five rows use a wider row
-  pitch. A competition without a table shows a card. The rim shows the
+  pitch. A competition without a table shows a card; one whose request
+  failed without a table shows its notice card (State cards). The rim shows the
   position of the visible rows in the whole table.
 - **Matchday**: the Konferenz layout. Caption "competition · round" of the
   first match (round label or "N. Spieltag", else its date), rows as in the Konferenz
   with result, kickoff time or "--:--"; the own match on a dark row. Below
-  the rows page dots while paging, else the status band; the rim shows the
-  position of the page in the matchday.
+  the rows page dots while paging, else the status line; the rim shows the
+  position of the page in the matchday. A competition whose request failed
+  without matches to show gets its notice card in the cycle.
 - **Crest / slideshow**: the image, page dots near the bottom rim while
-  several slides rotate, and the status band above them; a bottom IP chip
+  several slides rotate, and the status line above them; a bottom IP chip
   ends on the status line, so it never covers the dots.
 
 ### Start screen
@@ -182,22 +192,49 @@ hints, and a coloured ring:
 | Not configured, setup network on | "Einrichtung", "Mit WLAN verbinden:", "» network name", "dann im Browser öffnen:", setup IP | accent |
 | No data loaded yet, no WiFi | "Kein WLAN" with the reason: "Netz nicht gefunden" (saved network not seen), "Passwort falsch?" (authentication retry), "Setup-Netz aktiv" (setup network only) or "Verbinde …" (scanning, connecting or retry); hint "Neuer Versuch läuft" (not with the setup network only) and "Setup-Netz aktiv" while the setup network runs alongside | warning |
 | No data loaded yet, no valid time | "Warte auf Uhrzeit", "Zeitserver wird gefragt" | warning |
-| No data loaded yet | "Keine Daten" with the provider error and "Neuer Versuch HH:MM" (next attempt), or "Lade Daten" before the first answer | error / neutral |
+| No data loaded yet | "Lade Daten" before the first answer; after a failed request "Keine Daten", the name of the first failing competition, its short cause, "Neuer Versuch HH:MM" (next attempt) and its error code with the HTTP status ("OLG E10·503") | neutral / cause colour |
+| Matchday or Table: a competition in the cycle failed and has nothing to show | the competition name, its short cause, "Neuer Versuch HH:MM" and the error code with the HTTP status | cause colour |
 | Own match screen without an own match | "Eigenes Spiel", "Kein Spiel" | neutral |
+
+The cause colour is the error colour, for "Anbieter pflegt nicht" (the
+provider leaves past matches without a result for more than 24 hours) the
+warning colour, which also has no "Neuer Versuch". The short causes are
+listed in the firmware's cause texts; the Web UI explains each cause and its
+action in full (codes: [API.md](API.md#error-causes-and-codes)).
 
 The setup card already names the setup network and IP, so no IP chip is
 shown with it. A device without configuration and without the setup
 network shows the crest screen.
 
-### Status band
+### Status line and status pill
 
-One caption line below the content, by priority: "Demo" (dim), "Kein WLAN",
-"Warte auf Uhrzeit", stale data as "Stand HH:MM" (time of the oldest
-data shown: a competition whose fetch failed keeps its earlier data; "Daten
-veraltet" without any) — these three in the
-warning colour — and finally a provider error in the error colour.
-Otherwise the band is empty. The Konferenz shows page dots instead while it
-pages.
+"Demo" is a permanent dim line below the content while the demo runs; the
+demo shows no status pill.
+
+Every other status is a status pill: a slightly transparent dark pill
+(background opacity 204 of 255) at the bottom that lies over the content —
+page dots, the last row or a card — for 5 seconds (`kStatusPillS`) after a
+change of the status state. The state is the WiFi connection, valid time,
+stale data and, for each active competition, its cause and whether its
+data are stale. Changing the screen does not show it again; while it is
+visible it shows what the current screen reports. With a bottom IP chip the
+pill sits directly above the chip. Content by priority:
+
+- "Kein WLAN", "Warte auf Uhrzeit" (warning colour);
+- on Matchday and Table, the competition on screen: after a failed request
+  its error code without the HTTP status and "Stand HH:MM" of its last
+  successful request ("OLG E10 · Stand 14:05", cause colour); with stale
+  data "Stand HH:MM" (warning colour); nothing else from other competitions;
+- elsewhere one failing competition as "code · name" ("APF E08 · Premier
+  League"), several as "N Wettbewerbe gestört" (error colour); else stale
+  data as "Stand HH:MM" of the oldest data shown, "Daten veraltet" without
+  any (warning colour).
+
+The pill is not shown on a card that already says the same: the setup,
+"Kein WLAN" and "Warte auf Uhrzeit" cards for the network and time states,
+and a competition's notice card for that competition's failure. The start
+screen has no status. The Web UI preview shows the pill for as long as the
+state lasts and notes that the device shows it only for 5 seconds.
 
 ### Drawing
 
@@ -320,7 +357,8 @@ beyond those numbers.
 
 The IP chip is a dark pill with one or two caption lines, top or bottom by
 setting. At the top it takes the place of the caption band (on the table,
-of the title row); at the bottom it takes the place of the status band.
+of the title row); at the bottom it takes the place of the status line, and
+the status pill sits above it.
 Setup shows the setup network name and 192.168.4.1 and is permanent by
 default. Station IP is shown for 60 seconds after a successful connection,
 including recovery. Duration 0 means permanent. Each line is fitted to its

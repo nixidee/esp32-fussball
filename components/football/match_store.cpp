@@ -1,9 +1,10 @@
 #include "match_store.h"
 
-#include <new>
-
 #include <algorithm>
 #include <bitset>
+#include <new>
+
+#include "matchday.h"
 
 namespace football {
 namespace {
@@ -24,86 +25,6 @@ uint32_t sortKey(const StoredMatch& m) {
   return m.kickoff == 0 ? UINT32_MAX : m.kickoff;
 }
 
-bool goal(EventType t) {
-  return t == EventType::kGoal || t == EventType::kOwnGoal ||
-         t == EventType::kPenaltyGoal;
-}
-
-Side mirror(Side s) {
-  return s == Side::kHome   ? Side::kAway
-         : s == Side::kAway ? Side::kHome
-                            : s;
-}
-
-// Whether event 'e' is shown next to the events 'list' of its slot (see
-// MatchStore::eventShown()).
-template <class Pool>
-bool shownAmong(const StoredEvent& e, const Pool& pool, const uint8_t* list,
-                std::size_t count) {
-  if (!(e.flags & kEventFallback)) return true;
-  const bool scored = goal(e.type);
-  const bool missed = e.type == EventType::kPenaltyMissed;
-  if (!scored && !missed) return true;
-  for (std::size_t n = 0; n < count; ++n) {
-    const auto& p = pool[list[n]];
-    if (p.flags & (kEventFallback | kEventRemoved)) continue;
-    if ((scored && goal(p.type)) ||
-        (missed && p.type == EventType::kPenaltyMissed))
-      return false;
-  }
-  return true;
-}
-
-// The five scores with their fallback bits.
-struct ScoreField {
-  Goals StoredMatch::*goals;
-  uint8_t bit;
-};
-constexpr ScoreField kScores[] = {
-    {&StoredMatch::principal, kFallbackPrincipal},
-    {&StoredMatch::halftime, kFallbackHalftime},
-    {&StoredMatch::regulation, kFallbackRegulation},
-    {&StoredMatch::extra_time, kFallbackExtraTime},
-    {&StoredMatch::shootout, kFallbackShootout},
-};
-
-// A phase that stops the clock drops an estimated minute.
-void settle(StoredMatch& m) {
-  if (!running(m.phase) && (m.estimated & kEstimatedMinute)) {
-    m.minute = kNoValue;
-    m.estimated &= ~kEstimatedMinute;
-  }
-}
-
-// Keeps the values 'prior' took from its fallback source where 'm' lacks
-// them or only estimated them.
-void keepFallback(StoredMatch& m, const StoredMatch& prior) {
-  const uint8_t bits = prior.fallback;
-  m.fallback = 0;
-  if ((bits & kFallbackKickoff) && m.kickoff == 0) {
-    m.kickoff = prior.kickoff;
-    m.fallback |= kFallbackKickoff;
-  }
-  if ((bits & kFallbackPhase) &&
-      (m.phase == Phase::kUnknown || (m.estimated & kEstimatedPhase))) {
-    m.phase = prior.phase;
-    m.estimated &= ~kEstimatedPhase;
-    m.fallback |= kFallbackPhase;
-    settle(m);
-  }
-  if ((bits & kFallbackMinute) &&
-      (m.minute == kNoValue || (m.estimated & kEstimatedMinute))) {
-    m.minute = prior.minute;
-    m.estimated &= ~kEstimatedMinute;
-    m.fallback |= kFallbackMinute;
-  }
-  for (const auto& f : kScores)
-    if ((bits & f.bit) && !(m.*f.goals).valid()) {
-      m.*f.goals = prior.*f.goals;
-      m.fallback |= f.bit;
-    }
-}
-
 // A match first seen finished gets 'clock.utc' as estimated final whistle,
 // or the expected end when it was never seen running.
 void markFinished(StoredMatch& m, bool seen_running, const Clock& clock) {
@@ -115,11 +36,6 @@ void markFinished(StoredMatch& m, bool seen_running, const Clock& clock) {
     m.finished_at = static_cast<uint32_t>(t);
     m.estimated |= kEstimatedFinish;
   }
-}
-
-int64_t localDay(int64_t utc, int32_t offset) {
-  const int64_t t = utc + offset;
-  return t >= 0 ? t / 86400 : (t - 86399) / 86400;
 }
 
 }  // namespace
@@ -153,12 +69,6 @@ void estimate(StoredMatch& m, int64_t utc) {
   }
 }
 
-bool matchdayPassed(uint32_t last_kickoff, int64_t utc,
-                    int32_t local_offset_s) {
-  return localDay(utc, local_offset_s) >=
-         localDay(last_kickoff, local_offset_s) + 2;
-}
-
 MatchStore::MatchStore() = default;
 
 // Rebuilt in place: a temporary store would need 22 KB of stack.
@@ -187,19 +97,6 @@ uint8_t MatchStore::team(uint8_t competition, cfg::Provider provider,
   }
   teams_[free] = {id, provider, name};
   return static_cast<uint8_t>(free);
-}
-
-bool MatchStore::rename(cfg::Provider provider, uint32_t id,
-                        std::string_view short_name) {
-  Text<26> name;
-  name.assign(short_name);
-  if (id == 0 || name.empty()) return false;
-  for (auto& t : teams_)
-    if (t.id == id && t.provider == provider) {
-      t.short_name = name;
-      return true;
-    }
-  return false;
 }
 
 uint8_t MatchStore::label(std::string_view text) {
@@ -296,7 +193,6 @@ StoredMatch* MatchStore::upsert(const StoredMatch& incoming,
   const int at = matchIndex(m.competition, m.provider, m.id);
   if (at >= 0) {
     auto& prior = matches_[at];
-    keepFallback(m, prior);
     m.score_changed = prior.score_changed;
     if (m.principal.valid() && prior.principal.valid() &&
         !(m.principal == prior.principal))
@@ -367,86 +263,38 @@ StoredMatch* MatchStore::place(StoredMatch m, std::size_t from) {
   return &matches_[pos];
 }
 
-StoredMatch* MatchStore::fill(const StoredMatch& f, cfg::Provider provider,
-                              uint32_t id, bool swapped, const Clock& clock) {
-  const int at = matchIndex(f.competition, provider, id);
-  if (at < 0) return nullptr;
-  StoredMatch m = matches_[at];
-  const bool seen_running = running(m.phase);
-  // Open for the fallback: missing, only estimated, or filled before.
-  const auto open = [&m](bool lacks, uint8_t bit) {
-    return lacks || (m.fallback & bit);
-  };
-  if (f.kickoff != 0 && open(m.kickoff == 0, kFallbackKickoff)) {
-    m.kickoff = f.kickoff;
-    m.fallback |= kFallbackKickoff;
-  }
-  if (f.phase != Phase::kUnknown && !(f.estimated & kEstimatedPhase) &&
-      open(m.phase == Phase::kUnknown || (m.estimated & kEstimatedPhase),
-           kFallbackPhase)) {
-    m.phase = f.phase;
-    m.estimated &= ~kEstimatedPhase;
-    m.fallback |= kFallbackPhase;
-    settle(m);
-  }
-  if (f.minute != kNoValue && !(f.estimated & kEstimatedMinute) &&
-      open(m.minute == kNoValue || (m.estimated & kEstimatedMinute),
-           kFallbackMinute)) {
-    m.minute = f.minute;
-    m.estimated &= ~kEstimatedMinute;
-    m.fallback |= kFallbackMinute;
-  }
-  const Goals before = m.principal;
-  for (const auto& field : kScores) {
-    Goals g = f.*field.goals;
-    if (swapped) std::swap(g.home, g.away);
-    if (g.valid() && open(!(m.*field.goals).valid(), field.bit)) {
-      m.*field.goals = g;
-      m.fallback |= field.bit;
-    }
-  }
-  if (m.principal.valid() && before.valid() && !(m.principal == before))
-    m.score_changed = clock.mono_s ? clock.mono_s : 1;
-  if (m.phase == Phase::kFinished && m.finished_at == 0 && f.finished_at) {
-    m.finished_at = f.finished_at;
-    m.estimated = (m.estimated & ~kEstimatedFinish) |
-                  (f.estimated & kEstimatedFinish);
-  }
-  markFinished(m, seen_running, clock);
-  return place(m, static_cast<std::size_t>(at));
-}
-
-void MatchStore::removeProvider(uint8_t competition, cfg::Provider provider) {
-  for (std::size_t i = match_count_; i-- > 0;)
-    if (matches_[i].competition == competition &&
-        matches_[i].provider == provider)
-      removeMatch(i);
-}
-
 void MatchStore::expire(uint8_t competition, int64_t utc,
                         int32_t local_offset_s) {
   // Passed matchdays are always the earliest ones: find the last kickoff of
   // the latest passed matchday, then remove everything up to it.
-  uint32_t cutoff = 0, last = 0;
-  bool open = false;
-  for (std::size_t i = 0; i < match_count_; ++i) {
-    const auto& m = matches_[i];
-    if (m.competition != competition || m.kickoff == 0) continue;
-    if (open && m.kickoff - last >= cfg::kMatchdayGapHours * 3600u) {
-      if (!matchdayPassed(last, utc, local_offset_s)) break;
-      cutoff = last;
-    }
-    open = true;
-    last = m.kickoff;
-  }
-  if (open && cutoff != last && matchdayPassed(last, utc, local_offset_s))
-    cutoff = last;
+  uint32_t cutoff = 0;
+  matchday::Span span;
+  const auto all = [](const StoredMatch&) { return true; };
+  for (std::size_t from = 0;
+       matchday::next(*this, competition, all, from, span) &&
+       matchday::passed(span.last, utc, local_offset_s);
+       from = span.end)
+    cutoff = span.last;
   if (cutoff == 0) return;
   for (std::size_t i = match_count_; i-- > 0;) {
     const auto& m = matches_[i];
     if (m.competition == competition && m.kickoff != 0 && m.kickoff <= cutoff)
       removeMatch(i);
   }
+}
+
+bool MatchStore::unmaintained(uint8_t competition, int64_t utc) const {
+  for (std::size_t i = 0; i < match_count_; ++i) {
+    const auto& m = matches_[i];
+    if (m.competition != competition || m.kickoff == 0 ||
+        utc - m.kickoff <= cfg::kUnmaintainedAfterS || m.principal.valid())
+      continue;
+    if (m.phase == Phase::kFinished || m.phase == Phase::kPostponed ||
+        m.phase == Phase::kCancelled || m.phase == Phase::kAbandoned)
+      continue;
+    return true;
+  }
+  return false;
 }
 
 void MatchStore::estimateAll(int64_t utc) {
@@ -527,41 +375,22 @@ bool MatchStore::commitTable(bool complete) {
   return commit;
 }
 
-bool MatchStore::hasTable(uint8_t competition, cfg::Provider provider) const {
-  for (std::size_t i = 0; i < row_count_; ++i)
-    if (rows_[i].competition == competition &&
-        rows_[i].team < teams_.size() &&
-        teams_[rows_[i].team].id != 0 &&
-        teams_[rows_[i].team].provider == provider)
-      return true;
-  return false;
-}
-
-bool MatchStore::beginEvents(const StoredMatch& match, bool fallback,
-                             bool swapped, bool detail) {
+bool MatchStore::beginEvents(const StoredMatch& match, bool detail) {
   pending_slot_ = kNoIndex;
   if (match.own >= own_.size() || own_[match.own].match != match.id)
     return false;
   pending_slot_ = match.own;
   pending_count_ = 0;
   pending_cut_ = false;
-  pending_fallback_ = fallback;
-  pending_swapped_ = fallback && swapped;
-  pending_detail_ = !fallback && detail;
+  pending_detail_ = detail;
   return true;
 }
 
 void MatchStore::addEvent(const StoredEvent& incoming) {
   if (pending_slot_ == kNoIndex) return;
   StoredEvent event = incoming;
-  event.flags &= ~kEventOrigin;
-  if (pending_fallback_) event.flags |= kEventFallback;
+  event.flags &= ~kEventDetail;
   if (pending_detail_) event.flags |= kEventDetail;
-  if (pending_swapped_) {
-    event.actor = mirror(event.actor);
-    event.beneficiary = mirror(event.beneficiary);
-    std::swap(event.after.home, event.after.away);
-  }
   if (pending_count_ == pending_.size()) {
     // Keep the latest events: reuse the entry of the oldest new one.
     const uint8_t reuse = pending_[0];
@@ -579,7 +408,7 @@ void MatchStore::addEvent(const StoredEvent& incoming) {
   for (std::size_t i = 0; i < events_.size() && at < 0; ++i)
     if (events_[i].slot == pending_slot_ &&
         events_[i].identity == event.identity &&
-        (events_[i].flags & kEventOrigin) == (event.flags & kEventOrigin))
+        (events_[i].flags & kEventDetail) == (event.flags & kEventDetail))
       at = static_cast<int>(i);
   for (std::size_t i = 0; i < events_.size() && at < 0; ++i)
     if (events_[i].slot == kNoIndex) at = static_cast<int>(i);
@@ -643,10 +472,8 @@ void MatchStore::endEvents(bool complete) {
   }
   const bool whole =
       !pending_cut_ && row != nullptr && !(row->flags & kMatchEventsTruncated);
-  const uint8_t origin = pending_fallback_ ? kEventFallback
-                         : pending_detail_  ? kEventDetail
-                                            : 0;
-  // The other origins' events stay ahead of the new list.
+  const uint8_t origin = pending_detail_ ? kEventDetail : 0;
+  // The other origin's events stay ahead of the new list.
   std::array<uint8_t, cfg::kMatchEvents + cfg::kMatchEvents> list{};
   std::size_t count = 0;
   // Previous entries of this origin still held by the slot are missing from
@@ -654,7 +481,7 @@ void MatchStore::endEvents(bool complete) {
   for (std::size_t n = 0; n < own.event_count; ++n) {
     auto& previous = events_[own.events[n]];
     if (previous.slot != s) continue;
-    if ((previous.flags & kEventOrigin) != origin) {
+    if ((previous.flags & kEventDetail) != origin) {
       list[count++] = own.events[n];
       continue;
     }
@@ -674,21 +501,16 @@ void MatchStore::endEvents(bool complete) {
     events_[pending_[k]].slot = s;
     list[count++] = pending_[k];
   }
-  // Too many for the slot: hidden fallback events go first, then other
-  // fallback events, then detail events, then the oldest; dropping a shown
-  // event cuts the list.
+  // Too many for the slot: detail events go first, then the oldest; the
+  // list is cut.
   while (count > own.events.size()) {
-    std::size_t victim = count;
-    for (std::size_t k = 0; k < count && victim == count; ++k)
-      if ((events_[list[k]].flags & kEventFallback) &&
-          !shownAmong(events_[list[k]], events_, list.data(), count))
+    std::size_t victim = 0;
+    for (std::size_t k = 0; k < count; ++k)
+      if (events_[list[k]].flags & kEventDetail) {
         victim = k;
-    for (const uint8_t bit : {kEventFallback, kEventDetail})
-      for (std::size_t k = 0; k < count && victim == count; ++k)
-        if (events_[list[k]].flags & bit) victim = k;
-    if (victim == count) victim = 0;
-    if (shownAmong(events_[list[victim]], events_, list.data(), count))
-      pending_cut_ = true;
+        break;
+      }
+    pending_cut_ = true;
     events_[list[victim]] = {};
     for (std::size_t k = victim + 1; k < count; ++k) list[k - 1] = list[k];
     --count;
@@ -701,33 +523,6 @@ void MatchStore::endEvents(bool complete) {
     else
       row->flags &= ~kMatchEventsTruncated;
   }
-}
-
-bool MatchStore::matchday(uint8_t competition, uint8_t ordinal,
-                          Matchday& out) const {
-  Matchday current;
-  uint8_t index = 0;
-  for (std::size_t i = 0; i < match_count_; ++i) {
-    const auto& m = matches_[i];
-    if (m.competition != competition || m.kickoff == 0) continue;
-    if (current.count &&
-        m.kickoff - current.last >= cfg::kMatchdayGapHours * 3600u) {
-      if (index == ordinal) {
-        out = current;
-        return true;
-      }
-      ++index;
-      current = {};
-    }
-    if (current.count == 0) current.first = m.kickoff;
-    current.last = m.kickoff;
-    if (current.count < UINT8_MAX) ++current.count;
-  }
-  if (current.count && index == ordinal) {
-    out = current;
-    return true;
-  }
-  return false;
 }
 
 void MatchStore::note(uint8_t competition, uint8_t bits) {
@@ -749,12 +544,6 @@ void MatchStore::flag(uint8_t competition, uint8_t bits, bool on) {
   }
   for (auto& n : notices_)
     if (n.competition == competition) n.bits &= ~bits;
-}
-
-bool MatchStore::eventShown(uint8_t slot, const StoredEvent& e) const {
-  if (slot >= own_.size()) return true;
-  return shownAmong(e, events_, own_[slot].events.data(),
-                    own_[slot].event_count);
 }
 
 uint8_t MatchStore::notices(uint8_t competition) const {

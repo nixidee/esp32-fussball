@@ -11,6 +11,7 @@
 #include <string_view>
 
 #include "app_config.h"
+#include "cause_text.h"
 #include "conference.h"
 #include "display_port.h"
 #include "esp_app_desc.h"
@@ -46,14 +47,31 @@ struct Cycle {
   int64_t at = 0;
 };
 Cycle table_cycle, matchday_cycle;
+// First kickoff of the matchday the buttons moved to; 0 = the selected one
+// (OQ-269). Cleared when the cycle resumes.
+uint32_t matchday_first = 0;
 // Up/Down presses on the table or matchday screen not yet applied by bind().
 int pending_step = 0;
 int64_t input_at = 0, scroll_at = 0, render_at = 0, boot_at = 0;
 bool good = false, manual = false, scroll_down = true, paged = false;
 // The setup card already shows the setup network; no chip on top of it.
 bool no_badge = false;
+// What the shown card already states (OQ-287): the network or time state,
+// or the failure of competition 'card_fault' (0 = none). No pill repeats it.
+bool card_network = false;
+uint8_t card_fault = 0;
+// Status pill (OQ-285): fingerprint of the last state and the monotonic ms
+// the pill shows until; 'pill_known' false until the first state.
+uint32_t pill_state = 0;
+int64_t pill_until = 0;
+bool pill_known = false;
 // The owner's short names of the publication being bound (bind()).
 const football::persist::ShortNames* short_names = nullptr;
+// The publication being bound (bind()): competition states and next retry.
+const football::Published* published = nullptr;
+// The competition the table or matchday screen shows (0 = none), for the
+// status band (OQ-282).
+uint8_t on_screen = 0;
 // Start screen from boot until the first data, a failed step, an input, the
 // setup network or the demo; it does not return (docs/UI.md "Start screen").
 bool starting = true;
@@ -236,6 +254,68 @@ void cardText(const char* title, const char* line, const char* hint,
   view.rim.kind = RimKind::kRing;
   view.rim.tone = ring;
 }
+// Display name of competition 'id': the owner's name, else the provider's
+// competition id; "" if it is not in the list.
+void competitionName(char (&out)[48], uint8_t id) {
+  settings::Competition entry;
+  football::Text<sizeof(out) - 1> name;
+  if (entryOf(id, entry))
+    name.assign(entry.competition_name.empty()
+                    ? entry.primary.competition.view()
+                    : entry.competition_name.view());
+  memcpy(out, name.data, sizeof(out));
+}
+const football::CompetitionState* stateOf(uint8_t id) {
+  return published ? football::findState(published->competitions, id) : nullptr;
+}
+// Competition 'id' has a cause: its last request failed or its provider
+// does not maintain it.
+bool faulted(uint8_t id) {
+  const auto* state = stateOf(id);
+  return state && state->active && state->cause != football::Cause::kNone;
+}
+// The first active competition with a cause (0 = none) and how many have one.
+uint8_t firstFault(int& count) {
+  count = 0;
+  uint8_t first = 0;
+  if (!published) return 0;
+  for (const auto& state : published->competitions)
+    if (state.active && state.cause != football::Cause::kNone && count++ == 0)
+      first = state.id;
+  return first;
+}
+Tone causeTone(football::Cause cause) {
+  return cause == football::Cause::kUnmaintained ? Tone::kWarn : Tone::kError;
+}
+// Notice card of competition 'id' with nothing to show (OQ-278): its name,
+// the short cause, the next attempt and the code with the HTTP status. With
+// 'title' ("Keine Daten") the name moves to the first line.
+void faultCard(uint8_t id, int64_t now, int64_t utc,
+               const char* title = nullptr) {
+  const auto* state = stateOf(id);
+  const auto cause = state ? state->cause : football::Cause::kOther;
+  char name[48], retry[40]{}, code[football::kErrorCodeBytes];
+  competitionName(name, id);
+  // An unmaintained competition has no failed request to retry.
+  if (cause != football::Cause::kUnmaintained && published &&
+      published->retry_ms > now && utc > 0) {
+    char time[8];
+    localTime(time, sizeof(time),
+              utc + (published->retry_ms - now + 999) / 1000);
+    snprintf(retry, sizeof(retry), "%s %s",
+             translated("Neuer Versuch", "Retry at"), time);
+  }
+  const char* text = causeText(cause, model.language != 0);
+  cardText(title ? title : name, title ? name : text, retry, causeTone(cause));
+  card_fault = id;
+  if (title)
+    prefix<sizeof(view.card.lines[0]) - 1>(
+        view.card.lines[view.card.line_count++], text);
+  football::errorCode(code, state ? state->provider : cfg::kProviderDefault,
+                      cause, state ? state->http : 0);
+  prefix<sizeof(view.card.hints[0]) - 1>(
+      view.card.hints[view.card.hint_count++], code);
+}
 // Start screen: club name, the running step (0 WLAN, 1 time, 2 data) and the
 // three steps as rim segments. Caption: the version, then the data provider.
 void bindStart(uint8_t step) {
@@ -275,8 +355,7 @@ void bindStart(uint8_t step) {
 // Latest event of the own match, rotating through the event list.
 void ownHighlight(const football::MatchStore& store,
                   const football::StoredMatch& match, int64_t now) {
-  // Shown events only: removal markers and hidden fallback events are left
-  // out by the view.
+  // Shown events only: removal markers are left out by the view.
   const auto list = football::view::events(store, match);
   if (list.count == 0) return;
   const unsigned event_step = now / cfg::kHighlightRotateMs % list.count;
@@ -592,14 +671,16 @@ int cyclePosition(Cycle& cycle, const uint8_t* ids, int n, int64_t now) {
 // table_page_s; after its last page (with an own club: after one step
 // around the club) the next competition follows, wrapping. Up/Down move
 // row-wise and hold the cycle; past the last (first) row the next
-// (previous) competition follows.
+// (previous) competition follows. A competition with a cause and no table
+// shows its notice card for one page (OQ-278).
 void bindTables(const football::MatchStore& store,
-                const football::view::Shown& shown, int64_t now) {
+                const football::view::Shown& shown, int64_t now, int64_t utc) {
   uint8_t ids[cfg::kCompetitionMax];
   int n = 0;
   for (std::size_t i = 0; i < shown.count(); ++i) {
     const uint8_t id = shown.at(i).competition;
-    if (football::view::table(store, id).count > 0) ids[n++] = id;
+    if (football::view::table(store, id).count > 0 || faulted(id))
+      ids[n++] = id;
   }
   if (n == 0) {
     pending_step = 0;
@@ -608,8 +689,28 @@ void bindTables(const football::MatchStore& store,
   }
   auto& cycle = table_cycle;
   int at = cyclePosition(cycle, ids, n, now);
+  const auto bindShown = [&] {
+    on_screen = cycle.competition;
+    if (football::view::table(store, cycle.competition).count == 0)
+      faultCard(cycle.competition, now, utc);
+    else
+      bindTable(store, cycle.competition, cycle.page);
+  };
   const auto table = football::view::table(store, cycle.competition);
   const int rows = table.count;
+  if (rows == 0) {
+    const int step = pending_step;
+    pending_step = 0;
+    if (step != 0 || (!paged && now - cycle.at >= model.table_page_s * 1000)) {
+      if (n > 1)
+        nextCompetition(cycle, ids, n, at, step < 0 ? -1 : 1, now);
+      else
+        cycle.at = now;
+      scroll = 0;
+    }
+    bindShown();
+    return;
+  }
   const int count = std::min<int>(model.table_window, rows);
   const int pages = table.own >= 0 ? 1 : (rows + count - 1) / count;
   cycle.page = std::min(cycle.page, pages - 1);
@@ -637,22 +738,38 @@ void bindTables(const football::MatchStore& store,
       nextCompetition(cycle, ids, n, at, 1, now);
     }
   }
-  bindTable(store, cycle.competition, cycle.page);
+  bindShown();
 }
-// Matchday screen (OQ-193, OQ-202): the first stored matchday of each
-// competition with the matchday switch, in settings order, with result or
-// kickoff. It pages every kConferencePageMs and then shows the next
-// competition, wrapping; Up/Down page and hold the cycle, past the last
-// (first) page the next (previous) competition follows.
+// Matchday screen (OQ-193, OQ-244): per competition with the matchday
+// switch, in settings order, the matchday matchday_mode selects, with result
+// or kickoff. It pages every kConferencePageMs and then shows the next
+// competition, wrapping; with "next matchday" a competition without an
+// upcoming matchday is skipped (OQ-275). Up/Down page and hold the cycle;
+// past the last (first) page the next (previous) stored matchday of the
+// competition follows, then the next (previous) competition on its selected
+// matchday, forward on the first page, backward on the last (OQ-269,
+// OQ-276, OQ-277).
 void bindMatchday(const football::MatchStore& store,
                   const football::view::Shown& shown,
                   const BindContext& context) {
   const int64_t now = context.now;
+  const int64_t utc = context.valid ? context.utc : 0;
+  const int32_t offset = utc > 0 ? timekeeping::localOffset(utc) : 0;
+  const auto reachOf = [&](uint8_t id) {
+    return football::view::matchdays(store, shown, id, model.matchday_mode, utc,
+                                     offset);
+  };
+  // A competition without a matchday to show; one with a cause stays in the
+  // cycle as its notice card (OQ-278).
+  const auto usable = [&](const football::matchday::Reach& r) {
+    return paged ? r.count > 0 : r.selected >= 0;
+  };
+  if (!paged) matchday_first = 0;
   uint8_t ids[cfg::kCompetitionMax];
   int n = 0;
   for (std::size_t i = 0; i < shown.count(); ++i) {
     const uint8_t id = shown.at(i).competition;
-    if (football::view::matchday(store, shown, id).count > 0) ids[n++] = id;
+    if (usable(reachOf(id)) || faulted(id)) ids[n++] = id;
   }
   if (n == 0) {
     pending_step = 0;
@@ -662,35 +779,75 @@ void bindMatchday(const football::MatchStore& store,
     return;
   }
   auto& cycle = matchday_cycle;
+  const uint8_t was = cycle.competition;
   int at = cyclePosition(cycle, ids, n, now);
-  auto list = football::view::matchday(store, shown, cycle.competition);
+  if (cycle.competition != was) matchday_first = 0;
+  auto reach = reachOf(cycle.competition);
+  bool card = !usable(reach);
   const int per_page = std::max<int>(1, model.visible_matches);
-  int pages = (list.count + per_page - 1) / per_page;
-  cycle.page = std::min(cycle.page, pages - 1);
+  int day = 0, pages = 1;
+  football::view::List list{};
+  const auto load = [&](int k) {
+    day = k;
+    list = football::view::matchday(store, shown, cycle.competition,
+                                    reach.span[day]);
+    pages = (list.count + per_page - 1) / per_page;
+  };
+  if (!card) {
+    // The matchday held by the buttons, else the selected one; without one
+    // (OQ-275) the last reachable.
+    int held = reach.selected >= 0 ? reach.selected : reach.count - 1;
+    for (int k = 0; k < reach.count; ++k)
+      if (reach.span[k].first == matchday_first) held = k;
+    load(held);
+    cycle.page = std::min(cycle.page, pages - 1);
+  }
+  // Shows matchday 'k' of the cycle's competition, forward from its first
+  // page, backward from its last.
+  const auto enter = [&](int k, int direction) {
+    load(k);
+    cycle.page = direction > 0 ? 0 : pages - 1;
+    cycle.at = now;
+  };
+  const auto enterCompetition = [&](int direction) {
+    nextCompetition(cycle, ids, n, at, direction, now);
+    reach = reachOf(cycle.competition);
+    card = !usable(reach);
+    matchday_first = 0;
+    if (!card)
+      enter(reach.selected >= 0 ? reach.selected : reach.count - 1, direction);
+  };
   const int step = pending_step;
   pending_step = 0;
   const bool expired = !paged && now - cycle.at >= cfg::kConferencePageMs;
-  if (step > 0 || (step == 0 && expired)) {
-    if (cycle.page + 1 < pages) {
+  if (step > 0) {
+    if (!card && cycle.page + 1 < pages)
       cycle = {cycle.competition, cycle.page + 1, now};
-    } else if (n > 1 || pages > 1) {
-      nextCompetition(cycle, ids, n, at, 1, now);
-    } else {
-      cycle.at = now;
-    }
+    else if (!card && day + 1 < reach.count)
+      enter(day + 1, 1);
+    else
+      enterCompetition(1);
   } else if (step < 0) {
-    if (cycle.page > 0) {
+    if (!card && cycle.page > 0)
       cycle = {cycle.competition, cycle.page - 1, now};
-    } else {
-      nextCompetition(cycle, ids, n, at, -1, now);
-      cycle.page = INT8_MAX;  // the previous competition's last page
-    }
+    else if (!card && day > 0)
+      enter(day - 1, -1);
+    else
+      enterCompetition(-1);
+  } else if (expired) {
+    if (!card && cycle.page + 1 < pages)
+      cycle = {cycle.competition, cycle.page + 1, now};
+    else if (n > 1 || (!card && pages > 1))
+      enterCompetition(1);
+    else
+      cycle.at = now;
   }
-  if (cycle.competition != ids[at] || cycle.page == INT8_MAX) {
-    list = football::view::matchday(store, shown, cycle.competition);
-    pages = (list.count + per_page - 1) / per_page;
-    cycle.page = std::min(cycle.page, pages - 1);
+  on_screen = cycle.competition;
+  if (card) {
+    faultCard(cycle.competition, now, utc);
+    return;
   }
+  if (step != 0) matchday_first = reach.span[day].first;
   // Caption: competition · round of the first match, else its date.
   roundCaption(store, store.match(list.index[0]), true);
   view.layout = Layout::kConference;
@@ -710,13 +867,145 @@ void bindMatchday(const football::MatchStore& store,
   view.rim.count = static_cast<uint8_t>(rows);
   view.rim.total = static_cast<uint8_t>(std::min<int>(list.count, 255));
 }
+// What a status text is about: the network or time state, or the failure
+// of one competition (0 = several, stale data or nothing).
+struct Subject {
+  bool network = false;
+  uint8_t competition = 0;
+};
+// Status text (docs/UI.md "Status pill"), after the screen is bound: on
+// Spieltag and Tabelle the state of the competition on screen, elsewhere
+// one failing competition with its code and name, several as a count
+// (OQ-282). The code leads: fit() cuts the end of a long text.
+Subject statusText(const football::Published& data,
+                   const BindContext& context) {
+  const int64_t utc = context.utc, now = context.now;
+  char time[8], code[football::kErrorCodeBytes];
+  const auto asOf = [&](int64_t fetched_ms) {
+    localTime(time, sizeof(time), utc - (now - fetched_ms) / 1000);
+  };
+  // Last successful request of 'fetched_ms' (0 = none) as "Stand HH:MM".
+  const auto stand = [&](int64_t fetched_ms) {
+    if (fetched_ms != 0) {
+      asOf(fetched_ms);
+      snprintf(view.status, sizeof(view.status), "%s %s",
+               translated("Stand", "As of"), time);
+    } else
+      snprintf(view.status, sizeof(view.status), "%s",
+               translated("Daten veraltet", "Data stale"));
+    view.status_tone = Tone::kWarn;
+  };
+  if (!context.connected) {
+    snprintf(view.status, sizeof(view.status), "%s",
+             translated("Kein WLAN", "No WiFi"));
+    view.status_tone = Tone::kWarn;
+    return {true, 0};
+  }
+  if (!context.valid) {
+    snprintf(view.status, sizeof(view.status), "%s",
+             translated("Warte auf Uhrzeit", "Waiting for time"));
+    view.status_tone = Tone::kWarn;
+    return {true, 0};
+  }
+  const bool cycle_screen =
+      selected == cfg::Screen::kMatchday || selected == cfg::Screen::kTable;
+  const auto* state = cycle_screen ? stateOf(on_screen) : nullptr;
+  if (state) {
+    if (faulted(state->id)) {
+      // The HTTP status only on the card and in the Web UI.
+      football::errorCode(code, state->provider, state->cause, 0);
+      if (state->fetched_ms != 0) {
+        asOf(state->fetched_ms);
+        snprintf(view.status, sizeof(view.status), "%s \xC2\xB7 %s %s", code,
+                 translated("Stand", "As of"), time);
+      } else
+        snprintf(view.status, sizeof(view.status), "%s", code);
+      view.status_tone = causeTone(state->cause);
+      return {false, state->id};
+    }
+    if (state->stale) stand(state->fetched_ms);
+    return {};
+  }
+  int count = 0;
+  const uint8_t first = firstFault(count);
+  if (count == 1) {
+    const auto* fault = stateOf(first);
+    char name[48];
+    competitionName(name, first);
+    football::errorCode(code, fault->provider, fault->cause, 0);
+    // A long name is cut at a character boundary; fit() ends it with "…".
+    char band[sizeof(code) + 4 + sizeof(name)];
+    snprintf(band, sizeof(band), "%s \xC2\xB7 %s", code, name);
+    prefix<sizeof(view.status) - 1>(view.status, band);
+    view.status_tone = causeTone(fault->cause);
+    return {false, first};
+  }
+  if (count > 1) {
+    snprintf(view.status, sizeof(view.status),
+             translated("%d Wettbewerbe gestört", "%d competitions failing"),
+             count);
+    view.status_tone = Tone::kError;
+  } else if (data.stale)
+    // A competition that failed keeps earlier data: show the oldest.
+    stand(data.fetched_ms);
+  return {};
+}
+// Fingerprint of everything the status text reports, independent of the
+// screen (OQ-285): network, time, stale data and each competition's cause.
+uint32_t statusState(const football::Published& data,
+                     const BindContext& context) {
+  uint8_t bytes[3 + 3 * cfg::kCompetitionMax];
+  std::size_t n = 0;
+  bytes[n++] = context.connected;
+  bytes[n++] = context.valid;
+  bytes[n++] = data.stale;
+  for (const auto& state : data.competitions) {
+    const bool active = state.active && state.id != 0;
+    bytes[n++] = active ? state.id : 0;
+    bytes[n++] = active ? static_cast<uint8_t>(state.cause) : 0;
+    bytes[n++] = active && state.stale;
+  }
+  return football::fingerprint({reinterpret_cast<const char*>(bytes), n});
+}
+// Bottom status (docs/UI.md "Status pill"): "Demo" as a permanent line;
+// everything else as a pill for cfg::kStatusPillS after each state change
+// (OQ-284, OQ-285), not on a card that already states it (OQ-287).
+void bindStatus(const football::Published& data, const BindContext& context) {
+  if (model.demo) {
+    snprintf(view.status, sizeof(view.status), "Demo");
+    view.status_tone = Tone::kDim;
+    return;
+  }
+  const uint32_t state = statusState(data, context);
+  if (!pill_known || state != pill_state) {
+    pill_known = true;
+    pill_state = state;
+    pill_until = context.now + cfg::kStatusPillS * 1000;
+  }
+  const Subject subject = statusText(data, context);
+  const bool repeated =
+      view.layout == Layout::kCard &&
+      (subject.network
+           ? card_network
+           : subject.competition != 0 && subject.competition == card_fault);
+  if (repeated || context.now >= pill_until)
+    view.status[0] = 0;
+  else
+    view.status_pill = view.status[0] != 0;
+}
 void bind(const football::Published& data, void* raw_context) {
   const auto& context = *static_cast<BindContext*>(raw_context);
   // Rebuilt in place: `view = {}` would add a ~1.9 KB temporary to the
   // main task stack.
   new (&view) ViewModel();
   no_badge = false;
+  card_network = false;
+  card_fault = 0;
   short_names = &data.names;
+  published = &data;
+  on_screen = 0;
+  int faults = 0;
+  const uint8_t first_fault = firstFault(faults);
   const auto utc = context.utc;
   const bool valid = context.valid;
   // Each competition counts only on the screens it is switched on for
@@ -765,7 +1054,7 @@ void bind(const football::Published& data, void* raw_context) {
       active = entry.active;
     // A failed step shows its state card instead (docs/UI.md "State cards").
     starting = active && !model.demo && !context.ap && data.fetched_ms == 0 &&
-               data.error.empty() && wifi != network::State::kBackoff &&
+               faults == 0 && wifi != network::State::kBackoff &&
                wifi != network::State::kBackoffAuth &&
                wifi != network::State::kWaitSsid &&
                wifi != network::State::kApOnly;
@@ -774,36 +1063,17 @@ void bind(const football::Published& data, void* raw_context) {
       return;
     }
   }
-  const bool stale = data.stale;
-  // Bottom status band (docs/UI.md "Status band").
-  if (model.demo) {
-    snprintf(view.status, sizeof(view.status), "Demo");
-    view.status_tone = Tone::kDim;
-  } else if (!context.connected) {
-    snprintf(view.status, sizeof(view.status), "%s",
-             translated("Kein WLAN", "No WiFi"));
-    view.status_tone = Tone::kWarn;
-  } else if (!valid) {
-    snprintf(view.status, sizeof(view.status), "%s",
-             translated("Warte auf Uhrzeit", "Waiting for time"));
-    view.status_tone = Tone::kWarn;
-  } else if (stale) {
-    if (data.fetched_ms != 0) {
-      // A competition that failed keeps earlier data: show the oldest.
-      char time[8];
-      localTime(time, sizeof(time),
-                utc - (now - data.fetched_ms) / 1000);
-      snprintf(view.status, sizeof(view.status), "%s %s",
-               translated("Stand", "As of"), time);
-    } else
-      snprintf(view.status, sizeof(view.status), "%s",
-               translated("Daten veraltet", "Data stale"));
-    view.status_tone = Tone::kWarn;
-  } else if (!data.error.empty()) {
-    prefix<sizeof(view.status) - 1>(view.status, data.error.data);
-    view.status_tone = Tone::kError;
-  }
   const bool data_screen = selected != cfg::Screen::kCrest;
+  // Spieltag and Tabelle show a failing competition as its notice card in
+  // their cycle (OQ-278).
+  bool cycle_cards = false;
+  if (selected == cfg::Screen::kMatchday || selected == cfg::Screen::kTable) {
+    const auto cycle = data.shown.only(selected == cfg::Screen::kMatchday
+                                           ? cfg::CompetitionScreen::kMatchday
+                                           : cfg::CompetitionScreen::kTable);
+    for (std::size_t i = 0; !cycle_cards && i < cycle.count(); ++i)
+      cycle_cards = faulted(cycle.at(i).competition);
+  }
   if (!data.configured && context.ap) {
     // First setup: how to reach the setup page.
     const auto& net = *context.net;
@@ -819,8 +1089,11 @@ void bind(const football::Published& data, void* raw_context) {
     prefix<sizeof(view.card.hints[1]) - 1>(view.card.hints[1], net.ap_ip);
     view.card.hint_count = 2;
     no_badge = true;
-  } else if (data_screen && data.fetched_ms == 0 && !model.demo) {
+    card_network = true;
+  } else if (data_screen && data.fetched_ms == 0 && !model.demo &&
+             !(context.connected && valid && cycle_cards)) {
     // Data never loaded: say why instead of an empty screen.
+    card_network = !context.connected || !valid;
     if (!context.connected) {
       // Why, from the connection state (docs/UI.md "State cards").
       const auto why = network::offlineReason(context.net->state);
@@ -844,20 +1117,13 @@ void bind(const football::Published& data, void* raw_context) {
       cardText(translated("Warte auf Uhrzeit", "Waiting for time"),
                translated("Zeitserver wird gefragt", "Asking the time server"),
                nullptr, Tone::kWarn);
-    else {
-      // After a failed attempt: when the next one starts.
-      char retry[40]{};
-      if (!data.error.empty() && data.retry_ms > now) {
-        char time[8];
-        localTime(time, sizeof(time), utc + (data.retry_ms - now + 999) / 1000);
-        snprintf(retry, sizeof(retry), "%s %s",
-                 translated("Neuer Versuch", "Retry at"), time);
-      }
+    else if (faults == 0)
       cardText(translated("Keine Daten", "No data"),
-               data.error.empty() ? translated("Lade Daten", "Loading data")
-                                  : data.error.data,
-               retry, data.error.empty() ? Tone::kNeutral : Tone::kError);
-    }
+               translated("Lade Daten", "Loading data"), nullptr,
+               Tone::kNeutral);
+    else
+      // After a failed attempt: which competition, why, the next attempt.
+      faultCard(first_fault, now, utc, translated("Keine Daten", "No data"));
   } else if (selected == cfg::Screen::kLiveSingle) {
     if (own_match >= 0)
       bindOwnMatch(data.store, data.store.match(own_match), own_shown,
@@ -871,9 +1137,10 @@ void bind(const football::Published& data, void* raw_context) {
     bindMatchday(data.store,
                  data.shown.only(cfg::CompetitionScreen::kMatchday), context);
   } else if (selected == cfg::Screen::kTable) {
-    bindTables(data.store, data.shown.only(cfg::CompetitionScreen::kTable),
-               now);
+    bindTables(data.store, data.shown.only(cfg::CompetitionScreen::kTable), now,
+               valid ? utc : 0);
   }
+  bindStatus(data, context);
 }
 // Draws the view with the settings' rotation and brightness; false if the
 // display lock timed out.

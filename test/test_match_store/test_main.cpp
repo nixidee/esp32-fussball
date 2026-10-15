@@ -1,9 +1,9 @@
 // Host checks of the compact match store (football::MatchStore) and the
 // store mappers. OpenLigaDB and ESPN inputs are recorded public responses
-// (recorded.h, fetched 2026-10-14). The API-Football and football-data.org
-// samples and the synthetic matches below are written by the agent; they
-// prove only the mapping and the store rules, not what a provider delivers
-// or the owner's device acceptance.
+// (recorded.h, fetched 2026-10-14 and 2026-10-15). The API-Football and
+// football-data.org samples and the synthetic matches below are written by the
+// agent; they prove only the mapping and the store rules, not what a provider
+// delivers or the owner's device acceptance.
 
 #include <ArduinoJson.h>
 #include <unity.h>
@@ -14,6 +14,7 @@
 #include "app_config.h"
 #include "football_model.h"
 #include "match_store.h"
+#include "matchday.h"
 #include "recorded.h"
 #include "store_mappers.h"
 
@@ -25,7 +26,6 @@ using football::Goals;
 using football::kNoIndex;
 using football::kNoValue;
 using football::MapContext;
-using football::Matchday;
 using football::MatchStore;
 using football::Phase;
 using football::Side;
@@ -125,6 +125,28 @@ StoredMatch synthetic(uint8_t competition, uint32_t id, uint32_t kickoff,
   return m;
 }
 
+// The n-th matchday of 'competition' with its number of matches (OQ-274:
+// the checks of the removed MatchStore::matchday(), through the matchday
+// module).
+struct Matchday {
+  uint32_t first = 0, last = 0;
+  uint8_t count = 0;
+};
+bool matchday(uint8_t competition, std::size_t n, Matchday& out) {
+  football::matchday::Span span;
+  const auto all = [](const StoredMatch&) { return true; };
+  for (std::size_t from = 0;
+       football::matchday::next(store, competition, all, from, span);
+       from = span.end) {
+    if (n-- != 0) continue;
+    out = {span.first, span.last, 0};
+    for (std::size_t i = span.begin; i < span.end; ++i)
+      if (store.match(i).competition == competition) ++out.count;
+    return true;
+  }
+  return false;
+}
+
 StoredEvent goal(uint32_t identity, uint8_t minute, const char* player) {
   StoredEvent e;
   e.identity = identity;
@@ -145,15 +167,15 @@ void test_openliga_matchdays_from_kickoff_blocks() {
   for (std::size_t i = 1; i < store.matchCount(); ++i)
     TEST_ASSERT_TRUE(store.match(i - 1).kickoff <= store.match(i).kickoff);
   Matchday day;
-  TEST_ASSERT_TRUE(store.matchday(kBundesliga, 0, day));
+  TEST_ASSERT_TRUE(matchday(kBundesliga, 0, day));
   TEST_ASSERT_EQUAL_UINT32(utc("2026-10-09T18:30:00Z"), day.first);
   TEST_ASSERT_EQUAL_UINT32(utc("2026-10-11T15:30:00Z"), day.last);
   TEST_ASSERT_EQUAL_UINT8(9, day.count);
-  TEST_ASSERT_TRUE(store.matchday(kBundesliga, 1, day));
+  TEST_ASSERT_TRUE(matchday(kBundesliga, 1, day));
   TEST_ASSERT_EQUAL_UINT32(utc("2026-10-16T18:30:00Z"), day.first);
   TEST_ASSERT_EQUAL_UINT32(utc("2026-10-18T15:30:00Z"), day.last);
   TEST_ASSERT_EQUAL_UINT8(9, day.count);
-  TEST_ASSERT_FALSE(store.matchday(kBundesliga, 2, day));
+  TEST_ASSERT_FALSE(matchday(kBundesliga, 2, day));
   TEST_ASSERT_EQUAL(18, store.teamCount());
 }
 
@@ -246,7 +268,7 @@ void test_expire_keeps_a_matchday_through_the_next_local_day() {
   for (uint8_t i = 0; i < cfg::kStoreEvents; ++i)
     TEST_ASSERT_EQUAL_UINT8(kNoIndex, store.eventAt(i).slot);
   Matchday day;
-  TEST_ASSERT_TRUE(store.matchday(kBundesliga, 0, day));
+  TEST_ASSERT_TRUE(matchday(kBundesliga, 0, day));
   TEST_ASSERT_EQUAL_UINT32(utc("2026-10-16T18:30:00Z"), day.first);
 }
 
@@ -654,160 +676,40 @@ const StoredEvent& eventWith(const StoredMatch& m, uint32_t identity) {
   return store.eventAt(0);
 }
 
-// A paired fallback match of the primary match 'id' (ESPN ids here).
-StoredMatch fallbackOf(uint32_t id, uint32_t kickoff) {
-  StoredMatch f;
-  f.competition = kBundesliga;
-  f.provider = cfg::Provider::kEspn;
-  f.id = id;
-  f.kickoff = kickoff;
-  return f;
-}
-
-void test_fill_takes_missing_and_estimated_values_swapped() {
-  const uint32_t kickoff = utc("2026-10-14T18:30:00Z");
-  const Clock clock{football::parseUtc("2026-10-14T19:00:00Z"), 500};
-  auto m = synthetic(kBundesliga, 1, kickoff);
-  m.phase = Phase::kLive;
-  m.minute = 28;
-  m.estimated = football::kEstimatedMinute;
-  TEST_ASSERT_NOT_NULL(store.upsert(m, clock));
-  auto f = fallbackOf(900, kickoff);
-  f.phase = Phase::kLive;
-  f.minute = 31;
-  f.principal = {2, 1};
-  f.halftime = {1, 0};
-  const auto* filled =
-      store.fill(f, cfg::Provider::kOpenLigaDb, 1, true, clock);
-  TEST_ASSERT_NOT_NULL(filled);
-  assertGoals(1, 2, filled->principal);
-  assertGoals(0, 1, filled->halftime);
-  TEST_ASSERT_EQUAL_UINT8(31, filled->minute);
-  TEST_ASSERT_FALSE(filled->estimated & football::kEstimatedMinute);
-  TEST_ASSERT_EQUAL_UINT8(football::kFallbackMinute |
-                              football::kFallbackPrincipal |
-                              football::kFallbackHalftime,
-                          filled->fallback);
-  // The primary's own kickoff and reported phase stay.
-  TEST_ASSERT_EQUAL_UINT32(kickoff, filled->kickoff);
-  TEST_ASSERT_FALSE(filled->fallback & football::kFallbackPhase);
-  // An estimated fallback value fills nothing; no pair partner, no fill.
-  auto later = f;
-  later.minute = 40;
-  later.estimated = football::kEstimatedMinute;
-  later.extra_time = {0, 0};
-  filled = store.fill(later, cfg::Provider::kOpenLigaDb, 1, false, clock);
-  TEST_ASSERT_EQUAL_UINT8(31, filled->minute);
-  TEST_ASSERT_NULL(store.fill(f, cfg::Provider::kOpenLigaDb, 2, false, clock));
-}
-
-void test_upsert_keeps_fallback_values_until_the_primary_reports_them() {
-  const uint32_t kickoff = utc("2026-10-14T18:30:00Z");
-  const Clock clock{football::parseUtc("2026-10-14T19:00:00Z"), 500};
-  auto m = synthetic(kBundesliga, 1, kickoff);
-  m.phase = Phase::kLive;
-  store.upsert(m, clock);
-  auto f = fallbackOf(900, kickoff);
-  f.principal = {1, 0};
-  store.fill(f, cfg::Provider::kOpenLigaDb, 1, false, clock);
-  // The primary still lacks the score: the fallback's stays.
-  const auto* kept = store.upsert(m, {clock.utc + 60, 560});
-  assertGoals(1, 0, kept->principal);
-  TEST_ASSERT_TRUE(kept->fallback & football::kFallbackPrincipal);
-  // The primary reports it: its own value, no fallback bit.
-  m.principal = {1, 1};
-  kept = store.upsert(m, {clock.utc + 120, 620});
-  assertGoals(1, 1, kept->principal);
-  TEST_ASSERT_EQUAL_UINT8(0, kept->fallback);
-  TEST_ASSERT_EQUAL_UINT32(620, kept->score_changed);
-}
-
-void test_fallback_events_keep_their_origin_and_give_way() {
-  auto m = synthetic(kBundesliga, 1, utc("2026-10-14T18:30:00Z"));
-  m.flags |= football::kMatchOwn;
-  const Clock clock{football::parseUtc("2026-10-14T19:00:00Z"), 1};
-  const auto* stored = store.upsert(m, clock);
-  TEST_ASSERT_TRUE(store.beginEvents(*stored));
-  store.addEvent(goal(10, 5, "A"));
-  store.endEvents();
-  // Fallback stream, swapped: a goal and a card.
-  auto g = goal(500, 6, "A");
-  g.actor = Side::kHome;
-  g.after = {1, 0};
-  auto card = goal(501, 20, "B");
-  card.type = EventType::kYellow;
-  card.actor = Side::kAway;
-  TEST_ASSERT_TRUE(store.beginEvents(*stored, true, true));
-  store.addEvent(g);
-  store.addEvent(card);
-  store.endEvents();
-  const uint8_t slot = stored->own;
-  TEST_ASSERT_EQUAL_UINT8(3, store.ownAt(slot).event_count);
-  // The primary's own stream does not remove the fallback events.
-  TEST_ASSERT_TRUE(store.beginEvents(*stored));
-  store.addEvent(goal(10, 5, "A"));
-  store.endEvents();
-  TEST_ASSERT_EQUAL_UINT8(3, store.ownAt(slot).event_count);
-  const auto& fg = eventWith(*stored, 500);
-  TEST_ASSERT_TRUE(fg.flags & football::kEventFallback);
-  TEST_ASSERT_TRUE(Side::kAway == fg.actor);
-  assertGoals(0, 1, fg.after);
-  // The fallback goal is hidden behind the primary's goal; the card shows.
-  TEST_ASSERT_FALSE(store.eventShown(slot, fg));
-  TEST_ASSERT_TRUE(store.eventShown(slot, eventWith(*stored, 501)));
-  TEST_ASSERT_TRUE(Side::kHome == eventWith(*stored, 501).actor);
-  TEST_ASSERT_TRUE(store.eventShown(slot, eventWith(*stored, 10)));
-  // A full list drops fallback events first.
-  TEST_ASSERT_TRUE(store.beginEvents(*stored));
-  for (uint32_t i = 1; i <= cfg::kMatchEvents; ++i)
-    store.addEvent(goal(i, static_cast<uint8_t>(i), "P"));
-  store.endEvents();
-  const auto& own = store.ownAt(slot);
-  TEST_ASSERT_EQUAL_UINT8(cfg::kMatchEvents, own.event_count);
-  for (std::size_t n = 0; n < own.event_count; ++n)
-    TEST_ASSERT_FALSE(eventOf(*stored, n).flags & football::kEventFallback);
-}
-
 // Substitutions from ESPN's match summary (detail request): kept beside
-// the primary's events, they give way after fallback events.
-void test_detail_events_keep_their_origin_and_give_way_after_fallback() {
+// the list events, they give way when the slot is full.
+void test_detail_events_keep_their_origin_and_give_way() {
   auto m = synthetic(kBundesliga, 1, utc("2026-10-14T18:30:00Z"));
   m.flags |= football::kMatchOwn;
   const Clock clock{football::parseUtc("2026-10-14T19:00:00Z"), 1};
   const auto* stored = store.upsert(m, clock);
   TEST_ASSERT_TRUE(store.beginEvents(*stored));
   store.addEvent(goal(10, 5, "A"));
-  store.endEvents();
-  auto card = goal(500, 20, "B");
-  card.type = EventType::kYellow;
-  TEST_ASSERT_TRUE(store.beginEvents(*stored, true, false));
-  store.addEvent(card);
   store.endEvents();
   auto sub = goal(700, 26, "Out");
   sub.type = EventType::kSubstitution;
   sub.player_in.assign("In");
-  TEST_ASSERT_TRUE(store.beginEvents(*stored, false, false, true));
+  TEST_ASSERT_TRUE(store.beginEvents(*stored, true));
   store.addEvent(sub);
   store.endEvents();
   const uint8_t slot = stored->own;
-  TEST_ASSERT_EQUAL_UINT8(3, store.ownAt(slot).event_count);
+  TEST_ASSERT_EQUAL_UINT8(2, store.ownAt(slot).event_count);
   const auto& detail = eventWith(*stored, 700);
   TEST_ASSERT_TRUE(detail.flags & football::kEventDetail);
-  TEST_ASSERT_FALSE(detail.flags & football::kEventFallback);
   TEST_ASSERT_EQUAL_STRING("In", detail.player_in.data);
-  // The primary's stream keeps the detail and fallback events.
+  // The list stream keeps the detail events.
   TEST_ASSERT_TRUE(store.beginEvents(*stored));
   store.addEvent(goal(10, 5, "A"));
   store.endEvents();
-  TEST_ASSERT_EQUAL_UINT8(3, store.ownAt(slot).event_count);
+  TEST_ASSERT_EQUAL_UINT8(2, store.ownAt(slot).event_count);
   // A detail stream without the substitution removes only it.
-  TEST_ASSERT_TRUE(store.beginEvents(*stored, false, false, true));
+  TEST_ASSERT_TRUE(store.beginEvents(*stored, true));
   store.endEvents();
   TEST_ASSERT_TRUE(eventWith(*stored, 700).flags & football::kEventRemoved);
-  TEST_ASSERT_TRUE(store.beginEvents(*stored, false, false, true));
+  TEST_ASSERT_TRUE(store.beginEvents(*stored, true));
   store.addEvent(sub);
   store.endEvents();
-  // One too many: the fallback card goes first.
+  // A full slot keeps the substitution.
   TEST_ASSERT_TRUE(store.beginEvents(*stored));
   store.addEvent(goal(10, 5, "A"));
   for (uint32_t i = 1; i <= cfg::kMatchEvents - 2; ++i)
@@ -815,14 +717,11 @@ void test_detail_events_keep_their_origin_and_give_way_after_fallback() {
   store.endEvents();
   const auto& own = store.ownAt(slot);
   TEST_ASSERT_EQUAL_UINT8(cfg::kMatchEvents, own.event_count);
-  bool card_kept = false, sub_kept = false;
-  for (std::size_t n = 0; n < own.event_count; ++n) {
-    card_kept |= eventOf(*stored, n).identity == 500;
+  bool sub_kept = false;
+  for (std::size_t n = 0; n < own.event_count; ++n)
     sub_kept |= eventOf(*stored, n).identity == 700;
-  }
-  TEST_ASSERT_FALSE(card_kept);
   TEST_ASSERT_TRUE(sub_kept);
-  // Still one too many: then the substitution.
+  // One too many: the substitution gives way.
   TEST_ASSERT_TRUE(store.beginEvents(*stored));
   store.addEvent(goal(10, 5, "A"));
   for (uint32_t i = 1; i <= cfg::kMatchEvents - 1; ++i)
@@ -833,89 +732,35 @@ void test_detail_events_keep_their_origin_and_give_way_after_fallback() {
     TEST_ASSERT_FALSE(eventOf(*stored, n).flags & football::kEventDetail);
 }
 
-void test_remove_provider_table_origin_and_notice_flags() {
-  const uint32_t kickoff = utc("2026-10-14T18:30:00Z");
-  const Clock clock{football::parseUtc("2026-10-14T12:00:00Z"), 1};
-  store.upsert(synthetic(kBundesliga, 1, kickoff), clock);
-  auto f = fallbackOf(900, kickoff);
-  f.home = store.team(kBundesliga, f.provider, 7, "F7");
-  f.away = store.team(kBundesliga, f.provider, 8, "F8");
-  store.upsert(f, clock);
-  store.upsert(synthetic(kEspnLeague, 2, kickoff), clock);
-  store.removeProvider(kBundesliga, cfg::Provider::kEspn);
-  TEST_ASSERT_NULL(store.find(kBundesliga, cfg::Provider::kEspn, 900));
-  TEST_ASSERT_NOT_NULL(store.find(kBundesliga, cfg::Provider::kOpenLigaDb, 1));
-  TEST_ASSERT_NOT_NULL(store.find(kEspnLeague, cfg::Provider::kOpenLigaDb, 2));
-  // A table of fallback teams belongs to the fallback provider.
-  store.beginTable(kBundesliga);
-  football::StoredRow row;
-  row.team = store.team(kBundesliga, cfg::Provider::kEspn, 7, "F7");
-  row.position = 1;
-  TEST_ASSERT_TRUE(store.appendRow(row));
-  TEST_ASSERT_TRUE(store.commitTable(true));
-  TEST_ASSERT_TRUE(store.hasTable(kBundesliga, cfg::Provider::kEspn));
-  TEST_ASSERT_FALSE(store.hasTable(kBundesliga, cfg::Provider::kOpenLigaDb));
-  TEST_ASSERT_FALSE(store.hasTable(kEspnLeague, cfg::Provider::kEspn));
-  // Notice flags set and clear only their bits.
-  store.flag(kBundesliga, football::kNoticeFallbackRoute, true);
-  store.flag(kBundesliga, football::kNoticeFallbackFailed, true);
-  store.flag(kBundesliga, football::kNoticeFallbackFailed, false);
-  TEST_ASSERT_EQUAL_UINT8(football::kNoticeFallbackRoute,
-                          store.notices(kBundesliga));
+void test_notice_flags_set_and_clear_only_their_bits() {
+  store.flag(kBundesliga, football::kNoticeTable, true);
+  store.flag(kBundesliga, football::kNoticeEvents, true);
+  store.flag(kBundesliga, football::kNoticeEvents, false);
+  TEST_ASSERT_EQUAL_UINT8(football::kNoticeTable, store.notices(kBundesliga));
   TEST_ASSERT_EQUAL_UINT8(0, store.notices(kEspnLeague));
 }
 
-// OpenLigaDB rows as fallback of ESPN primary matches.
-const char* kFallbackRows =
-    R"([{"matchID":77,"matchDateTimeUTC":"2026-10-14T18:30:00Z",)"
-    R"("leagueShortcut":"bl1","leagueSeason":2026,)"
-    R"("group":{"groupName":"6. Spieltag","groupOrderID":6},)"
-    R"("team1":{"teamId":91,"teamName":"Frankfurt","shortName":"SGE"},)"
-    R"("team2":{"teamId":65,"teamName":"Koeln","shortName":"KOE"},)"
-    R"("matchIsFinished":false,"matchResults":[{"resultTypeKind":)"
-    R"("After90Minutes","pointsTeam1":1,"pointsTeam2":0}],)"
-    R"("goals":[{"goalID":5001,"scoreTeam1":1,"scoreTeam2":0,)"
-    R"("matchMinute":12,"goalGetterName":"X"}]},)"
-    R"({"matchID":78,"matchDateTimeUTC":"2026-10-14T18:30:00Z",)"
-    R"("leagueShortcut":"bl1","leagueSeason":2026,)"
-    R"("group":{"groupName":"6. Spieltag","groupOrderID":6},)"
-    R"("team1":{"teamId":5,"teamName":"Five","shortName":"FIV"},)"
-    R"("team2":{"teamId":6,"teamName":"Six","shortName":"SIX"},)"
-    R"("matchIsFinished":false,"matchResults":[],"goals":[]}])";
-
-void test_mapper_pairing_fills_drops_or_stands_alone() {
-  const Clock clock{football::parseUtc("2026-10-14T18:45:00Z"), 10};
-  StoredMatch primary;
-  primary.competition = kBundesliga;
-  primary.provider = cfg::Provider::kEspn;
-  primary.id = 401;
-  primary.kickoff = utc("2026-10-14T18:30:00Z");
-  primary.phase = Phase::kLive;
-  primary.flags = football::kMatchOwn;
-  primary.home = store.team(kBundesliga, primary.provider, 1, "E1");
-  primary.away = store.team(kBundesliga, primary.provider, 2, "E2");
-  TEST_ASSERT_NOT_NULL(store.upsert(primary, clock));
-  football::Pairing pairing;
-  pairing.primary = cfg::Provider::kEspn;
-  pairing.count = 1;
-  pairing.pairs[0] = {77, 401, kBundesliga, false};
-  auto c = context(kBundesliga, cfg::Provider::kOpenLigaDb, 91,
-                   "2026-10-14T18:45:00Z", 10);
-  c.pairing = &pairing;
-  storeAll(parse(kFallbackRows), c);
-  // The paired row filled the primary match, its goal is a fallback event;
-  // the unpaired row was dropped.
-  TEST_ASSERT_NULL(store.find(kBundesliga, cfg::Provider::kOpenLigaDb, 77));
-  TEST_ASSERT_NULL(store.find(kBundesliga, cfg::Provider::kOpenLigaDb, 78));
-  const auto& filled = found(kBundesliga, cfg::Provider::kEspn, 401);
-  assertGoals(1, 0, filled.principal);
-  TEST_ASSERT_EQUAL_UINT8(1, store.ownAt(filled.own).event_count);
-  TEST_ASSERT_TRUE(eventOf(filled, 0).flags & football::kEventFallback);
-  // The fallback route: every row on its own, nothing fills.
-  pairing.standalone = true;
-  storeAll(parse(kFallbackRows), c);
-  TEST_ASSERT_NOT_NULL(store.find(kBundesliga, cfg::Provider::kOpenLigaDb, 77));
-  TEST_ASSERT_NOT_NULL(store.find(kBundesliga, cfg::Provider::kOpenLigaDb, 78));
+// P11.19 B2: OpenLigaDB keeps the Champions League matchday of 2026-09-08
+// unfinished and without a result; more than 24 h after a kickoff such a
+// match marks the competition as not maintained (OQ-281).
+void test_unmaintained_competition_from_a_real_response() {
+  constexpr uint8_t kChampions = 3;
+  const auto c = context(kChampions, cfg::Provider::kOpenLigaDb, 0,
+                         "2026-10-15T12:00:00Z");
+  TEST_ASSERT_EQUAL(32, storeAll(parse(recorded::kOpenLigaUnmaintained), c));
+  const int64_t kickoff = utc("2026-09-08T19:00:00Z");
+  TEST_ASSERT_TRUE(store.unmaintained(kChampions, utc("2026-10-15T12:00:00Z")));
+  TEST_ASSERT_FALSE(
+      store.unmaintained(kChampions, kickoff + cfg::kUnmaintainedAfterS));
+  TEST_ASSERT_TRUE(
+      store.unmaintained(kChampions, kickoff + cfg::kUnmaintainedAfterS + 1));
+  // A maintained league with finished and upcoming matches is not marked,
+  // nor is a competition without matches.
+  loadBundesliga(0);
+  TEST_ASSERT_FALSE(
+      store.unmaintained(kBundesliga, utc("2026-10-15T12:00:00Z")));
+  TEST_ASSERT_FALSE(
+      store.unmaintained(kEspnLeague, utc("2026-10-15T12:00:00Z")));
 }
 
 void test_store_size_is_pinned() {
@@ -949,12 +794,9 @@ int main() {
   RUN_TEST(test_api_football_sample);
   RUN_TEST(test_football_data_sample);
   RUN_TEST(test_row_without_match_id_is_rejected);
-  RUN_TEST(test_fill_takes_missing_and_estimated_values_swapped);
-  RUN_TEST(test_upsert_keeps_fallback_values_until_the_primary_reports_them);
-  RUN_TEST(test_fallback_events_keep_their_origin_and_give_way);
-  RUN_TEST(test_detail_events_keep_their_origin_and_give_way_after_fallback);
-  RUN_TEST(test_remove_provider_table_origin_and_notice_flags);
-  RUN_TEST(test_mapper_pairing_fills_drops_or_stands_alone);
+  RUN_TEST(test_detail_events_keep_their_origin_and_give_way);
+  RUN_TEST(test_notice_flags_set_and_clear_only_their_bits);
+  RUN_TEST(test_unmaintained_competition_from_a_real_response);
   RUN_TEST(test_store_size_is_pinned);
   return UNITY_END();
 }

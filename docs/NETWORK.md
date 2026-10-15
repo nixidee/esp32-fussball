@@ -122,7 +122,9 @@ corrections and reconnect behaviour in this candidate remain unaccepted.
 
 One shared heavy-operation guard admits provider TLS/JSON work, image
 validation/publication/deletion and OTA. Competing heavy operations return
-HTTP 409 or wait for a later scheduled provider attempt. Normal screen redraw,
+HTTP 409 or wait for a later scheduled provider attempt: a provider request
+that finds the guard taken is not sent, counts neither as a request nor as
+a failure, and the scheduler offers it again after the 2-second device gap. Normal screen redraw,
 including its bounded JPEG decoder, is still allowed during provider traffic;
 that overlap must be measured.
 
@@ -193,11 +195,12 @@ are not prerequisites. Failed local health explicitly invalidates/reboots the
 image; if no previous bootable image exists, the fallback is a reboot path,
 not a promised recovery image.
 
-Valid format-1 and format-2 settings are converted in RAM without a write. The
-next explicit save writes the current format (4), which an older firmware
-cannot read. Browser OTA therefore refuses an image with an older settings
-format and accepts an equal or newer one (a newer image migrates the stored
-settings). Historical: the first format-3 image had to be installed by USB,
+Settings of an older format are not read: the device reports them as
+outdated and runs on initial values until the owner sets it up again; the
+next explicit save writes the current format, which an older firmware cannot
+read. Browser OTA therefore refuses an image with an older settings format
+and accepts an equal or newer one (a newer image discards older stored
+settings, see CONFIGURATION.md). Historical: the first format-3 image had to be installed by USB,
 because the format-2 firmware's gate still demanded an equal format. A manual USB downgrade after a new save selects
 old-firmware initial values.
 

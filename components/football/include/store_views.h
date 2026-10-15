@@ -13,6 +13,7 @@
 #include "app_config.h"
 #include "conference.h"
 #include "match_store.h"
+#include "matchday.h"
 #include "settings_model.h"
 
 namespace football::persist {
@@ -34,15 +35,12 @@ struct Source {
   }
 };
 
-// The shown source of every active competition. A competition shows its
-// primary provider's matches; while kNoticeFallbackRoute is set and the
-// store holds matches of the fallback provider in it, the fallback's
-// instead (the primary's stored rows stay hidden until the route ends).
+// The shown source of every active competition: its provider's matches.
 // Matches of other providers and of competitions not added stay hidden.
 class Shown {
  public:
   // Adds an active entry (inactive ones are skipped).
-  void add(const settings::Competition& entry, const MatchStore& store);
+  void add(const settings::Competition& entry);
   // Adds a source directly (demo).
   void add(const Source& source);
   const Source* source(uint8_t competition) const;
@@ -89,11 +87,15 @@ List conferenceMembers(const MatchStore& store, const Shown& shown,
                        int64_t utc, const ConferenceRules& rules);
 // Every shown match (demo mode).
 List conferenceAll(const MatchStore& store, const Shown& shown);
-// The first matchday of 'competition' among its shown matches with a
-// kickoff (the MatchStore::matchday() gap rule): the current matchday
-// until expire() drops it (OQ-202), then the next one. Kickoff order.
-List matchday(const MatchStore& store, const Shown& shown,
-              uint8_t competition);
+// The matchdays of 'competition' the Matchday screen can show among its
+// shown matches, with the one 'mode' selects (matchday::reach()).
+// 'local_offset_s' is the local UTC offset at 'utc'.
+matchday::Reach matchdays(const MatchStore& store, const Shown& shown,
+                          uint8_t competition, cfg::MatchdayMode mode,
+                          int64_t utc, int32_t local_offset_s);
+// The shown matches of 'competition' in 'span', kickoff order.
+List matchday(const MatchStore& store, const Shown& shown, uint8_t competition,
+              const matchday::Span& span);
 // Rows of one Konferenz page (store indices). per_page includes a pinned
 // own match, which stands in row 1 of every page. "One page" ranks the
 // others by activity: running with the latest score change first, goalless
@@ -111,10 +113,6 @@ int ownForScreen(const MatchStore& store, const Shown& shown, int64_t utc,
 // The own match of the Web UI overview: a running one first, else the one
 // with the kickoff closest to 'utc' (unknown kickoffs last); -1 when none.
 int ownForOverview(const MatchStore& store, const Shown& shown, int64_t utc);
-// Index of the 'ordinal'-th own match of 'competition' from 'provider'
-// (published fixtures of the pair picker); -1 when there is none.
-int ownAt(const MatchStore& store, uint8_t competition, cfg::Provider provider,
-          uint16_t ordinal);
 // Shown matches of 'competition'.
 uint16_t matchCount(const MatchStore& store, const Shown& shown,
                     uint8_t competition);
@@ -143,11 +141,10 @@ struct Table {
 };
 Table table(const MatchStore& store, uint8_t competition);
 
-// Shown events of an own match (removal markers and hidden fallback events
-// left out, MatchStore::eventShown()) in match order: regular time before
-// the shootout, then by minute and added minute; an event without minute
-// keeps the minute of the event before it in the stored list. Equal keys
-// keep the stored order.
+// Shown events of an own match (removal markers left out) in match order:
+// regular time before the shootout, then by minute and added minute; an event
+// without minute keeps the minute of the event before it in the stored list.
+// Equal keys keep the stored order.
 struct Events {
   std::array<uint8_t, cfg::kMatchEvents> index{};  // event pool indices
   uint8_t count = 0;

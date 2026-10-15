@@ -8,7 +8,12 @@ namespace {
 
 constexpr uint32_t kMagic = 0x31434246;       // "FBC1"
 constexpr uint32_t kNamesMagic = 0x314e4246;  // "FBN1"
-constexpr uint16_t kVersion = 1;
+// 2: one source per competition (OQ-247); 3: no core data, season time
+// (OQ-248, OQ-259).
+constexpr uint16_t kVersion = 3;
+// The short-name file has its own version and layout (OQ-260): a change of
+// the competition files keeps the owner's short names.
+constexpr uint16_t kNamesVersion = 1;
 
 struct Header {
   uint32_t magic, layout;
@@ -17,7 +22,7 @@ struct Header {
   uint32_t route_key;
   int64_t saved_utc;
   uint8_t teams, labels, matches, rows;
-  std::array<SavedSource, schedule::kSourceCount> sources;
+  SavedSource source;
 };
 // Follows an own match: its full names and event count; the events follow.
 struct OwnBlock {
@@ -41,10 +46,15 @@ constexpr uint32_t mix(uint32_t h, std::size_t value) {
 constexpr uint32_t kLayout = [] {
   uint32_t h = 2166136261u;
   for (const std::size_t v :
-       {sizeof(Header), sizeof(OwnBlock), sizeof(StoredTeam),
-        sizeof(Text<31>), sizeof(StoredMatch), sizeof(StoredEvent),
-        sizeof(StoredRow), sizeof(SavedSource), sizeof(ShortName),
-        sizeof(NamesHeader), cfg::kMatchEvents})
+       {sizeof(Header), sizeof(OwnBlock), sizeof(StoredTeam), sizeof(Text<31>),
+        sizeof(StoredMatch), sizeof(StoredEvent), sizeof(StoredRow),
+        sizeof(SavedSource), cfg::kMatchEvents})
+    h = mix(h, v);
+  return h;
+}();
+constexpr uint32_t kNamesLayout = [] {
+  uint32_t h = 2166136261u;
+  for (const std::size_t v : {sizeof(NamesHeader), sizeof(ShortName)})
     h = mix(h, v);
   return h;
 }();
@@ -115,10 +125,9 @@ bool parse(In& in, Saved& out, MatchStore* store, const Clock& clock) {
       h.labels > cfg::kStoreRoundLabels || h.matches > cfg::kStoreMatches ||
       h.rows > cfg::kStoreTableRows)
     return false;
-  for (const auto& s : h.sources)
-    if (s.resolved.day_count > plan::kEspnDays ||
-        s.resolved.season.length > s.resolved.season.kCapacity)
-      return false;
+  if (h.source.resolved.day_count > plan::kEspnDays ||
+      h.source.resolved.season.length > h.source.resolved.season.kCapacity)
+    return false;
   // File index -> store index (load only).
   std::array<uint8_t, cfg::kStoreTeams> teams;
   std::array<uint8_t, cfg::kStoreRoundLabels> labels;
@@ -188,7 +197,7 @@ bool parse(In& in, Saved& out, MatchStore* store, const Clock& clock) {
   out.route_key = h.route_key;
   out.saved_utc = h.saved_utc;
   out.notices = h.notices;
-  out.sources = h.sources;
+  out.source = h.source;
   return true;
 }
 
@@ -255,7 +264,7 @@ std::size_t encode(const MatchStore& store, const Saved& saved, Write write,
   h.labels = labels;
   h.matches = matches;
   h.rows = rows;
-  h.sources = saved.sources;
+  h.source = saved.source;
   out.put(&h, sizeof(h));
   for (uint8_t i = 0; i < teams; ++i) {
     const StoredTeam t = store.teamAt(team_list[i]);
@@ -346,8 +355,8 @@ std::size_t ShortNames::encode(Write write, void* context) const {
   NamesHeader h;
   std::memset(static_cast<void*>(&h), 0, sizeof(h));
   h.magic = kNamesMagic;
-  h.layout = kLayout;
-  h.version = kVersion;
+  h.layout = kNamesLayout;
+  h.version = kNamesVersion;
   h.count = static_cast<uint16_t>(count());
   out.put(&h, sizeof(h));
   for (const auto& n : names_)
@@ -362,7 +371,7 @@ bool ShortNames::decode(Read read, void* context) {
   In in{read, context};
   NamesHeader h;
   bool ok = in.get(&h, sizeof(h)) && h.magic == kNamesMagic &&
-            h.layout == kLayout && h.version == kVersion &&
+            h.layout == kNamesLayout && h.version == kNamesVersion &&
             h.count <= names_.size();
   for (uint16_t i = 0; ok && i < h.count; ++i) {
     auto& n = names_[i];

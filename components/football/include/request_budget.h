@@ -18,6 +18,9 @@ uint32_t remaining(cfg::Provider provider, uint32_t utc_day, uint32_t limit);
 // more durable counter of the same kind, admitted after the provider's.
 esp_err_t admitGlobal(uint32_t utc_day, uint32_t limit);
 uint32_t remainingGlobal(uint32_t utc_day, uint32_t limit);
+// The first valid UTC day: every damaged counter counts as used up on it
+// and starts afresh on the next day (without waiting for a request).
+void settle(uint32_t utc_day);
 // Settings reset: removes every stored counter (the device restarts next).
 esp_err_t erase();
 }  // namespace football::budget

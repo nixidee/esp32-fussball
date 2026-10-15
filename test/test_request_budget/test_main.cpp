@@ -149,6 +149,31 @@ void testDamagedRecord() {
   TEST_ASSERT_EQUAL(Verdict::kStore, request(other, kDay, 100));
 }
 
+// F-DATA-04 (review 2026-10-14): the provider worker asks remaining()
+// before any admission and settles every counter with the first valid UTC
+// day of each pass (budget::settle). A damaged counter is used up only on
+// that day; the next day has the whole limit without any request first.
+// A backward clock never reopens the settled day.
+void testDamagedRecordRecoversWithoutRequest() {
+  Counter counter;
+  counter.load(Load::kDamaged, {});
+  TEST_ASSERT_EQUAL_UINT32(0, counter.remaining(kDay, 100));
+  TEST_ASSERT_EQUAL_UINT32(0, counter.remaining(kDay + 1, 100));
+  counter.settle(kDay);
+  TEST_ASSERT_EQUAL_UINT32(0, counter.remaining(kDay, 100));
+  TEST_ASSERT_EQUAL_UINT32(100, counter.remaining(kDay + 1, 100));
+  TEST_ASSERT_EQUAL_UINT32(100, counter.remaining(kDay + 100, 100));
+  // Settling again (every pass) and a backward clock change nothing.
+  counter.settle(kDay + 1);
+  counter.settle(kDay - 1);
+  TEST_ASSERT_EQUAL_UINT32(0, counter.remaining(kDay - 1, 100));
+  TEST_ASSERT_EQUAL_UINT32(0, counter.remaining(kDay, 100));
+  Record next{};
+  TEST_ASSERT_EQUAL(Verdict::kUsedUp, counter.admit(kDay, 100, &next));
+  TEST_ASSERT_EQUAL(Verdict::kStore, request(counter, kDay + 1, 100));
+  TEST_ASSERT_EQUAL_UINT32(99, counter.remaining(kDay + 1, 100));
+}
+
 }  // namespace
 
 void setUp() {}
@@ -162,5 +187,6 @@ int main() {
   RUN_TEST(testRebootLosesUnusedReservation);
   RUN_TEST(testNewDayAndBackwardClock);
   RUN_TEST(testDamagedRecord);
+  RUN_TEST(testDamagedRecordRecoversWithoutRequest);
   return UNITY_END();
 }

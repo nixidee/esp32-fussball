@@ -479,21 +479,6 @@ bool smallInt(JsonVariantConst value, uint32_t max, Reason& why) {
   return text && text.size() == model.admin_password.length &&
          equal(text.c_str(), model.admin_password.data.data(), text.size());
 }
-// The list position ('route' of the data service) and the primary provider
-// of competition 'id'; false if there is none.
-[[gnu::noinline]] bool competitionRoute(uint32_t id, uint8_t& route,
-                                        cfg::Provider& provider) {
-  settings::Competition entry;
-  const int index = id <= UINT8_MAX
-                        ? settings::competitionIndex(static_cast<uint8_t>(id))
-                        : -1;
-  if (index < 0 || !settings::competitionAt(index, entry) || entry.id != id)
-    return false;
-  route = static_cast<uint8_t>(index);
-  provider = entry.primary.provider;
-  return true;
-}
-
 esp_err_t page(httpd_req_t* req) {
   Request request(req);
   httpd_resp_set_type(req, "text/html; charset=utf-8");
@@ -586,12 +571,10 @@ esp_err_t getStatus(httpd_req_t* req) {
   out["settings_source"] = settings::originName(settings::origin());
   out["competitions_source"] =
       settings::originName(settings::competitionsOrigin());
+  out["provider_started"] = data.started;
   out["provider_busy"] = data.busy;
   out["last_update_ms"] = data.fetched_ms;
   out["data_stale"] = data.stale;
-  out["data_error"] = data.error.data;
-  out["data_error_code"] = football::causeKey(data.cause);
-  out["routing_notice"] = data.routing_notice.data;
   out["matches_truncated"] = data.matches_truncated;
   out["next_request_ms"] = data.next_ms;
   out["next_request_reason"] = football::cadenceName(data.cadence);
@@ -627,7 +610,19 @@ esp_err_t getStatus(httpd_req_t* req) {
     row["id"] = id;
     row["matches"] = overview.routes[i].matches;
     row["provider"] = football::providerName(overview.routes[i].provider);
-    row["error"] = ((data.error_routes >> i) & 1) != 0;
+    // Why the competition has no current data (OQ-280): the stable key for
+    // the Web UI texts and the code the display shows.
+    const auto* state = football::findState(data.competitions, id);
+    const auto cause = state ? state->cause : football::Cause::kNone;
+    row["cause"] = football::causeKey(cause);
+    if (cause != football::Cause::kNone) {
+      char code[football::kErrorCodeBytes];
+      football::errorCode(code, state->provider, cause, state->http);
+      row["code"] = code;
+      row["error_provider"] = football::providerName(state->provider);
+      if (state->http) row["http"] = state->http;
+    }
+    if (state && state->fetched_ms) row["last_update_ms"] = state->fetched_ms;
   }
   return json(req, d.doc);
 }
@@ -655,11 +650,20 @@ esp_err_t getSelection(httpd_req_t* req) {
   const auto state = football::selectionStatus();
   out["busy"] = state.busy;
   out["more"] = state.more;
-  out["fixtures"] = state.fixtures;
-  out["route"] = state.route;
   out["revision"] = state.revision;
-  out["error"] = state.error.data;
   out["error_code"] = football::causeKey(state.cause);
+  if (state.cause != football::Cause::kNone) {
+    char code[football::kErrorCodeBytes];
+    football::errorCode(code, state.provider, state.cause, state.http);
+    out["code"] = code;
+    if (state.http) out["http"] = state.http;
+  }
+  // What holds the next selection request and for how many seconds more.
+  const int64_t left = state.wait_ms - timekeeping::monotonicMs();
+  const bool waits = state.busy && state.wait_ms && left > 0;
+  out["wait"] =
+      football::cadenceName(waits ? state.wait : football::Cadence::kNone);
+  out["wait_s"] = waits ? (left + 999) / 1000 : 0;
   auto list = out["items"].to<JsonArray>();
   football::Selection item;
   if (!state.busy)
@@ -670,75 +674,6 @@ esp_err_t getSelection(httpd_req_t* req) {
       row["id"] = item.id.data;
       row["name"] = item.name.data;
       row["season"] = item.season.data;
-    }
-  return json(req, d.doc);
-}
-// One match for the pair picker: provider fixture id, kickoff (UTC seconds,
-// 0 = unknown) and the two teams.
-void fixtureRow(JsonArray list, const football::Selection& item) {
-  auto row = list.add<JsonObject>();
-  row["id"] = item.id.data;
-  row["kickoff"] = strtoll(item.season.data, nullptr, 10);
-  row["name"] = item.name.data;
-}
-// ?competition=N&source=primary|fallback. Primary: the club's matches in the
-// published data of the competition. Fallback: the result of the job
-// POST /data/fixtures started (loaded stays false until it has finished for
-// this competition).
-esp_err_t getFixtures(httpd_req_t* req) {
-  Request request(req);
-  char query[64], value[16];
-  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK)
-    return invalid(req, Reason::kRequired, "competition required",
-                   "competition");
-  uint32_t id = 0;
-  if (httpd_query_key_value(query, "competition", value, sizeof(value)) !=
-      ESP_OK)
-    return invalid(req, Reason::kRequired, "competition required",
-                   "competition");
-  if (!parseUnsigned(value, UINT8_MAX, id) || id == 0)
-    return invalid(req, Reason::kRange, "competition rejected", "competition");
-  uint8_t route = 0;
-  cfg::Provider provider;
-  if (!competitionRoute(id, route, provider))
-    return invalid(req, Reason::kReference, "competition not defined",
-                   "competition");
-  if (httpd_query_key_value(query, "source", value, sizeof(value)) != ESP_OK)
-    return invalid(req, Reason::kRequired, "source required", "source");
-  const bool primary = !strcmp(value, "primary");
-  if (!primary && strcmp(value, "fallback"))
-    return invalid(req, Reason::kInvalid, "source rejected", "source");
-  Doc d;
-  auto out = d.doc.to<JsonObject>();
-  out["source"] = primary ? "primary" : "fallback";
-  out["competition"] = id;
-  auto list = out["items"].to<JsonArray>();
-  football::Selection item;
-  if (primary) {
-    uint32_t revision;
-    const auto count = football::publishedFixtureCount(route, provider, revision);
-    out["provider"] = football::providerName(provider);
-    out["busy"] = false;
-    out["loaded"] = true;
-    for (unsigned i = 0; i < count; ++i) {
-      if (!football::publishedFixtureAt(route, provider, i, revision, item))
-        return error(req, fault::kChanged);
-      fixtureRow(list, item);
-    }
-    return json(req, d.doc);
-  }
-  const auto state = football::selectionStatus();
-  const bool mine = state.fixtures && state.route == route;
-  out["busy"] = state.busy;
-  out["loaded"] = mine && !state.busy && state.error.empty();
-  out["error"] = mine && !state.busy ? state.error.data : "";
-  out["error_code"] =
-      mine && !state.busy ? football::causeKey(state.cause) : "";
-  if (mine && !state.busy)
-    for (unsigned i = 0; i < state.count; ++i) {
-      if (!football::selectionAt(i, state.revision, item))
-        return error(req, fault::kChanged);
-      fixtureRow(list, item);
     }
   return json(req, d.doc);
 }
@@ -1234,28 +1169,6 @@ esp_err_t dataSelect(httpd_req_t* req) {
   if (err == ESP_ERR_NOT_FINISHED) return error(req, fault::kSelectionBusy);
   return err == ESP_OK ? ok(req, d.doc) : failed(req, err);
 }
-// Starts loading the club's matches at the fallback source of a competition
-// (GET /fixtures?source=fallback returns them).
-esp_err_t dataFixtures(httpd_req_t* req) {
-  Request request(req);
-  Doc d;
-  if (const auto* f = admit(req, d.doc)) return error(req, *f);
-  Reason why;
-  if (!smallInt(d.doc["competition"], UINT8_MAX, why))
-    return invalid(req, why, "competition rejected", "competition");
-  uint8_t route = 0;
-  cfg::Provider provider;
-  if (!competitionRoute(d.doc["competition"].as<uint32_t>(), route, provider))
-    return invalid(req, Reason::kReference, "competition not defined",
-                   "competition");
-  const auto err = football::selectFixtures(route);
-  if (err == ESP_ERR_NOT_FINISHED) return error(req, fault::kSelectionBusy);
-  if (err == ESP_ERR_INVALID_ARG)
-    return invalid(req, Reason::kReference,
-                   "competition has no complete fallback source",
-                   "competition");
-  return err == ESP_OK ? ok(req, d.doc) : failed(req, err);
-}
 // Quick actions of the Web UI: the same events the buttons post.
 esp_err_t postDisplay(httpd_req_t* req) {
   Request request(req);
@@ -1503,18 +1416,26 @@ void streamDebug(void*) {
     if (debug_sending.exchange(true)) continue;
     auto net = network::status();
     auto data = football::status();
+    // The first failing competition's code and how many fail.
+    char code[football::kErrorCodeBytes] = "";
+    unsigned errors = 0;
+    for (const auto& state : data.competitions)
+      if (state.active && state.cause != football::Cause::kNone &&
+          errors++ == 0)
+        football::errorCode(code, state.provider, state.cause, state.http);
     const int length = snprintf(
         debug_record, sizeof(debug_record),
         "{\"ms\":%lld,\"net\":\"%s\",\"heap\":%u,\"rev\":%"
-        "lu,\"stale\":%s,\"busy\":%s,\"error\":\"%.48s\",\"requests\":[%lu,%lu,"
+        "lu,\"stale\":%s,\"busy\":%s,\"error\":\"%s\",\"errors\":%u,"
+        "\"requests\":[%lu,%lu,"
         "%lu,%lu]}",
         static_cast<long long>(timekeeping::monotonicMs()),
         network::stateName(net.state),
         static_cast<unsigned>(
             heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
         static_cast<unsigned long>(data.revision),
-        data.stale ? "true" : "false", data.busy ? "true" : "false",
-        data.error.data, static_cast<unsigned long>(data.requests[0]),
+        data.stale ? "true" : "false", data.busy ? "true" : "false", code,
+        errors, static_cast<unsigned long>(data.requests[0]),
         static_cast<unsigned long>(data.requests[1]),
         static_cast<unsigned long>(data.requests[2]),
         static_cast<unsigned long>(data.requests[3]));
@@ -1564,7 +1485,6 @@ constexpr Route kRoutes[] = {
     {"/api/v1/competitions", HTTP_GET, getCompetitions, nullptr},
     {"/api/v1/wifi", HTTP_GET, getWifi, nullptr},
     {"/api/v1/selection", HTTP_GET, getSelection, nullptr},
-    {"/api/v1/fixtures", HTTP_GET, getFixtures, nullptr},
     {"/api/v1/teams", HTTP_GET, getTeams, nullptr},
     {"/api/v1/images", HTTP_GET, getImages, nullptr},
     {"/api/v1/images/file", HTTP_GET, getImageFile, nullptr},
@@ -1578,7 +1498,6 @@ constexpr Route kRoutes[] = {
     {"/api/v1/export", HTTP_POST, exportSettings, nullptr},
     {"/api/v1/wifi/scan", HTTP_POST, wifiScan, nullptr},
     {"/api/v1/data/select", HTTP_POST, dataSelect, nullptr},
-    {"/api/v1/data/fixtures", HTTP_POST, dataFixtures, nullptr},
     {"/api/v1/data/refresh", HTTP_POST, dataRefresh, nullptr},
     {"/api/v1/teams", HTTP_POST, postTeam, nullptr},
     {"/api/v1/teams", HTTP_PUT, putTeams, nullptr},

@@ -72,12 +72,11 @@ Class classOf(cfg::DataType type, bool own_active) {
   switch (type) {
     case cfg::DataType::kLiveTable: return Class::kLiveTable;
     case cfg::DataType::kTable: return Class::kTable;
-    case cfg::DataType::kCore: return Class::kCore;
     case cfg::DataType::kFixtures: return Class::kFixtures;
     case cfg::DataType::kLive: return own_active ? Class::kOwn : Class::kLive;
     case cfg::DataType::kEvents: return Class::kOwn;
   }
-  return Class::kCore;
+  return Class::kFixtures;
 }
 
 // Interval factor over the provider's and the global daily cap.
@@ -164,14 +163,12 @@ void Scheduler::reset() {
   global_window_.set(0, 0);
   paused_until_.fill(0);
   last_start_ = kNever;
+  deferred_until_ = 0;
   factors_.fill(1);
 }
 
-std::size_t Scheduler::index(uint8_t slot, Source source,
-                             cfg::DataType type) const {
-  return (static_cast<std::size_t>(slot) * kSourceCount +
-          static_cast<std::size_t>(source)) *
-             cfg::kDataTypeCount +
+std::size_t Scheduler::index(uint8_t slot, cfg::DataType type) const {
+  return static_cast<std::size_t>(slot) * cfg::kDataTypeCount +
          static_cast<std::size_t>(type);
 }
 
@@ -217,28 +214,24 @@ Decision Scheduler::next(const Inputs& in) {
     for (uint8_t slot = 0; slot < cfg::kCompetitionMax; ++slot) {
       const auto& wanted = in.competitions[slot];
       if (wanted.id == 0) continue;
-      for (std::size_t s = 0; s < kSourceCount; ++s)
-        for (std::size_t t = 0; t < cfg::kDataTypeCount; ++t)
-          if (wanted.types[s] & (1u << t)) {
-            Job job;
-            job.slot = slot;
-            job.competition = wanted.id;
-            job.source = static_cast<Source>(s);
-            job.type = static_cast<cfg::DataType>(t);
-            job.provider = wanted.provider[s];
-            visit(job);
-          }
+      for (std::size_t t = 0; t < cfg::kDataTypeCount; ++t)
+        if (wanted.types & (1u << t)) {
+          Job job;
+          job.slot = slot;
+          job.competition = wanted.id;
+          job.type = static_cast<cfg::DataType>(t);
+          job.provider = wanted.provider;
+          visit(job);
+        }
     }
   };
   each([&](const Job& job) {
     const auto p = static_cast<std::size_t>(job.provider);
     const uint32_t interval =
         std::max<uint32_t>(1, plans[p].interval_s[static_cast<std::size_t>(job.type)]);
-    const auto i = index(job.slot, job.source, job.type);
+    const auto i = index(job.slot, job.type);
     const uint32_t cost = std::max<uint8_t>(
-        1, in.competitions[job.slot]
-               .cost[static_cast<std::size_t>(job.source)]
-                    [static_cast<std::size_t>(job.type)]);
+        1, in.competitions[job.slot].cost[static_cast<std::size_t>(job.type)]);
     Demand demand{};
     const auto& l = live[job.slot];
     const auto& o = own[job.slot];
@@ -293,26 +286,18 @@ Decision Scheduler::next(const Inputs& in) {
       factors_[c] = combine(factors_[c], provider_factors[p][c]);
   }
 
-  // When each provider may send its next request: device gap, its pause,
-  // the daily caps and the window limits.
+  // When each provider may send its next request: device gap, deferral,
+  // its pause, the daily caps and the window limits.
   std::array<uint32_t, cfg::kProviderCount> admit_at{};
   std::array<Wait, cfg::kProviderCount> admit_why{};
   for (std::size_t p = 0; p < cfg::kProviderCount; ++p) {
-    uint32_t at = now;
     Wait why = Wait::kIdle;
-    const auto block = [&](uint32_t until, Wait reason) {
-      if (until > at) {
-        at = until;
-        why = reason;
-      }
-    };
-    if (last_start_ != kNever)
-      block(clampS(uint64_t{last_start_} + kGapS), Wait::kGap);
-    block(paused_until_[p], Wait::kPaused);
-    if (in.daily_left[p] == 0 || in.global_daily_left == 0)
-      block(mono(day_end), Wait::kDaily);
-    block(windows_[p].admissibleAt(now), Wait::kWindow);
-    block(global_window_.admissibleAt(now), Wait::kWindow);
+    uint32_t at = admissibleAt(static_cast<cfg::Provider>(p), now, &why);
+    if ((in.daily_left[p] == 0 || in.global_daily_left == 0) &&
+        mono(day_end) > at) {
+      at = mono(day_end);
+      why = Wait::kDaily;
+    }
     admit_at[p] = at;
     admit_why[p] = why;
   }
@@ -330,8 +315,11 @@ Decision Scheduler::next(const Inputs& in) {
   uint32_t best_due = 0;
   Wait blocked_why = Wait::kIdle;
   each([&](const Job& job) {
+    if (in.competitions[job.slot].held &
+        (1u << static_cast<unsigned>(job.type)))
+      return;
     const auto p = static_cast<std::size_t>(job.provider);
-    const auto i = index(job.slot, job.source, job.type);
+    const auto i = index(job.slot, job.type);
     const Class cls = classOf(job.type, own[job.slot].active);
     const uint8_t factor =
         combine(provider_factors[p][static_cast<std::size_t>(cls)],
@@ -343,10 +331,12 @@ Decision Scheduler::next(const Inputs& in) {
     const uint64_t stretched = uint64_t{interval} * factor;
     const uint8_t f = failures_[i];
     const uint64_t retry =
-        f == 0 ? stretched
-               : std::min<uint64_t>(uint64_t{cfg::kProviderErrorRetryS}
-                                        << std::min<uint8_t>(f - 1, 16),
-                                    stretched);
+        f == 0
+            ? stretched
+            : std::min<uint64_t>(
+                  uint64_t{cfg::kProviderErrorRetryS}
+                      << std::min<uint8_t>(f - 1, 16),
+                  std::max<uint64_t>(stretched, cfg::kProviderErrorRetryMaxS));
     const int64_t last = last_[i];
     uint32_t due = 0;
     bool due_known = false;
@@ -429,25 +419,23 @@ void Scheduler::forget(uint8_t slot) {
   if (slot < cfg::kCompetitionMax) ids_[slot] = 0;
 }
 void Scheduler::clear(uint8_t slot) {
-  for (std::size_t s = 0; s < kSourceCount; ++s)
-    for (std::size_t t = 0; t < cfg::kDataTypeCount; ++t) {
-      const auto i =
-          index(slot, static_cast<Source>(s), static_cast<cfg::DataType>(t));
-      last_[i] = kNotStarted;
-      failures_[i] = 0;
-      pending_.reset(i);
-    }
+  for (std::size_t t = 0; t < cfg::kDataTypeCount; ++t) {
+    const auto i = index(slot, static_cast<cfg::DataType>(t));
+    last_[i] = kNotStarted;
+    failures_[i] = 0;
+    pending_.reset(i);
+  }
 }
-void Scheduler::seed(uint8_t slot, uint8_t id, Source source,
-                     cfg::DataType type, uint32_t age_s, uint32_t now_s) {
+void Scheduler::seed(uint8_t slot, uint8_t id, cfg::DataType type,
+                     uint32_t age_s, uint32_t now_s) {
   if (slot >= cfg::kCompetitionMax || id == 0 || isLive(type)) return;
   if (ids_[slot] != id) {
     clear(slot);
     ids_[slot] = id;
   }
   const int64_t start = int64_t{now_s} - age_s;
-  last_[index(slot, source, type)] =
-      static_cast<int32_t>(std::clamp<int64_t>(start, INT32_MIN, kNotStarted - 1));
+  last_[index(slot, type)] = static_cast<int32_t>(
+      std::clamp<int64_t>(start, INT32_MIN, kNotStarted - 1));
 }
 
 void Scheduler::configure(const settings::ProviderPlans& plans,
@@ -457,19 +445,30 @@ void Scheduler::configure(const settings::ProviderPlans& plans,
   global_window_.set(global.window_requests, global.window_s);
 }
 
-uint32_t Scheduler::admissibleAt(cfg::Provider provider,
-                                 uint32_t now_s) const {
+uint32_t Scheduler::admissibleAt(cfg::Provider provider, uint32_t now_s,
+                                 Wait* why) const {
   const auto p = static_cast<std::size_t>(provider);
-  if (p >= cfg::kProviderCount) return now_s;
   uint32_t at = now_s;
+  Wait reason = Wait::kIdle;
+  const auto block = [&](uint32_t until, Wait cause) {
+    if (until > at) {
+      at = until;
+      reason = cause;
+    }
+  };
   if (last_start_ != kNever)
-    at = std::max(at, clampS(uint64_t{last_start_} + kGapS));
-  at = std::max(at, paused_until_[p]);
-  at = std::max(at, windows_[p].admissibleAt(now_s));
-  return std::max(at, global_window_.admissibleAt(now_s));
+    block(clampS(uint64_t{last_start_} + kGapS), Wait::kGap);
+  block(deferred_until_, Wait::kBusy);
+  if (p < cfg::kProviderCount) {
+    block(paused_until_[p], Wait::kPaused);
+    block(windows_[p].admissibleAt(now_s), Wait::kWindow);
+  }
+  block(global_window_.admissibleAt(now_s), Wait::kWindow);
+  if (why != nullptr) *why = reason;
+  return at;
 }
 
-void Scheduler::record(cfg::Provider provider, uint32_t now_s) {
+void Scheduler::sent(cfg::Provider provider, uint32_t now_s) {
   const auto p = static_cast<std::size_t>(provider);
   if (p >= cfg::kProviderCount) return;
   last_start_ = now_s;
@@ -477,38 +476,40 @@ void Scheduler::record(cfg::Provider provider, uint32_t now_s) {
   global_window_.record(now_s);
 }
 
-void Scheduler::started(const Job& job, uint32_t now_s) {
-  if (job.slot >= cfg::kCompetitionMax || ids_[job.slot] != job.competition)
-    return;
-  const auto start =
-      static_cast<int32_t>(std::min<uint32_t>(now_s, kNotStarted - 1));
-  last_[index(job.slot, job.source, job.type)] = start;
-  // The table and the live table of a source are the same request: a start
-  // of one is a start of the other.
-  if (job.type == cfg::DataType::kTable)
-    last_[index(job.slot, job.source, cfg::DataType::kLiveTable)] = start;
-  else if (job.type == cfg::DataType::kLiveTable)
-    last_[index(job.slot, job.source, cfg::DataType::kTable)] = start;
-  last_start_ = now_s;
-  windows_[static_cast<std::size_t>(job.provider)].record(now_s);
-  global_window_.record(now_s);
-}
-
-void Scheduler::finished(const Job& job, Outcome outcome, uint32_t now_s,
+void Scheduler::finished(const Job& job, Outcome outcome, uint32_t at_s,
                          bool more) {
-  if (job.slot >= cfg::kCompetitionMax || ids_[job.slot] != job.competition)
-    return;
-  const auto i = index(job.slot, job.source, job.type);
-  pending_.set(i, outcome == Outcome::kOk && more);
-  auto& failures = failures_[i];
-  if (outcome == Outcome::kOk) {
-    failures = 0;
+  if (outcome == Outcome::kDeferred) {
+    // Nothing was decided about the job; the device may be free after the
+    // gap.
+    deferred_until_ = std::max(deferred_until_, clampS(uint64_t{at_s} + kGapS));
     return;
   }
-  if (failures < UINT8_MAX) ++failures;
+  if (job.slot >= cfg::kCompetitionMax || ids_[job.slot] != job.competition)
+    return;
+  const auto i = index(job.slot, job.type);
+  // The table and the live table are the same request: a start, a success
+  // or a failure of one is one of the other (OQ-263 amendment).
+  const auto twin = job.type == cfg::DataType::kTable
+                        ? index(job.slot, cfg::DataType::kLiveTable)
+                    : job.type == cfg::DataType::kLiveTable
+                        ? index(job.slot, cfg::DataType::kTable)
+                        : i;
+  const bool continued = pending_.test(i);
+  pending_.set(i, outcome == Outcome::kOk && more);
+  // A run that made no request counts from now; a continued run keeps the
+  // start of its last request.
+  if (outcome != Outcome::kNothing || !continued)
+    last_[i] = last_[twin] =
+        static_cast<int32_t>(std::min<uint32_t>(at_s, kNotStarted - 1));
+  if (outcome == Outcome::kNothing) return;
+  const uint8_t failures = outcome == Outcome::kOk
+                               ? 0
+                               : static_cast<uint8_t>(std::min<unsigned>(
+                                     failures_[i] + 1u, UINT8_MAX));
+  failures_[i] = failures_[twin] = failures;
   if (outcome == Outcome::kRateLimited)
     paused_until_[static_cast<std::size_t>(job.provider)] =
-        clampS(uint64_t{now_s} + cfg::kProviderRateRetryS);
+        clampS(uint64_t{at_s} + cfg::kProviderRateRetryS);
 }
 
 Factors degrade(const std::array<uint32_t, kClassCount>& demand,

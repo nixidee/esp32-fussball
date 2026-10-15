@@ -15,17 +15,16 @@ Implementation: `components/web/web_service.cpp`,
 | GET `/api/v1/status`, `/schema`, `/settings` | Status (screen, own match, competition state, full build identity, heap/task minima), bounds/options and upload limits, redacted settings |
 | GET `/api/v1/session` | `{password_set, valid}` for the token the request carries |
 | GET `/api/v1/wifi`, `/selection` | Bounded scan/selection results |
-| GET `/api/v1/competitions` | The competition store: competitions with their ids and fixture pairs |
-| GET `/api/v1/fixtures?competition=ID&source=primary\|fallback` | The club's matches of a competition (by its id) for the pair picker |
+| GET `/api/v1/competitions` | The competition store: competitions with their ids |
 | GET `/api/v1/teams?competition=ID` | The teams of a competition in the shown data with the owner's short names |
 | GET `/api/v1/images`, `/images/file?id=N\|stock=crest\|background[&r=rev]` | Image inventory: library images with per-image revision, and the two roles `crest` and `background` with `replaced`, replacement `bytes` and `revision` (it changes when the role's image changes); the JPEG itself (`stock=` delivers the role's replacement, else its factory image) |
 | POST `/api/v1/session`, `/logout` | Open/close the mutation session |
 | POST or PUT `/api/v1/settings` | Strictly typed settings patch |
-| POST or PUT `/api/v1/competitions` | Replace the competition list and/or the fixture pairs |
+| POST or PUT `/api/v1/competitions` | Replace the competition list |
 | POST `/api/v1/teams` | Set or remove the owner's short name of one team |
 | PUT `/api/v1/teams` | Replace all of the owner's short names (backup import) |
 | POST `/api/v1/export` | Explicit export of the settings, the competition store and the short names |
-| POST `/api/v1/wifi/scan`, `/data/select`, `/data/fixtures`, `/data/refresh` | Start asynchronous scan, provider list, fallback fixtures or refresh |
+| POST `/api/v1/wifi/scan`, `/data/select`, `/data/refresh` | Start asynchronous scan, provider list or refresh |
 | POST `/api/v1/display` | Quick display action `{"action":"next"\|"ip"}` (same events as the buttons) |
 | POST `/api/v1/images/upload`, `/images/delete` | Upload a library image (optional `X-Image-Id` replaces one; `X-Image-Role: crest\|background` uploads the replacement of that role instead, answer `{"ok":true,"role":…}`) or delete a library image by id |
 | POST `/api/v1/images/role` | `{"role":"crest"\|"background","action":"reset"}` deletes the replacement, so the factory image shows again; `{"role":…,"action":"copy","id":N}` copies library image N as the replacement (the library image stays). Roles cannot be deleted. A replacement counts towards the image budget, not towards the ten library ids |
@@ -46,6 +45,17 @@ have priority; a user scan runs with the existing 15-second scan deadline.
 Duplicate user requests return 409 `busy`; a failed or cancelled job is never
 represented as a successful empty scan.
 
+`GET /selection` returns the owner's competition or club list started by
+`POST /data/select`: `busy` while it runs, then `items` (`id`, `name`,
+`season`; at most one page), `more`, `revision` and `error_code` (a cause
+key below; empty after success). After a failure `code` holds the short
+error code and `http` the HTTP status the provider answered with, if any. While `busy`, `wait` says what holds the
+next request of the list and `wait_s` for how many more seconds: `limit`
+(the provider's or the global window limit) or `retry` (the provider
+answered "too many requests" and is paused); `none` with `wait_s` 0 while
+the request runs or only waits for the 2-second device gap. A waiting list
+never blocks the device: the jobs of other providers run meanwhile.
+
 The schema publishes `ota_max` from the actual inactive OTA slot and
 `selection_text_max` from the shared search/country capacity. `firmware_id`
 in status is the full 64-character lowercase hexadecimal ELF SHA256 from the
@@ -55,7 +65,8 @@ The schema lists the screens in display order as `screen_order` (screen
 indices as in [CONFIGURATION.md](CONFIGURATION.md): 0 Own match, 1
 Conference, 2 Table, 3 Crest/slideshow, 4 Matchday) and the keys of a
 competition's `screens` switches as `competition_screens`. Settings carry
-`table_page_s` (table step, bounds in the schema). Status `screen` is the
+`table_page_s` (table step, bounds in the schema) and `matchday_mode`
+(matchday the Matchday screen shows: 0 current, 1 next). Status `screen` is the
 index of the shown screen, 0–4.
 Status `requests` contains each provider's request attempts since boot,
 including selection requests. It is not a daily usage or remaining-credit
@@ -111,44 +122,36 @@ on any error the previous names stay. `POST /export` returns the same
 
 ## Competitions
 
-The competitions and the fixture pairs live in their own store with its own
+The competitions live in their own store with its own
 record (see [CONFIGURATION.md](CONFIGURATION.md)); the settings JSON does not
 carry them. `GET /competitions` returns
 
 ```json
-{"competitions":[{"id":1,"active":true,"fallback_active":false,
+{"competitions":[{"id":1,"active":true,
   "primary":{"provider":0,"competition":"bl1","season":"2025","team":"40"},
-  "fallback":{"provider":0,"competition":"","season":"","team":""},
   "competition_name":"1. Bundesliga","team_name":"FC Bayern",
-  "screens":{"own_match":true,"conference":true,"matchday":true,"table":true}}],
- "fixture_pairs":[{"active":true,"swapped":false,"competition":1,
-  "primary_id":"…","secondary_id":"…"}]}
+  "screens":{"own_match":true,"conference":true,"matchday":true,"table":true}}]}
 ```
 
 `provider` is the index into the schema's `providers` list (0 `openligadb`,
 1 `api-football`, 2 `espn`, 3 `football-data`). Every competition has a stable id from 1 to 255. The device assigns it when
 an entry is created and never changes it while the entry exists; the
 position in the list only sets the display order. `screens` says on which
-screens the competition appears. A fixture pair names its competition by id.
-At most `limits.competitions` competitions (8) and `limits.fixture_pairs`
-pairs exist (schema).
+screens the competition appears. `primary` is the competition's only source
+(provider, competition, season, club; the key keeps its name for
+compatibility). At most `limits.competitions` competitions (8) exist
+(schema).
 
-`POST` or `PUT /competitions` takes `{"competitions":[…]}`,
-`{"fixture_pairs":[…]}` or both. A list in the body replaces that whole
-list; a list that is absent stays. In an entry, an absent key takes the value
+`POST` or `PUT /competitions` takes `{"competitions":[…]}`. The list in the
+body replaces the whole list; without it the list stays. Any other key,
+including `fixture_pairs`, `fallback` or `fallback_active` of earlier
+firmware, is rejected as unknown. In an entry, an absent key takes the value
 of a new entry, and an absent `id` or `id` 0 creates a new entry that the
 device gives the next free id; any other id is kept as given (a restored
 backup keeps its ids) and must be unique in the list. The store is validated as a whole (unique
-ids, pairs that reference an existing competition with a club, usable
-providers) and saved in one step. The answer is `{"ok":true,
-"competitions":[…], "fixture_pairs":[…]}` with the assigned ids. A rejected
-body answers 400 with the field path, for example
-`competitions[2].primary.competition` or `fixture_pairs[0].competition`
-(code `reference` for an unknown id).
-
-`GET /fixtures?competition=ID` and `POST /data/fixtures {"competition":ID}`
-take the competition id, not a list position; an id that does not exist
-answers 400 `reference`.
+ids, usable providers) and saved in one step. The answer is `{"ok":true,
+"competitions":[…]}` with the assigned ids. A rejected body answers 400 with
+the field path, for example `competitions[2].primary.competition`.
 
 ## Status fields
 
@@ -159,29 +162,38 @@ stack_min_free}` with the lowest free stack in bytes of every task (at most 16).
 
 `settings_source` says where the current settings come from: `stored` (the
 stored record or the last save), `initial` (no record, or after a reset),
-`rejected` (the stored record has a value outside its limits), `damaged`
+`outdated` (the stored record has an older format that this firmware no
+longer reads), `rejected` (the stored record has a value outside its limits), `damaged`
 (too long or not decodable), `unreadable` (NVS read error or no memory) or
 `no_storage` (NVS unusable). Every value except `stored` means the initial
-values apply. A `rejected` or `damaged` record is overwritten by the next
-save; `unreadable` and `no_storage` refuse saving until a reset.
-`competitions_source` reports the competition store in the same words
-(`stored` also after a one-time migration of the competitions from an older
-settings record).
+values apply. An `outdated`, `rejected` or `damaged` record is overwritten by
+the next save; `unreadable` and `no_storage` refuse saving until a reset.
+`competitions_source` reports the competition store in the same words; it is
+also `outdated` when no competition record exists and the settings record is
+outdated (older firmware kept the competitions in the settings record).
 
-`competitions` has one row per competition in list order: `{id, matches,
-provider, error}`. `own_match.competition` is the id of the competition of
-the club's current or next match.
+`competitions` has one row per competition in list order: `id`, `matches`
+(match count in the published data), `provider` (source of those matches)
+and `cause` (a cause key below; empty while the competition is fine). With
+a cause the row adds `code` (short error code), `error_provider` (the
+provider of the failed request or of the unmaintained matches) and `http`
+(the HTTP status it answered with, only when there is one).
+`last_update_ms` is the monotonic time of the competition's last successful
+request (absent before the first one). `own_match.competition` is the id of
+the competition of the club's current or next match. `provider_started` is
+false until the provider service runs; the Web UI then shows "loading"
+instead of an error.
 
 `last_update_ms` is the monotonic time of the oldest last successful
 provider request over the active competitions (0 = none yet). Data kept
 from before a reboot carry their age, so the value can be negative. `data_stale`
-is true while a competition's primary source failed and no fallback source
-stands in, or while a shown match is in its live window and the last
+is true while the last request of an active competition failed, or while a shown match is in its live window and the last
 successful match request of its competition is older than the stale limit.
-`competitions[i].error` is true for every competition whose primary source
-failed without a fallback standing in; it keeps its earlier data until a
-later request succeeds, while the other competitions update. `data_error`
-and `data_error_code` explain the first such competition. `matches_truncated`
+A competition whose last request failed has a `cause`; it keeps its earlier
+data until a later request succeeds, while the other competitions update.
+`unmaintained` is a state, not a failed request: the provider has left
+matches without a result for more than 24 hours after their kickoff.
+`matches_truncated`
 is true when not every match of a competition fitted the match store; it
 then holds the matches nearest in time and every tracked-club match that
 fits.
@@ -211,26 +223,42 @@ says why the device is not connected, in the same words as the display card:
 no credentials or AP fallback), `connecting` (scanning, connecting or retry
 backoff) and an empty string while connected.
 
-## Provider-operation error keys
+## Error causes and codes
 
-Status pairs `data_error` with `data_error_code`; selection/fallback fixture
-responses pair `error` with `error_code`. The text remains diagnostic, while
-the browser translates the stable key. The cause is reset at each operation
-boundary and successful results clear previous errors. `last_update_ms` is
-the oldest age over the competitions; competition rows report source, match
-count and an error flag, not their own fetch age. Warnings derive from existing state fields,
-without a second warnings array.
+Every competition row and every selection reports why it failed as a stable
+cause key, and a short error code for the owner to quote: provider
+abbreviation (`OLG` OpenLigaDB, `APF` API-Football, `ESPN`, `FDO`
+football-data.org), `E` and the cause number, and the HTTP status after "·"
+when the provider answered with one, e.g. `OLG E10·503`. The display shows
+the code without the HTTP status. Numbers are assigned once and never
+change. The browser translates the key into the cause and the action; the
+firmware has no text of its own beyond the display's short text. A
+successful request clears the cause.
 
-| Key | Meaning |
-|---|---|
-| empty | No error |
-| `not_started`, `provider_off` | Service not started or provider unavailable by key/opt-in |
-| `budget_day`, `busy` | The provider's daily cap is reached, or another heavy operation prevented admission |
-| `net_lost`, `time_invalid`, `settings_changed` | Network, clock or settings invalidated the operation |
-| `rate_limited`, `auth`, `not_found`, `http_error` | HTTP 429, 401/403, 404 or another non-200 response |
-| `connect` | No HTTP response; connection failed before a response |
-| `bad_response`, `too_large`, `memory` | Unreadable/incomplete result, exceeded capacity or allocation failure |
-| `other` | An unclassified failure; inspect the diagnostic text/log |
+| No. | Key | Meaning |
+|---|---|---|
+| E01 | `provider_off` | The provider needs a key or opt-in that is not set |
+| E02 | `budget_day` | The provider's or the global daily request budget is used |
+| E03 | `busy` | Another heavy operation held the network too long |
+| E04 | `net_lost` | Network lost or changed during the request |
+| E05 | `time_invalid` | No valid time |
+| E06 | `settings_changed` | Settings changed during the request |
+| E07 | `rate_limited` | HTTP 429: the provider paused the device |
+| E08 | `auth` | HTTP 401 or 403: key wrong or not allowed |
+| E09 | `not_found` | HTTP 404: competition, season or club unknown to the provider |
+| E10 | `http_error` | Any other HTTP status than 200 |
+| E11 | `connect` | No HTTP response: DNS, TCP or TLS failed |
+| E12 | `bad_response` | Response missing, incomplete or unreadable |
+| E13 | `too_large` | Response or result exceeds the device's capacity |
+| E14 | `memory` | Out of memory |
+| E15 | `other` | Any other failure |
+| E16 | `unmaintained` | The provider leaves past matches without a result (more than 24 h) |
+| E17 | `no_season` | The provider reports no current season |
+| E18 | `counter` | The daily request counter could not be stored |
+
+`GET /wifi` reports its own `error_code` keys (above); the browser shows the
+key itself as the code. Failed requests answer with a `code` of their own
+("Errors" below), shown with the HTTP status of the response.
 
 ## Sessions and request validation
 
@@ -273,7 +301,7 @@ the dotted settings path (for example `competitions[0].primary.competition`),
 a body key (`competition`, `season`, `id`, `role`, `action`, `confirm`) or a header
 (`X-Image-Id`, `X-Image-Role`). For value errors `code` is the settings reason (`invalid`,
 `range`, `type`, `unknown_key`, `too_long`, `too_many`, `required`,
-`duplicate`, `reference`, `conflict`, `none_enabled`). Other codes: `origin`
+`duplicate`, `conflict`, `none_enabled`). Other codes: `origin`
 (403), `session`, `password` (401), `trial`, `busy`, `state`, `changed` (409),
 `unknown_route`, `not_found` (404), `method` (405), `body_missing`,
 `body_incomplete`, `json`, `size`, `content`, `invalid` (400),

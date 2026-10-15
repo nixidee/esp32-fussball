@@ -112,7 +112,7 @@ struct Source {
 
 // A league or cup, optionally with an own club (OQ-195: an empty team id
 // means no own club). 'active' false pauses it (the entry stays complete and
-// visible). The fallback is a second source of another provider. The display
+// visible). One source per competition (OQ-247). The display
 // names are stored when a competition and club are picked from a provider
 // list (OQ-75); they may be empty. 'id' is the stable id the competition
 // store assigns (OQ-209; 0 = not stored yet); 'screens' has one bit per
@@ -120,9 +120,7 @@ struct Source {
 struct Competition {
   uint8_t id = 0;
   bool active = cfg::kEntryActiveDefault;
-  bool fallback_active = cfg::kFallbackActiveDefault;
   Source primary;
-  Source fallback;
   Bytes<cfg::kDisplayNameMaxBytes> competition_name;
   Bytes<cfg::kDisplayNameMaxBytes> team_name;
   uint8_t screens = cfg::kCompetitionScreensDefault;
@@ -148,23 +146,10 @@ struct ScreenStyle {
 
 const char* fieldName(Field field) noexcept;
 
-// Explicitly verified provider fixture identity of a competition (its id,
-// Competition::id): the match's id at the primary and at the fallback
-// provider; no name/time matching.
-struct FixturePair {
-  bool active = cfg::kEntryActiveDefault;
-  bool swapped = cfg::kFixturePairSwappedDefault;
-  uint8_t competition = 0;
-  Bytes<cfg::kIdBytes> primary_id, secondary_id;
-  bool operator==(const FixturePair&) const noexcept = default;
-};
-
 // The competition store (OQ-200): its own NVS record, not part of Model.
-// Fixture pairs live here too, so a competition and its pairs change in one
-// save. 'next_id' is the id the store tries first for a new entry.
+// 'next_id' is the id the store tries first for a new entry.
 struct Competitions {
   List<Competition, cfg::kCompetitionMax> entries;
-  List<FixturePair, cfg::kFixtureMappingMax> pairs;
   uint8_t next_id = 1;
   // The entry with this id, or null.
   const Competition* find(uint8_t id) const noexcept {
@@ -174,7 +159,6 @@ struct Competitions {
   }
   void clear() noexcept {
     entries.clear();
-    pairs.clear();
     next_id = 1;
   }
   bool operator==(const Competitions&) const noexcept = default;
@@ -275,14 +259,15 @@ struct Model {
   // inputs are stored but unused.
   InputRoles input_roles = inputRolesDefault(hw::kMaxInputs);
 
-  // Format 8: request plan per provider (index cfg::Provider) and the
-  // optional limit over all providers together (default off, OQ-222).
+  // Request plan per provider (index cfg::Provider) and the optional limit
+  // over all providers together (default off, OQ-222).
   ProviderPlans providers = providerPlansDefault();
   RequestLimit global_limit;
-  // Format 8 tail after the global limit (an earlier format-8 record ends
-  // before it): the matchday screen's style is screens[cfg::Screen::kMatchday]
-  // above; the table step time follows it (OQ-196).
+  // Later tail after the global limit: the matchday screen's style is
+  // screens[cfg::Screen::kMatchday] above; the table step time follows it
+  // (OQ-196), then which matchday the Matchday screen shows (OQ-244, OQ-270).
   uint16_t table_page_s = cfg::kTablePageDefaultS;
+  cfg::MatchdayMode matchday_mode = cfg::kMatchdayModeDefault;
 
   bool operator==(const Model& other) const noexcept = default;
 };
@@ -321,14 +306,14 @@ enum class Reason : uint8_t {
   kTooMany,      // more list entries than the capacity
   kRequired,     // empty where a value is needed
   kDuplicate,    // value used twice where it must be unique
-  kReference,    // points at an entry that does not exist or is inactive
   kConflict,     // contradicts another field
   kNoneEnabled,  // not a single screen enabled
 };
 const char* reasonName(Reason reason) noexcept;
 
-// A JSON path such as "competitions[1].fallback.team" (names as in the
-// settings or competitions JSON). Text beyond the buffer is cut, never written past it.
+// A JSON path such as "competitions[1].primary.team" (names as in the
+// settings or competitions JSON). Text beyond the buffer is cut, never written
+// past it.
 class FieldPath {
  public:
   FieldPath& key(const char* name) noexcept {
@@ -385,11 +370,8 @@ bool validate(const Model& model, Field* invalid = nullptr,
               Violation* violation = nullptr,
               const Limits& limits = {}) noexcept;
 
-// True if every competition and fixture pair is within its limits: ids set
-// and unique, the primary competition given, the fallback complete while
-// active and of another provider, the club given at both sources or at
-// neither (OQ-195), screen bits known, pairs referring to an existing
-// competition (by id) whose fallback is active and unique per competition.
+// True if every competition is within its limits: ids set and unique, the
+// competition given (the club is optional, OQ-195) and screen bits known.
 // Otherwise *violation (if given) names the first rejected value in the
 // competitions JSON.
 bool validate(const Competitions& competitions,
@@ -398,7 +380,7 @@ bool validate(const Competitions& competitions,
 // True if 'a' and 'b' agree in every value that provider requests or the
 // fetched match data depend on: both provider keys, the ESPN opt-in and demo
 // mode; for the competitions their order, ids, active flags and sources (not
-// display names or screen switches) and the fixture pairs. A save that
+// display names or screen switches). A save that
 // changes one of them discards the fetched data; any other save keeps it.
 bool sameProviderData(const Model& a, const Model& b) noexcept;
 bool sameProviderData(const Competitions& a, const Competitions& b) noexcept;
@@ -407,8 +389,7 @@ bool sameProviderData(const Competitions& a, const Competitions& b) noexcept;
 // the opt-in, API-Football and football-data.org need their key.
 bool providerUsable(cfg::Provider provider, const Model& model) noexcept;
 
-// True if every active competition uses only usable providers (the primary
-// source, and the fallback source while it is active); otherwise
+// True if every active competition uses only a usable provider; otherwise
 // *violation (if given) names the first such provider field with kConflict.
 // Checked when settings or competitions are changed, not when a stored
 // record is loaded, so an older record keeps its values.

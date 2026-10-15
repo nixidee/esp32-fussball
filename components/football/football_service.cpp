@@ -58,7 +58,7 @@ plan::Request request;
 settings::Competitions routes;
 
 // Per route (mutex-protected; written by the worker). 'key' hashes the
-// competition's sources and pairs: a changed key drops its stored data.
+// competition's source: a changed key drops its stored data.
 struct Slot {
   uint8_t id = 0;
   bool active = false;
@@ -66,31 +66,33 @@ struct Slot {
   // Monotonic ms of the last successful request of any data type, and of
   // the last successful match request (fixtures or live).
   int64_t fetched_ms = 0, matches_ms = 0;
-  // The primary source's last request failed; 'reason' and 'cause' explain
-  // it (static texts).
-  bool failed = false;
-  const char* reason = nullptr;
+  // The source's last request failed: why, the provider asked and its HTTP
+  // error status (0 = none). 'unmaintained': the last successful match
+  // request still held an old match without a result (OQ-281).
+  bool failed = false, unmaintained = false;
   Cause cause = Cause::kNone;
-  // Kept data (worker only): UTC second each kept data type of each source
-  // last completed (0 = never), new data since the last write, whether the
-  // competition file holds this slot's data and its size, the monotonic ms
-  // of the last write attempt, and the UTC second a loaded file was written
-  // while no request has succeeded since (0 = none).
-  std::array<std::array<int64_t, persist::kKeptTypes>, schedule::kSourceCount>
-      done{};
+  cfg::Provider provider = cfg::kProviderDefault;
+  uint16_t http = 0;
+  // Kept data (worker only): UTC second each kept data type last completed (0 =
+  // never), new data since the last write, whether the competition file holds
+  // this slot's data and its size, the monotonic ms of the last write attempt,
+  // and the UTC second a loaded file was written while no request has succeeded
+  // since (0 = none).
+  std::array<int64_t, persist::kKeptTypes> done{};
   bool dirty = false, on_file = false;
   uint32_t file_bytes = 0;
   int64_t written_ms = 0, restored_utc = 0;
 };
 std::array<Slot, cfg::kCompetitionMax> slots{};
-uint8_t route_count = 0, table_competition = 0;
+// 'demo_competition': the competition the demo data fills.
+uint8_t route_count = 0, demo_competition = 0;
 bool configured = false, demo_mode = false;
 uint32_t revision = 0, published_generation = 0;
 uint32_t requests[cfg::kProviderCount]{};
-// Bit i set: route i failed and no fallback route stands in.
+// Bit i set: route i failed. 'states': what publish() derived from the
+// slots for the readers (mutex-protected).
 uint8_t error_routes = 0;
-Text<96> error, routing_notice;
-Cause error_cause = Cause::kNone;
+CompetitionStates states{};
 int64_t retry_ms = 0, due_ms = 0;
 Cadence cadence_now = Cadence::kNone;
 // UTC day of the daily ledgers (worker only).
@@ -148,20 +150,9 @@ uint32_t sourceHash(uint32_t hash, const settings::Source& s) {
   hash = fnv(hash, s.season.view());
   return fnv(hash, s.team.view());
 }
-// What the stored data of a competition depends on: its sources, whether
-// the fallback is active, and its fixture pairs.
+// What the stored data of a competition depends on: its source.
 uint32_t routeKey(const settings::Competition& e) {
-  uint32_t hash = fnv(2166136261u, e.id);
-  hash = sourceHash(hash, e.primary);
-  hash = sourceHash(hash, e.fallback);
-  hash = fnv(hash, e.fallback_active ? 1u : 0u);
-  for (const auto& pair : routes.pairs) {
-    if (pair.competition != e.id) continue;
-    hash = fnv(hash, (pair.active ? 1u : 0u) | (pair.swapped ? 2u : 0u));
-    hash = fnv(hash, pair.primary_id.view());
-    hash = fnv(hash, pair.secondary_id.view());
-  }
-  return hash;
+  return sourceHash(fnv(2166136261u, e.id), e.primary);
 }
 // Per provider, what its access depends on: its key (API-Football,
 // football-data.org) or the ESPN opt-in. A change drops the data of the
@@ -184,11 +175,8 @@ uint8_t changedProviders(const Access& a, const Access& b) {
   return mask;
 }
 bool usesAny(const settings::Competition& e, uint8_t providers) {
-  const auto bit = [](const settings::Source& s) {
-    return s.competition.empty() ? 0u
-                                 : 1u << static_cast<unsigned>(s.provider);
-  };
-  return ((bit(e.primary) | bit(e.fallback)) & providers) != 0;
+  return !e.primary.competition.empty() &&
+         ((1u << static_cast<unsigned>(e.primary.provider)) & providers) != 0;
 }
 const Slot* slotOf(uint8_t competition) {
   for (uint8_t i = 0; i < route_count; ++i)
@@ -196,9 +184,8 @@ const Slot* slotOf(uint8_t competition) {
   return nullptr;
 }
 
-// Why the last get() failed. Provider task only; the code pairs the text and
-// the cause with the error they explain.
-const char* failure = nullptr;
+// Why the last get() failed. Provider task only; the code pairs the cause
+// with the error it explains.
 Cause failure_cause = Cause::kNone;
 esp_err_t failure_code = ESP_OK;
 // HTTP status of the last get() that failed after sending (0 = none).
@@ -207,25 +194,18 @@ int failure_status = 0;
 // connection, not from a local refusal).
 bool sent = false;
 void clearFailure() {
-  failure = nullptr;
   failure_cause = Cause::kNone;
   failure_code = ESP_OK;
   failure_status = 0;
   sent = false;
 }
-esp_err_t stop(const char* why, esp_err_t err, Cause cause) {
-  failure = why;
+esp_err_t stop(esp_err_t err, Cause cause) {
   failure_cause = cause;
   failure_code = err;
   return err;
 }
-// Distinct text for the logs and the Web UI; plain error name otherwise.
-const char* reason(esp_err_t err) {
-  return failure != nullptr && failure_code == err ? failure
-                                                   : esp_err_to_name(err);
-}
-// Stable key behind reason(): the cause recorded for this error, else one
-// derived from the plain error code (failures outside get()).
+// The cause recorded for this error, else one derived from the plain error
+// code (failures outside get()).
 Cause causeOf(esp_err_t err) {
   if (failure_cause != Cause::kNone && failure_code == err)
     return failure_cause;
@@ -235,6 +215,14 @@ Cause causeOf(esp_err_t err) {
     case ESP_ERR_INVALID_RESPONSE: return Cause::kBadResponse;
     default: return Cause::kOther;
   }
+}
+// The HTTP error status behind 'err' (0 = none: refused before sending, no
+// response, or a 2xx response that could not be used).
+uint16_t httpOf(esp_err_t err) {
+  if (!sent || failure_code != err) return 0;
+  return failure_status >= 300 && failure_status <= UINT16_MAX
+             ? static_cast<uint16_t>(failure_status)
+             : 0;
 }
 // A request that was sent: the error of fetchJson() and the HTTP status it
 // received (0 = none, so no response came).
@@ -266,47 +254,36 @@ bool interruption(esp_err_t err) {
   return failure_code == err && (failure_cause == Cause::kSettings ||
                                  failure_cause == Cause::kNetwork);
 }
-// A scheduled job's request (the scheduler admitted it and counts it), or a
-// request outside the jobs (owner's selection lists, fixture picker) that
-// waits for the scheduler's device gap and window limits and is counted
-// there. 'body' caps the response body (plan::Request::body); the owner's
-// selection lists always get cfg::kSelectionBodyBytes.
-enum class Kind : uint8_t { kJob, kList, kPick };
+// One provider request the scheduler has admitted (a job, or a step of the
+// owner's selection that asked admissibleAt()). It never waits: a busy heavy
+// token, a used daily budget or changed settings refuse it before anything is
+// sent, and the caller reschedules. The scheduler counts the request when it
+// is really sent (sent()); 'sent_s' keeps that second for finished(). 'body'
+// caps the response body (plan::Request::body).
+uint32_t sent_s = 0;
 esp_err_t get(const char* url, const char* array, bool optional,
               cfg::Provider p, const settings::Model& m, uint32_t generation,
               uint32_t epoch, JsonConsumer consumer, void* context,
-              Kind kind, const bool* enough = nullptr,
+              const bool* enough = nullptr,
               std::size_t body = cfg::kProviderBodyBytes) {
   clearFailure();
   // One log line per provider request, sent or not. Keys travel in headers,
   // never in the URL.
   const auto skip = [url](const char* why, esp_err_t err, Cause cause) {
     ESP_LOGW("provider", "not sent: %s (%s)", url, why);
-    return stop(why, err, cause);
+    return stop(err, cause);
   };
   if (!settings::providerUsable(p, m))
     return skip("provider not enabled", ESP_ERR_INVALID_STATE,
                 Cause::kProviderOff);
-  if (kind != Kind::kJob) {
-    for (;;) {
-      if (const auto stopped = interrupted(generation, epoch))
-        return skip(stopped.why, ESP_ERR_INVALID_STATE, stopped.cause);
-      const auto now_s =
-          static_cast<uint32_t>(timekeeping::monotonicMs() / 1000);
-      if (scheduler.admissibleAt(p, now_s) <= now_s) break;
-      vTaskDelay(pdMS_TO_TICKS(cfg::kProviderWaitSliceMs));
-    }
-  }
   if (const auto stopped = interrupted(generation, epoch))
     return skip(stopped.why, ESP_ERR_INVALID_STATE, stopped.cause);
-  const int64_t deadline =
-      timekeeping::monotonicMs() + cfg::kOperationDeadlineMs;
-  while (!network::tryHeavy()) {
-    if (const auto stopped = interrupted(generation, epoch))
-      return skip(stopped.why, ESP_ERR_INVALID_STATE, stopped.cause);
-    if (timekeeping::monotonicMs() >= deadline)
-      return skip("operation busy", ESP_ERR_TIMEOUT, Cause::kBusy);
-    vTaskDelay(pdMS_TO_TICKS(cfg::kProviderWaitSliceMs));
+  // Another heavy operation (OTA, upload, image work) runs: the request
+  // waits for the next pass. Debug level, since it repeats until the token
+  // is free.
+  if (!network::tryHeavy()) {
+    ESP_LOGD("provider", "not sent: %s (operation busy)", url);
+    return stop(ESP_ERR_TIMEOUT, Cause::kBusy);
   }
   const auto index = static_cast<unsigned>(p);
   const auto& global = m.global_limit;
@@ -322,11 +299,10 @@ esp_err_t get(const char* url, const char* array, bool optional,
     network::releaseHeavy();
     if (admitted == ESP_ERR_NOT_ALLOWED)
       return skip("daily budget used", admitted, Cause::kBudget);
-    return skip("budget unavailable", admitted, Cause::kOther);
+    return skip("budget unavailable", admitted, Cause::kCounter);
   }
-  if (kind != Kind::kJob)
-    scheduler.record(p, static_cast<uint32_t>(timekeeping::monotonicMs() /
-                                              1000));
+  sent_s = static_cast<uint32_t>(timekeeping::monotonicMs() / 1000);
+  scheduler.sent(p, sent_s);
   lock();
   ++requests[index];
   unlock();
@@ -334,9 +310,7 @@ esp_err_t get(const char* url, const char* array, bool optional,
   FetchResult result;
   const int64_t started = timekeeping::monotonicMs();
   const auto err = fetchJson(url, array, p, m, generation, consumer, context,
-                             kind == Kind::kList ? cfg::kSelectionBodyBytes
-                                                 : body,
-                             &result, optional, enough);
+                             body, &result, optional, enough);
   network::releaseHeavy();
   const auto elapsed =
       static_cast<long long>(timekeeping::monotonicMs() - started);
@@ -348,7 +322,7 @@ esp_err_t get(const char* url, const char* array, bool optional,
              url, result.status, static_cast<unsigned>(result.bytes), elapsed,
              esp_err_to_name(err), result.stage, result.socket_error);
     if (const auto stopped = interrupted(generation, epoch))
-      stop(stopped.why, err, stopped.cause);
+      stop(err, stopped.cause);
     else {
       failure_cause = fetchCause(err, result.status);
       failure_code = err;
@@ -358,7 +332,7 @@ esp_err_t get(const char* url, const char* array, bool optional,
   return err;
 }
 // fetchJson consumer of the provider plan: each element is mapped into the
-// store under the mutex (the pick callback runs inside it).
+// store under the mutex.
 bool consumeLocked(ArduinoJson::JsonVariantConst element, void*) {
   lock();
   const bool ok = plan::Planner::consume(element, &planner);
@@ -366,37 +340,30 @@ bool consumeLocked(ArduinoJson::JsonVariantConst element, void*) {
   return ok;
 }
 
-bool covered(uint8_t competition) {
-  const auto n = store.notices(competition);
-  return (n & kNoticeFallbackRoute) != 0 && (n & kNoticeFallbackFailed) == 0;
-}
-// Under the mutex: the shown sources, the error summary and the routing
-// notice after the store or the slots changed; a new revision.
+// Under the mutex: the shown sources and the competition states after the
+// store or the slots changed; a new revision.
 void publish() {
   shown = {};
   if (demo_mode) {
-    shown.add(view::Source{table_competition, cfg::Provider::kOpenLigaDb, 0});
+    shown.add(view::Source{demo_competition, cfg::Provider::kOpenLigaDb, 0});
   } else {
-    for (const auto& entry : routes.entries) shown.add(entry, store);
+    for (const auto& entry : routes.entries) shown.add(entry);
   }
   error_routes = 0;
-  error = {};
-  error_cause = Cause::kNone;
-  routing_notice = {};
+  states = {};
   for (uint8_t i = 0; i < route_count; ++i) {
     const auto& slot = slots[i];
+    auto& state = states[i];
+    state.id = slot.id;
+    state.active = slot.active;
+    state.fetched_ms = slot.fetched_ms;
     if (!slot.active) continue;
-    const auto notices = store.notices(slot.id);
-    if ((notices & kNoticeFallbackFailed) != 0)
-      routing_notice.assign("fallback failed");
-    else if ((notices & kNoticeFallbackRoute) != 0 && routing_notice.empty())
-      routing_notice.assign("fallback active");
-    if (!slot.failed || covered(slot.id)) continue;
-    if (error_routes == 0) {
-      error.assign(slot.reason ? slot.reason : "");
-      error_cause = slot.cause;
-    }
-    error_routes |= 1u << i;
+    if (slot.failed) error_routes |= 1u << i;
+    state.cause = slot.failed         ? slot.cause
+                  : slot.unmaintained ? Cause::kUnmaintained
+                                      : Cause::kNone;
+    state.provider = slot.provider;
+    state.http = slot.failed ? slot.http : 0;
   }
   ++revision;
 }
@@ -410,25 +377,32 @@ int64_t oldestFetch() {
       oldest = slots[i].fetched_ms;
   return oldest;
 }
-// Under the mutex: a competition failed without a fallback route, or a
-// shown match is in its live window while its competition's last
-// successful match request is older than kDataStaleS. 'utc' 0 = no clock.
-bool staleNow(int64_t utc, int64_t now_ms) {
-  if (demo_mode) return false;
-  if (error_routes) return true;
-  if (utc == 0) return false;
+// Under the mutex: marks the competitions of 'out' whose last request
+// failed, or with a shown match in its live window while the competition's
+// last successful match request is older than kDataStaleS; true if any.
+// 'utc' 0 = no clock.
+bool markStale(CompetitionStates& out, int64_t utc, int64_t now_ms) {
+  bool any = false;
+  for (uint8_t i = 0; i < route_count; ++i) {
+    out[i].stale = !demo_mode && ((error_routes >> i) & 1) != 0;
+    any |= out[i].stale;
+  }
+  if (demo_mode || utc == 0) return any;
   for (std::size_t i = 0; i < store.matchCount(); ++i) {
     const auto& m = store.match(i);
     uint32_t start = 0, end = 0;
     if (!shown.shows(m) || !schedule::liveWindow(m, start, end) ||
         utc < start || utc > end)
       continue;
-    const auto* slot = slotOf(m.competition);
-    if (slot == nullptr || slot->matches_ms == 0 ||
-        now_ms - slot->matches_ms > cfg::kDataStaleS * 1000LL)
-      return true;
+    for (uint8_t r = 0; r < route_count; ++r) {
+      const auto& slot = slots[r];
+      if (slot.id != m.competition || out[r].stale) continue;
+      out[r].stale = slot.matches_ms == 0 ||
+                     now_ms - slot.matches_ms > cfg::kDataStaleS * 1000LL;
+      any |= out[r].stale;
+    }
   }
-  return false;
+  return any;
 }
 
 // Kept data (docs/DATA_FLOW.md "Kept data"): one competition file per
@@ -552,11 +526,8 @@ persist::Saved savedOf(uint8_t i, int64_t utc) {
   saved.route_key = slot.key;
   saved.saved_utc = utc;
   saved.notices = store.notices(slot.id);
-  for (std::size_t s = 0; s < schedule::kSourceCount; ++s) {
-    saved.sources[s].resolved = planner.saved(
-        i, static_cast<schedule::Source>(s), routes.entries[i]);
-    saved.sources[s].done = slot.done[s];
-  }
+  saved.source.resolved = planner.saved(i, routes.entries[i]);
+  saved.source.done = slot.done;
   return saved;
 }
 // A match of 'competition' is in its live window at 'utc'.
@@ -686,12 +657,9 @@ void loadKept() {
       rewind(file);
       lock();
       ok = persist::load(fileRead, file, store, nowClock());
-      for (std::size_t s = 0; ok && s < schedule::kSourceCount; ++s) {
-        planner.restore(i, static_cast<schedule::Source>(s), routes.entries[i],
-                        saved.sources[s].resolved);
-        slot.done[s] = saved.sources[s].done;
-      }
       if (ok) {
+        planner.restore(i, routes.entries[i], saved.source.resolved);
+        slot.done = saved.source.done;
         slot.on_file = true;
         slot.file_bytes = static_cast<uint32_t>(info.st_size);
         slot.restored_utc = saved.saved_utc;
@@ -719,16 +687,14 @@ void seedKept(int64_t utc) {
   for (uint8_t i = 0; i < route_count; ++i) {
     const auto& slot = slots[i];
     if (!slot.active || !slot.on_file) continue;
-    for (std::size_t s = 0; s < schedule::kSourceCount; ++s)
-      for (std::size_t t = 0; t < persist::kKeptTypes; ++t) {
-        const int64_t done = slot.done[s][t];
-        if (done <= 0 || done > utc) continue;
-        scheduler.seed(i, slot.id, static_cast<schedule::Source>(s),
-                       static_cast<cfg::DataType>(t),
-                       static_cast<uint32_t>(std::min<int64_t>(
-                           utc - done, UINT32_MAX)),
-                       now_s);
-      }
+    for (std::size_t t = 0; t < persist::kKeptTypes; ++t) {
+      const int64_t done = slot.done[t];
+      if (done <= 0 || done > utc) continue;
+      scheduler.seed(
+          i, slot.id, static_cast<cfg::DataType>(t),
+          static_cast<uint32_t>(std::min<int64_t>(utc - done, UINT32_MAX)),
+          now_s);
+    }
   }
   lock();
   for (uint8_t i = 0; i < route_count; ++i)
@@ -756,7 +722,7 @@ void relost() {
 
 // Applies a new data generation: boot and a changed demo mode ('reset')
 // drop every stored match and start every job afresh; else only
-// competitions whose sources or pairs changed, that were removed or paused,
+// competitions whose source changed, that were removed or paused,
 // or that use a provider in 'providers' (its key or the ESPN opt-in
 // changed) lose their data and jobs, the others keep theirs.
 void applyRoutes(const settings::Model& model, uint32_t generation,
@@ -782,7 +748,7 @@ void applyRoutes(const settings::Model& model, uint32_t generation,
     next[i].active = entry.active && entry.id != 0;
     next[i].key = key;
     if (!kept && entry.id != 0) store.removeCompetition(entry.id);
-    // The same competition in the same slot with other sources: its jobs
+    // The same competition in the same slot with another source: its jobs
     // start afresh (a changed id in a slot does that by itself).
     if (!kept && slots[i].id == entry.id) scheduler.forget(i);
     // Season, round and failure state start afresh with the jobs.
@@ -795,18 +761,17 @@ void applyRoutes(const settings::Model& model, uint32_t generation,
   }
   slots = next;
   route_count = count;
-  planner.setPairs(routes.pairs);
   demo_mode = model.demo;
-  table_competition = 0;
+  demo_competition = 0;
   configured = model.demo;
   for (uint8_t i = 0; i < count; ++i)
     if (slots[i].active) {
       configured = true;
-      if (table_competition == 0) table_competition = slots[i].id;
+      if (demo_competition == 0) demo_competition = slots[i].id;
     }
   if (model.demo) {
-    if (table_competition == 0) table_competition = 1;
-    view::demo(store, table_competition);
+    if (demo_competition == 0) demo_competition = 1;
+    view::demo(store, demo_competition);
     const auto now = timekeeping::monotonicMs();
     for (auto& slot : slots) slot.fetched_ms = slot.matches_ms = now;
   }
@@ -819,28 +784,10 @@ void applyRoutes(const settings::Model& model, uint32_t generation,
   sweep_pending = true;
   events::post(events::Event::kDataUpdated);
 }
-// Local UTC offset at 'utc' in seconds.
-int64_t daysFromCivil(int y, unsigned m, unsigned d) {
-  y -= m <= 2;
-  const int64_t era = (y >= 0 ? y : y - 399) / 400;
-  const auto yoe = static_cast<unsigned>(y - era * 400);
-  const unsigned doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;
-  const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-  return era * 146097 + static_cast<int64_t>(doe) - 719468;
-}
-int32_t localOffset(int64_t utc) {
-  std::tm local{};
-  timekeeping::toLocal(static_cast<time_t>(utc), local);
-  const int64_t as_utc =
-      daysFromCivil(local.tm_year + 1900, local.tm_mon + 1, local.tm_mday) *
-          86400 +
-      local.tm_hour * 3600 + local.tm_min * 60 + local.tm_sec;
-  return static_cast<int32_t>(as_utc - utc);
-}
 // Every kStoreMaintenanceS: estimated phases and minutes follow the clock,
 // passed matchdays go (OQ-202), unused directory entries are freed.
 void maintain(int64_t utc) {
-  const int32_t offset = localOffset(utc);
+  const int32_t offset = timekeeping::localOffset(utc);
   lock();
   store.estimateAll(utc);
   for (uint8_t i = 0; i < route_count; ++i)
@@ -851,6 +798,24 @@ void maintain(int64_t utc) {
   events::post(events::Event::kDataUpdated);
 }
 
+// How get() ended, for Planner::complete(): refusals before the send keep
+// apart a busy token (wait, keep the run), a used daily budget and changed
+// settings or network (wait, start the run again) and any other refusal
+// (a failure).
+plan::Fetch fetchOf(esp_err_t err) {
+  if (err == ESP_OK) return plan::Fetch::kOk;
+  if (interruption(err)) return plan::Fetch::kInterrupted;
+  if (!sent) {
+    if (failure_code == err && failure_cause == Cause::kBusy)
+      return plan::Fetch::kBusy;
+    if (failure_code == err && failure_cause == Cause::kBudget)
+      return plan::Fetch::kCapped;
+    return plan::Fetch::kRefused;
+  }
+  return failure_cause == Cause::kRateLimited ? plan::Fetch::kRateLimited
+                                              : plan::Fetch::kFailed;
+}
+
 // Runs one request of 'job' and reports its outcome to the scheduler.
 void runJob(const schedule::Job& job, const settings::Model& model,
             uint32_t generation, uint32_t epoch) {
@@ -859,70 +824,65 @@ void runJob(const schedule::Job& job, const settings::Model& model,
   const bool has = planner.request(job, entry, store, nowClock(), request);
   unlock();
   if (!has) {
-    scheduler.finished(job, schedule::Outcome::kOk,
-                       static_cast<uint32_t>(timekeeping::monotonicMs() /
-                                             1000));
+    scheduler.finished(
+        job, schedule::Outcome::kNothing,
+        static_cast<uint32_t>(timekeeping::monotonicMs() / 1000));
     return;
   }
-  // Recorded before the request: a refused request counts too, so a
-  // provider that refuses cannot make the loop spin.
-  scheduler.started(job, static_cast<uint32_t>(timekeeping::monotonicMs() /
-                                               1000));
   busy.store(true);
-  auto err = get(request.url, request.array, request.optional, job.provider,
-                 model, generation, epoch, consumeLocked, nullptr, Kind::kJob,
-                 nullptr, request.body);
+  auto err =
+      get(request.url, request.array, request.optional, job.provider, model,
+          generation, epoch, consumeLocked, nullptr, nullptr, request.body);
   busy.store(false);
   const auto clock = nowClock();
-  auto outcome = schedule::Outcome::kOk;
-  bool more = false, ok = false;
+  const auto fetch = fetchOf(err);
+  const int32_t offset =
+      clock.utc > 0 ? timekeeping::localOffset(clock.utc) : 0;
   lock();
-  if (err == ESP_OK) {
-    const auto step = planner.finish(true, clock);
-    if (step == plan::Step::kInvalid) {
-      err = stop("no current season", ESP_ERR_INVALID_RESPONSE,
-                 Cause::kBadResponse);
-      outcome = schedule::Outcome::kFailed;
-    } else {
-      ok = true;
-      more = step == plan::Step::kMore;
-    }
-  } else if (interruption(err)) {
-    // Settings or network changed: the run starts again soon, no backoff.
-    planner.abort();
-    more = true;
-  } else if (!sent) {
-    planner.abort();
-    outcome = schedule::Outcome::kFailed;
-  } else {
-    planner.finish(false, clock);
-    outcome = failure_cause == Cause::kRateLimited
-                  ? schedule::Outcome::kRateLimited
-                  : schedule::Outcome::kFailed;
+  const auto done = planner.complete(fetch, clock);
+  if (done.invalid) {
+    ESP_LOGW("provider", "no current season");
+    err = stop(ESP_ERR_INVALID_RESPONSE, Cause::kNoSeason);
   }
+  const auto outcome = done.outcome;
+  const bool more = done.more, ok = outcome == schedule::Outcome::kOk;
   auto& slot = slots[job.slot];
   const bool matches = job.type == cfg::DataType::kFixtures ||
                        job.type == cfg::DataType::kLive;
   if (ok) {
     slot.fetched_ms = timekeeping::monotonicMs();
     if (matches) slot.matches_ms = slot.fetched_ms;
-    if (job.source == schedule::Source::kPrimary) slot.failed = false;
+    slot.failed = false;
     slot.dirty = true;
     slot.restored_utc = 0;
     const auto type = static_cast<std::size_t>(job.type);
     if (!more && type < persist::kKeptTypes && clock.utc > 0)
-      slot.done[static_cast<std::size_t>(job.source)][type] = clock.utc;
-  } else if (outcome != schedule::Outcome::kOk &&
-             job.source == schedule::Source::kPrimary) {
+      slot.done[type] = clock.utc;
+    // Asked before expire() drops the passed matchday that holds such a
+    // match.
+    if (matches && clock.utc > 0) {
+      slot.unmaintained = store.unmaintained(slot.id, clock.utc);
+      slot.provider = job.provider;
+    }
+    // A provider still serving a passed matchday (an old OpenLigaDB current
+    // round) re-inserts it: drop it now, not at the next maintenance.
+    if (matches && clock.utc > 0) store.expire(slot.id, clock.utc, offset);
+  } else if (outcome != schedule::Outcome::kDeferred ||
+             fetch == plan::Fetch::kCapped) {
+    // A busy token or changed settings is no failure of the source; a used
+    // daily budget stays visible on the route.
     slot.failed = true;
-    slot.reason = reason(err);
     slot.cause = causeOf(err);
+    slot.provider = job.provider;
+    slot.http = httpOf(err);
   }
   publish();
   unlock();
-  scheduler.finished(job, outcome,
-                     static_cast<uint32_t>(timekeeping::monotonicMs() / 1000),
-                     more);
+  // A sent request counts from its start, a refusal from now.
+  scheduler.finished(
+      job, outcome,
+      sent ? sent_s : static_cast<uint32_t>(timekeeping::monotonicMs() / 1000),
+      more);
   events::post(events::Event::kDataUpdated);
 }
 
@@ -1001,225 +961,227 @@ void finishSelection(esp_err_t err) {
   lock();
   if (err != ESP_OK) {
     // Distinct codes so the Web UI can explain each cause.
-    selection_state.error.assign(reason(err));
     selection_state.cause = causeOf(err);
+    selection_state.http = httpOf(err);
     selection_state.count = 0;
   } else {
-    selection_state.error = {};
     selection_state.cause = Cause::kNone;
+    selection_state.http = 0;
   }
   selection_state.busy = false;
+  selection_state.wait = Cadence::kNone;
+  selection_state.wait_ms = 0;
   ++selection_state.revision;
   // Cleared under the mutex: select() checks it there before a new job.
   selecting.store(false);
   unlock();
 }
-// Picker entry: provider match id, kickoff (UTC seconds as text, empty if
-// unknown) and "home - away".
-void fixtureEntry(uint32_t id, uint32_t kickoff, const char* home,
-                  const char* away, Selection& out) {
-  out = {};
-  char text[24];
-  snprintf(text, sizeof(text), "%lu", static_cast<unsigned long>(id));
-  out.id.assign(text);
-  if (kickoff != 0) {
-    snprintf(text, sizeof(text), "%lu", static_cast<unsigned long>(kickoff));
-    out.season.assign(text);
-  }
-  char label[2 * cfg::kNameBytes + 4];
-  snprintf(label, sizeof(label), "%s - %s", home, away);
-  out.name.assign(label);
+// The owner's selection as a resumable work item (worker only, OQ-261): one
+// request per worker pass, admitted by the scheduler like a job. While the
+// provider's window limits or a pause hold it, the worker serves the other
+// jobs and the Web UI shows until when the selection waits; a busy heavy
+// token retries after the device gap, for at most kOperationDeadlineMs.
+// Stages: the provider's current season (a club list at OpenLigaDB and
+// API-Football needs it in the URL), the list, and one more list attempt
+// after a brief failure.
+struct SelectionRun {
+  enum Stage : uint8_t { kSeason, kList, kRetry };
+  bool active = false;
+  Stage stage = kList;
+  uint32_t generation = 0, epoch = 0;
+  // Monotonic ms the heavy token first refused this stage (0 = not busy).
+  int64_t busy_since_ms = 0;
+  // The season in the club list's URL (the owner's, or the current one).
+  char season[33]{};
+};
+SelectionRun run;
+void endSelection(esp_err_t err) {
+  run = {};
+  finishSelection(err);
 }
-// Pick callback of the fixture picker; runs inside consumeLocked(), so the
-// mutex is held already. A match listed twice (two requests of the run)
-// is added once.
-void pickMatch(uint32_t id, uint32_t kickoff, const char* home,
-               const char* away, void*) {
-  Selection entry;
-  fixtureEntry(id, kickoff, home, away, entry);
-  for (uint16_t i = 0; i < selection_state.count; ++i)
-    if (strcmp(selections[i].id.data, entry.id.data) == 0) return;
-  if (selection_state.count >= cfg::kSelectionEntries)
-    selection_state.more = true;
-  else
-    selections[selection_state.count++] = entry;
+// Season consumers: each OpenLigaDB match row carries leagueSeason; an
+// API-Football league row marks its current season.
+bool seasonRow(ArduinoJson::JsonVariantConst row, void* context) {
+  auto* r = static_cast<SelectionRun*>(context);
+  if (!row["leagueSeason"].is<int>()) return false;
+  snprintf(r->season, sizeof(r->season), "%d", row["leagueSeason"].as<int>());
+  return true;
 }
-// Loads the club's matches at the fallback source of competition 'route' into
-// the selection table: the fallback's fixtures run in pick mode, so the
-// picker sees the same matches the fallback would pair.
-esp_err_t runFixtures(const settings::Model& model, uint32_t generation,
-                      uint32_t epoch, uint8_t route) {
-  if (route >= routes.entries.size() ||
-      !routes.entries[route].fallback.complete())
-    return ESP_ERR_INVALID_ARG;
-  const auto& entry = routes.entries[route];
-  planner.beginPick();
-  for (;;) {
-    lock();
-    const bool has = planner.pickRequest(entry, store, nowClock(), request,
-                                         pickMatch, nullptr);
-    unlock();
-    if (!has) return ESP_OK;
-    const auto err =
-        get(request.url, request.array, request.optional,
-            entry.fallback.provider, model, generation, epoch, consumeLocked,
-            nullptr, Kind::kPick);
-    lock();
-    const auto step = planner.finish(err == ESP_OK, nowClock());
-    unlock();
-    if (err != ESP_OK) return err;
-    if (step == plan::Step::kInvalid)
-      return stop("no current season", ESP_ERR_INVALID_RESPONSE,
-                  Cause::kBadResponse);
-    if (step == plan::Step::kDone) return ESP_OK;
-  }
-}
-bool season(ArduinoJson::JsonVariantConst row, void* context) {
-  auto* route = static_cast<settings::Source*>(context);
-  if (row["leagueSeason"].is<int>()) {
-    char b[cfg::kSeasonMaxBytes + 1];
-    snprintf(b, sizeof(b), "%d", row["leagueSeason"].as<int>());
-    return route->season.assign(b);
-  }
-  return false;
-}
-// API-Football league row: the season marked current.
-bool apiSeason(ArduinoJson::JsonVariantConst row, void* context) {
-  auto* route = static_cast<settings::Source*>(context);
+bool apiSeasonRow(ArduinoJson::JsonVariantConst row, void* context) {
+  auto* r = static_cast<SelectionRun*>(context);
   for (auto item : row["seasons"].as<ArduinoJson::JsonArrayConst>())
     if (item["current"].as<bool>() && item["year"].is<int>()) {
-      char b[cfg::kSeasonMaxBytes + 1];
-      snprintf(b, sizeof(b), "%d", item["year"].as<int>());
-      return route->season.assign(b);
+      snprintf(r->season, sizeof(r->season), "%d", item["year"].as<int>());
+      return true;
     }
   return true;
 }
-// Fills the empty season of 'route' with the provider's current season (one
-// request) for a club list. Only OpenLigaDB and API-Football need it in
-// their URLs; the others select their current season themselves.
-esp_err_t currentSeason(settings::Source& route, const char* comp_url,
-                        const settings::Model& model, uint32_t generation,
-                        uint32_t epoch) {
-  char url[160];
-  esp_err_t err;
-  if (route.provider == cfg::Provider::kOpenLigaDb) {
-    // The current round's matches carry leagueSeason (about 18 KB for bl1).
-    snprintf(url, sizeof(url), "https://api.openligadb.de/getmatchdata/%s",
-             comp_url);
-    err = get(url, "", false, route.provider, model, generation, epoch, season,
-              &route, Kind::kList);
-  } else {
-    snprintf(url, sizeof(url),
+// The URL and array key of the current stage of 'request'.
+const char* selectionUrl(const SelectionRequest& request, int64_t utc,
+                         char* url, std::size_t capacity) {
+  char comp[3 * cfg::kCompetitionIdMaxBytes + 1];
+  char country[3 * cfg::kSelectionTextMaxBytes + 1];
+  plan::encode(request.competition.data, comp, sizeof(comp));
+  const char* season = run.season;
+  const auto p = request.provider;
+  if (run.stage == SelectionRun::kSeason) {
+    if (p == cfg::Provider::kOpenLigaDb) {
+      // The current round's matches carry leagueSeason (about 18 KB for bl1).
+      snprintf(url, capacity, "https://api.openligadb.de/getmatchdata/%s",
+               comp);
+      return "";
+    }
+    snprintf(url, capacity,
              "https://v3.football.api-sports.io/leagues?id=%s&current=true",
-             comp_url);
-    err = get(url, "response", false, route.provider, model, generation, epoch,
-              apiSeason, &route, Kind::kList);
+             comp);
+    return "response";
   }
-  if (err == ESP_OK && route.season.empty()) err = ESP_ERR_INVALID_RESPONSE;
-  return err;
+  if (p == cfg::Provider::kOpenLigaDb) {
+    if (request.teams) {
+      snprintf(url, capacity,
+               "https://api.openligadb.de/getavailableteams/%s/%s", comp,
+               season);
+      return "";
+    }
+    char year[12];
+    if (request.season.empty()) {
+      const time_t stamp = utc;
+      std::tm date{};
+      gmtime_r(&stamp, &date);
+      snprintf(year, sizeof(year), "%d",
+               date.tm_year + 1900 -
+                   (date.tm_mon + 1 < cfg::kSeasonStartMonth ? 1 : 0));
+      season = year;
+    }
+    snprintf(url, capacity, "https://api.openligadb.de/getavailableleagues/%s",
+             season);
+    return "";
+  }
+  if (p == cfg::Provider::kApiFootball) {
+    if (request.teams) {
+      snprintf(url, capacity,
+               "https://v3.football.api-sports.io/teams?league=%s&season=%s",
+               comp, season);
+    } else {
+      plan::encode(request.country.empty() ? cfg::kSelectionCountryDefault
+                                           : request.country.data,
+                   country, sizeof(country));
+      snprintf(url, capacity,
+               "https://v3.football.api-sports.io/leagues?country=%s", country);
+    }
+    return "response";
+  }
+  if (p == cfg::Provider::kFootballData) {
+    if (request.teams)
+      snprintf(url, capacity,
+               "https://api.football-data.org/v4/competitions/%s/teams%s%s",
+               comp, request.season.empty() ? "" : "?season=", season);
+    else
+      snprintf(url, capacity, "https://api.football-data.org/v4/competitions");
+    return request.teams ? "teams" : "competitions";
+  }
+  if (request.teams)
+    snprintf(url, capacity,
+             "https://site.api.espn.com/apis/site/v2/sports/soccer/%s/"
+             "teams?limit=1000%s%s",
+             comp, request.season.empty() ? "" : "&season=", season);
+  else
+    snprintf(url, capacity,
+             "https://site.api.espn.com/apis/site/v2/leagues/"
+             "dropdown?sport=soccer&limit=1000");
+  return request.teams ? "teams" : "leagues";
 }
-void runSelection(const settings::Model& model, uint32_t generation,
-                  int64_t utc) {
-  clearFailure();
-  const uint32_t epoch = network::status().epoch;
+void setSelectionWait(Cadence wait, int64_t wait_ms) {
+  lock();
+  selection_state.wait = wait;
+  selection_state.wait_ms = wait_ms;
+  unlock();
+}
+// One step of the owner's selection. Returns true when it ran a request (the
+// worker then decides again); otherwise 'wake_ms' is the monotonic ms it may
+// go on.
+bool stepSelection(const settings::Model& model, uint32_t generation,
+                   int64_t utc, int64_t& wake_ms) {
   SelectionRequest request;
   lock();
   request = selection_request;
-  selection_state.count = 0;
-  selection_state.more = false;
-  selection_state.error = {};
-  selection_state.cause = Cause::kNone;
   unlock();
-  if (request.fixtures) {
-    finishSelection(runFixtures(model, generation, epoch, request.route));
-    return;
+  if (!run.active) {
+    run = {};
+    run.active = true;
+    run.generation = generation;
+    run.epoch = network::status().epoch;
+    memcpy(run.season, request.season.data, sizeof(run.season));
+    run.stage = request.teams && request.season.empty() &&
+                        (request.provider == cfg::Provider::kOpenLigaDb ||
+                         request.provider == cfg::Provider::kApiFootball)
+                    ? SelectionRun::kSeason
+                    : SelectionRun::kList;
   }
-  char url[384], comp[3 * cfg::kCompetitionIdMaxBytes + 1], season_text[33]{};
-  char country[3 * cfg::kSelectionTextMaxBytes + 1];
-  plan::encode(request.country.empty() ? cfg::kSelectionCountryDefault
-                                       : request.country.data,
-               country, sizeof(country));
-  plan::encode(request.competition.data, comp, sizeof(comp));
-  memcpy(season_text, request.season.data, sizeof(season_text));
-  const char* key = "";
-  esp_err_t err = ESP_OK;
-  // A club list needs the season in the URL at these two providers.
-  if (request.teams && request.season.empty() &&
-      (request.provider == cfg::Provider::kOpenLigaDb ||
-       request.provider == cfg::Provider::kApiFootball)) {
-    settings::Source current;
-    current.provider = request.provider;
-    err = currentSeason(current, comp, model, generation, epoch);
-    if (err == ESP_OK)
-      memcpy(season_text, current.season.data.data(), current.season.length);
+  const int64_t now_ms = timekeeping::monotonicMs();
+  const auto now_s = static_cast<uint32_t>(now_ms / 1000);
+  schedule::Wait why = schedule::Wait::kIdle;
+  const auto at = scheduler.admissibleAt(request.provider, now_s, &why);
+  if (at > now_s) {
+    // The provider's window limit or pause holds the request; the gap and
+    // a busy device are short and shown as loading.
+    const auto shown = why == schedule::Wait::kWindow   ? Cadence::kLimit
+                       : why == schedule::Wait::kPaused ? Cadence::kRetry
+                                                        : Cadence::kNone;
+    wake_ms = at * 1000LL;
+    setSelectionWait(shown, shown == Cadence::kNone ? 0 : wake_ms);
+    return false;
   }
-  if (request.provider == cfg::Provider::kOpenLigaDb) {
-    if (request.teams)
-      snprintf(url, sizeof(url),
-               "https://api.openligadb.de/getavailableteams/%s/%s", comp,
-               season_text);
-    else {
-      if (request.season.empty()) {
-        const time_t stamp = utc;
-        std::tm date{};
-        gmtime_r(&stamp, &date);
-        snprintf(season_text, sizeof(season_text), "%d",
-                 date.tm_year + 1900 -
-                     (date.tm_mon + 1 < cfg::kSeasonStartMonth ? 1 : 0));
-      }
-      snprintf(url, sizeof(url),
-               "https://api.openligadb.de/getavailableleagues/%s",
-               season_text);
-    }
-  } else if (request.provider == cfg::Provider::kApiFootball) {
-    if (request.teams)
-      snprintf(url, sizeof(url),
-               "https://v3.football.api-sports.io/teams?league=%s&season=%s",
-               comp, season_text);
-    else
-      snprintf(url, sizeof(url),
-               "https://v3.football.api-sports.io/leagues?country=%s", country);
-    key = "response";
-  } else if (request.provider == cfg::Provider::kFootballData) {
-    if (request.teams)
-      snprintf(url, sizeof(url),
-               "https://api.football-data.org/v4/competitions/%s/teams%s%s",
-               comp, request.season.empty() ? "" : "?season=", season_text);
-    else
-      snprintf(url, sizeof(url),
-               "https://api.football-data.org/v4/competitions");
-    key = request.teams ? "teams" : "competitions";
+  setSelectionWait(Cadence::kNone, 0);
+  char url[384];
+  const char* key = selectionUrl(request, utc, url, sizeof(url));
+  esp_err_t err;
+  busy.store(true);
+  if (run.stage == SelectionRun::kSeason) {
+    run.season[0] = '\0';
+    err =
+        get(url, key, false, request.provider, model, run.generation, run.epoch,
+            request.provider == cfg::Provider::kOpenLigaDb ? seasonRow
+                                                           : apiSeasonRow,
+            &run, nullptr, cfg::kSelectionBodyBytes);
+    if (err == ESP_OK && run.season[0] == '\0') err = ESP_ERR_INVALID_RESPONSE;
   } else {
-    if (request.teams)
-      snprintf(url, sizeof(url),
-               "https://site.api.espn.com/apis/site/v2/sports/soccer/%s/"
-               "teams?limit=1000%s%s",
-               comp, request.season.empty() ? "" : "&season=", season_text);
-    else
-      snprintf(url, sizeof(url),
-               "https://site.api.espn.com/apis/site/v2/leagues/"
-               "dropdown?sport=soccer&limit=1000");
-    key = request.teams ? "teams" : "leagues";
+    SelectContext context{&request};
+    err =
+        get(url, key, false, request.provider, model, run.generation, run.epoch,
+            selectionRow, &context, &context.enough, cfg::kSelectionBodyBytes);
   }
-  if (err == ESP_OK) {
-    // A server error (5xx) or a failed connection is often brief: one more
-    // attempt, after the device gap get() waits for, with the rows of the
-    // first one dropped.
-    for (int attempt = 0;; ++attempt) {
-      SelectContext context{&request};
-      err = get(url, key, false, request.provider, model, generation, epoch,
-                selectionRow, &context, Kind::kList, &context.enough);
-      const bool brief = failure_cause == Cause::kConnect ||
-                         (failure_cause == Cause::kHttp &&
-                          failure_status >= 500 && failure_status <= 599);
-      if (err == ESP_OK || attempt > 0 || !brief) break;
-      lock();
-      selection_state.count = 0;
-      selection_state.more = false;
-      unlock();
+  busy.store(false);
+  if (fetchOf(err) == plan::Fetch::kBusy) {
+    if (run.busy_since_ms == 0) run.busy_since_ms = now_ms;
+    if (now_ms - run.busy_since_ms < cfg::kOperationDeadlineMs) {
+      wake_ms = now_ms + cfg::kRequestGapMs;
+      return false;
     }
+    endSelection(err);
+    return true;
   }
-  finishSelection(err);
+  run.busy_since_ms = 0;
+  if (err == ESP_OK && run.stage == SelectionRun::kSeason) {
+    run.stage = SelectionRun::kList;
+    return true;
+  }
+  // A server error (5xx) or a failed connection is often brief: one more
+  // list attempt, admitted like any request, with the rows of the first one
+  // dropped.
+  const bool brief = failure_cause == Cause::kConnect ||
+                     (failure_cause == Cause::kHttp && failure_status >= 500 &&
+                      failure_status <= 599);
+  if (err != ESP_OK && brief && run.stage == SelectionRun::kList) {
+    run.stage = SelectionRun::kRetry;
+    lock();
+    selection_state.count = 0;
+    selection_state.more = false;
+    unlock();
+    return true;
+  }
+  endSelection(err);
+  return true;
 }
 
 // Why nothing runs now (Web UI).
@@ -1312,11 +1274,14 @@ void worker(void*) {
       cadence_now = Cadence::kWaiting;
       due_ms = 0;
       if (selecting.load()) {
+        run = {};
+        selection_state.wait = Cadence::kNone;
+        selection_state.wait_ms = 0;
         selection_state.busy = false;
         selection_state.count = 0;
-        selection_state.error.assign("network/time unavailable");
         selection_state.cause =
             network::ready() ? Cause::kTime : Cause::kNetwork;
+        selection_state.http = 0;
         ++selection_state.revision;
         selecting.store(false);
       }
@@ -1324,18 +1289,21 @@ void worker(void*) {
       continue;
     }
     day = static_cast<uint32_t>(utc / 86400);
+    // A counter that could not be read counts as used up on this day only
+    // (the demo runs without a valid clock: no day to settle).
+    if (clock_valid) budget::settle(day);
     const int64_t now = timekeeping::monotonicMs();
     if (!model.demo && (maintained_ms == 0 ||
                         now - maintained_ms >= cfg::kStoreMaintenanceS * 1000LL)) {
       maintained_ms = now;
       maintain(utc);
     }
-    if (selecting.load()) {
-      busy.store(true);
-      runSelection(model, generation, utc);
-      busy.store(false);
+    // The owner's selection goes first; while it waits for its provider,
+    // the jobs run.
+    int64_t selection_wake = INT64_MAX;
+    if (selecting.load() &&
+        stepSelection(model, generation, utc, selection_wake))
       continue;
-    }
     if (model.demo) {
       setCadence(Cadence::kIdle, 0);
       continue;
@@ -1346,8 +1314,9 @@ void worker(void*) {
     }
     if (requested.exchange(false)) scheduler.refresh();
     for (uint8_t i = 0; i < cfg::kCompetitionMax; ++i)
-      planner.wanted(i, i < routes.entries.size() ? &routes.entries[i] : nullptr,
-                     inputs.competitions[i]);
+      planner.wanted(i,
+                     i < routes.entries.size() ? &routes.entries[i] : nullptr,
+                     store, nowClock(), inputs.competitions[i]);
     inputs.plans = &model.providers;
     inputs.global = model.global_limit;
     for (unsigned p = 0; p < cfg::kProviderCount; ++p) {
@@ -1378,11 +1347,11 @@ void worker(void*) {
     unlock();
     // Sleeps until the wake time (at most until the next maintenance) or
     // until something asks for a new decision.
-    const int64_t wake = std::min<int64_t>(
-        due ? due : INT64_MAX, now + cfg::kStoreMaintenanceS * 1000LL);
+    const int64_t wake = std::min({due ? due : INT64_MAX, selection_wake,
+                                   now + cfg::kStoreMaintenanceS * 1000LL});
     const uint32_t epoch = network::status().epoch;
     while (timekeeping::monotonicMs() < wake && !requested.load() &&
-           !selecting.load() && !time_changed.load() &&
+           (!selecting.load() || run.active) && !time_changed.load() &&
            settings::generation() == settings_seen &&
            settings::dataGeneration() == generation && network::ready() &&
            network::status().epoch == epoch && !ota::trial())
@@ -1409,11 +1378,8 @@ esp_err_t init() {
 void refresh() { requested.store(true); }
 Status status() {
   Status s{};
-  if (mutex == nullptr) {
-    s.error.assign("not started");
-    s.cause = Cause::kNotStarted;
-    return s;
-  }
+  if (mutex == nullptr) return s;
+  s.started = true;
   time_t utc = 0;
   const bool valid = timekeeping::utcNow(utc);
   const int64_t now = timekeeping::monotonicMs();
@@ -1424,19 +1390,11 @@ Status status() {
   s.fetched_ms = oldestFetch();
   s.matches = static_cast<uint8_t>(
       std::min<std::size_t>(UINT8_MAX, store.matchCount()));
-  std::size_t rows = 0;
-  for (std::size_t i = 0; i < store.rowCount(); ++i)
-    rows += table_competition != 0 &&
-            store.row(i).competition == table_competition;
-  s.rows = static_cast<uint8_t>(std::min<std::size_t>(UINT8_MAX, rows));
-  s.stale = staleNow(valid ? utc : 0, now);
-  s.error = error;
-  s.cause = error_cause;
-  s.routing_notice = routing_notice;
+  s.competitions = states;
+  s.stale = markStale(s.competitions, valid ? utc : 0, now);
   for (uint8_t i = 0; i < route_count; ++i)
     s.matches_truncated |=
         slots[i].active && (store.notices(slots[i].id) & kNoticeMatches) != 0;
-  s.error_routes = error_routes;
   s.cadence = cadence_now;
   const bool scheduled = cadence_now != Cadence::kNone &&
                          cadence_now != Cadence::kWaiting &&
@@ -1469,17 +1427,10 @@ void read(Reader reader, void* context) {
   const bool valid = timekeeping::utcNow(utc);
   const int64_t now = timekeeping::monotonicMs();
   lock();
-  const Published data{store,
-                       shown,
-                       names,
-                       revision,
-                       published_generation,
-                       configured,
-                       staleNow(valid ? utc : 0, now),
-                       oldestFetch(),
-                       retry_ms,
-                       error,
-                       error_cause};
+  const bool stale = markStale(states, valid ? utc : 0, now);
+  const Published data{
+      store,      shown, names,         revision, published_generation,
+      configured, stale, oldestFetch(), retry_ms, states};
   reader(data, context);
   unlock();
 }
@@ -1492,38 +1443,18 @@ esp_err_t start(const SelectionRequest& request) {
   if (!running) {
     selection_request = request;
     selection_state.busy = true;
-    selection_state.fixtures = request.fixtures;
-    selection_state.route = request.route;
     selection_state.count = 0;
     selection_state.more = false;
-    selection_state.error = {};
     selection_state.cause = Cause::kNone;
+    selection_state.provider = request.provider;
+    selection_state.http = 0;
     selecting.store(true);
   }
   unlock();
   return running ? ESP_ERR_NOT_FINISHED : ESP_OK;
 }
-// Under the mutex: picker entry of stored own match 'm'.
-void fixtureEntry(const StoredMatch& m, Selection& out) {
-  fixtureEntry(m.id, m.kickoff, view::fullName(store, m, true),
-               view::fullName(store, m, false), out);
-}
 }  // namespace
-esp_err_t select(const SelectionRequest& request) {
-  auto list = request;
-  list.fixtures = false;
-  list.route = 0;
-  return start(list);
-}
-esp_err_t selectFixtures(uint8_t route) {
-  settings::Competition entry;
-  if (!settings::competitionAt(route, entry) || !entry.fallback.complete())
-    return ESP_ERR_INVALID_ARG;
-  SelectionRequest request;
-  request.fixtures = true;
-  request.route = route;
-  return start(request);
-}
+esp_err_t select(const SelectionRequest& request) { return start(request); }
 SelectionStatus selectionStatus() {
   lock();
   auto s = selection_state;
@@ -1571,33 +1502,6 @@ Overview overview(int64_t utc) {
   }
   unlock();
   return result;
-}
-uint16_t publishedFixtureCount(uint8_t route, cfg::Provider provider,
-                               uint32_t& revision_out) {
-  revision_out = 0;
-  if (mutex == nullptr) return 0;
-  uint16_t count = 0;
-  lock();
-  revision_out = revision;
-  if (route < route_count && slots[route].id != 0)
-    while (view::ownAt(store, slots[route].id, provider, count) >= 0) ++count;
-  unlock();
-  return count;
-}
-bool publishedFixtureAt(uint8_t route, cfg::Provider provider, uint16_t index,
-                        uint32_t revision_in, Selection& out) {
-  if (mutex == nullptr) return false;
-  bool found = false;
-  lock();
-  if (revision_in == revision && route < route_count && slots[route].id != 0) {
-    const int at = view::ownAt(store, slots[route].id, provider, index);
-    if (at >= 0) {
-      fixtureEntry(store.match(at), out);
-      found = true;
-    }
-  }
-  unlock();
-  return found;
 }
 namespace {
 // Under the mutex: store team indices the matches and rows of

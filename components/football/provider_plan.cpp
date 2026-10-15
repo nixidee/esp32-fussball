@@ -5,6 +5,7 @@
 #include <ctime>
 
 #include "football_model.h"
+#include "matchday.h"
 
 namespace football::plan {
 namespace {
@@ -15,7 +16,6 @@ using cfg::DataType;
 using cfg::Provider;
 
 constexpr uint32_t kDayS = 86400;
-constexpr uint32_t kGapS = cfg::kMatchdayGapHours * 3600u;
 // Encoded components: three bytes per input byte plus the terminator.
 constexpr std::size_t kCompetitionUrl = 3 * cfg::kCompetitionIdMaxBytes + 1;
 constexpr std::size_t kSeasonUrl = 3 * cfg::kSeasonMaxBytes + 1;
@@ -77,20 +77,32 @@ void set(Request* out, Sink sink, const char* array, bool optional = false) {
 }
 // Providers whose URLs need the season: the current one when none is set.
 // Events (ESPN's match summary) never do.
+// The resolved season is due for a new resolution at 'utc': its time is
+// unknown, kSeasonRecheckS old, or after 'utc' (the clock was set back).
+bool seasonStale(const SourceState& state, int64_t utc) {
+  if (utc <= 0) return false;  // no valid clock: keep it
+  return state.season_utc == 0 || utc < state.season_utc ||
+         utc - state.season_utc >= cfg::kSeasonRecheckS;
+}
+
 bool needsSeason(Provider provider, DataType type) {
   if (type == DataType::kEvents) return false;
   if (provider == Provider::kApiFootball) return true;
   return provider == Provider::kOpenLigaDb && type != DataType::kFixtures;
 }
-// Expected requests per run of each data type ('known': the state belongs
-// to this source).
+// Expected requests per run of each data type at 'utc' ('known': the state
+// belongs to this source).
 void costs(const settings::Source& s, const SourceState& state, bool known,
-           std::array<uint8_t, cfg::kDataTypeCount>& cost) {
+           int64_t utc, std::array<uint8_t, cfg::kDataTypeCount>& cost) {
   const bool season = !s.season.empty() || (known && !state.season.empty());
   for (std::size_t t = 0; t < cfg::kDataTypeCount; ++t)
     cost[t] = needsSeason(s.provider, static_cast<DataType>(t)) && !season
                   ? 2
                   : 1;
+  // The fixtures run resolves a due season again first (OQ-259, begin()).
+  if (s.provider == Provider::kApiFootball && s.season.empty() && known &&
+      seasonStale(state, utc))
+    cost[index(DataType::kFixtures)] = 2;
   if (s.provider == Provider::kOpenLigaDb) {
     cost[index(DataType::kFixtures)] = s.team.empty() ? 2 : 3;
     cost[index(DataType::kLive)] = 2;  // change date, round when changed
@@ -107,13 +119,13 @@ uint8_t bit(DataType type) { return static_cast<uint8_t>(1u << index(type)); }
 // also give the live windows the live table follows.
 uint8_t screenTypes(const settings::Competition& entry) {
   using Screen = cfg::CompetitionScreen;
-  const bool club = !entry.primary.team.empty() || !entry.fallback.team.empty();
+  const bool club = !entry.primary.team.empty();
   const bool matches = (club && entry.uses(Screen::kOwnMatch)) ||
                        entry.uses(Screen::kConference) ||
                        entry.uses(Screen::kMatchday);
   const bool table = entry.uses(Screen::kTable);
   uint8_t types = 0;
-  if (matches || table) types |= bit(DataType::kCore) | bit(DataType::kFixtures);
+  if (matches || table) types |= bit(DataType::kFixtures);
   if (matches) types |= bit(DataType::kLive);
   if (table) types |= bit(DataType::kTable) | bit(DataType::kLiveTable);
   return types;
@@ -144,12 +156,6 @@ const StoredMatch* eventsMatch(const MatchStore& store, uint8_t competition,
              : nullptr;
 }
 
-bool matchType(DataType type) {
-  return type == DataType::kFixtures || type == DataType::kLive;
-}
-bool tableType(DataType type) {
-  return type == DataType::kTable || type == DataType::kLiveTable;
-}
 SourceState::Mark* findMark(SourceState& state, uint32_t round) {
   for (auto& mark : state.marks)
     if (mark.round != 0 && mark.round == round) return &mark;
@@ -179,7 +185,7 @@ std::size_t matchdayDays(const uint32_t* days, std::size_t count,
                          int64_t utc, uint32_t* out, std::size_t capacity) {
   // Last day of the matchday starting at 'first'.
   auto last = [&](std::size_t first) {
-    while (first + 1 < count && days[first + 1] - days[first] < kGapS)
+    while (first + 1 < count && !matchday::starts(days[first], days[first + 1]))
       ++first;
     return first;
   };
@@ -205,127 +211,74 @@ uint32_t changeHash(std::string_view text) {
 
 void Planner::reset() {
   states_ = {};
-  pick_state_ = {};
-  picking_ = false;
   current_ = nullptr;
   store_ = nullptr;
-  pairing_ = {};
 }
 
 void Planner::forget(uint8_t slot) {
   if (slot >= cfg::kCompetitionMax) return;
-  for (const auto& state : states_[slot])
-    if (current_ == &state) abort();
+  if (current_ == &states_[slot]) abort();
   states_[slot] = {};
 }
 
-Resolved Planner::saved(uint8_t slot, schedule::Source source,
+Resolved Planner::saved(uint8_t slot,
                         const settings::Competition& entry) const {
   Resolved out;
   if (slot >= cfg::kCompetitionMax) return out;
-  const bool fallback = source == schedule::Source::kFallback;
-  const auto& state = states_[slot][fallback ? 1 : 0];
-  if (state.key != sourceKey(entry.id, fallback ? entry.fallback
-                                                : entry.primary))
-    return out;
+  const auto& state = states_[slot];
+  if (state.key != sourceKey(entry.id, entry.primary)) return out;
   out.season = state.season;
+  out.season_utc = state.season_utc;
   out.round = state.round;
   out.days = state.days;
   out.day_count = state.day_count;
-  out.no_table = state.no_table;
   return out;
 }
 
-void Planner::restore(uint8_t slot, schedule::Source source,
-                      const settings::Competition& entry,
+void Planner::restore(uint8_t slot, const settings::Competition& entry,
                       const Resolved& resolved) {
   if (slot >= cfg::kCompetitionMax || resolved.day_count > kEspnDays) return;
-  const bool fallback = source == schedule::Source::kFallback;
-  auto& state = states_[slot][fallback ? 1 : 0];
+  auto& state = states_[slot];
   state = {};
-  state.key = sourceKey(entry.id, fallback ? entry.fallback : entry.primary);
+  state.key = sourceKey(entry.id, entry.primary);
   state.season = resolved.season;
+  state.season_utc = resolved.season_utc;
   state.round = resolved.round;
   state.days = resolved.days;
   state.day_count = resolved.day_count;
-  state.no_table = resolved.no_table;
-}
-
-void Planner::addPair(const settings::FixturePair& pair) {
-  const uint32_t primary = decimalId(pair.primary_id.view());
-  const uint32_t secondary = decimalId(pair.secondary_id.view());
-  if (!pair.active || pair.competition == 0 || primary == 0 ||
-      secondary == 0 || pairing_.count == pairing_.pairs.size())
-    return;
-  pairing_.pairs[pairing_.count++] = {secondary, primary, pair.competition,
-                                      pair.swapped};
-}
-
-bool Planner::paired(uint8_t competition) const {
-  for (uint8_t i = 0; i < pairing_.count; ++i)
-    if (pairing_.pairs[i].competition == competition) return true;
-  return false;
 }
 
 void Planner::wanted(uint8_t slot, const settings::Competition* entry,
+                     const MatchStore& store, const Clock& clock,
                      schedule::Wanted& out) const {
   out = {};
   if (entry == nullptr || !entry->active || entry->id == 0 ||
       entry->primary.competition.empty() || slot >= cfg::kCompetitionMax)
     return;
   const auto& s = entry->primary;
-  const auto& state = states_[slot][0];
-  const bool known = state.key == sourceKey(entry->id, s);
+  const auto& state = states_[slot];
   out.id = entry->id;
-  out.provider[0] = s.provider;
-  out.provider[1] = entry->fallback.provider;
-  const uint8_t types = screenTypes(*entry);
-  out.types[0] = types;
+  out.provider = s.provider;
+  out.types = screenTypes(*entry);
   // ESPN substitutions come only with the match summary (OQ-207).
   if (s.provider == Provider::kEspn && !s.team.empty() &&
-      entry->uses(cfg::CompetitionScreen::kOwnMatch))
-    out.types[0] |= bit(DataType::kEvents);
-  costs(s, state, known, out.cost[0]);
-
-  const auto& f = entry->fallback;
-  if (!entry->fallback_active || f.competition.empty()) return;
-  // The primary state describes this primary only when its key matches.
-  const bool failing = known && state.failing;
-  const bool no_table = known && (state.no_table || state.table_failing);
-  auto& fallback_types = out.types[1];
-  if (failing || paired(entry->id)) fallback_types |= bit(DataType::kLive);
-  if (failing) fallback_types |= bit(DataType::kFixtures);
-  if (no_table)
-    fallback_types |= bit(DataType::kTable) | bit(DataType::kLiveTable);
-  fallback_types &= types;
-  const auto& fallback = states_[slot][1];
-  costs(f, fallback, fallback.key == sourceKey(entry->id, f), out.cost[1]);
+      entry->uses(cfg::CompetitionScreen::kOwnMatch)) {
+    out.types |= bit(DataType::kEvents);
+    // Before kickoff the summary has nothing to ask for (begin()).
+    if (eventsMatch(store, entry->id, s.provider, clock.utc) == nullptr)
+      out.held |= bit(DataType::kEvents);
+  }
+  costs(s, state, state.key == sourceKey(entry->id, s), clock.utc, out.cost);
 }
 
 bool Planner::request(const schedule::Job& job,
                       const settings::Competition& entry, MatchStore& store,
                       const Clock& clock, Request& out) {
   current_ = nullptr;
-  picking_ = false;
   if (job.slot >= cfg::kCompetitionMax) return false;
-  const bool fallback = job.source == schedule::Source::kFallback;
-  const auto& s = fallback ? entry.fallback : entry.primary;
+  const auto& s = entry.primary;
   if (s.competition.empty()) return false;
-  if (fallback) {
-    // Core data and events never; a table only while the store lacks the
-    // primary's.
-    if (!entry.fallback_active || job.type == DataType::kCore ||
-        job.type == DataType::kEvents ||
-        (tableType(job.type) &&
-         store.hasTable(entry.id, entry.primary.provider)))
-      return false;
-  }
-  auto& state = states_[job.slot][static_cast<std::size_t>(job.source)];
-  auto& primary = states_[job.slot][0];
-  if (primary.key != sourceKey(entry.id, entry.primary)) {
-    primary = {};
-    primary.key = sourceKey(entry.id, entry.primary);
-  }
+  auto& state = states_[job.slot];
   const uint32_t key = sourceKey(entry.id, s);
   if (state.key != key) {
     state = {};
@@ -334,46 +287,12 @@ bool Planner::request(const schedule::Job& job,
   current_ = &state;
   store_ = &store;
   source_ = s;
-  kind_ = job.source;
-  fallback_on_ = entry.fallback_active && !entry.fallback.competition.empty();
-  fallback_provider_ = entry.fallback.provider;
   type_ = job.type;
   map_ = {};
   map_.competition = entry.id;
   map_.provider = s.provider;
   map_.club = decimalId(s.team.view());
   map_.clock = clock;
-  if (fallback) {
-    // Paired rows fill the primary's matches; while the primary's match
-    // requests fail, the fallback rows stand on their own.
-    pairing_.primary = entry.primary.provider;
-    pairing_.standalone = primary.failing;
-    map_.pairing = &pairing_;
-  }
-  return begin(store, clock, out);
-}
-
-bool Planner::pickRequest(const settings::Competition& entry,
-                          MatchStore& store, const Clock& clock, Request& out,
-                          MatchPick pick, void* context) {
-  current_ = nullptr;
-  picking_ = true;
-  const auto& s = entry.fallback;
-  if (entry.id == 0 || s.competition.empty() || pick == nullptr) return false;
-  current_ = &pick_state_;
-  store_ = &store;
-  source_ = s;
-  kind_ = schedule::Source::kFallback;
-  fallback_on_ = false;
-  fallback_provider_ = s.provider;
-  type_ = DataType::kFixtures;
-  map_ = {};
-  map_.competition = entry.id;
-  map_.provider = s.provider;
-  map_.club = decimalId(s.team.view());
-  map_.clock = clock;
-  map_.pick = pick;
-  map_.pick_context = context;
   return begin(store, clock, out);
 }
 
@@ -382,8 +301,10 @@ bool Planner::begin(MatchStore& store, const Clock& clock, Request& out) {
   auto& progress = state.progress[index(type_)];
   if (progress.step == 0 && progress.at == 0) {
     // A new run.
-    if (type_ == DataType::kCore && source_.provider == Provider::kApiFootball)
-      state.season = {};  // the season is resolved again once a day
+    if (type_ == DataType::kFixtures &&
+        source_.provider == Provider::kApiFootball &&
+        seasonStale(state, clock.utc))
+      state.season = {};  // resolved again once a day (OQ-259)
     if (type_ == DataType::kLive) liveItems(store, clock.utc);
     if (type_ == DataType::kEvents) {
       const auto* m = eventsMatch(store, map_.competition, source_.provider,
@@ -407,7 +328,7 @@ bool Planner::begin(MatchStore& store, const Clock& clock, Request& out) {
   if (sink_ == Sink::kEvents) {
     // The match's own slot takes the events; without one nothing to ask.
     const auto* m = eventsRow();
-    if (m == nullptr || !store.beginEvents(*m, false, false, true)) {
+    if (m == nullptr || !store.beginEvents(*m, true)) {
       state.progress[index(type_)] = {};
       current_ = nullptr;
       return false;
@@ -458,11 +379,6 @@ bool Planner::build(Request* out) {
 
   if (p == Provider::kOpenLigaDb) {
     switch (type_) {
-      case DataType::kCore:
-        if (progress.step != 1) return false;
-        format(out, "%sgetavailableteams/%s/%s", kOpenLigaDb, league, season);
-        set(out, Sink::kTeams, "");
-        return true;
       case DataType::kTable:
       case DataType::kLiveTable:
         if (progress.step != 1) return false;
@@ -534,12 +450,6 @@ bool Planner::build(Request* out) {
     const char* with = s.season.empty() ? "" : "season=";
     const char* season_query = s.season.empty() ? "" : season;
     switch (type_) {
-      case DataType::kCore:
-        if (progress.step != 1) return false;
-        format(out, "%s%s/teams%s%s%s", kEspnSite, league,
-               s.season.empty() ? "" : "?", with, season_query);
-        set(out, Sink::kTeams, "teams");
-        return true;
       case DataType::kTable:
       case DataType::kLiveTable:
         if (progress.step != 1) return false;
@@ -597,11 +507,6 @@ bool Planner::build(Request* out) {
   date(utc + span, "%Y-%m-%d", to);
   if (p == Provider::kApiFootball) {
     switch (type_) {
-      case DataType::kCore:
-        format(out, "%steams?league=%s&season=%s", kApiFootball, league,
-               season);
-        set(out, Sink::kTeams, "response");
-        return true;
       case DataType::kTable:
       case DataType::kLiveTable:
         format(out, "%sstandings?league=%s&season=%s", kApiFootball, league,
@@ -622,10 +527,6 @@ bool Planner::build(Request* out) {
   const char* first = s.season.empty() ? "" : "?season=";
   const char* then = s.season.empty() ? "" : "&season=";
   switch (type_) {
-    case DataType::kCore:
-      format(out, "%s%s/teams%s%s", kFootballData, league, first, season);
-      set(out, Sink::kTeams, "teams");
-      return true;
     case DataType::kTable:
     case DataType::kLiveTable:
       format(out, "%s%s/standings%s%s", kFootballData, league, first, season);
@@ -661,7 +562,6 @@ void Planner::liveItems(const MatchStore& store, int64_t utc) {
       // Round numbers are the provider's own.
       if (m.provider == Provider::kOpenLigaDb && m.round != 0) add(m.round);
     } else if (source_.provider == Provider::kEspn) {
-      // Any provider's kickoff (a fallback source may have no rows).
       // The provider day holding the kickoff, else the next match day.
       uint32_t day = 0;
       for (uint8_t d = 0; d < state.day_count; ++d)
@@ -684,7 +584,7 @@ bool Planner::consume(JsonVariantConst element, void* planner) {
 void Planner::addDay(uint32_t day) {
   if (scan_done_ || (scan_count_ > 0 && day <= scan_[scan_count_ - 1]))
     return;
-  if (scan_count_ > 0 && day - scan_[scan_count_ - 1] >= kGapS) {
+  if (scan_count_ > 0 && matchday::starts(scan_[scan_count_ - 1], day)) {
     // The matchday before 'day' is complete.
     if (static_cast<int64_t>(scan_[scan_count_ - 1]) + kDayS <=
         map_.clock.utc)
@@ -724,9 +624,6 @@ bool Planner::consumeElement(JsonVariantConst row) {
     case Sink::kTable:
       storeTableRow(row, *store_, map_);
       return true;
-    case Sink::kTeams:
-      storeTeam(row, *store_, map_);
-      return true;
     case Sink::kChange:
       if (!row.is<const char*>()) return false;
       found_change_ = changeHash(row.as<const char*>());
@@ -754,48 +651,59 @@ bool Planner::consumeElement(JsonVariantConst row) {
 
 Step Planner::finish(bool ok, const Clock& clock) {
   if (current_ == nullptr) return Step::kDone;
-  auto& state = *current_;
   if (sink_ == Sink::kTable) store_->commitTable(ok);
   if (sink_ == Sink::kEvents) store_->endEvents(ok);
-  const Step step = advance(ok, clock);
-  if (!picking_) settle(state, ok && step != Step::kInvalid);
-  return step;
+  return advance(ok, clock);
 }
 
 void Planner::abort() {
   if (current_ == nullptr) return;
+  current_->progress[index(type_)] = {};
+  release();
+}
+
+void Planner::release() {
+  if (current_ == nullptr) return;
   if (sink_ == Sink::kTable) store_->commitTable(false);
   if (sink_ == Sink::kEvents) store_->endEvents(false);
-  current_->progress[index(type_)] = {};
   current_ = nullptr;
 }
 
-void Planner::settle(SourceState& state, bool ok) {
-  const uint8_t competition = map_.competition;
-  if (kind_ == schedule::Source::kFallback) {
-    store_->flag(competition, kNoticeFallbackFailed, !ok);
-    return;
+Completion Planner::complete(Fetch fetch, const Clock& clock) {
+  using schedule::Outcome;
+  Completion c;
+  switch (fetch) {
+    case Fetch::kOk:
+      switch (finish(true, clock)) {
+        case Step::kDone: break;
+        case Step::kMore: c.more = true; break;
+        case Step::kInvalid:
+          c.outcome = Outcome::kFailed;
+          c.invalid = true;
+          break;
+      }
+      return c;
+    case Fetch::kFailed:
+    case Fetch::kRateLimited:
+      finish(false, clock);
+      c.outcome =
+          fetch == Fetch::kFailed ? Outcome::kFailed : Outcome::kRateLimited;
+      return c;
+    case Fetch::kBusy:
+      release();
+      c.outcome = Outcome::kDeferred;
+      return c;
+    case Fetch::kInterrupted:
+    case Fetch::kCapped:
+      abort();
+      c.outcome = Outcome::kDeferred;
+      return c;
+    case Fetch::kRefused:
+      abort();
+      c.outcome = Outcome::kFailed;
+      return c;
   }
-  if (tableType(type_)) {
-    state.table_failing = !ok;
-    // A complete table response that left no table (a cup): the
-    // fallback's is wanted.
-    if (ok && sink_ == Sink::kTable)
-      state.no_table = !store_->hasTable(competition, source_.provider);
-    return;
-  }
-  if (!matchType(type_)) return;
-  if (!ok) {
-    state.failing = true;
-    if (fallback_on_) store_->flag(competition, kNoticeFallbackRoute, true);
-    return;
-  }
-  if (!state.failing) return;
-  // The primary answers again: its rows replace the fallback's.
-  state.failing = false;
-  store_->flag(competition, kNoticeFallbackRoute, false);
-  if (fallback_provider_ != source_.provider)
-    store_->removeProvider(competition, fallback_provider_);
+  return c;
 }
 
 Step Planner::advance(bool ok, const Clock& clock) {
@@ -812,6 +720,9 @@ Step Planner::advance(bool ok, const Clock& clock) {
     // Season request (OpenLigaDB rows also give the current round).
     if (found_season_.empty()) return end(Step::kInvalid);
     state.season = found_season_;
+    state.season_utc = clock.utc > 0 && clock.utc < INT64_C(0x100000000)
+                           ? static_cast<uint32_t>(clock.utc)
+                           : 0;
     if (found_round_ > 0) state.round = static_cast<uint8_t>(found_round_);
     progress = {1, 0};
   } else if (p == Provider::kOpenLigaDb && type_ == DataType::kFixtures) {

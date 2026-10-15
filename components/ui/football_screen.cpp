@@ -225,6 +225,10 @@ struct Frame {
   const geometry::SafeArea* area;
   int s, g, R, cx, cy, rim;
   bool round, ok;
+  // Status pill (OQ-284): the layout's status line y, and the top of a
+  // bottom IP chip the pill stacks above.
+  bool band, chip_low;
+  int band_y, chip_top;
   uint8_t cap, body, title;
   uint32_t bg, text, dim, track, accent, warn, error, neutral, chip, dot_on,
       dot_off;
@@ -386,6 +390,10 @@ void chip(int y, bool upward) {
   const auto& m = *f.m;
   const int n = m.badge_lines, cap = line(f.cap);
   const int top = upward ? y - n * cap : y;
+  if (m.badge_bottom) {
+    f.chip_low = true;
+    f.chip_top = top - f.g / 2;
+  }
   int w = 0;
   for (int i = 0; i < n; ++i)
     w = std::max(w, std::min<int>(width(f.cap, m.badge[i]),
@@ -394,13 +402,36 @@ void chip(int y, bool upward) {
        f.chip, 235);
   for (int i = 0; i < n; ++i) label(top + i * cap, m.badge[i], {f.cap}, f.text);
 }
-// Bottom zone: the IP chip when it sits at the bottom, else the status.
+// Status at line y: the place of the pill drawn over the screen at the end
+// (statusPill()), or a permanent line ("Demo") when the line is 'free'.
+void statusAt(int y, bool free) {
+  const auto& m = *f.m;
+  if (m.status_pill) {
+    f.band = true;
+    f.band_y = y;
+  } else if (free) {
+    label(y, m.status, {f.cap}, f.tone(m.status_tone));
+  }
+}
+// Bottom zone: the IP chip when it sits at the bottom, and the status.
 void statusBand(int y) {
   const auto& m = *f.m;
-  if (m.badge_lines && m.badge_bottom)
-    chip(y, false);
-  else
-    label(y, m.status, {f.cap}, f.tone(m.status_tone));
+  const bool low_chip = m.badge_lines && m.badge_bottom;
+  if (low_chip) chip(y, false);
+  statusAt(y, !low_chip);
+}
+// Temporary status pill over everything else at the bottom (docs/UI.md
+// "Status pill"), stacked above a bottom IP chip; slightly transparent.
+void statusPill() {
+  const auto& m = *f.m;
+  if (!f.band || !m.status[0]) return;
+  const int cap = line(f.cap), h = cap + f.g;
+  const int y = f.chip_low ? f.chip_top - h : f.band_y;
+  const int w =
+      std::min<int>(width(f.cap, m.status), f.area->spanForBand(y, cap).width);
+  pill(f.cx - (w + 4 * f.g) / 2, y - f.g / 2, w + 4 * f.g, h, f.chip,
+       cfg::kStatusPillOpa);
+  label(y, m.status, {f.cap}, f.tone(m.status_tone));
 }
 // Caption band at the top, or the IP chip growing upward from its bottom.
 void captionBand(int y, const char* text, uint32_t colour) {
@@ -483,12 +514,13 @@ void conference() {
     y += pitch;
   }
   y = rows_top + slots * pitch + g;
-  if (m.badge_lines && m.badge_bottom)
+  const bool low_chip = m.badge_lines && m.badge_bottom;
+  if (low_chip)
     chip(y, false);
   else if (m.pages > 1)
     dots(y + cap / 2, m.pages, m.page, f.accent, f.track);
-  else
-    label(y, m.status, {f.cap}, f.tone(m.status_tone));
+  // The page dots take the line of a permanent status; the pill covers them.
+  statusAt(y, !low_chip && m.pages <= 1);
 }
 
 void table() {
@@ -565,10 +597,9 @@ void crest() {
   if (m.badge_lines && !m.badge_bottom)
     chip(2 * f.cy - bottom, true);
   // A bottom chip ends on the status line, above the slide dots.
-  if (m.badge_lines && m.badge_bottom)
-    chip(bottom + cap, true);
-  else
-    label(bottom, m.status, {f.cap}, f.tone(m.status_tone));
+  const bool low_chip = m.badge_lines && m.badge_bottom;
+  if (low_chip) chip(bottom + cap, true);
+  statusAt(bottom, !low_chip);
 }
 
 void card() {
@@ -597,6 +628,8 @@ void card() {
     else
       chip(top - g, true);
   }
+  // A card has no permanent status line; the pill goes below its text.
+  statusAt(y, false);
 }
 
 void rim() {
@@ -710,6 +743,8 @@ bool render(const ViewModel& m, const geometry::SafeArea& area) {
     case Layout::kCard: card(); break;
     case Layout::kImage: crest(); break;
   }
+  // Last: the pill lies over the content.
+  statusPill();
   for (std::size_t i = item_count; i < previous_count; ++i)
     invalidate(bounds(items[i]));
   return f.ok && !overflow;

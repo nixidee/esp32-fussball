@@ -132,14 +132,14 @@ persist::Saved saved() {
   s.competition = kLeague;
   s.route_key = 0x1234abcd;
   s.saved_utc = kNow.utc;
-  auto& primary = s.sources[0];
+  auto& primary = s.source;
   TEST_ASSERT_TRUE(primary.resolved.season.assign("2026"));
+  primary.resolved.season_utc = static_cast<uint32_t>(kNow.utc - 7200);
   primary.resolved.round = 7;
   primary.resolved.day_count = 2;
   primary.resolved.days[0] = 20261017;
   primary.resolved.days[1] = 20261018;
-  primary.done = {kNow.utc - 3600, kNow.utc - 600, kNow.utc - 60};
-  s.sources[1].resolved.no_table = true;
+  primary.done = {kNow.utc - 600, kNow.utc - 60};  // fixtures, table
   return s;
 }
 
@@ -192,13 +192,16 @@ void test_round_trip_restores_the_competition() {
   TEST_ASSERT_EQUAL_UINT32(0x1234abcd, header.route_key);
   TEST_ASSERT_EQUAL_INT64(kNow.utc, header.saved_utc);
   TEST_ASSERT_EQUAL_UINT8(football::kNoticeEvents, header.notices);
-  const auto& primary = header.sources[0];
+  const auto& primary = header.source;
   TEST_ASSERT_TRUE(primary.resolved.season.view() == "2026");
+  // The season's resolution time (OQ-259) comes back with it.
+  TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(kNow.utc - 7200),
+                           primary.resolved.season_utc);
   TEST_ASSERT_EQUAL_UINT8(7, primary.resolved.round);
   TEST_ASSERT_EQUAL_UINT8(2, primary.resolved.day_count);
   TEST_ASSERT_EQUAL_UINT32(20261018, primary.resolved.days[1]);
-  TEST_ASSERT_EQUAL_INT64(kNow.utc - 600, primary.done[1]);
-  TEST_ASSERT_TRUE(header.sources[1].resolved.no_table);
+  TEST_ASSERT_EQUAL_INT64(kNow.utc - 600, primary.done[0]);
+  TEST_ASSERT_EQUAL_INT64(kNow.utc - 60, primary.done[1]);
 
   // Into a store that already holds another competition's teams: the
   // file-local indices are mapped to new store indices.
@@ -283,11 +286,12 @@ void test_header_version_and_counts_are_checked() {
     std::size_t at;
     uint8_t value;
   };
-  for (const Patch p : {Patch{4, 0x00},   // layout of another build
-                        Patch{8, 0x02},   // version 2
-                        Patch{10, 0x00},  // competition 0
-                        Patch{24, static_cast<uint8_t>(cfg::kStoreTeams + 1)},
-                        Patch{26, static_cast<uint8_t>(cfg::kStoreMatches + 1)}}) {
+  for (const Patch p :
+       {Patch{4, 0x00},   // layout of another build
+        Patch{8, 0x02},   // version 2 (before OQ-248)
+        Patch{10, 0x00},  // competition 0
+        Patch{24, static_cast<uint8_t>(cfg::kStoreTeams + 1)},
+        Patch{26, static_cast<uint8_t>(cfg::kStoreMatches + 1)}}) {
     Buffer bad = good;
     if (bad.bytes[p.at] == p.value) bad.bytes[p.at] ^= 0x01;
     else bad.bytes[p.at] = p.value;
@@ -347,6 +351,16 @@ void test_short_name_file_round_trip_and_corruption() {
   short_file.at = 0;
   short_file.bytes.resize(short_file.bytes.size() - 2);
   TEST_ASSERT_FALSE(back.decode(get, &short_file));
+
+  // The file has its own version (OQ-260): 1, while the competition files
+  // are at 3; another version is not read.
+  TEST_ASSERT_EQUAL_HEX8(1, b.bytes[8]);
+  fill();
+  TEST_ASSERT_EQUAL_HEX8(3, encoded().bytes[8]);
+  Buffer other = b;
+  other.at = 0;
+  other.bytes[8] = 2;
+  TEST_ASSERT_FALSE(back.decode(get, &other));
 
   persist::ShortNames empty;
   Buffer none;

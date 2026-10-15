@@ -36,6 +36,9 @@ class Counter {
   // A damaged record counts as used up for the first day it is asked about;
   // the next UTC day starts a new record (OQ-163).
   void load(Load state, const Record& record);
+  // A damaged record becomes the used-up record of UTC 'day' (in RAM only),
+  // so the next day has the whole limit again; admit() does this too.
+  void settle(uint32_t day);
   // One request on UTC 'day' under the daily cap 'limit' (> 0). A day before
   // the stored one counts against the stored day (a backward clock
   // correction never reopens a day).

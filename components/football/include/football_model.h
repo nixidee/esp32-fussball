@@ -6,27 +6,34 @@
 #include "app_config.h"
 
 namespace football {
-// Why a provider operation failed; the stable key of the error text for the
-// Web UI (REST API). kNone = no error.
+// Why a provider operation failed, or why a competition's data are not
+// usable; the stable key of the error texts of the display and the Web UI
+// (REST API) and, with causeNumber(), of the short error code. kNone = no
+// error.
 enum class Cause : uint8_t {
   kNone,
-  kNotStarted,   // the service has not started
-  kProviderOff,  // provider needs a key or opt-in that is not set
-  kBudget,       // daily request budget used
-  kBusy,         // another heavy operation held the network too long
-  kNetwork,      // network lost or changed during the operation
-  kTime,         // no valid time
-  kSettings,     // settings changed during the operation
-  kRateLimited,  // HTTP 429
-  kAuth,         // HTTP 401 or 403
-  kNotFound,     // HTTP 404
-  kHttp,         // any other HTTP status than 200
-  kConnect,      // no HTTP response: DNS, TCP or TLS failed
-  kBadResponse,  // response missing, incomplete or unreadable
-  kTooLarge,     // response or result exceeds the device's capacity
-  kMemory,       // out of memory
-  kOther
+  kProviderOff,   // provider needs a key or opt-in that is not set
+  kBudget,        // daily request budget used
+  kBusy,          // another heavy operation held the network too long
+  kNetwork,       // network lost or changed during the operation
+  kTime,          // no valid time
+  kSettings,      // settings changed during the operation
+  kRateLimited,   // HTTP 429
+  kAuth,          // HTTP 401 or 403
+  kNotFound,      // HTTP 404
+  kHttp,          // any other HTTP status than 200
+  kConnect,       // no HTTP response: DNS, TCP or TLS failed
+  kBadResponse,   // response missing, incomplete or unreadable
+  kTooLarge,      // response or result exceeds the device's capacity
+  kMemory,        // out of memory
+  kOther,         // any other failure
+  kUnmaintained,  // the provider leaves past matches without a result
+  kNoSeason,      // the provider reports no current season
+  kCounter        // the daily request counter could not be stored
 };
+// Number of causes, kNone included (tests walk every cause).
+inline constexpr std::size_t kCauseCount =
+    static_cast<std::size_t>(Cause::kCounter) + 1;
 template <std::size_t N>
 struct Text {
   char data[N + 1]{};
@@ -84,6 +91,14 @@ struct Selection {
 const char* providerName(cfg::Provider provider);
 // Stable lower-case key of a failure cause (REST API); "" for kNone.
 const char* causeKey(Cause cause);
+// Number of a cause in the short error code (1..; 0 for kNone). Assigned
+// once and never changed (docs/API.md "Error codes").
+uint8_t causeNumber(Cause cause);
+// Short error code "OLG E11" of a cause, with the HTTP status when there is
+// one ("OLG E10·503"); "" for kNone. 'http' 0 = none.
+inline constexpr std::size_t kErrorCodeBytes = 16;
+void errorCode(char (&out)[kErrorCodeBytes], cfg::Provider provider,
+               Cause cause, uint16_t http);
 // Stable lower-case code of a match phase (REST API).
 const char* phaseName(Phase phase);
 int64_t parseUtc(const char* text);

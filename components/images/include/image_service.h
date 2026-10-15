@@ -73,12 +73,9 @@ esp_err_t resetRole(cfg::StockImage stock);
 // resets the settings.
 esp_err_t removeAll();
 
-// Outside the OTA trial, once: removes the legacy named files (OQ-73),
-// copies the crest image of a settings record before format 6 into the crest
-// role (settings::legacyCrest(), OQ-152) and removes settings references to
-// images that do not exist. True when done (or nothing to do); false while
-// the files are not mounted, the trial runs, the display stays busy or an
-// upload runs.
+// Outside the OTA trial, once: removes the legacy named files (OQ-73) and
+// settings references to images that do not exist. True when done (or
+// nothing to do); false while the files are not mounted or the trial runs.
 bool maintain();
 
 // Explicit full storage reset, including recovery from damaged LittleFS.

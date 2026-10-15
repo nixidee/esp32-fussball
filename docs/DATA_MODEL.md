@@ -23,10 +23,9 @@ open.
 
 | Data set | Content | Where / lifetime | Size (C6) |
 |---|---|---|---|
-| Competition list | up to 8 entries: stable id, active flag, four screen switches, primary source, optional fallback source, display names of competition and club | own competition record (NVS), persistent | 2,459 B in RAM, record up to 2,467 B ([CONFIGURATION.md](CONFIGURATION.md)) |
-| Fixture pairs | up to 8 links of a primary and a fallback match id, each naming its competition by id | competition record (NVS), persistent | part of the competition record |
+| Competition list | up to 8 entries: stable id, active flag, four screen switches, one source, display names of competition and club | own competition record (NVS), persistent | 1,226 B in RAM, record up to 1,234 B ([CONFIGURATION.md](CONFIGURATION.md)) |
 | Match store | matches, tables, team directory, round labels, own-match events and notices of all competitions | RAM, one static store, updated per provider response; reloaded from the competition files at boot | 22,728 B |
-| Competition files | per active competition: its part of the match store, what its sources resolved and when each data type last completed | LittleFS `comp_<id>.bin`, rewritten after new data (section 4.8) | about 3 KB for an 18-team league, one 4 KB block |
+| Competition files | per active competition: its part of the match store, what its source resolved and when each data type last completed | LittleFS `comp_<id>.bin`, rewritten after new data (section 4.8) | about 3 KB for an 18-team league, one 4 KB block |
 | Short names | the owner's replacements of team short names, per provider and team id | LittleFS `short_names.bin` and RAM, persistent until a settings reset | 48 entries of 32 B in RAM, file up to 1,552 B |
 | Selection page | one page of a provider's competition or club list for the setup wizard | RAM, per request | 64 entries of 131 B |
 | Display view model | what one screen shows, copied from the store | RAM | 1,420 B |
@@ -36,7 +35,7 @@ open.
 
 | Term | Meaning |
 |---|---|
-| Competition | one entry of the competition list: a league, cup or tournament at one provider (plus optional fallback). Its stable id (1–255) is used by the store, the fixture pairs and the REST interface. |
+| Competition | one entry of the competition list: a league, cup or tournament at one provider; each competition has exactly one source. Its stable id (1–255) is used by the store, the competition files and the REST interface. |
 | Tracked club / own club | the club id of the competition entry's source. Optional: an entry without a club shows the competition only. |
 | Own match | a match of the tracked club. The Own match screen shows the one in its window, else the one with the kickoff nearest to now. |
 | Screen switches | per competition, which of Own match, Konferenz, Matchday and Table show it; Matchday and Table show their competitions one after another in list order. Every requested competition's table is stored. |
@@ -44,7 +43,7 @@ open.
 | Matchday | the matches of a competition whose kickoffs follow each other with gaps of less than 48 hours; it decides how long matches stay stored. |
 | Live window | from 30 minutes before kickoff to the expected end of a match; live data are requested only inside it ([DATA_FLOW.md](DATA_FLOW.md)). |
 | Konferenz block | the shown matches of all active competitions with the same kickoff time (section 7.2). |
-| Estimated / fallback bit | per value: derived by the device, or supplied by the competition's fallback source instead of its primary provider. |
+| Estimated bit | per value: derived by the device, not reported by the provider. |
 | Principal score | the ordinary goals of the match (after extra time when played), never including shootout goals. |
 
 ## 3. Identity and values
@@ -76,8 +75,7 @@ football-data.org. Mapping details: [DATA_FLOW.md](DATA_FLOW.md).
 |---|---|---|---|
 | `active` | entry is requested and shown | – | the screens switched on in `screens` |
 | `screens` | one switch each for Own match, Konferenz, Matchday, Table (default all on) | – | which screens show the competition; the request plans fetch only the data of the switched-on screens (DATA_FLOW) |
-| `primary` / `fallback` | provider, competition id, season (empty = current), club id | primary competition | requests; club id marks own matches |
-| `fallback_active` | use the fallback source | – | combining (DATA_FLOW section 6) |
+| `primary` | the competition's only source: provider, competition id, season (empty = current), club id | competition id | requests; club id marks own matches |
 | `competition_name` | display name | – | Own match caption, Table title, start screen |
 | `team_name` | club display name | – | start screen title |
 
@@ -91,19 +89,20 @@ football-data.org. Mapping details: [DATA_FLOW.md](DATA_FLOW.md).
 | Own matches | 8 (`kStoreOwnMatches`) | 148 B | match id, competition, full team names, up to 12 event indices |
 | Events | 32 (`kStoreEvents`) | 84 B | section 4.4 |
 | Round labels | 24 (`kStoreRoundLabels`) | 32 B | provider round text, shared by all matches of the round |
-| Notices | one per competition | 2 B | a match, table row, team or event did not fit; fallback route active; fallback failed |
+| Notices | one per competition | 2 B | a match, table row, team or event did not fit |
 
 The whole store measures 22,728 B (pinned by the test suite).
 
 Team short name: OL `shortName`, ES `shortDisplayName` (partly English), AF
-none (the full name is used), FD `shortName`. Core-data requests update the
-short names of teams the store already holds; they add no teams.
+none (the full name is used), FD `shortName`. They come with the fixtures,
+table and live responses; a non-empty name in a later response replaces
+the stored one.
 
 ### 4.3 Match (40 B)
 
 | Field | Meaning | OL | ES | AF | FD | Shown / used |
 |---|---|---|---|---|---|---|
-| `competition`, `provider`, `id` | identity | ✓ | ✓ | ✓ | ✓ | fixture pairs, updates |
+| `competition`, `provider`, `id` | identity | ✓ | ✓ | ✓ | ✓ | updates |
 | `home`, `away` | team directory indices | ✓ | ✓ | ✓ | ✓ | Own match, Konferenz, REST |
 | `round` | round number | ✓ | ✗ | ✗ | ✓ `matchday` | Own match caption "N. Spieltag" when no label; Konferenz matchday |
 | `label` | round text (pool index) | ✓ `groupName` | ✗ | ✓ `league.round` | ✓ `stage` | Own match caption (preferred over the number) |
@@ -112,11 +111,11 @@ short names of teams the store already holds; they add no teams.
 | `phase` | Unknown … Abandoned (section 5) | (✓) finished flag, else E | ✓ | ✓ | ✓ | pill, live windows, Konferenz, rim, REST |
 | `minute` | match minute | E (`~`) | ✓ | ✓ | ✗ | pill, rim, REST |
 | `principal` | ordinary goals | ✓ | ✓ | ✓ | ✓ | score centre, Konferenz, REST, goal flash |
-| `halftime`, `regulation`, `extra_time` | intermediate scores | ✓ (extra time at times incomplete) | ✗ | ✓ | ✓ | **not shown** (fallback filling) |
+| `halftime`, `regulation`, `extra_time` | intermediate scores | ✓ (extra time at times incomplete) | ✗ | ✓ | ✓ | **not shown** |
 | `shootout` | shootout tally | ✓ (derived) | ✓ | ✓ | ✓ | pill "i.E. 4 : 2" |
 | `score_changed` | last principal score change | – | – | – | – | Konferenz goal flash (120 s), page order |
 | `flags` | own match, events truncated | – | – | – | – | accent colour, own match choice |
-| `estimated`, `fallback` | estimated and fallback bit per value | – | – | – | – | `~` minute; filling rules |
+| `estimated` | estimated bit per value (phase, minute, final whistle) | – | – | – | – | `~` minute |
 | `own` | own-match slot (full names, events) | – | – | – | – | Own match |
 
 ### 4.4 Event (84 B)
@@ -129,7 +128,7 @@ short names of teams the store already holds; they add no teams.
 | `player` | player; for a substitution the player going off (an ESPN scoreboard substitution: both names "A / B") | ✓ | ✓ | ✓ | ✗ | highlight line |
 | `player_in` | substitution: player coming on | ✗ | ✓ (match summary) | ✓ | ✗ | highlight "out > in" |
 | `after` | score after the event | ✓ | ✗ | ✗ | ✗ | identity; **not shown** |
-| `flags` | removed, shoot-out, origin (fallback source, or the primary's detail request) | – | ✓ shoot-out | ✓ shoot-out | ✗ | removed events hidden; "Elfmeterschießen" |
+| `flags` | removed, shoot-out, origin (the detail request) | – | ✓ shoot-out | ✓ shoot-out | ✗ | removed events hidden; "Elfmeterschießen" |
 | `identity`, `revision` | supplied id or hash; change fingerprint | – | – | – | – | updates |
 
 ### 4.5 Table row (14 B)
@@ -146,9 +145,15 @@ short names of teams the store already holds; they add no teams.
 
 ### 4.6 Store rules
 
-- *Expiry:* a matchday stays until the end of the local day after its last
-  kickoff; the provider worker drops passed matchdays every minute
-  (`kStoreMaintenanceS`). Matches without a kickoff stay.
+- *Expiry:* a matchday (kickoffs less than `kMatchdayGapHours` apart) is
+  *over* at the end of the local date of its last kickoff and *passed* at
+  the end of the following local day; a passed matchday is dropped. The
+  provider worker drops passed matchdays after every match fetch of a
+  competition (so a passed matchday that a provider sends again never
+  stays) and every minute (`kStoreMaintenanceS`). Matches without a kickoff
+  stay. One module (`football/matchday`) holds the gap rule, "over",
+  "passed" and the Matchday selection for the store, the views, the
+  request planner and the display.
 - *Full store:* the match of another club farthest from now makes room
   when the incoming match is nearer or own; otherwise the incoming match is
   skipped and the competition notes it. The list stays sorted by kickoff.
@@ -161,22 +166,16 @@ short names of teams the store already holds; they add no teams.
   only when the response was complete and every row fit; a broken or empty
   response keeps the stored table. OpenLigaDB positions come from the row
   order and are marked estimated.
-- *Events:* own matches only, in provider order per origin (primary
-  source, the primary's detail request — the ESPN match summary with the
-  substitutions — or the fallback source), at most 12. Each origin replaces
-  only its own events; the other origins' events stay ahead of a new list.
-  A full list gives way first with fallback events hidden behind a primary
-  event, then other fallback events, then detail events, then the oldest; dropping a shown event flags the match truncated. An event
-  missing from a later complete list of its own origin stays once as a
-  removal marker; a response that broke off keeps every previous event.
-- *Fallback values:* a paired fallback match fills the primary match's
-  missing or only estimated kickoff, phase, minute and five scores with its
-  reported values (swapped pairs swap home and away); each filled value
-  carries a fallback bit and stays until the primary reports the field
-  itself. A fallback goal is hidden while the match holds a goal of the
-  primary, a fallback missed penalty while it holds one of the primary's.
-- *Settings changes:* a competition whose sources, fallback switch or
-  fixture pairs change, that is removed or paused loses its stored data;
+- *Events:* own matches only, in provider order per origin (the source's
+  list request, or its detail request — the ESPN match summary with the
+  substitutions), at most 12. Each origin replaces only its own events;
+  the other origin's events stay ahead of a new list. A full list gives way
+  first with detail events, then the oldest; dropping a shown event flags
+  the match truncated. An event missing from a later complete list of its
+  own origin stays once as a removal marker; a response that broke off
+  keeps every previous event.
+- *Settings changes:* a competition whose source changes, that is removed
+  or paused loses its stored data;
   the others keep theirs. A changed provider key or ESPN opt-in drops the
   data of the competitions that use that provider; a changed demo mode
   clears the whole store.
@@ -186,11 +185,21 @@ short names of teams the store already holds; they add no teams.
 | Field | Meaning | Shown |
 |---|---|---|
 | `revision`, `generation` | publication counter and data settings generation | – |
-| `fetched_ms` | oldest last successful request over the active competitions | status band "Stand HH:MM", REST `last_update_ms` |
-| `stale` | a primary request failed and has not succeeded since, without the fallback route standing in, or a shown match is in its live window and its competition's last successful match request is older than 15 minutes (`kDataStaleS`) | status band, REST |
-| `retry_ms` | next scheduled request while a competition has failed | "Keine Daten" card, REST |
-| `error`, `cause`, `error_routes` | first failure text and cause, failed competitions | status band, cards, REST |
-| `routing_notice` | fallback in use or fallback failed | REST only |
+| `fetched_ms` | oldest last successful request over the active competitions | status pill "Stand HH:MM", REST `last_update_ms` |
+| `stale` | a request of an active competition failed and has not succeeded since, or a shown match is in its live window and its competition's last successful match request is older than 15 minutes (`kDataStaleS`) | status pill, REST |
+| `retry_ms` | next scheduled request while a competition has failed | notice cards "Neuer Versuch HH:MM", REST |
+| `competitions` | one state per competition (below) | status pill, notice cards, REST `competitions[]` |
+
+Per competition (`CompetitionState`, index = position in the competition
+list):
+
+| Field | Meaning |
+|---|---|
+| `id`, `active` | stable competition id, competition active |
+| `fetched_ms` | monotonic time of its last successful request (0 = none yet); a failed competition keeps its earlier data |
+| `cause` | why its last request failed (`Cause`, keys and codes in [API.md](API.md#error-causes-and-codes)); `unmaintained` when a match of it kicked off more than 24 hours ago (`kUnmaintainedAfterS`), is neither finished, postponed, cancelled nor abandoned and has no result; none after a successful request |
+| `provider`, `http` | provider of the failed request (or of the unmaintained matches) and its HTTP status (0 = none) |
+| `stale` | its last request failed, or a shown match of it is in its live window and its last successful match request is older than `kDataStaleS` |
 | `matches_truncated` | a competition notes that a match did not fit | REST / Web UI |
 | `configured` | at least one active competition (or demo) | setup card, stock image |
 
@@ -198,9 +207,10 @@ short names of teams the store already holds; they add no teams.
 
 A competition file lets a reboot show the data without a request. It holds
 the competition's matches with their teams and round labels, its table, the
-own matches' full names and events, its notices, what its sources resolved
+own matches' full names and events, its notices, what its source resolved
 (season, OpenLigaDB round, ESPN match days, "no table") and the UTC time
-each of core data, fixtures and table last completed. Not kept: the
+each of fixtures and table last completed, and when API-Football's season
+was last resolved. Not kept: the
 monotonic time of the last score change (no goal highlight after a
 reboot) and the live data types, which follow the live windows.
 
@@ -208,7 +218,7 @@ reboot) and the live data types, which follow the live windows.
   its full names and events), table rows, CRC-32. Structures are stored as
   in RAM, so a file is valid only for the build layout it names; another
   layout, version, a wrong count, index or CRC rejects the whole file.
-- **Load:** at boot, for every active competition whose sources are
+- **Load:** at boot, for every active competition whose source is
   unchanged since the file was written. A rejected or foreign file is
   ignored and deleted later; a competition without a file waits for its
   requests as before.
@@ -217,8 +227,10 @@ reboot) and the live data types, which follow the live windows.
   passed, measured once the clock is valid; live types run as usual.
 - **Short names:** at most 48 replacements (`kShortNamesMax`) of 26 bytes,
   per provider and team id; an empty name removes one. They replace the
-  provider's short name in every view (Konferenz, own match, table). An
-  invalid file starts with no replacements.
+  provider's short name in every view (Konferenz, own match, table). The
+  file has its own version and layout check, so a format change of the
+  competition files keeps it. An invalid file starts with no replacements
+  (a settings backup brings them back).
 
 ## 5. Match phases and scores
 
@@ -308,22 +320,34 @@ any table: a card.
 ### 7.3a Matchday
 
 Every competition with the Matchday switch, one after another in settings
-order. Each shows its first stored matchday (kickoffs less than
-`kMatchdayGapHours` apart): the current one until it expires (section 4.6),
-then the next one. Rows as in the Konferenz, in kickoff order, with the
-result or kickoff time; `visible_matches` rows per page, a new page every 8
-seconds, after the last page the next competition. Caption: competition
-display name · round label, else "N. Spieltag", else the date. Without any
-matchday: the card "Spieltag / Keine Spiele".
+order. Each shows its selected matchday (kickoffs less than
+`kMatchdayGapHours` apart; "over" and "passed" as in section 4.6), chosen
+by the setting `matchday_mode`:
+
+- *Current matchday* (default): the first stored matchday that has not
+  passed, so a finished matchday stays until the end of the following
+  local day, then the next one.
+- *Next matchday*: the first stored matchday that is not over, so it moves
+  on at midnight after the last kickoff. A competition without such a
+  matchday is skipped by the automatic cycle.
+
+Reachable with the buttons are, per competition, the stored matchdays from
+the first one not passed up to the one after the selected one (at most
+three: held, selected, next). Rows as in the Konferenz, in kickoff order,
+with the result or kickoff time; `visible_matches` rows per page, a new
+page every 8 seconds, after the last page the next competition. Caption:
+competition display name · round label, else "N. Spieltag", else the date.
+Without any matchday: the card "Spieltag / Keine Spiele".
 
 ### 7.4 Other users
 
 - **Start screen:** club display name and the first active competition's
   provider name.
-- **Status band / state cards:** stale state, fetch time, error, next retry.
+- **Status pill / state cards:** stale state, fetch time, cause and error
+  code per competition, next retry.
 - **REST status:** own match (competition, phase, kickoff, goals, minute,
-  team names) and per competition the match count, provider and error flag
-  ([API.md](API.md)). Tables and events are not exposed.
+  team names) and per competition the match count, provider, cause, error
+  code and last update ([API.md](API.md)). Tables and events are not exposed.
 
 ## 8. Capacities
 
@@ -336,7 +360,6 @@ matchday: the card "Spieltag / Keine Spiele".
 | Own matches with full names and events | 8 (`kStoreOwnMatches`) | all competitions |
 | Events | 32 (`kStoreEvents`), 12 per match | own matches |
 | Round labels | 24 (`kStoreRoundLabels`) | all competitions |
-| Fixture pairs | 8 | all competitions |
 | Selection page | 64 entries | – |
 | Stored matchdays | what the request plans fetch (current and next matchday, own fixtures within 7 days), until the end of the local day after the matchday | – |
 
@@ -354,10 +377,9 @@ Overflow handling is described in section 4.6.
 
 ## 10. Known gaps at a glance
 
-**Stored but never shown or used:** `halftime`, `regulation`, `extra_time`
-(only fallback filling), event `added`, `actor`, `beneficiary`, `after`,
+**Stored but never shown or used:** `halftime`, `regulation`, `extra_time`, event `added`, `actor`, `beneficiary`, `after`,
 table `won`, `drawn`, `lost`, `goals_for`, `goals_against`, the
-events-truncated flag (on screen), `routing_notice` (on screen).
+events-truncated flag (on screen).
 
 **Provider-dependent display differences:**
 
@@ -375,7 +397,7 @@ events-truncated flag (on screen), `routing_notice` (on screen).
 
 - At most 8 competitions and 192 stored matches.
 - Events only for own matches; Konferenz matches have scores only.
-- After a restart only the active competitions with unchanged sources show
+- After a restart only the active competitions with an unchanged source show
   their kept data; a competition file is written at most every 10 minutes
   and not during a live window, so the last minutes before a power loss
   can be missing.

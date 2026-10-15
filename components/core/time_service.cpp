@@ -168,6 +168,24 @@ void toLocal(time_t utc, std::tm& out) {
   localtime_r(&utc, &out);
 }
 
+int32_t localOffset(time_t utc) {
+  std::tm local{};
+  toLocal(utc, local);
+  // Days since 1970-01-01 of the local civil date (proleptic Gregorian).
+  int y = local.tm_year + 1900;
+  const unsigned m = static_cast<unsigned>(local.tm_mon + 1);
+  const auto d = static_cast<unsigned>(local.tm_mday);
+  y -= m <= 2;
+  const int64_t era = (y >= 0 ? y : y - 399) / 400;
+  const auto yoe = static_cast<unsigned>(y - era * 400);
+  const unsigned doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;
+  const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  const int64_t days = era * 146097 + static_cast<int64_t>(doe) - 719468;
+  const int64_t as_utc =
+      days * 86400 + local.tm_hour * 3600 + local.tm_min * 60 + local.tm_sec;
+  return static_cast<int32_t>(as_utc - utc);
+}
+
 int64_t monotonicMs() { return esp_timer_get_time() / 1000; }
 
 void logStatus() {

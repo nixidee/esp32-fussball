@@ -108,7 +108,6 @@ bool isValidSeason(cfg::Provider provider, std::string_view season) noexcept {
 
 const char* dataTypeName(cfg::DataType type) noexcept {
   switch (type) {
-    case cfg::DataType::kCore: return "core";
     case cfg::DataType::kFixtures: return "fixtures";
     case cfg::DataType::kTable: return "table";
     case cfg::DataType::kLive: return "live";
@@ -129,12 +128,10 @@ bool sameProviderData(const Competitions& a, const Competitions& b) noexcept {
   for (std::size_t i = 0; i < a.entries.size(); ++i) {
     const auto& x = a.entries[i];
     const auto& y = b.entries[i];
-    if (x.id != y.id || x.active != y.active ||
-        x.fallback_active != y.fallback_active || !(x.primary == y.primary) ||
-        !(x.fallback == y.fallback))
+    if (x.id != y.id || x.active != y.active || !(x.primary == y.primary))
       return false;
   }
-  return a.pairs == b.pairs;
+  return true;
 }
 
 void assignIds(Competitions& competitions) noexcept {
@@ -173,16 +170,10 @@ bool checkProviderAccess(const Model& model, const Competitions& competitions,
   for (unsigned i = 0; i < competitions.entries.size(); ++i) {
     const auto& entry = competitions.entries[i];
     if (!entry.active) continue;
-    const char* source = nullptr;
-    if (!providerUsable(entry.primary.provider, model))
-      source = "primary";
-    else if (entry.fallback_active &&
-             !providerUsable(entry.fallback.provider, model))
-      source = "fallback";
-    if (source == nullptr) continue;
+    if (providerUsable(entry.primary.provider, model)) continue;
     if (violation != nullptr) {
       FieldPath at;
-      at.key("competitions").index(i).key(source).key("provider");
+      at.key("competitions").index(i).key("primary").key("provider");
       violation->set(at, Reason::kConflict);
     }
     return false;
@@ -253,54 +244,10 @@ bool checkSources(Checker& check, const Competitions& competitions) {
       return check.fail(FieldPath(primary).with("competition"),
                         Reason::kRequired);
     if (!checkSource(check, primary, entry.primary)) return false;
-    const auto fallback = at.with("fallback");
-    if (!checkSource(check, fallback, entry.fallback)) return false;
     if (!isDisplayName(entry.competition_name.view()))
       return check.fail(at.with("competition_name"), Reason::kInvalid);
     if (!isDisplayName(entry.team_name.view()))
       return check.fail(at.with("team_name"), Reason::kInvalid);
-    if (!entry.fallback_active) continue;
-    if (entry.fallback.competition.empty())
-      return check.fail(FieldPath(fallback).with("competition"),
-                        Reason::kRequired);
-    // The fallback names the same club at its provider, or no club.
-    if (entry.fallback.team.empty() != entry.primary.team.empty())
-      return check.fail(FieldPath(fallback).with("team"),
-                        entry.fallback.team.empty() ? Reason::kRequired
-                                                    : Reason::kConflict);
-    if (entry.fallback.provider == entry.primary.provider)
-      return check.fail(FieldPath(fallback).with("provider"),
-                        Reason::kConflict);
-  }
-  return true;
-}
-
-bool checkPairs(Checker& check, const Competitions& competitions) {
-  for (unsigned i = 0; i < competitions.pairs.size(); ++i) {
-    const auto& pair = competitions.pairs[i];
-    FieldPath at;
-    at.key("fixture_pairs").index(i);
-    const auto* entry = competitions.find(pair.competition);
-    if (pair.competition == 0 || entry == nullptr)
-      return check.fail(at.with("competition"), Reason::kReference);
-    for (const auto& [name, id] :
-         {std::pair{"primary_id", &pair.primary_id},
-          std::pair{"secondary_id", &pair.secondary_id}}) {
-      if (id->empty()) return check.fail(at.with(name), Reason::kRequired);
-      if (!isValidIdentifier(id->view()))
-        return check.fail(at.with(name), Reason::kInvalid);
-    }
-    if (!pair.active) continue;
-    if (!entry->fallback_active)
-      return check.fail(at.with("competition"), Reason::kConflict);
-    for (unsigned j = 0; j < i; ++j) {
-      const auto& other = competitions.pairs[j];
-      if (!other.active || other.competition != pair.competition) continue;
-      if (other.primary_id == pair.primary_id)
-        return check.fail(at.with("primary_id"), Reason::kDuplicate);
-      if (other.secondary_id == pair.secondary_id)
-        return check.fail(at.with("secondary_id"), Reason::kDuplicate);
-    }
   }
   return true;
 }
@@ -396,7 +343,6 @@ const char* reasonName(Reason reason) noexcept {
     case Reason::kTooMany: return "too_many";
     case Reason::kRequired: return "required";
     case Reason::kDuplicate: return "duplicate";
-    case Reason::kReference: return "reference";
     case Reason::kConflict: return "conflict";
     case Reason::kNoneEnabled: return "none_enabled";
   }
@@ -437,46 +383,49 @@ bool validate(const Model& model, Field* invalid, Violation* violation,
     // While other matches run the own club does not play (OQ-122).
     const cfg::Range matchday{static_cast<uint16_t>(cfg::Screen::kLiveMulti),
                               screens.max};
-    ok = check.invalid("admin_password", model.admin_password.view().find(
-                                             '\0') == std::string_view::npos) &&
-         check.invalid("api_football_key",
-                       isHeaderValue(model.api_football_key.view())) &&
-         check.invalid("football_data_key",
-                       isHeaderValue(model.football_data_key.view())) &&
-         check.range("language", {0, 1}, model.language) &&
-         check.range("rotation", cfg::kRotationRange, model.rotation) &&
-         check.range("brightness", cfg::kBrightnessRange, model.brightness) &&
-         check.range("night_brightness", cfg::kBrightnessRange,
-                     model.night_brightness) &&
-         check.range("visible_matches", visible, model.visible_matches) &&
-         check.range("table_window", window, model.table_window) &&
-         check.range("manual_return_s", cfg::kReturnTimeRange,
-                     model.manual_return_s) &&
-         check.range("scroll_reset_s", cfg::kReturnTimeRange,
-                     model.scroll_reset_s) &&
-         check.range("scroll_repeat_ms", cfg::kScrollRepeatRange,
-                     model.scroll_repeat_ms) &&
-         check.range("slideshow_s", cfg::kSlideshowRange, model.slideshow_s) &&
-         check.range("table_page_s", cfg::kTablePageRange,
-                     model.table_page_s) &&
-         check.range("night_start", cfg::kDayMinutesRange, model.night_start) &&
-         check.range("night_end", cfg::kDayMinutesRange, model.night_end) &&
-         check.range("ip_badge_s", cfg::kReturnTimeRange, model.ip_badge_s) &&
-         check.range("window_before", cfg::kMatchWindowRange,
-                     model.window_before) &&
-         check.range("window_after", cfg::kMatchWindowRange,
-                     model.window_after) &&
-         check.range("idle_screen", screens,
-                     static_cast<unsigned>(model.idle_screen)) &&
-         check.range("matchday_screen", matchday,
-                     static_cast<unsigned>(model.matchday_screen)) &&
-         check.range("own_match_screen", screens,
-                     static_cast<unsigned>(model.own_match_screen)) &&
-         check.range("conference_mode",
-                     {0, static_cast<uint16_t>(cfg::ConferenceMode::kOnePage)},
-                     static_cast<unsigned>(model.conference_mode)) &&
-         checkInputs(check, model, limits.inputs) &&
-         checkRequestPlans(check, model) && checkImages(check, model);
+    ok =
+        check.invalid("admin_password", model.admin_password.view().find(
+                                            '\0') == std::string_view::npos) &&
+        check.invalid("api_football_key",
+                      isHeaderValue(model.api_football_key.view())) &&
+        check.invalid("football_data_key",
+                      isHeaderValue(model.football_data_key.view())) &&
+        check.range("language", {0, 1}, model.language) &&
+        check.range("rotation", cfg::kRotationRange, model.rotation) &&
+        check.range("brightness", cfg::kBrightnessRange, model.brightness) &&
+        check.range("night_brightness", cfg::kBrightnessRange,
+                    model.night_brightness) &&
+        check.range("visible_matches", visible, model.visible_matches) &&
+        check.range("table_window", window, model.table_window) &&
+        check.range("manual_return_s", cfg::kReturnTimeRange,
+                    model.manual_return_s) &&
+        check.range("scroll_reset_s", cfg::kReturnTimeRange,
+                    model.scroll_reset_s) &&
+        check.range("scroll_repeat_ms", cfg::kScrollRepeatRange,
+                    model.scroll_repeat_ms) &&
+        check.range("slideshow_s", cfg::kSlideshowRange, model.slideshow_s) &&
+        check.range("table_page_s", cfg::kTablePageRange, model.table_page_s) &&
+        check.range("night_start", cfg::kDayMinutesRange, model.night_start) &&
+        check.range("night_end", cfg::kDayMinutesRange, model.night_end) &&
+        check.range("ip_badge_s", cfg::kReturnTimeRange, model.ip_badge_s) &&
+        check.range("window_before", cfg::kMatchWindowRange,
+                    model.window_before) &&
+        check.range("window_after", cfg::kMatchWindowRange,
+                    model.window_after) &&
+        check.range("idle_screen", screens,
+                    static_cast<unsigned>(model.idle_screen)) &&
+        check.range("matchday_screen", matchday,
+                    static_cast<unsigned>(model.matchday_screen)) &&
+        check.range("own_match_screen", screens,
+                    static_cast<unsigned>(model.own_match_screen)) &&
+        check.range("conference_mode",
+                    {0, static_cast<uint16_t>(cfg::ConferenceMode::kOnePage)},
+                    static_cast<unsigned>(model.conference_mode)) &&
+        check.range("matchday_mode",
+                    {0, static_cast<uint16_t>(cfg::MatchdayMode::kNext)},
+                    static_cast<unsigned>(model.matchday_mode)) &&
+        checkInputs(check, model, limits.inputs) &&
+        checkRequestPlans(check, model) && checkImages(check, model);
   }
   if (ok) return true;
   if (invalid != nullptr) *invalid = bad;
@@ -485,7 +434,7 @@ bool validate(const Model& model, Field* invalid, Violation* violation,
 
 bool validate(const Competitions& competitions, Violation* violation) noexcept {
   Checker check(violation);
-  return checkSources(check, competitions) && checkPairs(check, competitions);
+  return checkSources(check, competitions);
 }
 
 bool dropMissingImages(Model& model, ImageMask present) noexcept {

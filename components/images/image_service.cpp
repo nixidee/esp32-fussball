@@ -107,10 +107,10 @@ esp_err_t unlinkImage(uint8_t slot) {
   if (rendering) display::unlock();
   return err;
 }
-// Opens the temporary file for 'slot'. 'budget' checks the image budget
-// without the file the slot holds now; the storage reserve is always
-// checked, with the old file still counted.
-esp_err_t start(uint8_t slot, std::size_t size, bool budget) {
+// Opens the temporary file for 'slot'. The image budget is checked without
+// the file the slot holds now, the storage reserve with the old file still
+// counted.
+esp_err_t start(uint8_t slot, std::size_t size) {
   if (temporary != nullptr || ota::trial() ||
       files::state() != files::State::kMounted)
     return ESP_ERR_INVALID_STATE;
@@ -123,8 +123,7 @@ esp_err_t start(uint8_t slot, std::size_t size, bool budget) {
   for (uint8_t i = 1; i <= kSlots; ++i)
     if (i != slot) total += slotBytes(i);
   files::Usage usage{};
-  if ((budget && total + size > cfg::kImageTotalBytes) ||
-      files::usage(usage) != ESP_OK ||
+  if (total + size > cfg::kImageTotalBytes || files::usage(usage) != ESP_OK ||
       usage.used_bytes + size + cfg::kImageReserveBytes > usage.total_bytes)
     return ESP_ERR_NO_MEM;
   temporary = fopen(p, "wb");
@@ -158,13 +157,13 @@ esp_err_t publish() {
   return err;
 }
 // Copies library image 'id' into the slot of 'stock'.
-esp_err_t copy(uint8_t id, cfg::StockImage stock, bool budget) {
+esp_err_t copy(uint8_t id, cfg::StockImage stock) {
   if (!libraryId(id) || !stockRole(stock)) return ESP_ERR_INVALID_ARG;
   char from[96];
   slotPath(id, from, sizeof(from));
   const auto size = bytes(from);
   if (size == 0) return ESP_ERR_NOT_FOUND;
-  auto err = start(roleSlot(stock), size, budget);
+  auto err = start(roleSlot(stock), size);
   if (err != ESP_OK) return err;
   FILE* in = fopen(from, "rb");
   if (in == nullptr) err = ESP_FAIL;
@@ -247,11 +246,11 @@ esp_err_t begin(uint8_t id, std::size_t size) {
   } else if (!info(id).present) {
     return ESP_ERR_NOT_FOUND;
   }
-  return start(id, size, true);
+  return start(id, size);
 }
 esp_err_t beginRole(cfg::StockImage stock, std::size_t size) {
   if (!stockRole(stock)) return ESP_ERR_INVALID_ARG;
-  return start(roleSlot(stock), size, true);
+  return start(roleSlot(stock), size);
 }
 uint8_t uploadedId() {
   return libraryId(destination) ? destination : cfg::kStockImageId;
@@ -301,7 +300,7 @@ esp_err_t remove(uint8_t id) {
 }
 esp_err_t copyToRole(uint8_t id, cfg::StockImage stock) {
   if (ota::trial()) return ESP_ERR_INVALID_STATE;
-  return copy(id, stock, true);
+  return copy(id, stock);
 }
 esp_err_t resetRole(cfg::StockImage stock) {
   if (!stockRole(stock)) return ESP_ERR_INVALID_ARG;
@@ -327,35 +326,16 @@ bool maintain() {
       changed.fetch_add(1);
     }
   }
-  // A crest reference of a format 3 to 5 record becomes the crest
-  // replacement once. The copy may exceed the image budget (the file is
-  // already counted in it) but not the storage reserve.
-  const uint8_t crest = settings::legacyCrest();
-  const bool migrate = crest != cfg::kStockImageId;
-  if (migrate) {
-    const auto err = info(crest).present ? copy(crest, cfg::kStockCrest, false)
-                                         : ESP_ERR_NOT_FOUND;
-    // Display busy or an upload running: try again on the next call.
-    if (err == ESP_ERR_TIMEOUT || err == ESP_ERR_INVALID_STATE) return false;
-    if (err == ESP_OK)
-      ESP_LOGI(kTag, "crest image %u copied into the crest role",
-               static_cast<unsigned>(crest));
-    else
-      ESP_LOGW(kTag, "crest image %u not copied (%s), it stays in the library",
-               static_cast<unsigned>(crest), esp_err_to_name(err));
-  }
   auto model = settings::current();
   const bool dropped = settings::dropMissingImages(model, present());
-  // Saving writes the current format, so the old reference is not read again.
-  if (dropped || migrate) {
+  if (dropped) {
     const auto err = settings::save(model);
-    if (err == ESP_OK && dropped)
+    if (err == ESP_OK)
       ESP_LOGI(kTag, "removed references to missing images");
-    else if (err != ESP_OK)
+    else
       ESP_LOGW(kTag, "settings not saved after image maintenance: %s",
                esp_err_to_name(err));
   }
-  if (migrate) settings::forgetLegacyCrest();
   return true;
 }
 uint32_t revision() { return changed.load(); }

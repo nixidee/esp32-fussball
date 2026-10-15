@@ -9,8 +9,8 @@ and pending device acceptance are recorded separately below.
 
 | Page | Content |
 |---|---|
-| Overview | Current screen/reason, own match or kickoff, global data age, next provider round and its reason, source/match count/error per competition, warnings and refresh/next/IP actions |
-| Competitions | Compact ordered list of active/paused entries with a Details expander (season, fallback, move/edit/short names/remove), add/edit wizard, provider competition/club lists, fallback explanation, saved-competition fixture picker |
+| Overview | Current screen/reason, own match or kickoff, global data age, next provider round and its reason, source/match count/data time/cause, action and error code per competition, warnings and refresh/next/IP actions |
+| Competitions | Compact ordered list of active/paused entries with a Details expander (season, screen switches, move/edit/short names/remove), add/edit wizard, provider competition/club lists |
 | Display | Situation defaults, five screen styles, background/image references, ordered slideshow (the crest is one possible slide), brightness/night/rotation, badges and expert scroll controls |
 | Images | Revisioned thumbnails, usage, quota, upload/replace editor, confirmed real deletion, and the crest and standard background (replace, copy from the library, restore the factory image) |
 | Settings | WiFi scan and credentials, hostname/antenna, provider keys/opt-in and request limits (daily cap, window limit) per provider, time/language/access and expert diagnostics |
@@ -41,9 +41,13 @@ may be shortened slightly earlier or later than on the device.
 
 The overview binds the device status the way the display does: the start
 screen with its three steps until the first data, the setup card, the
-no-WiFi, waiting-for-time and no-data cards, the status line (demo, no WiFi,
-waiting for time, the time of the last data when stale, provider error) and
-the IP chip with its configured duration. The own match uses the device's
+no-WiFi, waiting-for-time and no-data cards, the notice card of a failing
+competition in the Matchday and Table cycles, the "Demo" line, the status
+pill (no WiFi, waiting for time, the time of the last data when stale, the
+error code of a failing competition or the number of failing ones) and the
+IP chip with its configured duration. The device shows the status pill only
+for 5 seconds after each change; the preview shows it for as long as the
+state lasts and says so below the disc. The own match uses the device's
 real data (teams, score, minute or kickoff date and countdown, phase). Values
 the status API does not report — the matchday number, the event line,
 conference and matchday rows, table rows and the setup network name — are drawn as example
@@ -64,7 +68,7 @@ polling updates its own nodes and does not replace unsaved form input.
 Loaded settings and the editable draft are separate. Switching pages preserves
 the draft; a global save bar lists differences and supports discard/save. The
 client validates all fields against schema byte capacities, numeric bounds,
-list maxima and the firmware's source/pair/image relationships before sending.
+list maxima and the firmware's source/image relationships before sending.
 An empty number is an error, not zero. Server errors open the relevant page and
 identify the field. The server remains authoritative.
 
@@ -74,10 +78,9 @@ incomplete wizard step), so a greyed-out button is never left unexplained.
 
 A listed competition always needs a competition id, including when paused; the
 club is optional (without a club the competition shows conference and table,
-but no own match and no fixture pairs).
-An active fallback needs a complete source from another provider. Active pairs
-must not repeat an id on the same provider side within their competition; ids
-from different providers may be equal. At least one screen remains enabled.
+but no own match). Each competition has exactly one source; to follow the
+same league at two providers, add it twice. At least one screen remains
+enabled.
 
 Passwords/keys have explicit keep/change/remove modes. Empty change input means
 keep; only Remove sends an empty value. Unsaved summaries never reveal secret
@@ -90,19 +93,19 @@ and hostname. The page explains reconnection and shows the new hostname/IP
 addresses before saving. It does not relax origin checks or enable cross-origin
 access: a changed .local hostname is reached by navigation/the displayed link.
 
-## Competitions and fixture pairs
+## Competitions
 
-Lists contain real entries without holes: at most eight competitions, eight
-fixture pairs and five slides. The order of the list is the order in which
+Lists contain real entries without holes: at most eight competitions and
+five slides. The order of the list is the order in which
 the Matchday and Table screens show the competitions. The details of an entry
 hold its four screen switches (Own match, Konferenz, Matchday, Table; a new
 or imported entry has all on, an imported entry keeps the default for each
 switch it does not name); Own match is disabled without a club. The closed
 entry lists the screens it appears on.
-The competitions and fixture pairs are saved through their own endpoint
+The competitions are saved through their own endpoint
 (`/api/v1/competitions`) as part of the global save; the device assigns each
-new competition its id, and fixture pairs refer to that id, so moving a
-competition no longer changes its pairs. When the global save changes both
+new competition its id, so moving a competition keeps its id and its kept
+data. When the global save changes both
 the settings and the competitions, the page writes first the part that the
 other one needs (for example a newly entered provider key before a
 competition that uses it). A change that both removes one keyed provider and
@@ -113,6 +116,12 @@ Changing a competition clears its previous club selection.
 
 Provider lists are asynchronous, bounded pages. Only successful retrieval
 advances paging; busy jobs are waited for and their errors are translated.
+While the provider's window limit or a "too many requests" pause holds the
+list, the wizard shows "Waiting for the request limit until hh:mm:ss (Code
+limit)" (code `retry` for the pause) under the load button, in the
+browser's local time; the device keeps serving the other providers
+meanwhile. The page waits 150 seconds for a list, extended by the reported
+wait.
 Search/selection context cannot change underneath a running list request.
 Typing in the search field only filters the entries already loaded, without
 a request, and the load button then reads "Search"; "No results." appears when
@@ -122,7 +131,10 @@ match on the provider name (ASCII and accented Latin capitals such as Ä, Ö,
 Ü); names are the provider's own, so ESPN leagues are found by English names
 ("German Bundesliga"). "Next page" requests the same list as the last load,
 with an offset, because the device does not keep whole lists in RAM; a search
-text typed since then keeps filtering the loaded entries.
+text typed since then keeps filtering the loaded entries. The competition
+step and the club step each keep their own search text: the club step
+starts empty, "Back" shows the competition search again, and choosing
+another provider clears both.
 For OpenLigaDB the wizard shows a season field above the competition list.
 Empty loads the current season; a picked competition then stores no season,
 so the device follows the season automatically. Another typed season loads
@@ -134,7 +146,7 @@ passed to the club list request. An expert season override is stored as typed.
 Provider keys and ESPN opt-in must be saved before their provider can be used.
 Each provider card on the settings page also holds that provider's request
 limits: the maximum requests per day (0 = no daily cap; when the rest will
-not last until 00:00 UTC, the device requests live table, table, core data,
+not last until 00:00 UTC, the device requests live table, table,
 fixtures and live scores less often or not at all, the own match last) and a
 window limit,
 at most N requests per window of W seconds (both 0 = no window limit; the
@@ -145,35 +157,36 @@ them yet; they keep their values on every save.
 When the device runs on initial values because its stored settings were
 invalid, damaged, unreadable or not storable, the overview shows a warning;
 for an invalid or damaged record the first save asks before it overwrites
-the stored settings. When the shared match list could not hold every match,
+the stored settings. Settings or competitions written by an older firmware
+format are not read: the overview says they were discarded and asks to set
+them up again; the old record stays until the next save replaces it. When the shared match list could not hold every match,
 the overview says that not all matches were loaded and that the matches
 nearest in time are shown. While the device is not connected to the home
 network the overview shows "Kein WLAN" with the reason the display card
 shows (network not found, wrong password, setup network on, connecting).
+Each competition row of the overview shows its provider, match count and
+the time of its last successful request, and a state tag (current, stale,
+loading, "Gestört" after a failed request, "Nicht gepflegt" when the
+provider leaves past matches without a result). A failed competition adds
+the cause, what to do and the error code ("Fehlercode: OLG E10·503"); an
+unmaintained one names the other enabled providers, or asks to enable one
+under Settings. Every error message of the Web UI follows that pattern —
+what failed, what to do, a short error code — without a serial console.
 Below the data age the overview shows when the next provider round is due
 ("in 45 s" up to two minutes ahead, otherwise the browser's clock time) and
 why: match live, before kickoff, after the final whistle, no match window
 open, match window opens, daily limit tight (requests less often or skipped),
 daily limit reached, retry after an error, waiting for WiFi and time, update test
 running.
-The device refuses a save in which an active competition (primary source or
-active fallback) uses a provider without its key or opt-in, including a save
+The device refuses a save in which an active competition uses a provider
+without its key or opt-in, including a save
 that removes a key still in use; the page then marks that source's provider.
 
-Competition entries that are new, moved or changed show a notice that the
-device fetches them, and fixture pairs can be created for them, only after the
-global save. Removing a competition asks for confirmation, names it and lists
-the fixture pairs removed with it, and takes effect on save. The wizard
+Competition entries that are new or changed show a notice that the device
+fetches them only after the global save. Removing a competition asks for
+confirmation, names it and takes effect on save. The wizard
 asks for a country filter only for API-Football, whose competition list
 supports it; the Next button shows why it is not yet available.
-
-Fixture picking uses unchanged saved competitions by their ids.
-New or edited competitions require the global save first. It loads
-primary and fallback fixtures with ids, labels and kickoff, clears stale picks
-on reload and requires current valid selections before accepting. A home/away
-swap suggestion remains explicitly reviewable; the firmware never equates
-provider identities by similar names. Removing a competition removes its pairs
-from the draft.
 
 "Kurznamen" in the details of a saved, active competition lists the teams the
 device holds for it (from its matches and table), each with the provider's
@@ -205,7 +218,9 @@ the switch that pins the own match in the conference: when it is on, the own
 match stands in the first row of every conference page; when it is off, it
 takes its normal place in the order. "Matches visible at once" sits on the
 conference card and also sets the matches per page of the Matchday screen;
-it stays editable while either screen is on. The table card holds the table
+it stays editable while either screen is on. The Matchday card holds
+"Matchday shown" (current matchday, or the next matchday once the current
+one is over) with its help text. The table card holds the table
 rows and the table step (how long a table page or, with an own club, a
 competition stays before the next one). Display, provider-budget and diagnostics settings whose
 meaning is not obvious have a help text, including the device-specific
@@ -291,7 +306,7 @@ scripts/build_assets.py. Automatic provider-crest import is still deferred.
 ## System and diagnostics
 
 Export optionally includes secrets with an explicit notice; it carries the
-settings, the competitions with fixture pairs and the owner's short names.
+settings, the competitions and the owner's short names.
 Import sends them as up to three requests (settings, competitions, short
 names), each at most the API body limit; it checks size,
 JSON shape, types and the same validation rules before confirmation (an old
@@ -300,9 +315,12 @@ choice of an older backup is dropped, and the result message says so,
 because the crest is an image role now and images are not in the backup; the
 API-Football daily budget of an older backup becomes API-Football's daily cap,
 and the result message says so as well; the minimum request spacing of an
-older backup is ignored with a message; competitions of an older backup have
-no ids and get the ids 1, 2, 3 in list order, and their fixture pairs move from
-the list position to that id); successful
+older backup is ignored with a message; competitions of an older backup
+without ids get the ids 1, 2, 3 in list order; the fallback sources and
+fixture pairs of an older backup are dropped, the rest is imported, and the
+result message says that each competition has one source; the core-data
+interval of an older backup is ignored, and the result message says that
+team names now come with fixtures and table); successful
 import refreshes the settings and session state instead of rewriting an old
 draft. Restart and factory reset are separate confirmed actions. Factory reset
 requires the device name and explains how to reconnect to setup afterwards.

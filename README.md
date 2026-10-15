@@ -198,7 +198,7 @@ The C6 antenna driver is implemented; RF switching has not been tested.
 |---|---|
 | Live (single match) | Your club plays: big score, match minute, teams, highlights |
 | Live (conference) | Match days: the matches of the current kickoff times, your match pinned on top (optional), several pages |
-| Matchday | The whole current (then next) matchday of each competition, one after another, with results or kickoff times |
+| Matchday | The whole matchday of each competition, one after another, with results or kickoff times; set to the current matchday (a finished one stays until the end of the next day) or the next matchday; the buttons page through the pages, the neighbouring matchdays and the competitions |
 | Table | Default outside match days: positions around your club; the tables of several competitions in turn |
 | Crest / slideshow | Club crest or your own images |
 
@@ -220,12 +220,12 @@ Pinouts and wiring: [docs/HARDWARE.md](docs/HARDWARE.md).
 ## Data sources
 Four adapters are implemented: **OpenLigaDB** (default, no key), API-Football,
 ESPN (unofficial, opt-in) and football-data.org. Keyed providers require owner
-credentials and tier/coverage acceptance. Up to eight competitions (each with
-an optional fallback source at another provider) and up to eight explicit
-verified fixture pairs are stored as lists with fixed maxima.
+credentials and tier/coverage acceptance. Up to eight competitions, each with
+exactly one source, are stored as a list with a fixed maximum; providers are
+not combined.
 Provider coverage, limits and endpoints:
 [docs/DATA_PROVIDERS.md](docs/DATA_PROVIDERS.md); what the firmware requests
-and how it maps and combines the data: [docs/DATA_FLOW.md](docs/DATA_FLOW.md);
+and how it maps and stores the data: [docs/DATA_FLOW.md](docs/DATA_FLOW.md);
 the stored data and where it is shown: [docs/DATA_MODEL.md](docs/DATA_MODEL.md).
 
 ## Documentation

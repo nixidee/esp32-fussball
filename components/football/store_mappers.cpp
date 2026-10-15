@@ -104,15 +104,9 @@ TeamRef team(JsonVariantConst v, MatchStore& store, const MapContext& c,
   t.id = numericId(v[id_key]);
   t.name = text(v[name_key]);
   const char* short_name = text(v[short_key]);
-  if (c.pick == nullptr)
-    t.index = store.team(c.competition, c.provider, t.id,
-                         *short_name ? short_name : t.name);
+  t.index = store.team(c.competition, c.provider, t.id,
+                       *short_name ? short_name : t.name);
   return t;
-}
-
-// A round label's pool index (none in pick mode).
-uint8_t label(MatchStore& store, const MapContext& c, const char* text) {
-  return c.pick == nullptr ? store.label(text) : kNoIndex;
 }
 
 bool isOwn(const MapContext& c, const TeamRef& home, const TeamRef& away) {
@@ -153,29 +147,13 @@ Side opposite(Side s) {
                             : Side::kUnknown;
 }
 
-// Where a mapped match goes (see MapContext::pairing): stored, filled into
-// its paired primary match, or dropped. With 'events' (the row carries
-// them) opens the event list of the own match that takes them
-// (beginEvents()); false when none is open.
+// Stores a mapped match. With 'events' (the row carries them) opens the
+// event list of the own match (beginEvents()); false when none is open.
 bool put(StoredMatch& m, MatchStore& store, const MapContext& c,
          const char* home_name, const char* away_name, bool events) {
-  if (c.pick != nullptr) {
-    if (m.isOwn()) c.pick(m.id, m.kickoff, home_name, away_name, c.pick_context);
-    return false;
-  }
-  StoredMatch* target = nullptr;
-  bool fallback = false, swapped = false;
-  if (c.pairing == nullptr || c.pairing->standalone) {
-    // A source of its own, or the fallback route: every row stands alone.
-    target = store.upsert(m, c.clock, home_name, away_name);
-  } else if (const auto* pair = c.pairing->find(c.competition, m.id)) {
-    target = store.fill(m, c.pairing->primary, pair->primary, pair->swapped,
-                        c.clock);
-    fallback = true;
-    swapped = pair->swapped;
-  }
+  StoredMatch* target = store.upsert(m, c.clock, home_name, away_name);
   return events && target != nullptr && target->isOwn() &&
-         store.beginEvents(*target, fallback, swapped);
+         store.beginEvents(*target);
 }
 
 void openLigaGoals(JsonVariantConst row, MatchStore& store) {
@@ -223,7 +201,7 @@ bool openLigaMatch(JsonVariantConst row, MatchStore& store,
   long round;
   if (number(row["group"]["groupOrderID"], 1, 255, round))
     m.round = static_cast<uint8_t>(round);
-  m.label = label(store, c, text(row["group"]["groupName"]));
+  m.label = store.label(text(row["group"]["groupName"]));
   Goals penalty_total;
   for (JsonVariantConst result : row["matchResults"].as<JsonArrayConst>()) {
     const Goals g = goals(result, "pointsTeam1", "pointsTeam2");
@@ -310,7 +288,7 @@ void apiFootballMatch(JsonVariantConst row, StoredMatch& m, MatchStore& store,
   m.regulation = goals(row["score"]["fulltime"]);
   m.extra_time = goals(row["score"]["extratime"]);
   m.shootout = goals(row["score"]["penalty"]);
-  m.label = label(store, c, text(row["league"]["round"]));
+  m.label = store.label(text(row["league"]["round"]));
 }
 
 void footballDataMatch(JsonVariantConst row, StoredMatch& m, MatchStore& store,
@@ -323,7 +301,7 @@ void footballDataMatch(JsonVariantConst row, StoredMatch& m, MatchStore& store,
   long round;
   if (number(row["matchday"], 1, 255, round))
     m.round = static_cast<uint8_t>(round);
-  m.label = label(store, c, text(row["stage"]));
+  m.label = store.label(text(row["stage"]));
   auto s = row["score"];
   m.halftime = goals(s["halfTime"]);
   m.regulation = goals(s["regularTime"]);
@@ -549,15 +527,6 @@ void storeSummaryEvent(JsonVariantConst row, MatchStore& store,
   add(store, e);
 }
 
-const Pairing::Pair* Pairing::find(uint8_t competition,
-                                   uint32_t secondary) const {
-  for (uint8_t i = 0; i < count && i < pairs.size(); ++i)
-    if (secondary != 0 && pairs[i].secondary == secondary &&
-        pairs[i].competition == competition)
-      return &pairs[i];
-  return nullptr;
-}
-
 bool storeTableRow(JsonVariantConst row, MatchStore& store,
                    const MapContext& c) {
   if (c.provider == cfg::Provider::kApiFootball &&
@@ -575,26 +544,6 @@ bool storeTableRow(JsonVariantConst row, MatchStore& store,
     return true;
   }
   return tableRow(row, store, c);
-}
-
-bool storeTeam(JsonVariantConst row, MatchStore& store, const MapContext& c) {
-  JsonVariantConst t = row;
-  const char *id = "id", *name = "name", *short_key = "shortName";
-  if (c.provider == cfg::Provider::kOpenLigaDb) {
-    id = "teamId";
-    name = "teamName";
-  } else if (c.provider == cfg::Provider::kEspn) {
-    t = row["team"];
-    name = "displayName";
-    short_key = "shortDisplayName";
-  } else if (c.provider == cfg::Provider::kApiFootball) {
-    t = row["team"];
-  }
-  const uint32_t team = numericId(t[id]);
-  if (team == 0) return false;
-  const char* short_name = text(t[short_key]);
-  store.rename(c.provider, team, *short_name ? short_name : text(t[name]));
-  return true;
 }
 
 }  // namespace football

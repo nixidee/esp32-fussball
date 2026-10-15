@@ -250,7 +250,7 @@ allocation failures, cleanup and retry. Bookkeeping and handling costs are
 assessed before coding and compared in the required build; this decision does
 not introduce a replacement library or a new version.
 
-## ADR-014 — Provider identity before cross-source routing · Accepted 2026-10-08
+## ADR-014 — Provider identity before cross-source routing · Accepted 2026-10-08 · no cross-source routing since ADR-034
 
 Refines ADR-005 and supersedes its statement that canonical club mapping can
 later be added with small changes. Provider-scoped initial club selection and
@@ -316,7 +316,7 @@ controlled restart. "The area is redrawn" means the screen is invalidated at the
 next run of the periodic supervision timer and redrawn by LVGL afterwards; there
 is no fixed recovery deadline (see `docs/ARCHITECTURE.md`).
 
-## ADR-016 — Service design directions · Accepted 2026-10-09
+## ADR-016 — Service design directions · Accepted 2026-10-09 · fallback sources and fixture pairs removed by ADR-034
 
 Refines ADR-006, ADR-008, ADR-011, ADR-012 and ADR-014. Selects the design
 direction for planned services; concrete layouts, limits and values are still
@@ -614,7 +614,7 @@ observed without changing reset control lines, and normal firmware was restored.
 This covers the current boot/core-service workload; the complete resource
 budget and browser transport have their own later acceptance.
 
-## ADR-022 — Complete bounded candidate under delegated decisions · Accepted 2026-10-10
+## ADR-022 — Complete bounded candidate under delegated decisions · Accepted 2026-10-10 · fallback sources and fixture pairs removed by ADR-034
 
 **Context:** the owner explicitly requested autonomous continuation until the
 scheduled implementation is complete except polish and testing. The owner is
@@ -687,7 +687,7 @@ new resolutions, S3 and long-run tests are pending. Visual/resource polish,
 screenshots and the already deferred enhancement backlog remain. No reserve,
 coverage or production acceptance is implied.
 
-## ADR-023 — Settings size ceiling, format 2 and legacy import · Accepted 2026-10-10 · format-2 encoding and OTA gate superseded by ADR-024
+## ADR-023 — Settings size ceiling, format 2 and legacy import · Accepted 2026-10-10 · format-2 encoding and OTA gate superseded by ADR-024 · legacy import removed by ADR-034
 
 **Context:** final source review proved that the accepted core firmware refuses
 stored records above 1024 bytes, while the complete candidate encodes 1720.
@@ -729,7 +729,7 @@ The format-2 correction artifact, before subsequent network fixes, was
 flash reserve goal is missed by 46,904 B. No device/storage write or behavioural
 test was performed for this correction.
 
-## ADR-024 — Settings format 3: lists, image library, equal-or-newer OTA gate · Accepted 2026-10-12 · record extended by ADR-026 · table competition replaced by ADR-033
+## ADR-024 — Settings format 3: lists, image library, equal-or-newer OTA gate · Accepted 2026-10-12 · record extended by ADR-026 · table competition replaced by ADR-033 · fallback sources and fixture pairs removed by ADR-034
 
 **Context:** the fixed slots of format 2 (three routes, three fallbacks, eight
 mappings, each with an enabled flag) show empty entries in the interface, cap
@@ -777,7 +777,7 @@ are verified on the host only; device acceptance is pending. The page in
 `web/index.html` still edits the removed fixed slots until its rewrite; settings
 remain changeable through export/import and the API meanwhile.
 
-## ADR-025 — REST API for the new design: sessions, field-level errors, list and image endpoints · Accepted 2026-10-12
+## ADR-025 — REST API for the new design: sessions, field-level errors, list and image endpoints · Accepted 2026-10-12 · fixture endpoints removed by ADR-034
 
 **Context:** the Web UI review found that a second browser logged the first
 one out (one session slot), that a rejected request could end in a connection
@@ -966,7 +966,7 @@ the 85 % line, permitted during the redesign). Host tests cover the format-5
 layout, format-3/4 reads and the role rules; the input mapping has its own
 host suite. Device behaviour is not yet checked.
 
-## ADR-028 — Protected stock images as roles, settings format 6 without a crest setting · Accepted 2026-10-13
+## ADR-028 — Protected stock images as roles, settings format 6 without a crest setting · Accepted 2026-10-13 · crest hand-over removed by ADR-034
 
 **Context:** the owner asked for the management of all images under "Images":
 the stock crest and the stock background must be replaceable there and can
@@ -1103,7 +1103,7 @@ Host tests cover the format-7 layout, the older-format reads, the counter
 rules and the Web UI fields; the NVS behaviour on the device is not yet
 checked.
 
-## ADR-031 — Competition store, request plans, settings format 8 · Accepted 2026-10-14
+## ADR-031 — Competition store, request plans, settings format 8 · Accepted 2026-10-14 · fallback sources, fixture pairs and format migration removed by ADR-034 · core-data interval removed by ADR-035
 
 **Context:** the owner wants the display to show the matches of up to eight
 of their competitions, the own match in detail, compact data, regular core
@@ -1163,7 +1163,7 @@ is open. A save that writes the competition record and then fails on the
 settings record leaves the old settings record, which still wins at the next
 boot.
 
-## ADR-032 — Kept football data and own short names on LittleFS · Accepted 2026-10-14
+## ADR-032 — Kept football data and own short names on LittleFS · Accepted 2026-10-14 · core data and short-name file version changed by ADR-035
 
 **Context:** the owner wants data shown quickly and few requests, with very
 little memory. Without persistence every reboot showed nothing until the
@@ -1201,7 +1201,7 @@ static RAM +2,128 B (150,960 B). An 18-team league with an own match takes
 1,552 B. The last minutes before a power loss can be missing. The device
 evidence (data after a reboot without a request) is open.
 
-## ADR-033 — Matchday screen, screen switches per competition, table cycle, ESPN substitutions · Accepted 2026-10-14
+## ADR-033 — Matchday screen, screen switches per competition, table cycle, ESPN substitutions · Accepted 2026-10-14 · matchday selection and button stepping changed by ADR-036
 
 **Context:** the owner wants to see "nur den letzten bzw. aktuellen
 spieltag und die tabelle aus liga 2 und 3", wants competitions usable only
@@ -1246,3 +1246,165 @@ request and is read in full (only `keyEvents` is parsed into elements); whether 
 the 30 s request deadline and the provider stack reserve with it are not
 measured on the device. Whether ESPN and OpenLigaDB change their tables
 during a match is not yet checked on a match day.
+
+## ADR-034 — One source per competition, older formats not read · Accepted 2026-10-15
+
+**Context:** until the alpha the owner wants each competition to have one
+source; the fallback source per competition, the explicit fixture pairs
+between providers and the combining of a paired fallback match into the
+primary match are removed. The owner also decided that settings and
+competition records of older formats are discarded instead of converted.
+
+**Decision:**
+- Each competition has exactly one source (provider, competition, season,
+  club; JSON key `primary`). There is no fallback source, no fixture pair,
+  no combining of values or events of two providers, no `/fixtures`
+  endpoint and no routing notice. To follow one league at two providers,
+  the owner adds it twice. Request jobs are per competition and data type.
+- Competition record format 2: 8 entries of 153 B, at most 1,234 B.
+- Settings formats 1 to 7 and competition record format 1 are not read:
+  the store reports them as `outdated`, initial values apply, and the old
+  record stays until the next save replaces it. Version 0 or a newer
+  version counts as damaged. The crest hand-over of formats 3 to 5 is gone.
+- `PUT /competitions` rejects `fixture_pairs`, `fallback` and
+  `fallback_active` as unknown keys. A backup import drops them, imports
+  the rest and says that each competition has one source.
+
+**Alternatives:** keep the fallback code dormant until the alpha (RAM,
+flash and test effort without a use); convert format-1 competitions by
+keeping their primary source, or keep the migration of formats 1 to 7
+(conversion code for data the owner chose to discard).
+
+**Cost and boundary:** C6 build flash −19,444 B (1,613,450 B, 87.9 %),
+static RAM −4,424 B (146,688 B), embedded page −3,089 B gzip (59,963 B);
+competition store 1,226 B (was 2,459 B). A device updated from older
+firmware loses its settings and competitions and must be set up again or
+restored from a backup. A second source per competition later needs a new
+design; the identity rules of ADR-014 still apply to it.
+
+## ADR-035 — No core-data request, settings format 9 · Accepted 2026-10-15
+
+**Context:** the core-data request (team list per competition) only renamed
+teams the store already held, and the next fixtures or table response
+overwrote those names again with the same values. API-Football also
+re-resolved its season with it. The owner decided to remove the request.
+
+**Decision:**
+- There is no core-data data type: the data types are fixtures, table,
+  live, live table and own-match events. Team names and short names come
+  with the fixtures, table and live responses.
+- API-Football resolves its season again with the first fixtures run
+  24 hours (`kSeasonRecheckS`, fixed) after the last resolution, or when
+  the clock went back before it; without a valid clock the known season is
+  kept. The resolution time is kept in the competition file.
+- Settings format 9 stores five intervals per provider (record at most
+  805 B); format 8 is not read and reported as `outdated`, as in ADR-034.
+  The settings API rejects `intervals.core` as an unknown key; the Web UI
+  import of an older backup drops it and says so.
+- Competition file version 3 (the version-2 files are dropped and fetched
+  again once). The short-name file has its own version and layout check, so
+  later competition-file changes keep it; the switch to it loses the stored
+  short names once (a backup import restores them).
+
+**Alternatives:** keep format 8 and ignore the stored core interval (a dead
+field in every record); re-resolve the API-Football season with every
+fixtures run (one more request per run) or only at boot; keep the
+short-name file tied to the competition-file version.
+
+**Cost and boundary:** C6 build flash −574 B (1,612,876 B, 87.9 %), static
+RAM −88 B (146,600 B), embedded page +151 B gzip (60,114 B); settings model
+844 → 828 B. With 8 competitions about 8 requests a day fewer. A device
+updated from format-8 firmware loses its settings and competitions (as with
+ADR-034) and its short names once. Team names were compared with the former
+team-list names on recorded OpenLigaDB and ESPN responses (18 of 18 equal
+each); API-Football and football-data.org were not checked with real
+responses.
+
+## ADR-036 — One matchday module, current or next matchday · Accepted 2026-10-15
+
+**Context:** the Matchday screen showed the earliest stored matchday, also
+when it was over, and the gap rule, the hold rule and the matchday grouping
+existed in several places (store expiry, views, planner, UI). The owner
+wants the shown matchday "Einstellbar"; the screen was meant for "nur den
+letzten bzw. aktuellen spieltag".
+
+**Decision:**
+- One pure module `football/matchday` holds the gap rule (a new matchday
+  starts after a gap of at least 48 hours), "over" (24:00 local time on the
+  date of the last kickoff), "passed" (the end of the local day after it)
+  and the selection of the matchdays the screen can reach. Store expiry,
+  the store views, the planner's grouping and the UI use it; the local UTC
+  offset comes from `timekeeping` next to `toLocal()`.
+- The store drops a passed matchday after every match fetch and in the
+  minute maintenance; no view shows a passed matchday.
+- Setting `matchday_mode` for all competitions, appended to the settings
+  record tail of format 9 (no format change): *Current matchday* (default)
+  shows the first matchday that has not passed, so a finished matchday
+  stays until the end of the following local day; *Next matchday* shows
+  the first matchday that is not over, and a competition without one is
+  skipped by the automatic cycle.
+- At most three matchdays per competition are reachable (held, selected,
+  next). Down/Up page within the matchday, then move to the next/previous
+  reachable matchday of the competition, then to the next/previous
+  competition: forward on page 1, backward on the last page of its selected
+  matchday (without one, its last reachable matchday).
+- The Konferenz membership of a match is decided in one pass.
+- The ESPN planner keeps its own rule for which days it fetches.
+
+**Alternatives:** one setting per competition (more NVS and Web UI for a
+choice the owner wants global); "over" at the final whistle or estimated
+end of every match (depends on live data and differs per provider); a hold
+time setting (one more field without an owner need); a new settings format
+(re-setup of every device for one byte); letting the planner keep fetching
+the held matchday (more requests for a matchday that no longer changes).
+
+**Cost and boundary:** C6 build flash +1,956 B (1,616,110 B, 88.1 %),
+static RAM +16 B (146,712 B), embedded page +664 B gzip (61,074 B);
+settings model 832 B, longest record 806 B. Checked with real OpenLigaDB
+and ESPN responses through the host parser, including a held Champions
+League matchday that is dropped at the end of the following day. After a
+start without stored data during the hold time, *Current matchday* with
+ESPN shows the next matchday, because the planner no longer fetches the
+finished one. OpenLigaDB's Champions League 2026 data set holds placeholder
+kickoffs (all on one past date), so that competition shows no matches.
+The stepping is not yet checked in the renderer or on the device.
+
+## ADR-037 — Status per competition, error codes, status pill · Accepted 2026-10-15
+
+**Context:** a failure of one competition was reported as one global error
+text, so the owner could not tell which competition failed or why; the
+Champions League table stayed empty and OpenLigaDB showed 0 matches without
+explanation. The owner: "der normale nutzer hat keine konsole, der brauch
+sinnvolle fehlermeldungen. also dann auch mal fehlercode". The bottom status
+band also took a permanent line from every screen; the owner wants it "wie
+ip" as a temporary pill over the rest, "ggf. mit leichtem
+transparentenhintergrund".
+
+**Decision:**
+- The firmware keeps one `CompetitionState` per competition: cause of the
+  last failed request (or "unmaintained": a match without a result more
+  than 24 hours after kickoff), provider, HTTP status, stale flag and time
+  of the last successful request. A failed competition keeps its earlier
+  data; the others update.
+- One `Cause` enum with stable keys and stable numbers E01–E18; the short
+  error code is the provider abbreviation, the number and the HTTP status
+  ("OLG E10·503"). The firmware reports only keys and codes; the display
+  has short texts, the Web UI the full cause and action (OQ-279, OQ-280).
+- The display shows a notice card per failing competition in the Matchday
+  and Table cycles (OQ-278) and a status pill for 5 seconds after a change
+  of the status state, over the content at the bottom and above a bottom IP
+  chip, not on a card that says the same; "Demo" stays a permanent line
+  (OQ-282, OQ-284..OQ-287). The REST status reports each competition's
+  cause, code, provider, HTTP status and last update (OQ-283); the global
+  `data_error` fields are removed.
+
+**Alternatives:** a permanent status band (costs a line on every screen);
+a text per cause in the firmware (flash for two languages that the browser
+already has); one global error (does not say which competition failed);
+a pill on every screen change (repeats a known state on every cycle step).
+
+**Cost and boundary:** C6 build static RAM −108 B (146,604 B), flash
++7,138 B (1,623,248 B) against ADR-036, embedded page +3,247 B gzip
+(64,321 B). The mapping of HTTP and transport failures to E07–E15 runs in
+the provider service and is not yet host-tested; the pill and the notice
+cards are checked in the Web UI preview, not yet in the device renderer.

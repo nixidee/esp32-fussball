@@ -7,9 +7,8 @@
 // tests drive it with recorded responses. Not thread-safe: the provider
 // worker owns it.
 //
-// Per provider and data type (OQ-216, OQ-218):
-//   OpenLigaDB  core       getavailableteams/{league}/{season}
-//               fixtures   getmatchdata/{league} (current round, also the
+// Per provider and data type (OQ-216, OQ-218; no core data, OQ-248):
+//   OpenLigaDB  fixtures   getmatchdata/{league} (current round, also the
 //                          current season), getmatchdata/…/{round + 1},
 //                          getmatchesbyteamid/{club}/… (club only)
 //               table      getbltable/{league}/{season} (also live table)
@@ -18,8 +17,7 @@
 //                          getmatchdata/…/{round} when the date changed or
 //                          the last full request is kOpenLigaDbFullRefreshS
 //                          old; goals come with the match data
-//   ESPN        core       {slug}/teams
-//               fixtures   calendar/ondays (match days), then the scoreboard
+//   ESPN        fixtures   calendar/ondays (match days), then the scoreboard
 //                          of every day of the current and the next matchday
 //               table      site.web.api standings (also live table; cups
 //                          have none, an absent list is an empty table)
@@ -29,33 +27,20 @@
 //                          substitutions, OQ-207): the latest own match
 //                          whose live window has opened, once it has
 //                          kicked off; body cap kProviderSummaryBodyBytes
-//   API-Football, football-data.org: generic test sources (OQ-205): teams,
+//   API-Football, football-data.org: generic test sources (OQ-205):
 //   fixtures within kFixtureHorizonDays, standings, today's fixtures.
+//   API-Football first resolves the current season (/leagues) when it is
+//   unknown; a fixtures run kSeasonRecheckS after the last resolution
+//   resolves it again (OQ-259).
 // Other providers make no own-match events request: OpenLigaDB delivers
 // goals with the live data, API-Football events are removed (OQ-206).
 //
-// Data types per competition by its screen switches (OQ-192): core data and
-// fixtures while it is shown on a screen with match or table data (own
+// Data types per competition by its screen switches (OQ-192): fixtures
+// while it is shown on a screen with match or table data (own
 // match only with a club); live for Konferenz, matchday and the own match
 // (with a club); table and live table for the table screen; own-match
-// events for the own match with an ESPN primary source and a club. The
-// fallback's data types are limited the same way.
-//
-// Fallback source (fallback_active): its rows fill the paired primary
-// matches (MatchStore::fill, confirmed values only). Wanted per data type:
-//   live         while the competition has active fixture pairs or the
-//                primary's last match request failed
-//   fixtures     while the primary's last match request failed
-//   table, live table
-//                while the primary has no table (a cup, or a failed or
-//                empty table run); skipped while the store holds the
-//                primary's table
-//   core data    never (the match rows carry the team names)
-// While the primary's last match request (fixtures or live) failed, every
-// fallback row is stored on its own (none fills) and the store notice
-// kNoticeFallbackRoute is set; the primary's next successful match request
-// clears it and removes the fallback rows. A failed fallback request sets
-// kNoticeFallbackFailed, a successful one clears it.
+// events for the own match with an ESPN source and a club. Each competition
+// has one source (OQ-247).
 
 #pragma once
 
@@ -84,7 +69,6 @@ inline constexpr std::size_t kLiveItems = 3;
 enum class Sink : uint8_t {
   kMatches,  // storeMatch(); OpenLigaDB rows also give season and round
   kTable,    // storeTableRow() between beginTable() and commitTable()
-  kTeams,    // storeTeam()
   kChange,   // OpenLigaDB change date (one JSON string)
   kDays,     // ESPN match days (calendar/ondays "dates")
   kSeason,   // API-Football current season (/leagues "response")
@@ -110,10 +94,30 @@ enum class Step : uint8_t {
   kInvalid,  // the response lacked what the run needs (no season): failed
 };
 
-// What one competition source keeps between requests (RAM only).
+// How a prepared request ended in the provider worker.
+enum class Fetch : uint8_t {
+  kOk,           // sent, the response was complete
+  kFailed,       // sent, no complete response
+  kRateLimited,  // sent, answered "too many requests"
+  kInterrupted,  // settings or the network changed (sent or not)
+  kBusy,         // not sent: another operation held the network
+  kCapped,       // not sent: a daily cap is used up
+  kRefused,      // not sent: the provider cannot be used (switched off, no
+                 // key) or its request counter could not be stored
+};
+
+// The scheduler's view of an ended request (Planner::complete()).
+struct Completion {
+  schedule::Outcome outcome = schedule::Outcome::kOk;
+  bool more = false;     // the run continues with another request
+  bool invalid = false;  // the response lacked the season the run needs
+};
+
+// What one competition's source keeps between requests (RAM only).
 struct SourceState {
   uint32_t key = 0;  // hash of the competition id and its source settings
   settings::Bytes<cfg::kSeasonMaxBytes> season;  // resolved current season
+  uint32_t season_utc = 0;  // UTC second of its resolution, 0 = unknown
   uint8_t round = 0;  // OpenLigaDB current round, 0 = unknown
   // OpenLigaDB change date per checked round, with the time of the last
   // full request of that round.
@@ -137,47 +141,37 @@ struct SourceState {
     uint8_t step = 0, at = 0;
   };
   std::array<Progress, cfg::kDataTypeCount> progress{};
-  // Primary source only: the last match request (fixtures or live) failed,
-  // the last table run failed, the last complete table run left no table.
-  bool failing : 1 = false;
-  bool table_failing : 1 = false;
-  bool no_table : 1 = false;
 };
 
 // What a source resolved that a competition file keeps (football_files.h):
-// its current season, OpenLigaDB round, ESPN match days and whether its
-// last complete table run left no table.
+// its current season (with the UTC second of its resolution), OpenLigaDB
+// round and ESPN match days.
 struct Resolved {
   settings::Bytes<cfg::kSeasonMaxBytes> season;
+  uint32_t season_utc = 0;
   uint8_t round = 0;
   std::array<uint32_t, kEspnDays> days{};
   uint8_t day_count = 0;
-  bool no_table = false;
 };
 
 class Planner {
  public:
   void reset();
-  // The source states of slot 'slot' start afresh (its data was dropped).
+  // The source state of slot 'slot' starts afresh (its data was dropped).
   void forget(uint8_t slot);
   // The resolved part of a source state; empty when the state does not
-  // belong to the current sources of 'entry'.
-  Resolved saved(uint8_t slot, schedule::Source source,
-                 const settings::Competition& entry) const;
-  // Restores a saved source state for the current sources of 'entry' (as
+  // belong to the current source of 'entry'.
+  Resolved saved(uint8_t slot, const settings::Competition& entry) const;
+  // Restores a saved source state for the current source of 'entry' (as
   // after its requests); a run in progress starts over.
-  void restore(uint8_t slot, schedule::Source source,
-               const settings::Competition& entry, const Resolved& resolved);
-  // The fixture pairs of all competitions (the competition store's list);
-  // pairs with an id that is not a decimal number are ignored.
-  template <class Pairs>
-  void setPairs(const Pairs& pairs) {
-    pairing_.count = 0;
-    for (const auto& p : pairs) addPair(p);
-  }
+  void restore(uint8_t slot, const settings::Competition& entry,
+               const Resolved& resolved);
   // Scheduler inputs of slot 'slot' (entry null, inactive or without
-  // competition: unused); the fallback source as described above.
+  // competition: unused) at 'clock': the own-match events are held until
+  // their match has kicked off; an API-Football fixtures run whose season
+  // is due for resolution costs its /leagues request too (OQ-264).
   void wanted(uint8_t slot, const settings::Competition* entry,
+              const MatchStore& store, const Clock& clock,
               schedule::Wanted& out) const;
   // The next request of 'job' for competition 'entry' (its slot and id);
   // prepares the streaming into 'store' (a table request begins the
@@ -185,15 +179,6 @@ class Planner {
   // complete without a request.
   bool request(const schedule::Job& job, const settings::Competition& entry,
                MatchStore& store, const Clock& clock, Request& out);
-  // Fixture picker: the fixtures run of the fallback source of 'entry' in
-  // pick mode (MapContext::pick): the club's matches go to 'pick', nothing
-  // is stored and no source state or notice changes. beginPick() starts a
-  // run; pickRequest() is then called until it returns false or finish()
-  // returns kDone.
-  void beginPick() { pick_state_ = {}; }
-  bool pickRequest(const settings::Competition& entry, MatchStore& store,
-                   const Clock& clock, Request& out, MatchPick pick,
-                   void* context);
   // fetchJson consumer for the prepared request; 'planner' is this.
   static bool consume(ArduinoJson::JsonVariantConst element, void* planner);
   // Ends the prepared request; 'ok' = the response was complete. A failure
@@ -201,19 +186,21 @@ class Planner {
   Step finish(bool ok, const Clock& clock);
   // Ends the prepared request and its run without an outcome (settings or
   // network changed, the request was not sent): a staged table is dropped,
-  // no source state or notice changes; the next run starts from its first
-  // request.
+  // no source state changes; the next run starts from its first request.
   void abort();
+  // Ends the prepared request without an outcome but keeps the run's
+  // position: the next request() asks for the same request again.
+  void release();
+  // Ends the prepared request as 'fetch' says (finish(), abort() or
+  // release()) and tells the scheduler how its turn ended: a sent request
+  // counts as kOk, kFailed or kRateLimited; a local refusal (busy, changed,
+  // daily cap) defers it without a failure; a provider that cannot be used
+  // fails.
+  Completion complete(Fetch fetch, const Clock& clock);
 
-  const SourceState& state(uint8_t slot, schedule::Source source) const {
-    return states_[slot][static_cast<std::size_t>(source)];
-  }
+  const SourceState& state(uint8_t slot) const { return states_[slot]; }
 
  private:
-  void addPair(const settings::FixturePair& pair);
-  bool paired(uint8_t competition) const;
-  // Fixtures/live/table outcome of the prepared request for the route.
-  void settle(SourceState& state, bool ok);
   Step advance(bool ok, const Clock& clock);
   bool consumeElement(ArduinoJson::JsonVariantConst element);
   // Starts the prepared request of the current run (current_, source_,
@@ -228,19 +215,12 @@ class Planner {
   const StoredMatch* eventsRow() const;
   void addDay(uint32_t day);
 
-  std::array<std::array<SourceState, schedule::kSourceCount>,
-             cfg::kCompetitionMax>
-      states_{};
-  SourceState pick_state_{};  // the fixture picker's run (RAM only)
-  bool picking_ = false;      // the prepared request is the picker's
+  std::array<SourceState, cfg::kCompetitionMax> states_{};
   // The prepared request: its source, data type and consume context.
   SourceState* current_ = nullptr;
   MatchStore* store_ = nullptr;
   settings::Source source_;
-  schedule::Source kind_ = schedule::Source::kPrimary;
-  bool fallback_on_ = false;        // the entry's fallback is active
-  cfg::Provider fallback_provider_ = cfg::Provider::kOpenLigaDb;
-  cfg::DataType type_ = cfg::DataType::kCore;
+  cfg::DataType type_ = cfg::DataType::kFixtures;
   MapContext map_;
   Sink sink_ = Sink::kMatches;
   uint32_t event_match_ = 0;  // the own match of an events run
@@ -255,9 +235,6 @@ class Planner {
   std::array<uint32_t, 2 * kEspnDays> scan_{};
   uint8_t scan_count_ = 0, scan_blocks_ = 0;
   bool scan_done_ = false;
-  // The fixture pairs of all competitions (setPairs); primary provider and
-  // route are set per fallback request.
-  Pairing pairing_;
 };
 
 // One URL path or query component: every byte outside the RFC 3986
@@ -267,8 +244,9 @@ class Planner {
 void encode(std::string_view in, char* out, std::size_t size);
 
 // Days of the current and the next matchday from ascending provider day
-// starts: days less than kMatchdayGapHours apart form one matchday; the
-// current one is the first whose last day has not ended at 'utc'. At most
+// starts, grouped by matchday::starts(); the current one is the first whose
+// last provider day has not ended at 'utc' (results of a held matchday are
+// final and stay stored, so it is not fetched again, OQ-272). At most
 // 'capacity' days. Returns the number written.
 std::size_t matchdayDays(const uint32_t* days, std::size_t count,
                          int64_t utc, uint32_t* out, std::size_t capacity);

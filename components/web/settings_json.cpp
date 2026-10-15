@@ -191,6 +191,7 @@ void settingsJson(JsonObject out, const settings::Model& m, bool secrets) {
   out["matchday_screen"] = static_cast<unsigned>(m.matchday_screen);
   out["own_match_screen"] = static_cast<unsigned>(m.own_match_screen);
   out["conference_mode"] = static_cast<unsigned>(m.conference_mode);
+  out["matchday_mode"] = static_cast<unsigned>(m.matchday_mode);
   // Every stored slot; the schema's "inputs" says how many the device has.
   auto roles = out["input_roles"].to<JsonArray>();
   for (const auto role : m.input_roles) roles.add(static_cast<unsigned>(role));
@@ -232,8 +233,8 @@ bool applyJson(JsonObjectConst in, settings::Model& m,
 #undef KNOWN
     for (const char* other :
          {"slides", "screens", "idle_screen", "matchday_screen",
-          "own_match_screen", "conference_mode", "input_roles", "providers",
-          "global_limit"})
+          "own_match_screen", "conference_mode", "matchday_mode", "input_roles",
+          "providers", "global_limit"})
       known |= strcmp(name, other) == 0;
     // Redacted exports carry only these boolean markers; they never clear a
     // key.
@@ -268,6 +269,10 @@ bool applyJson(JsonObjectConst in, settings::Model& m,
               mode))
     return false;
   m.conference_mode = static_cast<cfg::ConferenceMode>(mode);
+  mode = static_cast<uint8_t>(m.matchday_mode);
+  if (!scalar(c, FieldPath().key("matchday_mode"), in["matchday_mode"], mode))
+    return false;
+  m.matchday_mode = static_cast<cfg::MatchdayMode>(mode);
   // A role list replaces the first slots; the slots after it keep theirs.
   if (!in["input_roles"].isNull()) {
     const auto list = FieldPath().key("input_roles");
@@ -335,9 +340,7 @@ void competitionsJson(JsonObject out, const settings::Competitions& list) {
     auto item = competitions.add<JsonObject>();
     item["id"] = entry.id;
     item["active"] = entry.active;
-    item["fallback_active"] = entry.fallback_active;
     sourceJson(item["primary"].to<JsonObject>(), entry.primary);
-    sourceJson(item["fallback"].to<JsonObject>(), entry.fallback);
     item["competition_name"] = std::string_view(entry.competition_name.view());
     item["team_name"] = std::string_view(entry.team_name.view());
     auto screens = item["screens"].to<JsonObject>();
@@ -345,21 +348,11 @@ void competitionsJson(JsonObject out, const settings::Competitions& list) {
       screens[kScreenKeys[i]] =
           entry.uses(static_cast<cfg::CompetitionScreen>(i));
   }
-  auto pairs = out["fixture_pairs"].to<JsonArray>();
-  for (const auto& pair : list.pairs) {
-    auto item = pairs.add<JsonObject>();
-    item["active"] = pair.active;
-    item["swapped"] = pair.swapped;
-    item["competition"] = pair.competition;
-    item["primary_id"] = std::string_view(pair.primary_id.view());
-    item["secondary_id"] = std::string_view(pair.secondary_id.view());
-  }
 }
 bool applyCompetitionsJson(JsonObjectConst in, settings::Competitions& list,
                            settings::Violation* violation) {
   const Context c{violation};
-  if (!onlyKeys(c, FieldPath(), in, {"competitions", "fixture_pairs"}))
-    return false;
+  if (!onlyKeys(c, FieldPath(), in, {"competitions"})) return false;
   // A list in the input replaces the whole list; absent keys of an entry
   // take the defaults of a new entry, an absent or 0 id makes it new.
   if (!in["competitions"].isNull()) {
@@ -372,15 +365,11 @@ bool applyCompetitionsJson(JsonObjectConst in, settings::Competitions& list,
       const auto at = at_list.withIndex(n++);
       settings::Competition entry;
       if (!onlyKeys(c, at, row,
-                    {"id", "active", "fallback_active", "primary", "fallback",
-                     "competition_name", "team_name", "screens"}) ||
+                    {"id", "active", "primary", "competition_name", "team_name",
+                     "screens"}) ||
           !scalar(c, at.with("id"), row["id"], entry.id) ||
           !scalar(c, at.with("active"), row["active"], entry.active) ||
-          !scalar(c, at.with("fallback_active"), row["fallback_active"],
-                  entry.fallback_active) ||
           !applySource(c, at.with("primary"), row["primary"], entry.primary) ||
-          !applySource(c, at.with("fallback"), row["fallback"],
-                       entry.fallback) ||
           !bytes(c, at.with("competition_name"), row["competition_name"],
                  entry.competition_name) ||
           !bytes(c, at.with("team_name"), row["team_name"], entry.team_name))
@@ -405,30 +394,6 @@ bool applyCompetitionsJson(JsonObjectConst in, settings::Competitions& list,
       list.entries.push(entry);
     }
   }
-  if (!in["fixture_pairs"].isNull()) {
-    const auto at_list = FieldPath().key("fixture_pairs");
-    const auto rows = in["fixture_pairs"];
-    if (!listOf(c, at_list, rows, list.pairs.kCapacity)) return false;
-    list.pairs.clear();
-    unsigned n = 0;
-    for (JsonVariantConst row : rows.as<JsonArrayConst>()) {
-      const auto at = at_list.withIndex(n++);
-      settings::FixturePair pair;
-      if (!onlyKeys(c, at, row,
-                    {"active", "swapped", "competition", "primary_id",
-                     "secondary_id"}) ||
-          !scalar(c, at.with("active"), row["active"], pair.active) ||
-          !scalar(c, at.with("swapped"), row["swapped"], pair.swapped) ||
-          !scalar(c, at.with("competition"), row["competition"],
-                  pair.competition) ||
-          !bytes(c, at.with("primary_id"), row["primary_id"],
-                 pair.primary_id) ||
-          !bytes(c, at.with("secondary_id"), row["secondary_id"],
-                 pair.secondary_id))
-        return false;
-      list.pairs.push(pair);
-    }
-  }
   return true;
 }
 void schemaJson(JsonObject out, const settings::Limits& limits) {
@@ -436,7 +401,6 @@ void schemaJson(JsonObject out, const settings::Limits& limits) {
   out["max_body"] = cfg::kApiBodyBytes;
   auto lists = out["limits"].to<JsonObject>();
   lists["competitions"] = cfg::kCompetitionMax;
-  lists["fixture_pairs"] = cfg::kFixtureMappingMax;
   lists["slides"] = cfg::kSlideMax;
   lists["images"] = cfg::kImageLibraryMax;
   lists["screens"] = cfg::kScreenCount;
@@ -477,10 +441,6 @@ void schemaJson(JsonObject out, const settings::Limits& limits) {
   entry["competition_name"] =
       decltype(settings::Competition::competition_name)::kCapacity;
   entry["team_name"] = decltype(settings::Competition::team_name)::kCapacity;
-  auto pair = text["fixture_pairs"].to<JsonObject>();
-  pair["primary_id"] = decltype(settings::FixturePair::primary_id)::kCapacity;
-  pair["secondary_id"] =
-      decltype(settings::FixturePair::secondary_id)::kCapacity;
   auto bounds = out["bounds"].to<JsonObject>();
   auto range = [&](const char* name, int min, int max) {
     auto row = bounds[name].to<JsonArray>();

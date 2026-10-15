@@ -42,17 +42,18 @@ env.BuildSources(
     src_filter=(
         "+<football_model.cpp> +<budget_ledger.cpp> +<match_store.cpp> +<store_mappers.cpp>"
         " +<request_scheduler.cpp> +<provider_plan.cpp> +<store_views.cpp>"
-        " +<football_files.cpp>"
+        " +<football_files.cpp> +<matchday.cpp>"
     ),
 )
 
-# Pure input state machine and role mapping; the rest of the UI needs LVGL.
+# Pure input state machine and role mapping, and the display's error texts;
+# the rest of the UI needs LVGL.
 ui_root = project_root / "components" / "ui"
 env.Append(CPPPATH=[str(ui_root / "include")])
 env.BuildSources(
     str(Path(env.subst("$BUILD_DIR")) / "pure" / "ui"),
     str(ui_root),
-    src_filter="+<input_policy.cpp>",
+    src_filter="+<input_policy.cpp> +<cause_text.cpp>",
 )
 
 # Pure Wi-Fi connection policy; the network service needs IDF.

@@ -56,8 +56,8 @@ Inputs inputs(int64_t dt) {
 void want(Inputs& in, uint8_t slot, uint8_t id, cfg::Provider provider,
           uint8_t types) {
   in.competitions[slot].id = id;
-  in.competitions[slot].provider = {provider, provider};
-  in.competitions[slot].types = {types, 0};
+  in.competitions[slot].provider = provider;
+  in.competitions[slot].types = types;
 }
 
 Inputs inputs(int64_t dt, uint8_t types, cfg::Provider provider = kOlg) {
@@ -81,10 +81,15 @@ void addMatch(uint32_t id, int64_t kickoff_dt, bool own = false,
   TEST_ASSERT_NOT_NULL(store.upsert(m, at(0), "Home FC", "Away FC"));
 }
 
-// Runs the decision of next() at 'dt' and records its start.
-Decision step(const Inputs& in) {
+// Runs the decision of next(): a run job sends its request now and ends
+// with 'outcome'.
+Decision step(const Inputs& in, Outcome outcome = Outcome::kOk,
+              bool more = false) {
   const Decision d = scheduler.next(in);
-  if (d.run) scheduler.started(d.job, in.clock.mono_s);
+  if (d.run) {
+    scheduler.sent(d.job.provider, in.clock.mono_s);
+    scheduler.finished(d.job, outcome, in.clock.mono_s, more);
+  }
   return d;
 }
 
@@ -109,7 +114,7 @@ void setUp() {
   plans = settings::providerPlansDefault();
   for (auto& p : plans) {
     p.limit = {};
-    p.interval_s = {3600, 1800, 900, 60, 120, 30};
+    p.interval_s = {3600, 900, 60, 120, 30};
   }
 }
 void tearDown() {}
@@ -191,8 +196,8 @@ void test_window_unlimited_and_reset_on_change() {
 // ------------------------------------------------------------- degradation
 
 void test_degrade_gives_way_in_class_order() {
-  // live table, table, core, fixtures, live, own
-  const std::array<uint32_t, kClassCount> demand{100, 10, 2, 5, 50, 50};
+  // live table, table, fixtures, live, own
+  const std::array<uint32_t, kClassCount> demand{100, 10, 7, 50, 50};
   Factors f = degrade(demand, 1000);
   for (const auto x : f) TEST_ASSERT_EQUAL_UINT8(1, x);
   // The live table alone is stretched: 117 others, 3 left for 100.
@@ -201,19 +206,19 @@ void test_degrade_gives_way_in_class_order() {
   for (std::size_t c = 1; c < kClassCount; ++c) TEST_ASSERT_EQUAL_UINT8(1, f[c]);
   // Exactly the live and own demand fit: everything before is skipped.
   f = degrade(demand, 100);
-  const Factors skip4{0, 0, 0, 0, 1, 1};
-  TEST_ASSERT_EQUAL_UINT8_ARRAY(skip4.data(), f.data(), kClassCount);
+  const Factors skip3{0, 0, 0, 1, 1};
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(skip3.data(), f.data(), kClassCount);
   // Live is stretched before the own match is touched.
   f = degrade(demand, 60);
-  const Factors live5{0, 0, 0, 0, 5, 1};
+  const Factors live5{0, 0, 0, 5, 1};
   TEST_ASSERT_EQUAL_UINT8_ARRAY(live5.data(), f.data(), kClassCount);
   // The own match is stretched last.
   f = degrade(demand, 10);
-  const Factors own5{0, 0, 0, 0, 0, 5};
+  const Factors own5{0, 0, 0, 0, 5};
   TEST_ASSERT_EQUAL_UINT8_ARRAY(own5.data(), f.data(), kClassCount);
   // More than 255 times counts as skipped.
-  f = degrade({0, 0, 0, 0, 0, 3000}, 10);
-  TEST_ASSERT_EQUAL_UINT8(0, f[5]);
+  f = degrade({0, 0, 0, 0, 3000}, 10);
+  TEST_ASSERT_EQUAL_UINT8(0, f[4]);
   f = degrade(demand, 0);
   for (const auto x : f) TEST_ASSERT_EQUAL_UINT8(0, x);
 }
@@ -253,11 +258,11 @@ void test_live_window_per_phase() {
 // ------------------------------------------------------------- due times
 
 void test_periodic_job_runs_once_per_interval() {
-  const uint8_t types = bit(cfg::DataType::kCore);
-  assertRuns(step(inputs(0, types)), cfg::DataType::kCore);
+  const uint8_t types = bit(cfg::DataType::kFixtures);
+  assertRuns(step(inputs(0, types)), cfg::DataType::kFixtures);
   assertWaits(step(inputs(1, types)), Wait::kIdle, mono(3600));
   assertWaits(step(inputs(3599, types)), Wait::kIdle, mono(3600));
-  assertRuns(step(inputs(3600, types)), cfg::DataType::kCore);
+  assertRuns(step(inputs(3600, types)), cfg::DataType::kFixtures);
 }
 
 void test_live_job_runs_only_in_the_live_window() {
@@ -348,16 +353,17 @@ void test_window_reentry_runs_at_once() {
 
 void test_own_live_first_then_class_order() {
   addMatch(1, 0, true);
-  const uint8_t types = bit(cfg::DataType::kCore) |
+  const uint8_t types = bit(cfg::DataType::kFixtures) |
                         bit(cfg::DataType::kTable) | bit(cfg::DataType::kLive);
   assertRuns(step(inputs(0, types)), cfg::DataType::kLive);
-  assertRuns(step(inputs(2, types)), cfg::DataType::kCore);
+  assertRuns(step(inputs(2, types)), cfg::DataType::kFixtures);
   assertRuns(step(inputs(4, types)), cfg::DataType::kTable);
 }
 
 void test_device_gap() {
-  const uint8_t types = bit(cfg::DataType::kCore) | bit(cfg::DataType::kTable);
-  assertRuns(step(inputs(0, types)), cfg::DataType::kCore);
+  const uint8_t types =
+      bit(cfg::DataType::kFixtures) | bit(cfg::DataType::kTable);
+  assertRuns(step(inputs(0, types)), cfg::DataType::kFixtures);
   assertWaits(step(inputs(1, types)), Wait::kGap, mono(2));
   assertRuns(step(inputs(2, types)), cfg::DataType::kTable);
 }
@@ -366,20 +372,19 @@ void test_paused_provider_does_not_hold_back_another() {
   addMatch(1, 0, true);
   Inputs in = inputs(0);
   want(in, 0, kId, kApi, bit(cfg::DataType::kLive));
-  want(in, 1, 7, kOlg, bit(cfg::DataType::kCore));
-  Decision d = step(in);
+  want(in, 1, 7, kOlg, bit(cfg::DataType::kFixtures));
+  Decision d = step(in, Outcome::kRateLimited);
   assertRuns(d, cfg::DataType::kLive);
-  scheduler.finished(d.job, Outcome::kRateLimited, mono(0));
   // The paused provider's own live job is due again at 60 s, but waits;
-  // the other provider's core job runs.
+  // the other provider's fixtures job runs.
   in.clock = at(60);
-  assertRuns(step(in), cfg::DataType::kCore);
+  assertRuns(step(in), cfg::DataType::kFixtures);
   in.clock = at(70);
   assertWaits(step(in), Wait::kPaused, mono(cfg::kProviderRateRetryS));
 }
 
 void test_daily_cap_used_up_waits_for_the_utc_day_end() {
-  Inputs in = inputs(0, bit(cfg::DataType::kCore), kApi);
+  Inputs in = inputs(0, bit(cfg::DataType::kFixtures), kApi);
   in.daily_left[static_cast<std::size_t>(kApi)] = 0;
   // kBase is 12:00 UTC: the day ends 12 h later.
   assertWaits(step(in), Wait::kDaily, mono(12 * 3600));
@@ -390,96 +395,95 @@ void test_daily_cap_used_up_waits_for_the_utc_day_end() {
 
 void test_provider_window_limit_blocks() {
   plans[static_cast<std::size_t>(kOlg)].limit = {0, 2, 60};
-  const uint8_t types = bit(cfg::DataType::kCore) |
-                        bit(cfg::DataType::kTable) |
-                        bit(cfg::DataType::kFixtures);
-  // Fixtures rank before core data (OQ-221 order).
-  assertRuns(step(inputs(0, types)), cfg::DataType::kFixtures);
-  TEST_ASSERT_TRUE(step(inputs(2, types)).run);
-  const Decision d = step(inputs(4, types));
+  const uint8_t types =
+      bit(cfg::DataType::kTable) | bit(cfg::DataType::kFixtures);
+  // Two competitions of the same provider: four jobs, two per minute.
+  const auto both = [types](int64_t dt) {
+    Inputs in = inputs(dt, types);
+    want(in, 1, 2, kOlg, types);
+    return in;
+  };
+  // Fixtures rank before the table (OQ-221 order).
+  assertRuns(step(both(0)), cfg::DataType::kFixtures);
+  TEST_ASSERT_TRUE(step(both(2)).run);
+  const Decision d = step(both(4));
   TEST_ASSERT_FALSE(d.run);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Wait::kWindow),
                           static_cast<uint8_t>(d.wait));
   TEST_ASSERT_TRUE(d.wake_s >= mono(60) && d.wake_s <= mono(64));
-  TEST_ASSERT_TRUE(step(inputs(d.wake_s - kBoot, types)).run);
+  TEST_ASSERT_TRUE(step(both(d.wake_s - kBoot)).run);
 }
 
 void test_failure_backoff_doubles_up_to_the_interval() {
-  const uint8_t types = bit(cfg::DataType::kCore);
+  const uint8_t types = bit(cfg::DataType::kFixtures);
   int64_t t = 0;
   uint32_t expected = cfg::kProviderErrorRetryS;
   for (int i = 0; i < 9; ++i) {
-    const Decision d = step(inputs(t, types));
-    assertRuns(d, cfg::DataType::kCore);
-    scheduler.finished(d.job, Outcome::kFailed, mono(t));
+    const Decision d = step(inputs(t, types), Outcome::kFailed);
+    assertRuns(d, cfg::DataType::kFixtures);
     const uint32_t wait = expected < 3600 ? expected : 3600;
     assertWaits(step(inputs(t + 1, types)), Wait::kIdle, mono(t + wait));
     t += wait;
     expected *= 2;
   }
-  const Decision d = step(inputs(t, types));
-  scheduler.finished(d.job, Outcome::kOk, mono(t));
+  step(inputs(t, types), Outcome::kOk);
   assertWaits(step(inputs(t + 1, types)), Wait::kIdle, mono(t + 3600));
 }
 
 void test_slot_id_change_starts_fresh() {
-  const uint8_t types = bit(cfg::DataType::kCore);
-  assertRuns(step(inputs(0, types)), cfg::DataType::kCore);
+  const uint8_t types = bit(cfg::DataType::kFixtures);
+  assertRuns(step(inputs(0, types)), cfg::DataType::kFixtures);
   Inputs in = inputs(10);
   want(in, 0, 2, kOlg, types);
   const Decision d = step(in);
-  assertRuns(d, cfg::DataType::kCore);
+  assertRuns(d, cfg::DataType::kFixtures);
   TEST_ASSERT_EQUAL_UINT8(2, d.job.competition);
 }
 
 void test_daily_cap_degrades_before_it_runs_out() {
-  // 12 h left: core 12, fixtures 24, table 48 requests expected.
-  Inputs in = inputs(0, bit(cfg::DataType::kCore) | bit(cfg::DataType::kTable) |
-                            bit(cfg::DataType::kFixtures), kApi);
+  // 12 h left: fixtures 12, table 48 requests expected.
+  Inputs in = inputs(
+      0, bit(cfg::DataType::kTable) | bit(cfg::DataType::kFixtures), kApi);
   in.daily_left[static_cast<std::size_t>(kApi)] = 1;
   const Decision d = step(in);
   assertRuns(d, cfg::DataType::kFixtures);
   TEST_ASSERT_TRUE(scheduler.degraded());
-  const Factors expected{1, 0, 0, 24, 1, 1};
+  const Factors expected{1, 0, 12, 1, 1};
   TEST_ASSERT_EQUAL_UINT8_ARRAY(expected.data(), scheduler.factors().data(),
                                 kClassCount);
   // Plenty left: back to normal.
   in.daily_left[static_cast<std::size_t>(kApi)] = 1000;
   in.clock = at(2);
-  assertRuns(step(in), cfg::DataType::kCore);
+  assertRuns(step(in), cfg::DataType::kTable);
   TEST_ASSERT_FALSE(scheduler.degraded());
 }
 
 void test_continued_run_stays_due_until_its_last_request() {
-  const uint8_t types = bit(cfg::DataType::kCore);
-  Decision d = step(inputs(0, types));
-  assertRuns(d, cfg::DataType::kCore);
-  scheduler.finished(d.job, Outcome::kOk, mono(0), true);
+  const uint8_t types = bit(cfg::DataType::kFixtures);
+  Decision d = step(inputs(0, types), Outcome::kOk, true);
+  assertRuns(d, cfg::DataType::kFixtures);
   // The next request of the run follows after the device gap.
   assertWaits(step(inputs(1, types)), Wait::kGap, mono(2));
-  d = step(inputs(2, types));
-  assertRuns(d, cfg::DataType::kCore);
-  scheduler.finished(d.job, Outcome::kOk, mono(2));
+  d = step(inputs(2, types), Outcome::kOk);
+  assertRuns(d, cfg::DataType::kFixtures);
   // Run complete: the interval counts from its last request.
   assertWaits(step(inputs(4, types)), Wait::kIdle, mono(2 + 3600));
   // A failure ends a continued run.
-  d = step(inputs(3602, types));
-  scheduler.finished(d.job, Outcome::kOk, mono(3602), true);
-  d = step(inputs(3604, types));
-  assertRuns(d, cfg::DataType::kCore);
-  scheduler.finished(d.job, Outcome::kFailed, mono(3604));
+  step(inputs(3602, types), Outcome::kOk, true);
+  d = step(inputs(3604, types), Outcome::kFailed);
+  assertRuns(d, cfg::DataType::kFixtures);
   assertWaits(step(inputs(3606, types)), Wait::kIdle,
               mono(3604 + cfg::kProviderErrorRetryS));
 }
 
 void test_run_cost_multiplies_the_daily_demand() {
-  // 12 h left, core every hour: 12 runs.
-  Inputs in = inputs(0, bit(cfg::DataType::kCore), kApi);
+  // 12 h left, fixtures every hour: 12 runs.
+  Inputs in = inputs(0, bit(cfg::DataType::kFixtures), kApi);
   in.daily_left[static_cast<std::size_t>(kApi)] = 20;
-  assertRuns(scheduler.next(in), cfg::DataType::kCore);
+  assertRuns(scheduler.next(in), cfg::DataType::kFixtures);
   TEST_ASSERT_FALSE(scheduler.degraded());
   // Three requests per run: 36 expected, 20 left.
-  in.competitions[0].cost[0][static_cast<std::size_t>(cfg::DataType::kCore)] =
+  in.competitions[0].cost[static_cast<std::size_t>(cfg::DataType::kFixtures)] =
       3;
   scheduler.next(in);
   TEST_ASSERT_TRUE(scheduler.degraded());
@@ -488,33 +492,31 @@ void test_run_cost_multiplies_the_daily_demand() {
 // ------------------------------------------------------- restored data
 
 void test_seeded_job_waits_for_the_rest_of_its_interval() {
-  const uint8_t types = bit(cfg::DataType::kCore);
+  const uint8_t types = bit(cfg::DataType::kFixtures);
   // Restored data 600 s old: due 3000 s after the seed.
-  scheduler.seed(0, kId, Source::kPrimary, cfg::DataType::kCore, 600,
-                 mono(0));
+  scheduler.seed(0, kId, cfg::DataType::kFixtures, 600, mono(0));
   assertWaits(step(inputs(0, types)), Wait::kIdle, mono(3000));
-  assertRuns(step(inputs(3000, types)), cfg::DataType::kCore);
+  assertRuns(step(inputs(3000, types)), cfg::DataType::kFixtures);
 }
 
 void test_seeded_job_older_than_its_interval_runs_at_once() {
-  const uint8_t types = bit(cfg::DataType::kCore);
+  const uint8_t types = bit(cfg::DataType::kFixtures);
   // Older than the monotonic clock itself (saved before the boot).
-  scheduler.seed(0, kId, Source::kPrimary, cfg::DataType::kCore,
-                 mono(0) + 7200, mono(0));
-  assertRuns(step(inputs(0, types)), cfg::DataType::kCore);
+  scheduler.seed(0, kId, cfg::DataType::kFixtures, mono(0) + 7200, mono(0));
+  assertRuns(step(inputs(0, types)), cfg::DataType::kFixtures);
 }
 
 void test_seed_ignores_live_types_and_other_ids_start_fresh() {
   const uint8_t live = bit(cfg::DataType::kLive);
   addMatch(1, 0, false, Phase::kLive);
-  scheduler.seed(0, kId, Source::kPrimary, cfg::DataType::kLive, 10, mono(0));
+  scheduler.seed(0, kId, cfg::DataType::kLive, 10, mono(0));
   assertRuns(step(inputs(0, live)), cfg::DataType::kLive);
 
   scheduler.reset();
-  const uint8_t core = bit(cfg::DataType::kCore);
-  scheduler.seed(0, 2, Source::kPrimary, cfg::DataType::kCore, 10, mono(0));
+  const uint8_t fixtures = bit(cfg::DataType::kFixtures);
+  scheduler.seed(0, 2, cfg::DataType::kFixtures, 10, mono(0));
   // The slot holds competition kId: the seed of competition 2 is gone.
-  assertRuns(step(inputs(0, core)), cfg::DataType::kCore);
+  assertRuns(step(inputs(0, fixtures)), cfg::DataType::kFixtures);
 }
 
 int main() {

@@ -66,6 +66,9 @@ struct ViewModel {
   Card card;
   char status[64]{};
   Tone status_tone = Tone::kText;
+  // The status is a temporary pill over the bottom of the content
+  // (OQ-284); false: a permanent line ("Demo").
+  bool status_pill = false;
   // IP chip: one line (station IP) or two (setup network name and IP).
   char badge[2][40]{};
   uint8_t badge_lines = 0;

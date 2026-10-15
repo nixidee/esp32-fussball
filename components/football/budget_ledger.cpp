@@ -34,14 +34,17 @@ void Counter::load(Load state, const Record& record) {
   damaged_ = state == Load::kDamaged;
 }
 
+void Counter::settle(uint32_t day) {
+  if (!damaged_) return;
+  // Used up for this day, in RAM only: nothing is stored until the next day
+  // writes a new record.
+  damaged_ = false;
+  record_ = {cfg::kBudgetRecordMagic, day, UINT32_MAX};
+  credits_ = 0;
+}
+
 Counter::Verdict Counter::admit(uint32_t day, uint32_t limit, Record* next) {
-  if (damaged_) {
-    // Used up for this day, in RAM only: nothing is stored until the next
-    // day writes a new record.
-    damaged_ = false;
-    record_ = {cfg::kBudgetRecordMagic, day, UINT32_MAX};
-    credits_ = 0;
-  }
+  settle(day);
   const bool new_day = day > record_.day;
   if (!new_day && credits_ > 0 && record_.reserved - credits_ < limit) {
     --credits_;

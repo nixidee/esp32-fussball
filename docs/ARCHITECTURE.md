@@ -56,7 +56,7 @@
 | Module | Does | Does not |
 |---|---|---|
 | Provider | HTTP request, parse, map to canonical model, report capabilities | Decide when to poll, know about screens |
-| Match store | Hold matches, tables, teams and own-match events of all competitions, combine a paired fallback, detect changes (score change, final whistle) | Network I/O |
+| Match store | Hold matches, tables, teams and own-match events of all competitions, detect changes (score change, final whistle) | Network I/O |
 | Request scheduler / plans | Choose the next job from due times and live windows, enforce the per-provider and global limits; turn a job into provider requests | Parsing |
 | Screen-mode resolver | Pure function: (time, data state, settings, inputs available) → screen set + default | LVGL, I/O |
 | Presenter | Build a view model for one screen from the store views + settings | Draw |
@@ -86,7 +86,11 @@
   request. `football::read()` holds that mutex while the presenter builds
   its bounded owned view model. The worker also keeps each active
   competition's data in a LittleFS file and loads it at boot; file I/O
-  holds the heavy-operation token.
+  holds the heavy-operation token. A provider request never waits for that
+  token or for a limit: the worker asks the request scheduler what may run,
+  reports each request's start and outcome to it, and sleeps until the
+  scheduler's next wake time. The owner's selection list is a pending work
+  item served one request per pass.
   Status readers copy only bounded status. A caller may not retain model
   references after its reader callback returns. Reader lock duration is
   still to be measured.
@@ -524,19 +528,19 @@ shape the image design:
   (temporary file, then rename), otherwise a replacement during a redraw fails.
 This is integration evidence only, not the supported-maximum envelope.
 
-### Current compiled resource ledger — 2026-10-14 (compact match store, request scheduler and plans in the firmware, competition files and short names, Matchday screen and per-competition screen switches; settings format 8 with competition store and request plans, image roles, font set 12/14/18/48, display design renderer, start screen, automatic season)
+### Current compiled resource ledger — 2026-10-15 (one source per competition, no fixture pairs, no settings migration, no core-data request, one job outcome protocol; compact match store, request scheduler and plans in the firmware, competition files and short names, Matchday screen and per-competition screen switches, one matchday module with current/next selection, status per competition with error codes and status pill; settings format 9 with competition store and request plans, image roles, font set 12/14/18/48, display design renderer, start screen, automatic season)
 
 | Item | C6 candidate | Growth over the accepted core image |
 |---|---|---|
-| Firmware binary | 1,633,648 B | +1,117,344 B |
-| PlatformIO flash report | 1,632,894 B, 89.0% of 1,835,008 B | +1,117,230 B |
-| Static data/BSS | 151,112 B | +102,892 B |
+| Firmware binary | 1,624,000 B | +1,107,696 B |
+| PlatformIO flash report | 1,623,248 B, 88.5% of 1,835,008 B | +1,107,584 B |
+| Static data/BSS | 146,604 B | +98,384 B |
 | Linked DIRAM, official IDF size report | not re-measured (266,066 B at the 2026-10-10 image) | — |
 | Match store | 22,728 B (BSS) | Included above; replaced three snapshots of 27,200 B (81,600 B) |
 | Short-name table | 48 entries of 32 B (BSS) | Included above |
 | Football files on LittleFS | about 3 KB (one block) per competition, short names up to 1,552 B | Budget 48 KiB for all football files |
-| Settings model / longest encoded record | 844 / 821 B | Format 8 (variable length, ceiling 2,048 B); formats 1 to 7 are converted in RAM without an NVS rewrite (the crest id of formats 3 to 5 is handed to the image service once, which saves the current format; the competitions of formats 2 to 7 move into the competition record at the first save) |
-| Competition store / longest encoded record | 2,459 / 2,467 B | Own NVS record, format 1 (ceiling 4,096 B); 8 entries of 238 B plus 8 fixture pairs |
+| Settings model / longest encoded record | 832 / 806 B | Format 9 (variable length, ceiling 2,048 B); formats 1 to 8 are not read (reported as outdated, initial values apply, the old record stays until the next save) |
+| Competition store / longest encoded record | 1,226 / 1,234 B | Own NVS record, format 2 (ceiling 4,096 B); 8 entries of 153 B, one source each; format 1 is not read (outdated) |
 | UI view model / draw list / text store | 1,852 / 2,016 / 1,280 B | Static owned view; 72 draw items of 28 B; view and draw list are initialised data (also stored in flash) |
 | Parser live allocation cap | 24,576 B including custom headers | Libc metadata additional |
 | JPEG validation workspace | 4,096 B static | Included above |
@@ -552,7 +556,7 @@ Runtime initialization of large snapshot defaults, shared stock aliases/font
 roles and unused C6 SDK speed/protocol features reduced the first complete
 build's 94.3% occupancy to 81.8% at the settings-format-3 build.
 
-The image fits the OTA slot and is 73,137 B above the 85% reserve line
+The image fits the OTA slot and is 53,119 B above the 85% reserve line
 (1,559,757 B) using the PlatformIO report; the line may be exceeded during
 the display redesign, and the savings are decided at alpha from a size map. Settings format 3 added 3,706 B flash
 and 620 B static RAM over the preceding build; the later Web UI rewrite, API
@@ -626,6 +630,48 @@ RAM (embedded page 62,843 B gzip, +1,074 B; estimate flash +6…10 KB, gzip
 +1…2 KB, static RAM +0.6 KB); the settings model grew to 844 B. Three
 corrected Web UI texts (window limit, daily-limit reason, daily-cap help)
 added 184 B flash (embedded page 63,026 B gzip, +183 B).
+One source per competition (no fallback source, no fixture pairs, no
+combining in the match store, the scheduler without the source dimension)
+and the removal of every settings migration (formats 1 to 7 and competition
+format 1 are reported as outdated) changed flash by −19,444 B and static RAM
+by −4,424 B (estimate flash −15…−27 KB, static RAM −3…−5 KB); the embedded
+page went from 63,052 B to 59,963 B gzip (−3,089 B). The competition store
+shrank from 2,459 B to 1,226 B per copy, the planner is 1,256 B.
+Removing the core-data request (team names come with fixtures and table;
+API-Football re-resolves its season with the first fixtures run after
+24 hours; settings format 9 without the core interval) changed flash by
+−574 B and static RAM by −88 B (estimate flash −1…−2 KB, RAM about
+−100 B); the embedded page grew from 59,963 B to 60,114 B gzip (+151 B,
+the backup-import note in two languages). The settings model shrank from
+844 B to 828 B, the longest settings record from 821 B to 805 B.
+One job outcome protocol (typed outcomes in the scheduler, the request
+counted at its real HTTP start, no wait loop in the provider request, the
+owner's selection list as a resumable work item with its wait in the API,
+the failure backoff up to 15 minutes, a damaged request counter settled on
+the first valid day, the exact cost of the API-Football season run)
+changed flash by +1,254 B and static RAM by +96 B (estimate flash
++1.5…3 KB, static RAM +4…40 B; the selection work item with its season
+buffer and the wait fields account for the RAM); the embedded page went
+from 60,114 B to 60,437 B gzip (+323 B, the wizard wait line in two
+languages). One search text per wizard step then added flash +24 B and
+27 B gzip to the embedded page (static RAM 0).
+One matchday module (gap, over, passed and the current/next selection in
+one place for store expiry, views, planner and UI), the `matchday_mode`
+setting, Konferenz membership in one pass and the Up/Down stepping through
+pages, matchdays and competitions changed flash by +1,956 B and static RAM
+by +16 B (estimate flash +0.3…1 KB, static RAM +0…8 B; the settings model
+grew from 828 B to 832 B through alignment, held in three static copies,
+plus the 4 B held matchday of the UI); the embedded page went from
+60,410 B to 61,074 B gzip (+664 B, estimate +0.2 KB; the select with its
+help in two languages). The longest settings record grew from 805 B to
+806 B.
+Status per competition (a state with cause, provider, HTTP status and last
+update per competition instead of one global error, stable error codes,
+notice cards in the Matchday and Table cycles, the status pill and the Web
+UI cause and action texts) changed flash by +7,138 B to 1,623,248 B and
+static RAM by −108 B to 146,604 B (estimate flash +1…2 KB, static RAM
++50…100 B; the static RAM reduction is not itemised); the embedded page went from 61,074 B to 64,321 B gzip
+(+3,247 B; the cause and action texts in two languages).
 No flash-reserve gate is
 accepted. Free heap is not derivable from the static figures: dynamic stacks,
 network, TLS, parser, DMA and library charges must still be accounted for. Peak heap,
@@ -670,7 +716,8 @@ components/
   settings/ timekeeping/     pure typed record/codec and civil rules
   network/                   WiFi policy, antenna, DNS, mDNS, SNTP, admission
   football/                  compact match store + row mappers, request
-                             scheduler, provider request plans, views from
+                             scheduler, provider request plans, matchday
+                             rules (gap, over, passed, selection), views from
                              the store, competition and short-name files,
                              provider worker, client, budget
   ui/                        pure input/navigation policy, presenter, views

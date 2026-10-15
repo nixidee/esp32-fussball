@@ -3,6 +3,7 @@
 idf_component_register(
   SRCS
     "boot_screen.cpp"
+    "cause_text.cpp"
     "football_screen.cpp"
     "ui_controller.cpp"
     "navigation_policy.cpp"

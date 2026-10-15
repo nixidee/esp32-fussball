@@ -1,5 +1,6 @@
 #include "football_model.h"
 
+#include <cstdio>
 #include <cstring>
 
 namespace football {
@@ -15,7 +16,6 @@ const char* providerName(cfg::Provider p) {
 const char* causeKey(Cause cause) {
   switch (cause) {
     case Cause::kNone: return "";
-    case Cause::kNotStarted: return "not_started";
     case Cause::kProviderOff: return "provider_off";
     case Cause::kBudget: return "budget_day";
     case Cause::kBusy: return "busy";
@@ -31,8 +31,53 @@ const char* causeKey(Cause cause) {
     case Cause::kTooLarge: return "too_large";
     case Cause::kMemory: return "memory";
     case Cause::kOther: return "other";
+    case Cause::kUnmaintained: return "unmaintained";
+    case Cause::kNoSeason: return "no_season";
+    case Cause::kCounter: return "counter";
   }
   return "other";
+}
+uint8_t causeNumber(Cause cause) {
+  switch (cause) {
+    case Cause::kNone: return 0;
+    case Cause::kProviderOff: return 1;
+    case Cause::kBudget: return 2;
+    case Cause::kBusy: return 3;
+    case Cause::kNetwork: return 4;
+    case Cause::kTime: return 5;
+    case Cause::kSettings: return 6;
+    case Cause::kRateLimited: return 7;
+    case Cause::kAuth: return 8;
+    case Cause::kNotFound: return 9;
+    case Cause::kHttp: return 10;
+    case Cause::kConnect: return 11;
+    case Cause::kBadResponse: return 12;
+    case Cause::kTooLarge: return 13;
+    case Cause::kMemory: return 14;
+    case Cause::kOther: return 15;
+    case Cause::kUnmaintained: return 16;
+    case Cause::kNoSeason: return 17;
+    case Cause::kCounter: return 18;
+  }
+  return 15;
+}
+void errorCode(char (&out)[kErrorCodeBytes], cfg::Provider provider,
+               Cause cause, uint16_t http) {
+  out[0] = 0;
+  if (cause == Cause::kNone) return;
+  const char* abbreviation = "???";
+  switch (provider) {
+    case cfg::Provider::kOpenLigaDb: abbreviation = "OLG"; break;
+    case cfg::Provider::kApiFootball: abbreviation = "APF"; break;
+    case cfg::Provider::kEspn: abbreviation = "ESPN"; break;
+    case cfg::Provider::kFootballData: abbreviation = "FDO"; break;
+  }
+  const unsigned number = causeNumber(cause);
+  if (http != 0)
+    snprintf(out, sizeof(out), "%s E%02u\xC2\xB7%u", abbreviation, number,
+             static_cast<unsigned>(http));
+  else
+    snprintf(out, sizeof(out), "%s E%02u", abbreviation, number);
 }
 const char* phaseName(Phase phase) {
   switch (phase) {

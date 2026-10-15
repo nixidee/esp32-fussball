@@ -93,16 +93,6 @@ bool nvs_ready = false;
 bool record_unread = false;
 // The same for the competition record.
 bool competitions_unread = false;
-// The stored settings record is a readable format 2 to 7 record: its
-// competitions replaced the competition record at boot (an older firmware
-// wrote it last). Loading writes nothing (OTA trial, rollback); the first
-// save() or saveCompetitions() writes the competition record and then the
-// settings record in the current format, so the next boot no longer
-// migrates. Interrupted between the two writes, the next boot migrates the
-// unchanged legacy competitions again.
-bool settings_legacy = false;
-// Crest image id of a format 3 to 5 record, read at boot; 0 once handed over.
-std::atomic<uint8_t> legacy_crest{cfg::kStockImageId};
 
 Presets presets() {
   return {
@@ -275,6 +265,12 @@ void loadCompetitions(nvs_handle_t handle) {
     setCompetitionsOrigin(Origin::kStored);
     ESP_LOGI(kTag, "stored competitions loaded (%u B)",
              static_cast<unsigned>(blob.size));
+  } else if (result == DecodeResult::kOutdatedVersion) {
+    setCompetitionsOrigin(Origin::kOutdated);
+    ESP_LOGW(kTag,
+             "stored competitions have an older format (%u B): discarded, "
+             "initial competitions apply until the next save",
+             static_cast<unsigned>(blob.size));
   } else {
     setCompetitionsOrigin(result == DecodeResult::kInvalidValue
                               ? Origin::kRejected
@@ -287,14 +283,13 @@ void loadCompetitions(nvs_handle_t handle) {
   }
 }
 
-// Loads the settings record over the initial values in current_model; a
-// format 2 to 7 record also replaces current_competitions. True if it did.
-bool loadSettings(nvs_handle_t handle) {
+// Loads the settings record over the initial values in current_model.
+void loadSettings(nvs_handle_t handle) {
   Blob blob;
   readBlob(handle, cfg::kSettingsNvsKey, cfg::kSettingsMaxRecordBytes, blob);
   if (blob.err == ESP_ERR_NVS_NOT_FOUND) {
     ESP_LOGI(kTag, "no stored settings: initial values apply");
-    return false;
+    return;
   }
   if (blob.err == ESP_ERR_INVALID_SIZE) {
     setOrigin(Origin::kDamaged);
@@ -303,30 +298,31 @@ bool loadSettings(nvs_handle_t handle) {
              "the next save",
              static_cast<unsigned>(blob.size),
              decodeResultText(DecodeResult::kTooLong));
-    return false;
+    return;
   }
   if (blob.err != ESP_OK) {
     refuseSavingAfter(blob.step, blob.err);
-    return false;
+    return;
   }
 
-  const std::span<const uint8_t> record(blob.data, blob.size);
-  const bool migrating = carriesCompetitions(record);
   Model loaded = current_model;
   Field invalid = Field::kWifiSsid;
-  uint8_t crest = cfg::kStockImageId;
   const DecodeResult result =
-      decode(record, loaded, &invalid, display_limits, &crest,
-             migrating ? &current_competitions : nullptr);
+      decode({blob.data, blob.size}, loaded, &invalid, display_limits);
   if (result == DecodeResult::kOk) {
     current_model = loaded;
-    legacy_crest = crest;
     setOrigin(Origin::kStored);
     ESP_LOGI(kTag, "stored settings loaded (%u B)",
              static_cast<unsigned>(blob.size));
-    return migrating;
+    return;
   }
-  if (result == DecodeResult::kInvalidValue) {
+  if (result == DecodeResult::kOutdatedVersion) {
+    setOrigin(Origin::kOutdated);
+    ESP_LOGW(kTag,
+             "stored settings have an older format (%u B): discarded, "
+             "initial values apply until the next save",
+             static_cast<unsigned>(blob.size));
+  } else if (result == DecodeResult::kInvalidValue) {
     setOrigin(Origin::kRejected);
     ESP_LOGE(kTag,
              "stored settings rejected (%s: %s): initial values apply until "
@@ -339,7 +335,6 @@ bool loadSettings(nvs_handle_t handle) {
              "the next save",
              static_cast<unsigned>(blob.size), decodeResultText(result));
   }
-  return false;
 }
 
 esp_err_t writeRecord(const char* key, std::span<const uint8_t> record) {
@@ -375,9 +370,10 @@ esp_err_t writeCompetitions(const Competitions& competitions) {
   return err;
 }
 
-// Loads both records (boot only) and writes nothing. A readable settings
-// record of format 2 to 7 was written last by an older firmware: its
-// competitions (over the initial ones) win over a competition record.
+// Loads both records (boot only) and writes nothing; a discarded older record
+// stays until the next save, so an OTA rollback can still read it. Settings
+// of formats 2 to 7 carried the competitions: without a competition record,
+// those competitions count as discarded too.
 void load() {
   nvs_handle_t handle;
   const esp_err_t err =
@@ -391,14 +387,12 @@ void load() {
     refuseCompetitionsAfter("open", err);
     return;
   }
-  settings_legacy = loadSettings(handle);
-  if (!settings_legacy) loadCompetitions(handle);
+  loadSettings(handle);
+  loadCompetitions(handle);
   nvs_close(handle);
-  if (!settings_legacy) return;
-  setCompetitionsOrigin(Origin::kStored);
-  ESP_LOGI(kTag,
-           "competitions taken from the settings record; the next save "
-           "moves them into their own record");
+  if (current_source == Origin::kOutdated &&
+      competitions_source == Origin::kInitial)
+    setCompetitionsOrigin(Origin::kOutdated);
 }
 
 const char* setText(std::size_t length) { return length > 0 ? "set" : "empty"; }
@@ -450,6 +444,7 @@ const char* originName(Origin origin) noexcept {
       return "stored";
     case Origin::kRejected:
       return "rejected";
+    case Origin::kOutdated: return "outdated";
     case Origin::kDamaged:
       return "damaged";
     case Origin::kUnreadable:
@@ -459,10 +454,6 @@ const char* originName(Origin origin) noexcept {
   }
   return "initial";
 }
-
-uint8_t legacyCrest() { return legacy_crest.load(); }
-
-void forgetLegacyCrest() { legacy_crest = cfg::kStockImageId; }
 
 uint32_t generation() {
   return generation_counter.load(std::memory_order_acquire);
@@ -489,14 +480,9 @@ esp_err_t save(const Model& model, Violation* violation, bool check_access) {
              !checkProviderAccess(model, current_competitions, violation)) {
     err = ESP_ERR_INVALID_ARG;
     ESP_LOGE(kTag, "save rejected: a competition uses a disabled provider");
-  } else if (settings_legacy &&
-             (err = writeCompetitions(current_competitions)) != ESP_OK) {
-    ESP_LOGE(kTag, "save failed: competitions not moved (%s)",
-             esp_err_to_name(err));
   } else {
     err = writeSettings(model);
     if (err == ESP_OK) {
-      settings_legacy = false;
       setCurrent(model, Origin::kStored);
     } else {
       ESP_LOGE(kTag, "save failed: %s, settings unchanged",
@@ -545,16 +531,6 @@ uint8_t competitionId(std::size_t index) {
   return id;
 }
 
-int competitionIndex(uint8_t id) {
-  xSemaphoreTake(model_mutex, portMAX_DELAY);
-  int index = -1;
-  for (std::size_t i = 0; i < current_competitions.entries.size(); ++i)
-    if (id != 0 && current_competitions.entries[i].id == id)
-      index = static_cast<int>(i);
-  xSemaphoreGive(model_mutex);
-  return index;
-}
-
 Origin competitionsOrigin() {
   xSemaphoreTake(model_mutex, portMAX_DELAY);
   const Origin from = competitions_source;
@@ -580,15 +556,7 @@ esp_err_t saveCompetitions(Competitions& candidate, Violation* violation) {
   } else if ((err = writeCompetitions(candidate)) != ESP_OK) {
     ESP_LOGE(kTag, "competitions save failed: %s, competitions unchanged",
              esp_err_to_name(err));
-  } else if (settings_legacy &&
-             (err = writeSettings(current_model)) != ESP_OK) {
-    // The legacy settings record still wins at the next boot.
-    ESP_LOGE(kTag,
-             "competitions save failed: settings record not converted (%s), "
-             "competitions unchanged",
-             esp_err_to_name(err));
   } else {
-    settings_legacy = false;
     setCompetitions(candidate, Origin::kStored);
   }
   xSemaphoreGive(write_mutex);
@@ -610,8 +578,6 @@ esp_err_t reset() {
   if (err == ESP_OK) {
     record_unread = false;
     competitions_unread = false;
-    settings_legacy = false;
-    legacy_crest = cfg::kStockImageId;
     // Built in place: the store is too large for the caller's stack.
     xSemaphoreTake(model_mutex, portMAX_DELAY);
     initialCompetitions(presets(), current_competitions);
@@ -636,8 +602,6 @@ void logCurrent(const char* when) {
   const Origin from = current_source;
   const auto competition_count =
       static_cast<unsigned>(current_competitions.entries.size());
-  const auto pair_count =
-      static_cast<unsigned>(current_competitions.pairs.size());
   const Origin competitions_from = competitions_source;
   xSemaphoreGive(model_mutex);
 
@@ -656,8 +620,8 @@ void logCurrent(const char* when) {
       static_cast<unsigned>(model.debug_status_interval_s),
       static_cast<int>(model.time_zone.length), model.time_zone.data.data(),
       static_cast<int>(model.ntp_server.length), model.ntp_server.data.data());
-  ESP_LOGI(kTag, "%s (%s): %u competitions, %u fixture pairs", when,
-           originName(competitions_from), competition_count, pair_count);
+  ESP_LOGI(kTag, "%s (%s): %u competitions", when,
+           originName(competitions_from), competition_count);
 }
 
 }  // namespace settings

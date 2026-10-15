@@ -157,43 +157,27 @@ enum class TimeTest : uint8_t {
 inline constexpr TimeTest kTimeTest = TimeTest::kNone;
 
 // ---- Settings record -------------------------------------------------------
-// Format 3 stores the lists (competitions, fixture pairs, slides) as a count
-// followed by that many entries, so the record length varies. Format 4 appends
-// the Konferenz pin flag, format 5 the Konferenz mode, the whole-matchday flag
-// and one role byte per input slot; older records are read with the defaults
-// of the missing fields. Format 6 drops the crest image reference of formats
-// 3 to 5 (the crest is a protected image with its own file); the reference
-// read from an older record is handed to the image service once. Format 7
-// replaces the API-Football daily budget among the scalars with a daily cap
-// and a request spacing per provider at the end; an older record's budget
-// becomes API-Football's cap, the other providers take the defaults. Format 8
-// moves the competitions and fixture pairs into their own record (OQ-200,
-// OQ-209) and replaces the request limits by a plan per provider (daily cap,
-// window limit, interval per data type; OQ-216, OQ-225) plus one global limit
-// (OQ-226); a format 7 record keeps its daily caps, its spacings are dropped
-// (OQ-225). Formats 1 (core only), 2 (lists as fixed slots) and 3 to 7 are
-// still read and converted in RAM; the next save writes format 8. Loading
-// writes nothing; the competitions of a readable older record win over the
-// competition record and are moved into it at the first save.
-inline constexpr uint16_t kSettingsFormatVersion = 8;
-inline constexpr uint16_t kSettingsLimitFormatVersion = 7;
-inline constexpr uint16_t kSettingsRoleFormatVersion = 6;
-inline constexpr uint16_t kSettingsModeFormatVersion = 5;
-inline constexpr uint16_t kSettingsPinFormatVersion = 4;
-inline constexpr uint16_t kSettingsLegacyFormatVersion = 1;
-inline constexpr uint16_t kSettingsSlotFormatVersion = 2;
-inline constexpr uint16_t kSettingsListFormatVersion = 3;
-inline constexpr std::size_t kSettingsLegacyMaxRecordBytes = 1024;
-inline constexpr std::size_t kSettingsLegacyCoreRecordBytes = 335;
+// Format 9: the lists are stored as a count followed by that many entries, so
+// the record length varies; the competitions have their own record (OQ-200,
+// OQ-209); the request limits are a plan per provider (daily cap, window
+// limit, interval per data type; OQ-216, OQ-225) plus one global limit
+// (OQ-226); format 9 drops the core-data interval (OQ-248, OQ-257). A shorter
+// record keeps the initial values of its missing trailing fields. Records of
+// formats 1 to 8 are not read (OQ-253, OQ-257): the device starts with the
+// initial values (origin "outdated"); the old record stays in NVS until the
+// next save, so an OTA rollback can still read it.
+inline constexpr uint16_t kSettingsFormatVersion = 9;
 // Longest stored record that is read (newer firmware may have appended
 // fields); a longer one counts as damaged.
 inline constexpr std::size_t kSettingsMaxRecordBytes = 2048;
 // NVS namespace and key, at most 15 characters each.
 inline constexpr char kSettingsNvsNamespace[] = "settings";
 inline constexpr char kSettingsNvsKey[] = "record";
-// Competition record (OQ-200): same namespace, own key and format.
+// Competition record (OQ-200): same namespace, own key and format. Format 2
+// has one source per competition (OQ-247); format 1 (fallback source and
+// fixture pairs) is not read (OQ-253).
 inline constexpr char kCompetitionsNvsKey[] = "competitions";
-inline constexpr uint16_t kCompetitionsFormatVersion = 1;
+inline constexpr uint16_t kCompetitionsFormatVersion = 2;
 // Longest competition record that is read (newer firmware may append).
 inline constexpr std::size_t kCompetitionsMaxRecordBytes = 4096;
 
@@ -278,6 +262,11 @@ enum class Screen : uint8_t { kLiveSingle, kLiveMulti, kTable, kCrest, kMatchday
 enum class ConferenceMode : uint8_t { kAllPages, kOnePage };
 inline constexpr ConferenceMode kConferenceModeDefault =
     ConferenceMode::kAllPages;
+// Matchday screen selection (OQ-244, OQ-267): the current matchday (the
+// finished one until the end of the following local day, OQ-268) or the
+// next one (from the end of the last kickoff's local date, OQ-271).
+enum class MatchdayMode : uint8_t { kCurrent, kNext };
+inline constexpr MatchdayMode kMatchdayModeDefault = MatchdayMode::kCurrent;
 // Function of one input (OQ-141…OQ-143). Exactly one active input carries the
 // mandatory one-key set: short Next, double Previous, long Default screen.
 // Up/Down page or scroll; Scroll moves in its current direction while held and
@@ -298,10 +287,8 @@ inline constexpr Provider kProviderDefault = Provider::kOpenLigaDb;
 inline constexpr Screen kIdleScreenDefault = Screen::kTable,
                         kMatchdayScreenDefault = Screen::kLiveMulti,
                         kOwnMatchScreenDefault = Screen::kLiveSingle;
-// A new competition or fixture pair is active; a fallback is added on purpose.
+// A new competition is active.
 inline constexpr bool kEntryActiveDefault = true,
-                      kFallbackActiveDefault = false,
-                      kFixturePairSwappedDefault = false,
                       kScreenEnabledDefault = true, kBackgroundsDefault = true,
                       kEspnOptInDefault = false, kDemoDefault = false,
                       kNightEnabledDefault = true,
@@ -322,7 +309,6 @@ inline constexpr Screen kScreenOrder[kScreenCount] = {
 // empty entries). A competition is a league or cup, optionally with an own
 // club (OQ-194, OQ-195).
 inline constexpr std::size_t kCompetitionMax = 8;
-inline constexpr std::size_t kFixtureMappingMax = 8;
 inline constexpr std::size_t kSlideMax = 5;
 // Screens a competition is used for (OQ-192), one bit each in
 // Competition::screens; a new competition is used for all of them.
@@ -344,7 +330,7 @@ inline constexpr std::size_t kCompetitionIdMaxBytes = 32;
 inline constexpr std::size_t kSeasonMaxBytes = 16;
 inline constexpr std::size_t kTeamIdMaxBytes = 32;
 inline constexpr std::size_t kDisplayNameMaxBytes = 32;
-// Provider ids of a match or team (also the fixture pair ids).
+// Provider ids of a match or team.
 inline constexpr std::size_t kIdBytes = 32;
 inline constexpr std::size_t kNameBytes = 64;
 // Longest search text of a competition or team list request.
@@ -397,26 +383,29 @@ inline constexpr uint32_t kWifiRadioRetryMs = 10000;
 // next DTIM beacon, which adds latency to every TCP round trip.
 inline constexpr bool kWifiPowerSave = false;
 inline constexpr uint32_t kAntennaSettleMs = 100;
-// Data types a provider is requested for (OQ-216, OQ-218): core data (teams
-// with ids and names), fixtures (current and next matchday), table, live
-// scores (also from 30 minutes before kickoff, OQ-220), live table and the
-// events of an own match.
+// Data types a provider is requested for (OQ-216, OQ-218; the core data are
+// gone, OQ-248): fixtures (current and next matchday), table, live scores
+// (also from 30 minutes before kickoff, OQ-220), live table and the events
+// of an own match.
 enum class DataType : uint8_t {
-  kCore,
   kFixtures,
   kTable,
   kLive,
   kLiveTable,
   kEvents,
 };
-inline constexpr std::size_t kDataTypeCount = 6;
+inline constexpr std::size_t kDataTypeCount = 5;
 // Default interval per data type in seconds, the same for every provider
-// (OQ-216: core data once a day, fixtures every 8 h, table every 4 h, live
-// every minute, events of the own match every 10 minutes, OQ-207; the live
-// table every 10 minutes is the agent's choice under OQ-227).
-inline constexpr uint32_t kIntervalDefaultS[kDataTypeCount] = {
-    86400, 28800, 14400, 60, 600, 600};
+// (OQ-216: fixtures every 8 h, table every 4 h, live every minute, events of
+// the own match every 10 minutes, OQ-207; the live table every 10 minutes is
+// the agent's choice under OQ-227).
+inline constexpr uint32_t kIntervalDefaultS[kDataTypeCount] = {28800, 14400, 60,
+                                                               600, 600};
 inline constexpr uint32_t kIntervalMinS = 10, kIntervalMaxS = 604800;
+// An API-Football source resolves its current season again when a fixtures
+// run starts this long after the last resolution (OQ-259; before OQ-248 the
+// daily core-data run did it).
+inline constexpr uint32_t kSeasonRecheckS = 86400;
 // Defaults of the per-provider request limits (OQ-225), provider order
 // OpenLigaDB, API-Football, ESPN, football-data.org: the limits the
 // providers document (checked 2026-10-13): OpenLigaDB 60 requests per minute
@@ -448,8 +437,12 @@ inline constexpr uint16_t kLiveLeadMinutes = 30;
 inline constexpr uint16_t kConferencePageMs = 8000;
 // Shown data counts as stale while a match of its competition is in its
 // live window and the competition's last successful match request is older
-// than this, or while its last request failed without a fallback route.
+// than this, or while its last request failed.
 inline constexpr uint16_t kDataStaleS = 900;
+// A fetched match that kicked off this long ago and is neither finished nor
+// has a result marks its provider as not maintaining the competition
+// (OQ-281).
+inline constexpr uint32_t kUnmaintainedAfterS = 24 * 3600;
 // The provider worker re-estimates phases and minutes, drops passed
 // matchdays and frees unused directory entries this often.
 inline constexpr uint16_t kStoreMaintenanceS = 60;
@@ -508,9 +501,15 @@ inline constexpr std::size_t kShortNamesMax = 48;
 inline constexpr uint16_t kDebugStreamPeriodMs = 1000;
 inline constexpr uint16_t kAppPollMs = 20;
 inline constexpr uint16_t kUiRefreshMs = 500;
+// Status pill (OQ-284, OQ-285): shown this long after a state change
+// (failure, network, time, stale data), then the screen is free again.
+inline constexpr uint16_t kStatusPillS = 5;
+// Opacity of the status pill's background (0..255): slightly transparent,
+// the content under it stays visible (OQ-284).
+inline constexpr uint8_t kStatusPillOpa = 204;
 inline constexpr uint16_t kHighlightRotateMs = 5000;
 
-// Longest field path of a rejected value, e.g. "competitions[2].fallback.team"
+// Longest field path of a rejected value, e.g. "competitions[2].primary.team"
 // (NUL included); the API error names the field with it.
 inline constexpr std::size_t kFieldPathBytes = 48;
 
@@ -535,6 +534,10 @@ inline constexpr std::size_t kProviderHeaderBytes = 8192;
 inline constexpr std::size_t kProviderWireOverheadBytes = 32768;
 inline constexpr uint16_t kProviderWaitSliceMs = 100;
 inline constexpr uint16_t kProviderErrorRetryS = 60, kProviderRateRetryS = 300;
+// Ceiling of the failure backoff for jobs with a shorter interval (OQ-262):
+// a failing request is retried after 60, 120, 240, 480, then every 900 s;
+// longer intervals grow up to their interval.
+inline constexpr uint16_t kProviderErrorRetryMaxS = 900;
 // Maximum age of reused OpenLigaDB data: a full refresh of the round (and of
 // another round with a fixture in its match window) is forced after this
 // time even with an unchanged change date.

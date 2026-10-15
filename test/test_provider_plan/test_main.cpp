@@ -1,8 +1,8 @@
 // Host checks of the provider request plans (football::plan). The ESPN
 // match and table inputs are recorded public responses
 // (../test_match_store/recorded.h, fetched 2026-10-14). The OpenLigaDB rows,
-// change dates, ESPN match days, API-Football season and team samples below
-// are written by the agent after the response shapes checked on 2026-10-14;
+// change dates, ESPN match days and API-Football season samples below are
+// written by the agent after the response shapes checked on 2026-10-14;
 // they prove only the request plans and the consumers, not what a provider
 // delivers or the owner's device acceptance.
 
@@ -10,9 +10,7 @@
 #include <unity.h>
 
 #include <cstring>
-#include <span>
 #include <string>
-#include <string_view>
 
 #include "../test_match_store/recorded.h"
 #include "app_config.h"
@@ -34,7 +32,6 @@ using football::plan::Request;
 using football::plan::Sink;
 using football::plan::Step;
 using football::schedule::Job;
-using football::schedule::Source;
 using football::schedule::Wanted;
 using namespace recorded;
 
@@ -61,7 +58,6 @@ Job job(cfg::DataType type) {
   Job j;
   j.slot = 0;
   j.competition = entry.id;
-  j.source = Source::kPrimary;
   j.type = type;
   j.provider = entry.primary.provider;
   return j;
@@ -188,22 +184,21 @@ void test_change_hash() {
 void test_wanted_types_and_costs() {
   setSource(cfg::Provider::kOpenLigaDb, "bl1", "91");
   Wanted w;
-  planner.wanted(0, &entry, w);
+  planner.wanted(0, &entry, store, at(0), w);
   TEST_ASSERT_EQUAL_UINT8(3, w.id);
   // Every data type but the own-match events (they come with live data).
-  TEST_ASSERT_EQUAL_UINT8(0x1f, w.types[0]);
-  TEST_ASSERT_EQUAL_UINT8(0, w.types[1]);
-  TEST_ASSERT_EQUAL_UINT8(3, w.cost[0][1]);  // fixtures with club
-  TEST_ASSERT_EQUAL_UINT8(2, w.cost[0][0]);  // core: season first
-  TEST_ASSERT_EQUAL_UINT8(2, w.cost[0][3]);  // live: change date + round
+  TEST_ASSERT_EQUAL_UINT8(0x0f, w.types);
+  TEST_ASSERT_EQUAL_UINT8(3, w.cost[0]);  // fixtures with club
+  TEST_ASSERT_EQUAL_UINT8(2, w.cost[1]);  // table: season first
+  TEST_ASSERT_EQUAL_UINT8(2, w.cost[2]);  // live: change date + round
   setSource(cfg::Provider::kEspn, "ger.1");
-  planner.wanted(0, &entry, w);
-  TEST_ASSERT_EQUAL_UINT8(8, w.cost[0][1]);  // match days + 7 days
-  TEST_ASSERT_EQUAL_UINT8(1, w.cost[0][2]);
+  planner.wanted(0, &entry, store, at(0), w);
+  TEST_ASSERT_EQUAL_UINT8(8, w.cost[0]);  // match days + 7 days
+  TEST_ASSERT_EQUAL_UINT8(1, w.cost[1]);
   entry.active = false;
-  planner.wanted(0, &entry, w);
+  planner.wanted(0, &entry, store, at(0), w);
   TEST_ASSERT_EQUAL_UINT8(0, w.id);
-  planner.wanted(0, nullptr, w);
+  planner.wanted(0, nullptr, store, at(0), w);
   TEST_ASSERT_EQUAL_UINT8(0, w.id);
 }
 
@@ -217,7 +212,7 @@ void test_openliga_fixtures_run() {
       olgRow(2, "2026-10-17T13:30:00Z", 6, "bl1", 2026, 7, 80) + "]";
   TEST_ASSERT_TRUE(feed(r, round6.c_str()));
   TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(0)));
-  const auto& state = planner.state(0, Source::kPrimary);
+  const auto& state = planner.state(0);
   TEST_ASSERT_EQUAL_UINT8(6, state.round);
   TEST_ASSERT_EQUAL_STRING("2026", std::string(state.season.view()).c_str());
   TEST_ASSERT_TRUE(stored(1) && stored(2));
@@ -275,30 +270,6 @@ void test_failure_ends_the_run() {
   TEST_ASSERT_EQUAL(Step::kDone, planner.finish(false, at(2)));
   expect(cfg::DataType::kFixtures,
          "https://api.openligadb.de/getmatchdata/bl1", 60);
-}
-
-void test_openliga_core_resolves_the_season_and_renames_teams() {
-  setSource(cfg::Provider::kOpenLigaDb, "bl1");
-  Request r = expect(cfg::DataType::kCore,
-                     "https://api.openligadb.de/getmatchdata/bl1");
-  TEST_ASSERT_TRUE(feed(r, ("[" + olgRow(1, "2026-10-16T18:30:00Z", 6) + "]")
-                               .c_str()));
-  TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(0)));
-  const std::size_t teams = store.teamCount();
-  r = expect(cfg::DataType::kCore,
-             "https://api.openligadb.de/getavailableteams/bl1/2026", 2);
-  TEST_ASSERT_TRUE(Sink::kTeams == r.sink);
-  TEST_ASSERT_TRUE(feed(
-      r, R"([{"teamId":91,"teamName":"Eintracht Frankfurt","shortName":"SGE"},)"
-         R"({"teamId":999,"teamName":"Not Stored","shortName":"NS"}])"));
-  TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(2)));
-  // Core data renames stored teams and adds none.
-  TEST_ASSERT_EQUAL(teams, store.teamCount());
-  const auto* m = store.find(entry.id, cfg::Provider::kOpenLigaDb, 1);
-  TEST_ASSERT_NOT_NULL(m);
-  TEST_ASSERT_EQUAL_STRING("SGE", store.teamAt(m->home).short_name.data);
-  TEST_ASSERT_FALSE(store.rename(cfg::Provider::kOpenLigaDb, 999, "NS"));
-  TEST_ASSERT_FALSE(store.rename(cfg::Provider::kEspn, 91, "X"));
 }
 
 void test_season_request_without_season_is_invalid() {
@@ -389,7 +360,7 @@ void test_espn_fixtures_from_match_days() {
   for (JsonVariantConst day : doc["eventDate"]["dates"].as<JsonArrayConst>())
     TEST_ASSERT_TRUE(Planner::consume(day, &planner));
   TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(0)));
-  TEST_ASSERT_EQUAL_UINT8(6, planner.state(0, Source::kPrimary).day_count);
+  TEST_ASSERT_EQUAL_UINT8(6, planner.state(0).day_count);
   const char* expected[] = {"20261016", "20261017", "20261018",
                             "20261023", "20261024", "20261025"};
   for (int i = 0; i < 6; ++i) {
@@ -405,8 +376,8 @@ void test_espn_fixtures_from_match_days() {
   }
   TEST_ASSERT_TRUE(stored(401884770, cfg::Provider::kEspn));
   Wanted w;
-  planner.wanted(0, &entry, w);
-  TEST_ASSERT_EQUAL_UINT8(7, w.cost[0][1]);
+  planner.wanted(0, &entry, store, at(0), w);
+  TEST_ASSERT_EQUAL_UINT8(7, w.cost[0]);
 }
 
 void test_espn_live_uses_the_match_day() {
@@ -441,7 +412,7 @@ void test_espn_live_uses_the_match_day() {
   TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(now + 2)));
 }
 
-void test_espn_table_and_core() {
+void test_espn_table() {
   setSource(cfg::Provider::kEspn, "ger.1");
   Request r = expect(cfg::DataType::kTable,
                      "https://site.web.api.espn.com/apis/v2/sports/soccer/"
@@ -451,21 +422,6 @@ void test_espn_table_and_core() {
   TEST_ASSERT_TRUE(feed(r, kEspnTable));
   TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(0)));
   TEST_ASSERT_EQUAL(18, store.rowCount());
-  r = expect(cfg::DataType::kCore,
-             "https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/"
-             "teams",
-             2);
-  TEST_ASSERT_EQUAL_STRING("teams", r.array);
-  TEST_ASSERT_TRUE(feed(
-      r, R"({"teams":[{"team":{"id":"598","displayName":"1. FC Union Berlin",)"
-         R"("shortDisplayName":"Union"}}]})"));
-  TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(2)));
-  bool renamed = false;
-  for (std::size_t i = 0; i < cfg::kStoreTeams; ++i)
-    if (store.teamAt(static_cast<uint8_t>(i)).id == 598)
-      renamed = std::string_view(store.teamAt(static_cast<uint8_t>(i))
-                                     .short_name.data) == "Union";
-  TEST_ASSERT_TRUE(renamed);
   setSource(cfg::Provider::kEspn, "ger.1", "", "2025");
   expect(cfg::DataType::kTable,
          "https://site.web.api.espn.com/apis/v2/sports/soccer/ger.1/"
@@ -491,9 +447,111 @@ void test_api_football_resolves_the_season() {
          "&from=2026-10-14&to=2026-10-14",
          4);
   planner.finish(true, at(4));
-  // Core data resolves the season again (once a day).
-  expect(cfg::DataType::kCore,
-         "https://v3.football.api-sports.io/leagues?id=78&current=true", 6);
+}
+
+// The season is resolved again by the first fixtures run 24 h after the
+// last resolution (OQ-248, OQ-259); the resolution time survives a save.
+void test_api_football_fixtures_recheck_the_season_daily() {
+  setSource(cfg::Provider::kApiFootball, "78");
+  const char* leagues =
+      "https://v3.football.api-sports.io/leagues?id=78&current=true";
+  const char* season =
+      R"({"response":[{"seasons":[{"year":2026,"current":true}]}]})";
+  Request r = expect(cfg::DataType::kFixtures, leagues);
+  TEST_ASSERT_TRUE(feed(r, season));
+  TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(0)));
+  TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(kBase),
+                           planner.state(0).season_utc);
+  expect(cfg::DataType::kFixtures,
+         "https://v3.football.api-sports.io/fixtures?league=78&season=2026"
+         "&from=2026-10-07&to=2026-10-21",
+         2);
+  planner.finish(true, at(2));
+  // Less than 24 h later: the known season.
+  const int64_t day = cfg::kSeasonRecheckS;
+  expect(cfg::DataType::kFixtures,
+         "https://v3.football.api-sports.io/fixtures?league=78&season=2026"
+         "&from=2026-10-08&to=2026-10-22",
+         day - 1);
+  planner.finish(true, at(day - 1));
+  // A table run does not resolve it again.
+  expect(cfg::DataType::kTable,
+         "https://v3.football.api-sports.io/standings?league=78&season=2026",
+         day);
+  planner.finish(true, at(day));
+  // Saved and restored: the resolution time comes back with the season.
+  const auto resolved = planner.saved(0, entry);
+  TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(kBase), resolved.season_utc);
+  planner.reset();
+  planner.restore(0, entry, resolved);
+  TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(kBase),
+                           planner.state(0).season_utc);
+  // 24 h after the resolution: the fixtures run asks for the season first.
+  r = expect(cfg::DataType::kFixtures, leagues, day + 2);
+  TEST_ASSERT_TRUE(feed(r, season));
+  TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(day + 2)));
+  TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(kBase + day + 2),
+                           planner.state(0).season_utc);
+  expect(cfg::DataType::kFixtures,
+         "https://v3.football.api-sports.io/fixtures?league=78&season=2026"
+         "&from=2026-10-08&to=2026-10-22",
+         day + 4);
+  TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(day + 4)));
+  // A clock that went back before the resolution counts as stale too.
+  expect(cfg::DataType::kFixtures, leagues, -10);
+}
+
+// OQ-264: the daily-cap degradation counts an API-Football fixtures run as
+// the requests it really sends: 2 while the season is unknown or due, 1 in
+// between.
+void test_api_football_fixtures_cost_matches_the_sent_requests() {
+  setSource(cfg::Provider::kApiFootball, "78");
+  const char* season =
+      R"({"response":[{"seasons":[{"year":2026,"current":true}]}]})";
+  const auto run = [&](int64_t dt) {
+    Wanted w;
+    planner.wanted(0, &entry, store, at(dt), w);
+    unsigned sent = 0;
+    Step step = Step::kMore;
+    while (step == Step::kMore) {
+      Request r;
+      TEST_ASSERT_TRUE(planner.request(job(cfg::DataType::kFixtures), entry,
+                                       store, at(dt + sent), r));
+      TEST_ASSERT_TRUE(feed(
+          r, std::strstr(r.url, "leagues?") ? season : R"({"response":[]})"));
+      step = planner.finish(true, at(dt + sent));
+      ++sent;
+    }
+    TEST_ASSERT_EQUAL(Step::kDone, step);
+    TEST_ASSERT_EQUAL_UINT8(sent, w.cost[0]);
+    return sent;
+  };
+  const int64_t day = cfg::kSeasonRecheckS;
+  TEST_ASSERT_EQUAL_UINT32(2, run(0));         // season unknown
+  TEST_ASSERT_EQUAL_UINT32(1, run(day - 10));  // season known
+  TEST_ASSERT_EQUAL_UINT32(2, run(day + 10));  // season due again
+  TEST_ASSERT_EQUAL_UINT32(1, run(day + 20));
+}
+
+// Without a valid UTC clock the known season is kept.
+void test_api_football_season_kept_without_a_clock() {
+  setSource(cfg::Provider::kApiFootball, "78");
+  Request r = expect(cfg::DataType::kFixtures,
+                     "https://v3.football.api-sports.io/"
+                     "leagues?id=78&current=true");
+  TEST_ASSERT_TRUE(feed(r, R"({"response":[{"seasons":[{"year":2026,)"
+                           R"("current":true}]}]})"));
+  TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(0)));
+  expect(cfg::DataType::kFixtures,
+         "https://v3.football.api-sports.io/fixtures?league=78&season=2026"
+         "&from=2026-10-07&to=2026-10-21",
+         2);
+  TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(2)));
+  const Clock no_utc{0, kBoot + 2 * cfg::kSeasonRecheckS};
+  TEST_ASSERT_TRUE(
+      planner.request(job(cfg::DataType::kFixtures), entry, store, no_utc, r));
+  TEST_ASSERT_NULL(std::strstr(r.url, "leagues?"));
+  TEST_ASSERT_NOT_NULL(std::strstr(r.url, "season=2026"));
 }
 
 void test_football_data_urls() {
@@ -506,11 +564,6 @@ void test_football_data_urls() {
          "https://api.football-data.org/v4/competitions/BL1/"
          "standings?season=2026");
   planner.finish(true, at(0));
-  setSource(cfg::Provider::kFootballData, "BL1");
-  const Request r = expect(cfg::DataType::kCore,
-                           "https://api.football-data.org/v4/competitions/"
-                           "BL1/teams");
-  TEST_ASSERT_EQUAL_STRING("teams", r.array);
 }
 
 void test_events_have_no_request_and_a_source_change_starts_fresh() {
@@ -522,38 +575,11 @@ void test_events_have_no_request_and_a_source_change_starts_fresh() {
              "https://api.openligadb.de/getmatchdata/bl1");
   feed(r, ("[" + olgRow(1, "2026-10-16T18:30:00Z", 6) + "]").c_str());
   planner.finish(true, at(0));
-  TEST_ASSERT_EQUAL_UINT8(6, planner.state(0, Source::kPrimary).round);
+  TEST_ASSERT_EQUAL_UINT8(6, planner.state(0).round);
   setSource(cfg::Provider::kOpenLigaDb, "bl2", "91");
   expect(cfg::DataType::kFixtures,
          "https://api.openligadb.de/getmatchdata/bl2", 2);
-  TEST_ASSERT_EQUAL_UINT8(0, planner.state(0, Source::kPrimary).round);
-}
-
-// The entry's fallback source (fallback_active).
-void setFallback(cfg::Provider provider, const char* competition,
-                 const char* season = "") {
-  entry.fallback_active = true;
-  entry.fallback.provider = provider;
-  entry.fallback.competition.assign(competition);
-  entry.fallback.season.assign(season);
-}
-
-Request expectFallback(cfg::DataType type, const char* url, int64_t dt = 0) {
-  Job j = job(type);
-  j.source = Source::kFallback;
-  j.provider = entry.fallback.provider;
-  Request r;
-  TEST_ASSERT_TRUE(planner.request(j, entry, store, at(dt), r));
-  TEST_ASSERT_EQUAL_STRING(url, r.url);
-  return r;
-}
-
-bool fallbackRequest(cfg::DataType type, int64_t dt = 0) {
-  Job j = job(type);
-  j.source = Source::kFallback;
-  j.provider = entry.fallback.provider;
-  Request r;
-  return planner.request(j, entry, store, at(dt), r);
+  TEST_ASSERT_EQUAL_UINT8(0, planner.state(0).round);
 }
 
 void feedDays(const Request& r) {
@@ -568,88 +594,39 @@ uint8_t bit(cfg::DataType type) {
   return static_cast<uint8_t>(1u << static_cast<unsigned>(type));
 }
 
-void test_fallback_wanted_by_pairs_and_switch() {
-  setSource(cfg::Provider::kOpenLigaDb, "bl1", "91");
-  setFallback(cfg::Provider::kEspn, "ger.1");
-  Wanted w;
-  planner.wanted(0, &entry, w);
-  TEST_ASSERT_EQUAL_UINT8(0, w.types[1]);
-  TEST_ASSERT_TRUE(cfg::Provider::kEspn == w.provider[1]);
-  // An active pair of this competition: the fallback's live data.
-  settings::FixturePair pair;
-  pair.active = true;
-  pair.competition = entry.id;
-  pair.primary_id.assign("1");
-  pair.secondary_id.assign("401884770");
-  settings::FixturePair other = pair;
-  other.competition = 9;
-  const settings::FixturePair pairs[] = {pair, other};
-  planner.setPairs(pairs);
-  planner.wanted(0, &entry, w);
-  TEST_ASSERT_EQUAL_UINT8(bit(cfg::DataType::kLive), w.types[1]);
-  TEST_ASSERT_EQUAL_UINT8(8, w.cost[1][1]);  // ESPN fixtures estimate
-  // Switched off: nothing, and no request.
-  entry.fallback_active = false;
-  planner.wanted(0, &entry, w);
-  TEST_ASSERT_EQUAL_UINT8(0, w.types[1]);
-  TEST_ASSERT_FALSE(fallbackRequest(cfg::DataType::kLive));
-  entry.fallback_active = true;
-  // Core data never comes from the fallback.
-  TEST_ASSERT_FALSE(fallbackRequest(cfg::DataType::kCore));
-}
-
-// The competition's screen switches limit the data types (OQ-192), for
-// the fallback as well.
+// The competition's screen switches limit the data types (OQ-192).
 void test_screen_switches_mask_the_wanted_types() {
   using Screen = cfg::CompetitionScreen;
   const auto only = [](Screen screen) {
     return static_cast<uint8_t>(1u << static_cast<unsigned>(screen));
   };
-  const uint8_t matches = bit(cfg::DataType::kCore) |
-                          bit(cfg::DataType::kFixtures) |
-                          bit(cfg::DataType::kLive);
-  const uint8_t table = bit(cfg::DataType::kCore) |
-                        bit(cfg::DataType::kFixtures) |
+  const uint8_t matches =
+      bit(cfg::DataType::kFixtures) | bit(cfg::DataType::kLive);
+  const uint8_t table = bit(cfg::DataType::kFixtures) |
                         bit(cfg::DataType::kTable) |
                         bit(cfg::DataType::kLiveTable);
   setSource(cfg::Provider::kOpenLigaDb, "bl1", "91");
   Wanted w;
   entry.screens = only(Screen::kTable);
-  planner.wanted(0, &entry, w);
-  TEST_ASSERT_EQUAL_UINT8(table, w.types[0]);
+  planner.wanted(0, &entry, store, at(0), w);
+  TEST_ASSERT_EQUAL_UINT8(table, w.types);
   entry.screens = only(Screen::kOwnMatch);
-  planner.wanted(0, &entry, w);
-  TEST_ASSERT_EQUAL_UINT8(matches, w.types[0]);
+  planner.wanted(0, &entry, store, at(0), w);
+  TEST_ASSERT_EQUAL_UINT8(matches, w.types);
   entry.screens = only(Screen::kConference);
-  planner.wanted(0, &entry, w);
-  TEST_ASSERT_EQUAL_UINT8(matches, w.types[0]);
+  planner.wanted(0, &entry, store, at(0), w);
+  TEST_ASSERT_EQUAL_UINT8(matches, w.types);
   entry.screens = only(Screen::kMatchday);
-  planner.wanted(0, &entry, w);
-  TEST_ASSERT_EQUAL_UINT8(matches, w.types[0]);
+  planner.wanted(0, &entry, store, at(0), w);
+  TEST_ASSERT_EQUAL_UINT8(matches, w.types);
   // The own match needs a club.
   setSource(cfg::Provider::kOpenLigaDb, "bl1");
   entry.screens = only(Screen::kOwnMatch);
-  planner.wanted(0, &entry, w);
-  TEST_ASSERT_EQUAL_UINT8(0, w.types[0]);
+  planner.wanted(0, &entry, store, at(0), w);
+  TEST_ASSERT_EQUAL_UINT8(0, w.types);
   entry.screens = 0;
-  planner.wanted(0, &entry, w);
-  TEST_ASSERT_EQUAL_UINT8(0, w.types[0]);
-  // A paired fallback's live data only while a match screen is on.
-  setSource(cfg::Provider::kOpenLigaDb, "bl1", "91");
-  setFallback(cfg::Provider::kEspn, "ger.1");
-  settings::FixturePair pair;
-  pair.active = true;
-  pair.competition = entry.id;
-  pair.primary_id.assign("1");
-  pair.secondary_id.assign("401884770");
-  const settings::FixturePair pairs[] = {pair};
-  planner.setPairs(pairs);
-  planner.wanted(0, &entry, w);
-  TEST_ASSERT_EQUAL_UINT8(bit(cfg::DataType::kLive), w.types[1]);
-  entry.screens = only(Screen::kTable);
-  planner.wanted(0, &entry, w);
-  TEST_ASSERT_EQUAL_UINT8(0, w.types[1]);
-  planner.setPairs(std::span<const settings::FixturePair>());
+  planner.wanted(0, &entry, store, at(0), w);
+  TEST_ASSERT_EQUAL_UINT8(0, w.types);
 }
 
 // ESPN's own-match substitutions: the match summary of the latest own
@@ -660,14 +637,14 @@ void test_espn_events_from_the_match_summary() {
   using Screen = cfg::CompetitionScreen;
   setSource(cfg::Provider::kEspn, "ger.1", "125");
   Wanted w;
-  planner.wanted(0, &entry, w);
-  TEST_ASSERT_EQUAL_UINT8(0x1f | bit(cfg::DataType::kEvents), w.types[0]);
-  TEST_ASSERT_EQUAL_UINT8(1, w.cost[0][5]);
+  planner.wanted(0, &entry, store, at(0), w);
+  TEST_ASSERT_EQUAL_UINT8(0x0f | bit(cfg::DataType::kEvents), w.types);
+  TEST_ASSERT_EQUAL_UINT8(1, w.cost[4]);
   entry.screens = static_cast<uint8_t>(
       cfg::kCompetitionScreensDefault &
       ~(1u << static_cast<unsigned>(Screen::kOwnMatch)));
-  planner.wanted(0, &entry, w);
-  TEST_ASSERT_EQUAL_UINT8(0x1f, w.types[0]);
+  planner.wanted(0, &entry, store, at(0), w);
+  TEST_ASSERT_EQUAL_UINT8(0x0f, w.types);
   entry.screens = cfg::kCompetitionScreensDefault;
 
   // Kickoff 2026-10-16 18:30 UTC; ten minutes later.
@@ -735,129 +712,6 @@ void test_espn_events_from_the_match_summary() {
       planner.request(job(cfg::DataType::kEvents), entry, store, at(now), r));
 }
 
-void test_paired_fallback_rows_fill_and_unpaired_are_dropped() {
-  setSource(cfg::Provider::kOpenLigaDb, "bl1", "", "2026");
-  setFallback(cfg::Provider::kEspn, "ger.1");
-  settings::FixturePair pair;
-  pair.active = true;
-  pair.competition = entry.id;
-  pair.primary_id.assign("1");
-  pair.secondary_id.assign("401884770");
-  pair.swapped = true;
-  const settings::FixturePair pairs[] = {pair};
-  planner.setPairs(pairs);
-  Request r = expect(cfg::DataType::kFixtures,
-                     "https://api.openligadb.de/getmatchdata/bl1");
-  feed(r, ("[" + olgRow(1, "2026-10-16T18:30:00Z", 6) + "]").c_str());
-  planner.finish(true, at(0));
-  // Without match days of its own: the scoreboard without date.
-  r = expectFallback(cfg::DataType::kLive,
-                     "https://site.api.espn.com/apis/site/v2/sports/soccer/"
-                     "ger.1/scoreboard",
-                     2);
-  TEST_ASSERT_TRUE(feed(r, kEspnUpcoming));
-  TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(2)));
-  TEST_ASSERT_FALSE(stored(401884770, cfg::Provider::kEspn));
-  const auto* m = store.find(entry.id, cfg::Provider::kOpenLigaDb, 1);
-  TEST_ASSERT_NOT_NULL(m);
-  // The recorded match is scheduled without score: its reported phase
-  // replaces the primary's estimated one.
-  TEST_ASSERT_EQUAL_UINT8(football::kFallbackPhase, m->fallback);
-  TEST_ASSERT_TRUE(football::Phase::kScheduled == m->phase);
-  TEST_ASSERT_EQUAL_UINT8(0, store.notices(entry.id));
-}
-
-void test_failed_primary_matches_switch_to_the_fallback_route() {
-  setSource(cfg::Provider::kOpenLigaDb, "bl1", "", "2026");
-  setFallback(cfg::Provider::kEspn, "ger.1");
-  expect(cfg::DataType::kFixtures,
-         "https://api.openligadb.de/getmatchdata/bl1");
-  TEST_ASSERT_EQUAL(Step::kDone, planner.finish(false, at(0)));
-  TEST_ASSERT_TRUE(planner.state(0, Source::kPrimary).failing);
-  TEST_ASSERT_EQUAL_UINT8(football::kNoticeFallbackRoute,
-                          store.notices(entry.id));
-  Wanted w;
-  planner.wanted(0, &entry, w);
-  TEST_ASSERT_EQUAL_UINT8(
-      bit(cfg::DataType::kLive) | bit(cfg::DataType::kFixtures), w.types[1]);
-  // The fallback's fixtures stand on their own.
-  Request r = expectFallback(cfg::DataType::kFixtures,
-                             "https://sports.core.api.espn.com/v2/sports/"
-                             "soccer/leagues/ger.1/calendar/ondays",
-                             2);
-  feedDays(r);
-  TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(2)));
-  r = expectFallback(cfg::DataType::kFixtures,
-                     "https://site.api.espn.com/apis/site/v2/sports/soccer/"
-                     "ger.1/scoreboard?dates=20261016",
-                     4);
-  TEST_ASSERT_TRUE(feed(r, kEspnUpcoming));
-  planner.finish(true, at(4));
-  TEST_ASSERT_TRUE(stored(401884770, cfg::Provider::kEspn));
-  // A failed fallback request is noted, a successful one clears it.
-  expectFallback(cfg::DataType::kLive,
-                 "https://site.api.espn.com/apis/site/v2/sports/soccer/"
-                 "ger.1/scoreboard",
-                 6);
-  planner.finish(false, at(6));
-  TEST_ASSERT_TRUE(store.notices(entry.id) & football::kNoticeFallbackFailed);
-  // The primary answers again: its rows replace the fallback's.
-  r = expect(cfg::DataType::kFixtures,
-             "https://api.openligadb.de/getmatchdata/bl1", 8);
-  feed(r, ("[" + olgRow(1, "2026-10-16T18:30:00Z", 6) + "]").c_str());
-  planner.finish(true, at(8));
-  TEST_ASSERT_FALSE(planner.state(0, Source::kPrimary).failing);
-  TEST_ASSERT_FALSE(store.notices(entry.id) & football::kNoticeFallbackRoute);
-  TEST_ASSERT_FALSE(stored(401884770, cfg::Provider::kEspn));
-  TEST_ASSERT_TRUE(stored(1));
-  planner.wanted(0, &entry, w);
-  TEST_ASSERT_EQUAL_UINT8(0, w.types[1]);
-}
-
-void test_fallback_table_only_while_the_primary_has_none() {
-  // A cup at ESPN: the standings answer has no entries.
-  setSource(cfg::Provider::kEspn, "ger.dfb_pokal");
-  setFallback(cfg::Provider::kOpenLigaDb, "dfb", "2026");
-  Request r = expect(cfg::DataType::kTable,
-                     "https://site.web.api.espn.com/apis/v2/sports/soccer/"
-                     "ger.dfb_pokal/standings");
-  TEST_ASSERT_TRUE(feed(r, R"({"children":[]})"));
-  planner.finish(true, at(0));
-  TEST_ASSERT_TRUE(planner.state(0, Source::kPrimary).no_table);
-  Wanted w;
-  planner.wanted(0, &entry, w);
-  TEST_ASSERT_EQUAL_UINT8(
-      bit(cfg::DataType::kTable) | bit(cfg::DataType::kLiveTable),
-      w.types[1]);
-  r = expectFallback(cfg::DataType::kTable,
-                     "https://api.openligadb.de/getbltable/dfb/2026", 2);
-  TEST_ASSERT_TRUE(feed(
-      r, R"([{"teamInfoId":91,"teamName":"Frankfurt","shortName":"SGE",)"
-         R"("points":3,"matches":1,"won":1,"draw":0,"lost":0,"goals":2,)"
-         R"("opponentGoals":0,"goalDiff":2}])"));
-  planner.finish(true, at(2));
-  TEST_ASSERT_TRUE(store.hasTable(entry.id, cfg::Provider::kOpenLigaDb));
-  // A failed primary table run keeps the fallback wanted.
-  expect(cfg::DataType::kTable,
-         "https://site.web.api.espn.com/apis/v2/sports/soccer/"
-         "ger.dfb_pokal/standings",
-         4);
-  planner.finish(false, at(4));
-  TEST_ASSERT_TRUE(planner.state(0, Source::kPrimary).table_failing);
-  TEST_ASSERT_TRUE(store.hasTable(entry.id, cfg::Provider::kOpenLigaDb));
-  // While the store holds the primary's table, the fallback asks nothing.
-  setUp();
-  setSource(cfg::Provider::kEspn, "ger.1");
-  setFallback(cfg::Provider::kOpenLigaDb, "bl1", "2026");
-  r = expect(cfg::DataType::kTable,
-             "https://site.web.api.espn.com/apis/v2/sports/soccer/"
-             "ger.1/standings");
-  TEST_ASSERT_TRUE(feed(r, kEspnTable));
-  planner.finish(true, at(0));
-  TEST_ASSERT_FALSE(planner.state(0, Source::kPrimary).no_table);
-  TEST_ASSERT_FALSE(fallbackRequest(cfg::DataType::kTable, 2));
-}
-
 void test_openliga_live_without_a_known_round_asks_the_current_one() {
   setSource(cfg::Provider::kOpenLigaDb, "bl1", "", "2026");
   Request r = expect(cfg::DataType::kLive,
@@ -865,7 +719,7 @@ void test_openliga_live_without_a_known_round_asks_the_current_one() {
   TEST_ASSERT_TRUE(feed(r, ("[" + olgRow(1, "2026-10-14T11:50:00Z", 6) + "]")
                                .c_str()));
   TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(0)));
-  TEST_ASSERT_EQUAL_UINT8(6, planner.state(0, Source::kPrimary).round);
+  TEST_ASSERT_EQUAL_UINT8(6, planner.state(0).round);
   TEST_ASSERT_TRUE(stored(1));
 }
 
@@ -878,22 +732,20 @@ int main() {
   RUN_TEST(test_openliga_fixtures_run);
   RUN_TEST(test_openliga_fixtures_without_club_and_explicit_season);
   RUN_TEST(test_failure_ends_the_run);
-  RUN_TEST(test_openliga_core_resolves_the_season_and_renames_teams);
   RUN_TEST(test_season_request_without_season_is_invalid);
   RUN_TEST(test_openliga_table);
   RUN_TEST(test_openliga_live_checks_the_change_date_per_round);
   RUN_TEST(test_espn_fixtures_from_match_days);
   RUN_TEST(test_espn_live_uses_the_match_day);
-  RUN_TEST(test_espn_table_and_core);
+  RUN_TEST(test_espn_table);
   RUN_TEST(test_api_football_resolves_the_season);
+  RUN_TEST(test_api_football_fixtures_recheck_the_season_daily);
+  RUN_TEST(test_api_football_fixtures_cost_matches_the_sent_requests);
+  RUN_TEST(test_api_football_season_kept_without_a_clock);
   RUN_TEST(test_football_data_urls);
   RUN_TEST(test_events_have_no_request_and_a_source_change_starts_fresh);
-  RUN_TEST(test_fallback_wanted_by_pairs_and_switch);
   RUN_TEST(test_screen_switches_mask_the_wanted_types);
   RUN_TEST(test_espn_events_from_the_match_summary);
-  RUN_TEST(test_paired_fallback_rows_fill_and_unpaired_are_dropped);
-  RUN_TEST(test_failed_primary_matches_switch_to_the_fallback_route);
-  RUN_TEST(test_fallback_table_only_while_the_primary_has_none);
   RUN_TEST(test_openliga_live_without_a_known_round_asks_the_current_one);
   return UNITY_END();
 }

@@ -111,6 +111,10 @@ uint32_t remainingGlobal(uint32_t day, uint32_t limit) {
   return counters[kGlobal].remaining(day, limit);
 }
 
+void settle(uint32_t day) {
+  for (auto& counter : counters) counter.settle(day);
+}
+
 esp_err_t erase() {
   nvs_handle_t handle;
   auto err = nvs_open(cfg::kBudgetNvsNamespace, NVS_READWRITE, &handle);

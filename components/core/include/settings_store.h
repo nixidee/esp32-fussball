@@ -1,5 +1,5 @@
 // Settings store (docs/CONFIGURATION.md): two NVS records in one namespace,
-// the settings and the competitions (with their fixture pairs, OQ-200), each
+// the settings and the competitions (OQ-200), each
 // loaded at boot, copied to readers and saved all-or-nothing; reset erases
 // the namespace. Initial values are the secrets.h presets over the
 // app_config.h defaults.
@@ -28,13 +28,6 @@ const Limits& limits();
 // the caller's stack, pinned by the host test).
 Model current();
 
-// Library id of the crest image a format 3 to 5 record referred to (format
-// 6 has no such field), 0 if none or after reset(). The image service copies that image into
-// the crest role once, saves the settings in the current format and then
-// calls forgetLegacyCrest().
-uint8_t legacyCrest();
-void forgetLegacyCrest();
-
 // Increases with every successful save or reset, which also posts
 // events::Event::kSettingsChanged (event_bus.h). Work started under one
 // generation can compare it later to detect a change.
@@ -47,19 +40,21 @@ uint32_t generation();
 uint32_t dataGeneration();
 
 // Where the current settings come from. Every value except kStored means the
-// initial values apply; kRejected and kDamaged records are overwritten by the
-// next save, kUnreadable and kNoStorage refuse saving (see save()).
+// initial values apply; kOutdated, kRejected and kDamaged records are
+// overwritten by the next save, kUnreadable and kNoStorage refuse saving (see
+// save()).
 enum class Origin : uint8_t {
   kInitial,     // no stored record, or reset() since boot
   kStored,      // the stored record, or the last successful save
+  kOutdated,    // stored record of an older format, discarded (OQ-253)
   kRejected,    // stored record decoded, but a value violates its limits
   kDamaged,     // stored record too long or not decodable
   kUnreadable,  // stored record could not be read (NVS error, no memory)
   kNoStorage,   // NVS unusable
 };
 Origin origin();
-// Stable name for the REST status ("initial", "stored", "rejected",
-// "damaged", "unreadable", "no_storage").
+// Stable name for the REST status ("initial", "stored", "outdated",
+// "rejected", "damaged", "unreadable", "no_storage").
 const char* originName(Origin origin) noexcept;
 
 // Validates and stores the complete model, then makes it current.
@@ -70,10 +65,7 @@ const char* originName(Origin origin) noexcept;
 // (if given) names the first offending field.
 // ESP_ERR_INVALID_STATE: NVS unusable, or the stored record could not be
 // read at boot (only reset() may replace it).
-// Other errors come from NVS or allocation; the current settings stay. While
-// the stored settings record has format 2 to 7, the competitions taken from
-// it are written to their own record first; if that fails, nothing is
-// stored.
+// Other errors come from NVS or allocation; the current settings stay.
 esp_err_t save(const Model& model, Violation* violation = nullptr,
                bool check_access = false);
 
@@ -84,21 +76,17 @@ std::size_t competitionCount();
 bool competitionAt(std::size_t index, Competition& out);
 bool competitionById(uint8_t id, Competition& out);
 void competitions(Competitions& out);
-// Id of the entry at 'index', 0 if none; list position of 'id', -1 if none.
+// Id of the entry at 'index', 0 if none.
 uint8_t competitionId(std::size_t index);
-int competitionIndex(uint8_t id);
 // Where the current competitions come from (as origin() for the settings).
-// A readable settings record of format 2 to 7 was written last by an older
-// firmware: its competitions replace the competition record at boot (nothing
-// is written) and count as kStored.
+// kOutdated also when there is no competition record and the settings record
+// has an older format (formats 2 to 7 carried the competitions).
 Origin competitionsOrigin();
 
-// Gives new entries (id 0) an id, validates the list and its fixture pairs,
+// Gives new entries (id 0) an id, validates the list,
 // requires every active competition to use enabled providers, stores the
 // record and makes it current. On success 'candidate' holds the saved list
-// with its ids. While the stored settings record has format 2 to 7, it is
-// then rewritten in the current format; if that fails, the competitions stay
-// unchanged. Errors as save(); ESP_ERR_INVALID_STATE also if the stored
+// with its ids. Errors as save(); ESP_ERR_INVALID_STATE also if the stored
 // competition record could not be read at boot.
 esp_err_t saveCompetitions(Competitions& candidate,
                            Violation* violation = nullptr);

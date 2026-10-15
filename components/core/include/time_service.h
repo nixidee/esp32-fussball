@@ -65,6 +65,10 @@ bool localNow(std::tm& out);
 // applied zone; works whether or not the wall clock is valid.
 void toLocal(time_t utc, std::tm& out);
 
+// Local UTC offset in seconds at the UTC instant 'utc' in the applied zone
+// (daylight saving included); works whether or not the wall clock is valid.
+int32_t localOffset(time_t utc);
+
 // Milliseconds since boot, unaffected by wall-clock changes: use it for
 // delays, retries, deadlines, freshness and input/overlay timeouts.
 int64_t monotonicMs();
