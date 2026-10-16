@@ -17,6 +17,9 @@ struct TaskRow {
   char name[cfg::kHealthTaskNameBytes];
   uint32_t id;
   uint32_t min_free_bytes;
+  // Inclusive kernel stack bounds, after port alignment; not the originally
+  // requested allocation. Zero when a safe bounds reading is unavailable.
+  uint32_t usable_bytes;
 };
 
 struct TaskSnapshot {

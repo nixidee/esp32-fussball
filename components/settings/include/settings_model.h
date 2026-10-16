@@ -400,9 +400,15 @@ bool checkProviderAccess(const Model& model, const Competitions& competitions,
 // advances 'next_id' past it (1..255, wrapping). Entries with an id keep it.
 void assignIds(Competitions& competitions) noexcept;
 
-// Bit n set = library image n exists (bit 0, the stock image, is ignored).
+// Bit n identifies library image n (bit 0, the stock image, is ignored).
 using ImageMask = uint16_t;
 static_assert(cfg::kImageLibraryMax < 16, "ImageMask has 16 bits");
+inline constexpr ImageMask kLibraryImageMask =
+    static_cast<ImageMask>((ImageMask{1} << (cfg::kImageLibraryMax + 1)) - 2);
+
+// Saved desired library ids, including disabled screens and every slide.
+// Missing files remain references; stock id 0 and invalid ids are ignored.
+ImageMask referencedImages(const Model& model) noexcept;
 
 // Replaces every reference to a library image missing from 'present' by the
 // stock image and removes it from the slides (a slide never stays empty).

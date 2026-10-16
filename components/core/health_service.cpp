@@ -13,6 +13,7 @@
 #include "event_bus.h"
 #include "file_service.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/freertos_debug.h"
 #include "freertos/task.h"
 #include "settings_store.h"
 #include "time_service.h"
@@ -151,6 +152,17 @@ Reading readTasks(TaskStatus_t* raw, TaskRow* rows, std::size_t capacity) {
       row.id = raw[i].xTaskNumber;
       row.min_free_bytes = raw[i].usStackHighWaterMark;
 #if configNUMBER_OF_CORES == 1
+      // The scheduler remains suspended until every TCB-derived value has
+      // been copied. This works for SDK and application tasks alike, without
+      // guessing stack allocations from task names. On SMP another core may
+      // delete the task, so its bounds remain explicitly unknown.
+      TaskSnapshot_t bounds{};
+      const auto first = reinterpret_cast<uintptr_t>(raw[i].pxStackBase);
+      if (first != 0 && vTaskGetSnapshot(raw[i].xHandle, &bounds) == pdTRUE) {
+        const auto last = reinterpret_cast<uintptr_t>(bounds.pxEndOfStack);
+        if (last >= first && last - first < UINT32_MAX)
+          row.usable_bytes = static_cast<uint32_t>(last - first + 1);
+      }
       const char* name = raw[i].pcTaskName;
       if (name != nullptr) {
         const std::size_t length = strnlen(name, sizeof(row.name) - 1);

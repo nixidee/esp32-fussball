@@ -6,6 +6,8 @@ idf_component_register(
     "cause_text.cpp"
     "football_screen.cpp"
     "ui_controller.cpp"
+    "football_presenter.cpp"
+    "status_presenter.cpp"
     "navigation_policy.cpp"
     "input_policy.cpp"
     "fonts/ui_font_text_12.c"

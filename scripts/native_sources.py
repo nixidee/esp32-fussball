@@ -53,7 +53,7 @@ env.Append(CPPPATH=[str(ui_root / "include")])
 env.BuildSources(
     str(Path(env.subst("$BUILD_DIR")) / "pure" / "ui"),
     str(ui_root),
-    src_filter="+<input_policy.cpp> +<cause_text.cpp>",
+    src_filter="+<input_policy.cpp> +<cause_text.cpp> +<navigation_policy.cpp>",
 )
 
 # Pure Wi-Fi connection policy; the network service needs IDF.

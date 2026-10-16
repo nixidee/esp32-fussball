@@ -17,10 +17,11 @@ limits change; recheck before relying on a value.
 
 ## 1. Priority
 
-ESPN and OpenLigaDB are the primary providers; request planning is designed
-for them. API-Football and football-data.org stay supported by the firmware
-and are not removed, but they are not refined further now and their limits
-are not part of the current planning:
+ESPN and OpenLigaDB are the primary providers and the focus of current
+request-optimization work. API-Football and football-data.org stay supported;
+the common scheduler enforces the configured daily caps and window limits
+for all four providers. Further refinement of the keyed-provider request
+plans is deferred for now:
 
 - API-Football free plan: 100 requests per day, which is not enough for live
   polling of more than one match.
@@ -193,10 +194,13 @@ on the community and differs by competition.
 | EURO qualifying | 3 matches | goal, penalty, yellow, red |
 | Friendlies | 10 matches | goal (header, free kick), penalty, yellow, red |
 
-Every sampled ESPN competition showed the same event types on the scoreboard
-(goals, penalties, own goals, yellow and red cards); none had substitutions.
-For ESPN the competition therefore makes no difference; for OpenLigaDB the
-quality table above does.
+Across these ESPN samples the scoreboard contained goals, penalties, own
+goals and yellow/red cards, with the observed subset listed per competition
+above; none contained substitutions. This supports a shared event mapper
+for the sampled responses. It does not establish equal completeness,
+update timing or parser-memory needs across competitions, and the unsampled
+UEFA rows remain unverified by this table. OpenLigaDB's observed differences
+are recorded in its quality table above.
 
 ## 6. OpenLigaDB
 

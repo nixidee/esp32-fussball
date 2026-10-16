@@ -26,6 +26,7 @@
 #include "freertos/task.h"
 #include "gc9a01_panel.h"
 #include "hw_target.h"
+#include "jpeg_observer.h"
 #include "lvgl.h"
 #include "sdkconfig.h"
 
@@ -322,18 +323,16 @@ esp_err_t initLvgl(const hw::DisplayProfile& profile, uint32_t buffer_pixels) {
   ESP_RETURN_ON_ERROR(lvgl_port_init(&port), kTag, "LVGL port init failed");
   if (!lvgl_port_lock(cfg::kBootScreenLockTimeoutMs)) return ESP_ERR_TIMEOUT;
   lv_log_register_print_cb([](lv_log_level_t level, const char* message) {
-    // LVGL 9.6 TJPGD has no end-of-image check: every image draw ends with
-    // one of these benign format results after the last MCU. Uploads are
-    // fully decoded by the same decoder before they are published.
-    if (level == LV_LOG_LEVEL_WARN && (strstr(message, "jd_restart error: 6") ||
-                                       strstr(message, "jd_mcu_load error: 6")))
-      return;
+    // The decoder observer ends a complete walk before the nonexistent extra
+    // MCU. Real decoder warnings must remain visible, including format errors.
     if (level == LV_LOG_LEVEL_ERROR)
       ESP_LOGE(kTag, "LVGL %s", message);
     else
       ESP_LOGW(kTag, "LVGL %s", message);
   });
+  const auto observer_error = initImageObserver();
   lvgl_port_unlock();
+  if (observer_error != ESP_OK) return observer_error;
 
   lvgl_port_display_cfg_t disp = {};
   disp.io_handle = g_io;

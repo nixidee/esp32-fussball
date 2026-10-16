@@ -186,7 +186,7 @@ constexpr TickType_t kEventPollTicks = pdMS_TO_TICKS(10);
 
 std::atomic<uint32_t> time_events{0};
 
-void onTimeChanged(events::Event, uint32_t, void*) {
+void onTimeChanged(events::Event, events::Payload, void*) {
   time_events.fetch_add(1, std::memory_order_relaxed);
 }
 

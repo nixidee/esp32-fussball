@@ -25,12 +25,12 @@ constexpr uint32_t kSettleMs = 2000;
 std::atomic<uint32_t> ui_delivered{0};
 std::atomic<uint32_t> state_delivered{0};
 
-void onUiAction(Event, uint32_t, void*) {
+void onUiAction(Event, Payload, void*) {
   ui_delivered.fetch_add(1, std::memory_order_relaxed);
   vTaskDelay(pdMS_TO_TICKS(kSlowSubscriberMs));
 }
 
-void onSettingsChanged(Event, uint32_t, void*) {
+void onSettingsChanged(Event, Payload, void*) {
   state_delivered.fetch_add(1, std::memory_order_relaxed);
 }
 

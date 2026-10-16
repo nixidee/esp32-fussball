@@ -28,7 +28,7 @@ open.
 | Competition files | per active competition: its part of the match store, what its source resolved and when each data type last completed | LittleFS `comp_<id>.bin`, rewritten after new data (section 4.8) | about 3 KB for an 18-team league, one 4 KB block |
 | Short names | the owner's replacements of team short names, per provider and team id | LittleFS `short_names.bin` and RAM, persistent until a settings reset | 48 entries of 32 B in RAM, file up to 1,552 B |
 | Selection page | one page of a provider's competition or club list for the setup wizard | RAM, per request | 64 entries of 131 B |
-| Display view model | what one screen shows, copied from the store | RAM | 1,420 B |
+| Display view model | what one screen shows, copied from the store | RAM, one static owned model; a full copy would need its own storage | 1,880 B |
 | REST overview | own match and per-competition state, computed from the store | per request | – |
 
 ## 2. Definitions

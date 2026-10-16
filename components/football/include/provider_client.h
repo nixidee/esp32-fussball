@@ -7,7 +7,8 @@
 #include "football_model.h"
 #include "settings_model.h"
 namespace football {
-// One capped document at a time, released after an array element is mapped.
+// One shared capped budget for the request's field mask and the one element
+// document released after mapping. An unfiltered request needs no mask.
 class JsonAllocator : public ArduinoJson::Allocator {
  public:
   void* allocate(std::size_t size) override;

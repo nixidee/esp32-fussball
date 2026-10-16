@@ -14,9 +14,11 @@
 
 namespace events {
 
+using Payload = uint64_t;
+
 // Runs in the bus task. Keep it short: set a flag or notify the subscriber's
 // own task; never block, never call LVGL.
-using Callback = void (*)(Event event, uint32_t payload, void* context);
+using Callback = void (*)(Event event, Payload payload, void* context);
 
 // Creates the loop and its task. Call once at boot before any other service
 // posts. Errors come from esp_event (no memory for the loop or task).
@@ -33,7 +35,7 @@ esp_err_t subscribe(Event event, Callback callback, void* context);
 // ESP_ERR_TIMEOUT: UI action dropped, all UI slots taken.
 // ESP_ERR_INVALID_STATE: init() has not succeeded.
 // Other errors come from esp_event; the event is lost and counted.
-esp_err_t post(Event event, uint32_t payload = 0);
+esp_err_t post(Event event, Payload payload = 0);
 
 // Bus task stack low-water mark, dropped UI actions and failed posts.
 void logStatus();

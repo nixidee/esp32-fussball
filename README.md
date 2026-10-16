@@ -12,9 +12,9 @@ Configured through a built-in web interface.
 > long-run tests remain. Earlier boot/core tests
 > do not establish acceptance of these new services.
 >
-> Current C6 size: 1,633,648 B firmware binary, 1,632,894 B PlatformIO flash
-> (89.0% of one OTA slot), 151,112 B static RAM and 63,026 B embedded UI gzip.
-> It fits the slot and is 73,137 B above the 85% flash-reserve line; the
+> Last verified C6 checkpoint (2026-10-16): 1,650,176 B firmware binary, 1,649,420 B PlatformIO flash
+> (89.9% of one OTA slot), 150,940 B static RAM and 68,449 B embedded UI gzip.
+> The binary fits the slot and is 90,420 B above the 85% flash-reserve line; the
 > savings are decided at alpha from a size map.
 > Peak heap, largest
 > block, stack and LVGL reserves remain unmeasured

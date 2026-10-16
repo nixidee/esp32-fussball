@@ -10,6 +10,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_netif_defaults.h"
 #include "esp_netif_sntp.h"
 #include "esp_random.h"
 #include "esp_wifi.h"
@@ -50,13 +51,54 @@ enum class UserScanState : uint8_t {
 UserScanState scan_state = UserScanState::kIdle;  // protected by mux
 int64_t user_scan_at = 0;
 bool started = false, ap_on = false, scanning = false, user_scan = false;
-bool sntp_on = false, configured_radio = false, mdns_ready = false;
-// A failed radio reconfiguration or AP mode change is retried from poll()
-// at these times.
-int64_t published_at = 0, radio_retry_at = 0, mode_retry_at = 0;
-// The hostname of `applied` is not yet set in the driver and mDNS.
-bool hostname_pending = false;
-int64_t hostname_retry_at = 0;
+bool sntp_on = false, configured_radio = false, settings_pending = true;
+int64_t published_at = 0, mode_retry_at = 0;
+// Confirmed substeps retain their resources for this boot; the global stack
+// and possibly borrowed loop are only acknowledged, never destroyed. Retries
+// never repeat successful constructors, registrations, socket binds or tasks.
+enum Resource : uint32_t {
+  kPins = 1u << 0,
+  kStack = 1u << 1,
+  kLoop = 1u << 2,
+  kStation = 1u << 3,
+  kAccessPoint = 1u << 4,
+  kDhcpStopped = 1u << 5,
+  kApAddress = 1u << 6,
+  kDhcpArmed = 1u << 7,
+  kDriver = 1u << 8,
+  kStorage = 1u << 9,
+  kPowerSave = 1u << 10,
+  kWifiHandler = 1u << 11,
+  kIpHandler = 1u << 12,
+  kRunning = 1u << 13,
+  kDnsTask = 1u << 14,
+  kMdns = 1u << 15,
+  kDhcpHostname = 1u << 16,
+  kMdnsHostname = 1u << 17,
+  kHttpService = 1u << 18
+};
+constexpr uint32_t kRadioPrerequisites =
+    kPins | kStack | kLoop | kStation | kAccessPoint | kDhcpStopped |
+    kApAddress | kDhcpArmed | kDriver | kStorage | kPowerSave | kWifiHandler |
+    kIpHandler;
+constexpr uint32_t kRequiredResources = kRadioPrerequisites | kRunning |
+                                        kDnsTask | kMdns | kDhcpHostname |
+                                        kMdnsHostname | kHttpService;
+uint32_t resources = 0;
+esp_err_t init_errors[static_cast<unsigned>(InitStep::kHttpService) + 1]{};
+int64_t init_retry_at = 0;
+bool owns(uint32_t mask) { return (resources & mask) == mask; }
+bool initialized() {
+  return owns(kRequiredResources) && configured_radio && !settings_pending;
+}
+esp_err_t& initError(InitStep step) {
+  return init_errors[static_cast<unsigned>(step)];
+}
+InitStep failureStep() {
+  for (unsigned i = 1; i < std::size(init_errors); ++i)
+    if (init_errors[i] != ESP_OK) return static_cast<InitStep>(i);
+  return InitStep::kNone;
+}
 // esp_netif_sntp_init() failed (it allocates); retried while connected.
 bool sntp_pending = false;
 int64_t sntp_retry_at = 0;
@@ -96,26 +138,35 @@ void cancelUserScan(UserScanState state = UserScanState::kInterrupted) {
 
 void publish() {
   Status next{};
-  next.state = policy.state();
+  next.state = owns(kRunning) ? policy.state() : State::kIdle;
   next.connected = next.state == State::kConnected;
   next.ap = ap_on;
   next.ap_clients = clients.load();
+  next.initialized = initialized();
+  next.failure_step = failureStep();
+  next.init_error = initError(next.failure_step);
+  next.retry_at_ms = next.failure_step == InitStep::kNone ? 0 : init_retry_at;
   esp_netif_ip_info_t info{};
-  esp_netif_get_ip_info(sta, &info);
+  if (owns(kStation)) esp_netif_get_ip_info(sta, &info);
   snprintf(next.ip, sizeof(next.ip), IPSTR, IP2STR(&info.ip));
-  esp_netif_get_ip_info(ap, &info);
+  info = {};
+  if (owns(kAccessPoint)) esp_netif_get_ip_info(ap, &info);
   snprintf(next.ap_ip, sizeof(next.ap_ip), IPSTR, IP2STR(&info.ip));
   wifi_config_t conf{};
-  esp_wifi_get_config(WIFI_IF_AP, &conf);
+  if (owns(kDriver)) esp_wifi_get_config(WIFI_IF_AP, &conf);
   memcpy(next.ap_ssid, conf.ap.ssid,
          std::min<std::size_t>(conf.ap.ssid_len, 32));
   wifi_ap_record_t record{};
   if (next.connected && esp_wifi_sta_get_ap_info(&record) == ESP_OK)
     next.rssi = record.rssi;
   portENTER_CRITICAL(&mux);
-  const bool changed =
+  const bool connectivity_changed =
       next.connected != current.connected || next.ap != current.ap;
-  next.epoch = current.epoch + (changed ? 1 : 0);
+  const bool changed = connectivity_changed ||
+                       next.initialized != current.initialized ||
+                       next.failure_step != current.failure_step ||
+                       next.init_error != current.init_error;
+  next.epoch = current.epoch + (connectivity_changed ? 1 : 0);
   current = next;
   portEXIT_CRITICAL(&mux);
   if (changed) events::post(events::Event::kNetworkState);
@@ -136,8 +187,6 @@ void event(void*, esp_event_base_t base, int32_t id, void* data) {
 }
 void dns(void*) {
   const int fd = dns_fd;
-  timeval timeout{1, 0};
-  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
   uint8_t* const packet = dns_packet;
   for (;;) {
     sockaddr_in source{};
@@ -213,18 +262,23 @@ esp_err_t antenna(bool external) {
                          external == b.antenna_external_level_high);
   return err;
 }
-// Sets the hostname of `applied` for DHCP and mDNS; a failed setter (they
-// allocate) is retried from poll().
-void applyHostname() {
+// Initial setup and later changes use this single path. Each allocating setter
+// is acknowledged separately, so retrying mDNS does not replace a good DHCP
+// name.
+esp_err_t applyHostname() {
   char hostname[64]{};
   memcpy(hostname, applied.hostname.data.data(), applied.hostname.length);
-  esp_err_t err = esp_netif_set_hostname(sta, hostname);
-  if (err == ESP_OK && mdns_ready) err = mdns_hostname_set(hostname);
-  hostname_pending = err != ESP_OK;
-  if (!hostname_pending) return;
-  hostname_retry_at = timekeeping::monotonicMs() + cfg::kWifiRadioRetryMs;
-  ESP_LOGE(kTag, "hostname: %s; retry in %lu s", esp_err_to_name(err),
-           static_cast<unsigned long>(cfg::kWifiRadioRetryMs / 1000));
+  esp_err_t first = ESP_OK;
+  if (owns(kStation) && !owns(kDhcpHostname)) {
+    first = esp_netif_set_hostname(sta, hostname);
+    if (first == ESP_OK) resources |= kDhcpHostname;
+  }
+  if (owns(kMdns) && !owns(kMdnsHostname)) {
+    const auto err = mdns_hostname_set(hostname);
+    if (err == ESP_OK) resources |= kMdnsHostname;
+    if (first == ESP_OK) first = err;
+  }
+  return first;
 }
 void sntp() {
   if (sntp_on) return;
@@ -268,13 +322,9 @@ esp_err_t configureRadio(const settings::Model& model, const char*& step) {
   access.ap.channel = cfg::kApChannel;
   step = "AP config";
   if ((err = esp_wifi_set_config(WIFI_IF_AP, &access)) != ESP_OK) return err;
-  applyHostname();
   policy.start(!model.wifi_ssid.empty(), timekeeping::monotonicMs());
   // The radio is stopped: no AP until the driver started in the new mode.
   const bool want_ap = policy.ap();
-  ap_on = false;
-  mode_retry_at = 0;
-  clients.store(0);
   station_event.store(Station::kNone);
   scan_done.store(-1);
   step = "mode";
@@ -283,124 +333,245 @@ esp_err_t configureRadio(const settings::Model& model, const char*& step) {
     return err;
   step = "start";
   if ((err = esp_wifi_start()) != ESP_OK) return err;
+  resources |= kRunning;
   ap_on = want_ap;
   return ESP_OK;
 }
-}  // namespace
-esp_err_t init() {
-  applied = settings::current();
-  esp_err_t err = antennaPins();
-  if (err == ESP_OK) err = antenna(applied.external_antenna);
-  if (err != ESP_OK) return err;
-  if ((err = esp_netif_init()) != ESP_OK) return err;
-  if ((err = esp_event_loop_create_default()) != ESP_OK &&
-      err != ESP_ERR_INVALID_STATE)
+// A failed attach/handler setup retains ownership until cleanup succeeds.
+// The default convenience constructors abort on these errors in IDF 6.1.
+esp_err_t createInterface(esp_netif_t*& netif, bool station) {
+  const auto clear = [&]() {
+    const auto err = esp_wifi_clear_default_wifi_driver_and_handlers(netif);
+    if (err == ESP_OK) {
+      esp_netif_destroy(netif);
+      netif = nullptr;
+    }
     return err;
-  sta = esp_netif_create_default_wifi_sta();
-  ap = esp_netif_create_default_wifi_ap();
-  if (sta == nullptr || ap == nullptr) return ESP_ERR_NO_MEM;
-  esp_netif_ip_info_t ap_address{};
-  IP4_ADDR(&ap_address.ip, cfg::kApIp[0], cfg::kApIp[1], cfg::kApIp[2],
-           cfg::kApIp[3]);
-  ap_address.gw = ap_address.ip;
-  IP4_ADDR(&ap_address.netmask, 255, 255, 255, 0);
-  // A new AP is DHCP_INIT, but setting its address requires DHCP_STOPPED.
-  // Re-arm DHCP before radio startup so the AP's netif-up event starts it.
-  if ((err = esp_netif_dhcps_stop(ap)) != ESP_OK) return err;
-  if ((err = esp_netif_set_ip_info(ap, &ap_address)) != ESP_OK) return err;
-  if ((err = esp_netif_dhcps_start(ap)) != ESP_OK) return err;
-  wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
-  if ((err = esp_wifi_init(&config)) != ESP_OK) return err;
-  if ((err = esp_wifi_set_storage(WIFI_STORAGE_RAM)) != ESP_OK) return err;
-  if ((err = esp_wifi_set_ps(cfg::kWifiPowerSave ? WIFI_PS_MIN_MODEM
-                                                 : WIFI_PS_NONE)) != ESP_OK)
-    return err;
-  if ((err = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, event,
-                                        nullptr)) != ESP_OK)
-    return err;
-  if ((err = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, event,
-                                        nullptr)) != ESP_OK)
-    return err;
-  started = true;
-  applySettings();
-  dns_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-  sockaddr_in dns_address{};
-  dns_address.sin_family = AF_INET;
-  dns_address.sin_port = htons(53);
-  if (dns_fd < 0 || bind(dns_fd, reinterpret_cast<sockaddr*>(&dns_address),
-                         sizeof(dns_address)) != 0) {
-    if (dns_fd >= 0) close(dns_fd);
-    dns_fd = -1;
-    ESP_LOGE(kTag, "portal DNS socket/bind failed");
-    return ESP_FAIL;
+  };
+  if (netif != nullptr) {
+    const auto err = clear();
+    if (err != ESP_OK) return err;
   }
-  if (xTaskCreateStatic(dns, "portal_dns", cfg::kDnsStackBytes, nullptr, 2,
-                        dns_stack, &dns_tcb) == nullptr) {
-    close(dns_fd);
-    dns_fd = -1;
-    return ESP_ERR_NO_MEM;
+  esp_netif_config_t config = ESP_NETIF_DEFAULT_WIFI_STA();
+  if (!station) config = ESP_NETIF_DEFAULT_WIFI_AP();
+  netif = esp_netif_new(&config);
+  if (netif == nullptr) return ESP_ERR_NO_MEM;
+  esp_err_t err = station ? esp_netif_attach_wifi_station(netif)
+                          : esp_netif_attach_wifi_ap(netif);
+  if (err == ESP_OK)
+    err = station ? esp_wifi_set_default_wifi_sta_handlers()
+                  : esp_wifi_set_default_wifi_ap_handlers();
+  if (err != ESP_OK) {
+    const auto cleanup = clear();
+    if (cleanup != ESP_OK) return cleanup;
   }
-  if ((err = mdns_init()) != ESP_OK) return err;
-  mdns_ready = true;
-  char hostname[64]{};
-  memcpy(hostname, applied.hostname.data.data(), applied.hostname.length);
-  if ((err = mdns_hostname_set(hostname)) != ESP_OK) return err;
-  return mdns_service_add(nullptr, "_http", "_tcp", 80, nullptr, 0);
+  return err;
 }
-bool healthy() {
-  return started && configured_radio && mdns_ready && dns_fd >= 0;
+
+void adoptModel(const settings::Model& model) {
+  if (model.hostname != applied.hostname) {
+    resources &= ~(kDhcpHostname | kMdnsHostname);
+    initError(InitStep::kHostname) = ESP_OK;
+  }
+  const bool ntp_changed = model.ntp_server != applied.ntp_server;
+  applied = model;
+  if (ntp_changed) {
+    if (sntp_on) esp_netif_sntp_deinit();
+    sntp_on = false;
+    sntp_pending = false;
+    if (ready()) sntp();
+  }
 }
-void applySettings() {
-  if (!started) return;
-  auto model = settings::current();
+
+esp_err_t applyModel(const settings::Model& model) {
   const bool radio_changed = !configured_radio ||
                              model.wifi_ssid != applied.wifi_ssid ||
                              model.wifi_password != applied.wifi_password ||
                              model.ap_password != applied.ap_password ||
                              model.external_antenna != applied.external_antenna;
   if (!radio_changed) {
-    const bool hostname_changed = model.hostname != applied.hostname;
-    const bool ntp_changed = model.ntp_server != applied.ntp_server;
-    applied = model;
-    if (hostname_changed) applyHostname();
-    if (ntp_changed) {
-      if (sntp_on) esp_netif_sntp_deinit();
-      sntp_on = false;
-      if (ready()) sntp();
-    }
-    return;
+    adoptModel(model);
+    return ESP_OK;
   }
-  // Reconfigure the radio while stopped; antenna changes always reconnect.
   cancelUserScan();
   esp_wifi_scan_stop();
-  esp_wifi_stop();
   scanning = false;
   user_scan = false;
-  if (sntp_on) {
-    esp_netif_sntp_deinit();
-    sntp_on = false;
+  const char* step = "stop";
+  esp_err_t err = esp_wifi_stop();
+  if (err == ESP_OK) {
+    resources &= ~kRunning;
+    ap_on = false;
+    mode_retry_at = 0;
+    clients.store(0);
+    if (sntp_on) {
+      esp_netif_sntp_deinit();
+      sntp_on = false;
+    }
+    // A previous station lease cannot restart SNTP while its radio is stopped.
+    sntp_pending = false;
+    if (model.hostname != applied.hostname) {
+      resources &= ~(kDhcpHostname | kMdnsHostname);
+      initError(InitStep::kHostname) = ESP_OK;
+    }
+    applied = model;
+    err = configureRadio(model, step);
   }
-  applied = model;
-  const char* step = "";
-  const esp_err_t err = configureRadio(model, step);
   configured_radio = err == ESP_OK;
-  if (err != ESP_OK) {
-    // No reboot: the stored settings would fail again at boot. poll()
-    // retries; until then the network is not healthy (OTA trial).
-    radio_retry_at = timekeeping::monotonicMs() + cfg::kWifiRadioRetryMs;
-    ESP_LOGE(kTag, "radio %s: %s; retry in %lu s", step, esp_err_to_name(err),
-             static_cast<unsigned long>(cfg::kWifiRadioRetryMs / 1000));
-  }
-  publish();
+  if (err != ESP_OK) ESP_LOGE(kTag, "radio %s: %s", step, esp_err_to_name(err));
+  return err;
 }
-void poll() {
-  if (!started) return;
+
+esp_err_t startDns() {
+  if (dns_fd < 0) {
+    dns_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (dns_fd < 0) return ESP_FAIL;
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(53);
+    timeval timeout{1, 0};
+    if (bind(dns_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) !=
+            0 ||
+        setsockopt(dns_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                   sizeof(timeout)) != 0) {
+      close(dns_fd);
+      dns_fd = -1;
+      return ESP_FAIL;
+    }
+  }
+  // A task-allocation failure leaves this one bound, configured socket owned
+  // by the service. There is no worker using it until creation succeeds.
+  if (xTaskCreateStatic(dns, "portal_dns", cfg::kDnsStackBytes, nullptr, 2,
+                        dns_stack, &dns_tcb) == nullptr)
+    return ESP_ERR_NO_MEM;
+  return ESP_OK;
+}
+
+void advanceInitialization(bool force_settings = false) {
+  if (initialized()) return;
   const int64_t now = timekeeping::monotonicMs();
-  if (!configured_radio) {
-    if (now >= radio_retry_at) applySettings();
+  if (!force_settings && init_retry_at != 0 && now < init_retry_at &&
+      (!settings_pending || initError(InitStep::kRadio) != ESP_OK))
+    return;
+  HeavyGuard guard;
+  if (!guard) {
+    // The settings flag survives admission refusal; poll() retries with the
+    // current store after the admitted operation releases its token.
+    publish();
     return;
   }
-  if (hostname_pending && now >= hostname_retry_at) applyHostname();
+  const bool retry = init_retry_at != 0 && now >= init_retry_at;
+  const auto allowed = [&](InitStep step) {
+    return initError(step) == ESP_OK || retry ||
+           (step == InitStep::kRadio && force_settings);
+  };
+  const auto result = [&](InitStep step, esp_err_t err) {
+    initError(step) = err;
+    if (err != ESP_OK)
+      ESP_LOGE(kTag, "%s: %s; retry scheduled", initStepKey(step),
+               esp_err_to_name(err));
+  };
+  const auto run = [&](InitStep step, uint32_t owned, uint32_t dependencies,
+                       auto operation) {
+    if (owns(owned) || !owns(dependencies) || !allowed(step)) return;
+    const auto err = operation();
+    result(step, err);
+    if (err == ESP_OK) resources |= owned;
+  };
+  // Settings can change while an early constructor is still failing. No
+  // second desired Model is retained; retry always consults the current store.
+  if (settings_pending && !started) {
+    adoptModel(settings::current());
+    settings_pending = false;
+  }
+  run(InitStep::kAntenna, kPins, 0, antennaPins);
+  run(InitStep::kNetworkStack, kStack, 0, esp_netif_init);
+  run(InitStep::kNetworkStack, kLoop, kStack, [] {
+    const auto err = esp_event_loop_create_default();
+    // The process-global loop may be borrowed. Never delete or replace it.
+    return err == ESP_ERR_INVALID_STATE ? ESP_OK : err;
+  });
+  run(InitStep::kStationInterface, kStation, kStack | kLoop,
+      [] { return createInterface(sta, true); });
+  run(InitStep::kAccessPointInterface, kAccessPoint, kStack | kLoop,
+      [] { return createInterface(ap, false); });
+  run(InitStep::kAccessPointAddress, kDhcpStopped, kAccessPoint, [] {
+    const auto err = esp_netif_dhcps_stop(ap);
+    return err == ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED ? ESP_OK : err;
+  });
+  run(InitStep::kAccessPointAddress, kApAddress, kDhcpStopped, [] {
+    esp_netif_ip_info_t address{};
+    IP4_ADDR(&address.ip, cfg::kApIp[0], cfg::kApIp[1], cfg::kApIp[2],
+             cfg::kApIp[3]);
+    address.gw = address.ip;
+    IP4_ADDR(&address.netmask, 255, 255, 255, 0);
+    return esp_netif_set_ip_info(ap, &address);
+  });
+  run(InitStep::kAccessPointAddress, kDhcpArmed, kApAddress, [] {
+    const auto err = esp_netif_dhcps_start(ap);
+    return err == ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED ? ESP_OK : err;
+  });
+  run(InitStep::kWifiDriver, kDriver, kStack | kLoop, [] {
+    wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
+    return esp_wifi_init(&config);
+  });
+  run(InitStep::kWifiConfiguration, kStorage, kDriver,
+      [] { return esp_wifi_set_storage(WIFI_STORAGE_RAM); });
+  run(InitStep::kWifiConfiguration, kPowerSave, kStorage, [] {
+    return esp_wifi_set_ps(cfg::kWifiPowerSave ? WIFI_PS_MIN_MODEM
+                                               : WIFI_PS_NONE);
+  });
+  run(InitStep::kWifiEvents, kWifiHandler, kLoop, [] {
+    return esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, event,
+                                      nullptr);
+  });
+  run(InitStep::kWifiEvents, kIpHandler, kWifiHandler, [] {
+    return esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, event,
+                                      nullptr);
+  });
+  started = owns(kRadioPrerequisites);
+  if (started && (settings_pending || !configured_radio) &&
+      allowed(InitStep::kRadio)) {
+    const auto err = applyModel(settings::current());
+    result(InitStep::kRadio, err);
+    settings_pending = err != ESP_OK;
+  }
+  run(InitStep::kPortalDns, kDnsTask, kStack | kLoop, startDns);
+  run(InitStep::kMdns, kMdns, kLoop | kStation | kAccessPoint, mdns_init);
+  if (!owns(kDhcpHostname | kMdnsHostname) && allowed(InitStep::kHostname))
+    result(InitStep::kHostname, applyHostname());
+  run(InitStep::kHttpService, kHttpService, kMdns | kMdnsHostname, [] {
+    return mdns_service_add(nullptr, "_http", "_tcp", 80, nullptr, 0);
+  });
+  if (failureStep() == InitStep::kNone)
+    init_retry_at = 0;
+  else if (retry || init_retry_at == 0)
+    init_retry_at = timekeeping::monotonicMs() + cfg::kWifiRadioRetryMs;
+  publish();
+}
+}  // namespace
+esp_err_t init() {
+  settings_pending = true;
+  advanceInitialization();
+  const auto state = status();
+  return state.init_error != ESP_OK ? state.init_error
+         : state.initialized        ? ESP_OK
+                                    : ESP_ERR_INVALID_STATE;
+}
+bool healthy() {
+  portENTER_CRITICAL(&mux);
+  const bool value = current.initialized;
+  portEXIT_CRITICAL(&mux);
+  return value;
+}
+void applySettings() {
+  settings_pending = true;
+  advanceInitialization(true);
+}
+void poll() {
+  advanceInitialization();
+  if (!started || !configured_radio) return;
+  const int64_t now = timekeeping::monotonicMs();
   const Station transition = station_event.exchange(Station::kNone);
   if (transition == Station::kGotIp) {
     policy.gotIp(now);
@@ -511,9 +682,10 @@ void poll() {
       ESP_LOGW(kTag, "user scan start: %s", esp_err_to_name(started_scan));
     }
   }
+  const auto snapshot = status();
   if (now - published_at >= cfg::kNetworkPublishMs ||
-      status().state != policy.state() || status().ap != ap_on ||
-      status().ap_clients != clients.load()) {
+      snapshot.state != policy.state() || snapshot.ap != ap_on ||
+      snapshot.ap_clients != clients.load()) {
     published_at = now;
     publish();
   }
@@ -524,7 +696,12 @@ Status status() {
   portEXIT_CRITICAL(&mux);
   return copy;
 }
-bool ready() { return status().connected; }
+bool ready() {
+  portENTER_CRITICAL(&mux);
+  const bool value = current.connected;
+  portEXIT_CRITICAL(&mux);
+  return value;
+}
 esp_err_t requestScan() {
   if (!started) return ESP_ERR_INVALID_STATE;
   portENTER_CRITICAL(&mux);

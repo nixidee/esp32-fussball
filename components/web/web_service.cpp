@@ -593,19 +593,51 @@ esp_err_t getStatus(httpd_req_t* req) {
   out["network"] = network::stateName(net.state);
   out["network_reason"] =
       network::reasonName(network::offlineReason(net.state));
+  auto initialization = out["network_init"].to<JsonObject>();
+  initialization["ready"] = net.initialized;
+  initialization["step"] = network::initStepKey(net.failure_step);
+  initialization["error"] = net.init_error;
+  initialization["error_name"] = esp_err_to_name(net.init_error);
+  initialization["code"] = network::initStepCode(net.failure_step);
+  initialization["retry_ms"] = net.retry_at_ms;
+  const auto selected_image = images::status();
+  auto image = out["image"].to<JsonObject>();
+  image["active"] = selected_image.active;
+  image["pending"] = selected_image.pending;
+  image["id"] = selected_image.desired_id;
+  image["role"] =
+      selected_image.role == cfg::kStockCrest ? "crest" : "background";
+  image["actual"] = images::fileSourceKey(selected_image.actual);
+  image["failed"] = images::fileSourceKey(selected_image.failed);
+  image["reason"] = images::failureKey(selected_image.reason);
+  image["error"] = selected_image.error;
+  image["error_name"] = esp_err_to_name(selected_image.error);
+  image["code"] = images::failureCode(selected_image.reason);
+  image["revision"] = selected_image.revision;
+  image["attempt"] = selected_image.attempt;
+  image["retry_ms"] = selected_image.retry_at_ms;
   out["ap"] = net.ap;
   out["rssi"] = net.rssi;
   out["time_valid"] = timekeeping::status().valid;
   out["uptime_s"] = timekeeping::monotonicMs() / 1000;
   out["reset_reason"] = health::resetReason();
-  out["heap_free"] =
-      heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  out["heap_largest"] =
-      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  // Lowest free heap since boot and stack minima of every task, for browser
-  // and health-log acceptance under the real workload.
-  out["heap_min"] =
-      heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const auto heap = health::observeHeap();
+  out["heap_free"] = heap.point.free_bytes;
+  out["heap_largest"] = heap.point.largest_bytes;
+  if (heap.scope == health::MinimumScope::kUnavailable)
+    out["heap_min"] = nullptr;
+  else
+    out["heap_min"] = heap.point.minimum_bytes;
+  out["heap_min_scope"] =
+      heap.scope == health::MinimumScope::kLifetime   ? "lifetime"
+      : heap.scope == health::MinimumScope::kInterval ? "interval"
+                                                      : "unavailable";
+  out["heap_min_start_ms"] = heap.interval_start_ms;
+  const auto app_bytes = ota::imageBytes();
+  if (app_bytes != 0)
+    out["app_bytes"] = app_bytes;
+  else
+    out["app_bytes"] = nullptr;
   std::array<health::TaskRow, cfg::kHealthMaxTasks> stacks;
   const auto task_count = health::stackMinima(stacks.data(), stacks.size());
   auto tasks = out["tasks"].to<JsonArray>();
@@ -614,6 +646,7 @@ esp_err_t getStatus(httpd_req_t* req) {
     task["name"] = stacks[i].name;
     task["id"] = stacks[i].id;
     task["stack_min_free"] = stacks[i].min_free_bytes;
+    task["stack_usable_bytes"] = stacks[i].usable_bytes;
   }
   out["fs_total"] = usage.total_bytes;
   out["fs_used"] = usage.used_bytes;
@@ -634,6 +667,7 @@ esp_err_t getStatus(httpd_req_t* req) {
   const auto shown = ui::status();
   out["screen"] = static_cast<uint8_t>(shown.screen);
   out["screen_reason"] = ui::reasonName(shown.reason);
+  out["screen_starting"] = shown.starting;
   // The club's current or next match and the state of each competition.
   time_t utc = 0;
   timekeeping::utcNow(utc);
@@ -905,9 +939,9 @@ esp_err_t getImages(httpd_req_t* req) {
   out["max"] = cfg::kImageLibraryMax;
   return json(req, d.doc);
 }
-// ?id=N or ?stock=crest|background, optionally &r=<revision>. The revision
-// changes whenever the image does, so a URL that carries one never goes stale
-// and may be cached for good.
+// ?id=N or ?stock=crest|background, optionally &r=<revision>. ?display=1
+// reads the actual selected file, including factory fallback while a damaged
+// replacement remains. This dynamic selection is never cached as immutable.
 esp_err_t getImageFile(httpd_req_t* req) {
   Request request(req);
   char query[48], value[16];
@@ -915,7 +949,14 @@ esp_err_t getImageFile(httpd_req_t* req) {
     return invalid(req, Reason::kRequired, "image required", "id");
   uint8_t id = cfg::kStockImageId;
   cfg::StockImage stock = cfg::kStockCrest;
-  if (httpd_query_key_value(query, "id", value, sizeof(value)) == ESP_OK) {
+  const bool selected =
+      httpd_query_key_value(query, "display", value, sizeof(value)) == ESP_OK;
+  if (selected) {
+    if (strcmp(value, "1") != 0)
+      return invalid(req, Reason::kInvalid, "display image rejected",
+                     "display");
+  } else if (httpd_query_key_value(query, "id", value, sizeof(value)) ==
+             ESP_OK) {
     uint32_t number = 0;
     if (!parseUnsigned(value, cfg::kImageLibraryMax, number) || number < 1)
       return invalid(req, Reason::kRange, "image id rejected", "id");
@@ -928,22 +969,27 @@ esp_err_t getImageFile(httpd_req_t* req) {
   } else
     return invalid(req, Reason::kRequired, "image required", "id");
   char path[96];
-  if (!images::filePath(id, stock, path, sizeof(path)))
-    return error(req, fault::kMissing, "id");
+  const bool found =
+      selected ? images::filePath(images::status(), path, sizeof(path))
+               : images::filePath(id, stock, path, sizeof(path));
+  if (!found) return error(req, fault::kMissing, "id");
   FILE* file = fopen(path, "rb");
   if (file == nullptr) return error(req, fault::kMissing, "id");
   httpd_resp_set_type(req, "image/jpeg");
   httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
-  httpd_resp_set_hdr(
-      req, "Cache-Control",
-      httpd_query_key_value(query, "r", value, sizeof(value)) == ESP_OK
-          ? "public, max-age=31536000, immutable"
-          : "no-cache");
+  httpd_resp_set_hdr(req, "Cache-Control",
+                     !selected && httpd_query_key_value(query, "r", value,
+                                                        sizeof(value)) == ESP_OK
+                         ? "public, max-age=31536000, immutable"
+                         : "no-cache");
   uint8_t buffer[1024];
   esp_err_t err = ESP_OK;
   for (;;) {
     const auto count = fread(buffer, 1, sizeof(buffer), file);
-    if (count == 0) break;
+    if (count == 0) {
+      if (ferror(file)) err = ESP_FAIL;
+      break;
+    }
     if (!sendReady(req) ||
         httpd_resp_send_chunk(req, reinterpret_cast<char*>(buffer), count) !=
             ESP_OK) {
@@ -1245,7 +1291,8 @@ esp_err_t postDisplay(httpd_req_t* req) {
   else
     return invalid(req, Reason::kInvalid, "display action rejected", "action");
   const auto err =
-      events::post(events::Event::kUiAction, static_cast<uint32_t>(action));
+      events::post(events::Event::kUiAction,
+                   ui::actionPayload(action, settings::generation()));
   // All queue slots for UI actions are taken: the display is busy.
   if (err == ESP_ERR_TIMEOUT) return error(req, fault::kBusy);
   return err == ESP_OK ? ok(req, d.doc) : failed(req, err);
@@ -1312,18 +1359,19 @@ esp_err_t upload(httpd_req_t* req, bool firmware) {
   if (!authenticate(req)) return error(req, fault::kSession);
   network::HeavyGuard guard;
   if (!guard) return error(req, fault::kBusy);
-  // No X-Image-Id header: store a new image under the lowest free id; with
-  // an id: replace that library image. X-Image-Role instead: upload the
-  // replacement of that role.
+  // Automatic uploads skip stored references and the browser's reserved ids.
+  // X-Image-Id replaces/restores that id; X-Image-Role replaces a role.
   uint8_t index = cfg::kStockImageId;
+  settings::ImageMask reserved = 0;
   auto role = cfg::kStockImageCount;
   if (!firmware) {
     char id[8]{};
-    const auto found = httpd_req_get_hdr_value_str(req, "X-Image-Id", id, sizeof(id));
+    const auto found =
+        httpd_req_get_hdr_value_str(req, "X-Image-Id", id, sizeof(id));
     if (found != ESP_ERR_NOT_FOUND) {
       uint32_t value = 0;
-      if (found != ESP_OK ||
-          !parseUnsigned(id, cfg::kImageLibraryMax, value) || value < 1)
+      if (found != ESP_OK || !parseUnsigned(id, cfg::kImageLibraryMax, value) ||
+          value < 1)
         return invalid(req, Reason::kRange, "image id rejected", "X-Image-Id");
       index = value;
     }
@@ -1339,6 +1387,22 @@ esp_err_t upload(httpd_req_t* req, bool firmware) {
         return invalid(req, Reason::kInvalid, "image role rejected",
                        "X-Image-Role");
     }
+    char mask[8]{};
+    const auto masked = httpd_req_get_hdr_value_str(req, "X-Image-Reserved",
+                                                    mask, sizeof(mask));
+    if (masked != ESP_ERR_NOT_FOUND) {
+      if (found != ESP_ERR_NOT_FOUND || named != ESP_ERR_NOT_FOUND)
+        return invalid(req, Reason::kConflict,
+                       "reserved ids require an automatic library upload",
+                       "X-Image-Reserved");
+      uint32_t value = 0;
+      if (masked != ESP_OK ||
+          !parseUnsigned(mask, settings::kLibraryImageMask, value) ||
+          (value & ~uint32_t{settings::kLibraryImageMask}) != 0)
+        return invalid(req, Reason::kRange, "reserved image ids rejected",
+                       "X-Image-Reserved");
+      reserved = static_cast<settings::ImageMask>(value);
+    }
   }
   const int64_t deadline = request_deadline;
   uint8_t buffer[1024];
@@ -1347,7 +1411,7 @@ esp_err_t upload(httpd_req_t* req, bool firmware) {
   esp_err_t err = ESP_OK;
   if (!firmware) {
     err = role == cfg::kStockImageCount
-              ? images::begin(index, req->content_len)
+              ? images::begin(index, req->content_len, reserved)
               : images::beginRole(role, req->content_len);
     begun = err == ESP_OK;
   }

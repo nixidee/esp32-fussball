@@ -24,14 +24,18 @@ is `components/core/settings_store.cpp`. The competitions
 are a separate store with its own record and REST endpoint
 (`/api/v1/competitions`, see [API.md](API.md)); the settings JSON does not
 carry them. Successful save/reset of either store increments the settings
-generation and posts a short change notification. A second counter, the
-provider-data generation, increments only when a value provider data depends
-on changes: a competition's id, position, active flag or its source
+generation and posts a short change notification after publishing the model
+and its version together under the existing settings mutex. Readers can copy
+both in one operation; no second model is retained. A second counter, the
+provider-data generation, increments on saves only when a value provider data
+depends on changes: a competition's id, position, active flag or its source
 (provider, competition, season, club), either provider key, the ESPN opt-in or demo mode. Only that counter discards
 fetched data and interrupts a running provider request: the data of the
 changed, removed or paused competitions, of the competitions that use a
 provider whose key or ESPN opt-in changed, or all data after a change of
-demo mode.
+demo mode. Reset additionally forces data invalidation even if the initial
+provider values already match; if they change, both invalidations advance
+the counter. These counters are version markers, not save counts.
 Display names, the screens a competition is used for and every display,
 network or time setting keep the shown data and request nothing. A changed
 match window, request limit or interval applies with the next scheduling
@@ -51,7 +55,7 @@ Supported keys are `SECRET_WIFI_SSID`, `SECRET_WIFI_PASSWORD`,
 `SECRET_AP_PASSWORD`, `SECRET_HOSTNAME`, `SECRET_TIME_ZONE`,
 `SECRET_ADMIN_PASSWORD`, `SECRET_API_FOOTBALL_KEY`,
 `SECRET_FOOTBALL_DATA_KEY`, `SECRET_DEFAULT_PROVIDER`,
-`SECRET_DEFAULT_COMPETITION`, `SECRET_DEFAULT_TEAM` and
+`SECRET_DEFAULT_COMPETITION`, `SECRET_DEFAULT_TEAM_ID` and
 `SECRET_DEFAULT_SEASON`. Provider values are `openligadb`, `api-football`,
 `espn` or `football-data`. ESPN additionally requires explicit runtime opt-in.
 A settings or competitions change through the REST API is refused
@@ -106,13 +110,13 @@ are rejected before a whole-model save.
 | Visible conference / table rows | 5 / 5 (240 px round: 4 / 5) | 1–5 / 1–9 (240 px round: 1–4 / 1–7); the conference value is also the number of matches per Matchday page; the display profile sets the upper limits, the schema reports them, the API rejects more, stored values above them are clamped when loaded; all stored table rows remain reachable |
 | Table step | 8 seconds | 3–600 seconds; time until the Table screen shows the next page of a table without an own club, or (with an own club, or after the last page) the next competition's table |
 | Slideshow | 15 seconds, no slides | 3–3600 seconds; up to five slides in play order, each the crest or a library image |
-| Image library | empty | up to ten uploaded JPEGs (ids 1–10); screen backgrounds and slides refer to them; id 0 is the stock image of the role (crest or background): its replacement when one exists, else the factory image. The crest is not a setting; it is always the crest role. Replacements count towards the shared 320 KB image budget but not towards the ten library ids |
+| Image library | empty | up to ten uploaded JPEGs (ids 1–10); screen backgrounds and slides refer to them. Selected missing files keep their ids reserved for explicit restoration; new uploads skip saved references and the current browser's draft references. Id 0 is the stock image of the role (crest or background): its replacement when one exists, else the factory image. The crest is not a setting; it is always the crest role. Replacements count towards the shared 320 KB image budget but not towards the ten library ids |
 | Brightness / night brightness | 100% / 10% | 0–100%; hardware dimming requires a backlight pin |
 | Rotation | 0 | 0–3 quarter turns |
 | Language | German | German or English |
 | Night mode / window | on / 23:00–07:00 | local civil time; equal endpoints mean empty; requires valid clock |
 | IP badge | 60 seconds, top | 0–4000 seconds, 0 permanent; setup AP permanent by default |
-| Match window before / after | 30 / 30 minutes | 0–180 minutes |
+| Match window before / after | 30 / 30 minutes | 0–180 minutes; display selection only (Own match and Konferenz), independent of the request scheduler's live window |
 | Daily request cap per provider | 0 / 100 / 0 / 0 requests | 0–65535 per provider; 0 = no daily cap (no counter, no storage write); a cap counts every attempted request through durable reservations and resets at 00:00 UTC |
 | Window limit per provider | 60 per 60 s / off / off / 10 per 60 s | requests 0–65535 per window of 0–43200 seconds; both values 0 or both set; 0 = no window limit |
 | Interval per data type and provider | fixtures 8 h, table 4 h, live 60 s, live table 10 min, events 10 min | 10 s – 7 days each; how often the provider is asked for that data type |
@@ -181,12 +185,29 @@ competition's last successful match request is older marks the data
 stale) and `kUnmaintainedAfterS` (24 h: a match that kicked off this long
 ago, is neither finished, postponed, cancelled nor abandoned and has no
 result marks its provider as not maintaining the competition).
+Network/time recovery constants are `kWifiRadioRetryMs` (10,000 ms for
+failed local network initialization phases, radio/AP reconfiguration,
+initial/runtime hostname acknowledgement and SNTP initialization) and
+`kTimeZoneRetryMs` (10,000 ms after a failed time-zone application). Confirmed
+network phases/resources remain active while only failed work is repeated.
+These compile-time delays do not require Internet/SNTP for local readiness.
+
+`kImageMaintenanceRetryMs` (10,000 ms) delays another startup-maintenance
+attempt after legacy-image removal fails. Maintenance no longer removes
+references just because a file is missing. `kImageSourceRetryMs` (10,000 ms)
+retries the desired image after file/source/decode failure; a new file
+revision is checked immediately. `kImageValidationTimeoutMs` (1,000 ms)
+bounds each admitted full-file/fallback-resolution pass, reusing the existing
+JPEG workspace. A longer candidate chain resumes in a later ordinary app
+poll. Waiting for exclusive-operation admission is nonblocking and does not
+hold that admission during the delay. None is a user setting.
+
 Lists never contain empty entries: an entry exists or the list is shorter.
 The crest screen shows the crest or its slides and has no background image,
-so its `image` stays 0. A reference to a library image that no longer exists
-is replaced by the stock image (a slide is removed) at the next boot outside an
-OTA trial and when the image is deleted; the renderer skips such a reference
-meanwhile.
+so its `image` stays 0. Missing/damaged referenced files retain their desired
+id and slideshow position and use the appropriate role/factory fallback.
+Explicit manual deletion clears only that id; confirmed repair/reset retains
+its own destructive semantics. Image errors never automatically save settings.
 
 ## Record format and consistent saves
 

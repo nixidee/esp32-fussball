@@ -13,7 +13,7 @@
 
 // esp_event keeps up to CONFIG_ESP_EVENT_POST_FROM_ISR_SIZE bytes of data in
 // the queue entry and allocates heap for anything larger on every post.
-#if !CONFIG_ESP_EVENT_POST_FROM_ISR || CONFIG_ESP_EVENT_POST_FROM_ISR_SIZE < 4
+#if !CONFIG_ESP_EVENT_POST_FROM_ISR || CONFIG_ESP_EVENT_POST_FROM_ISR_SIZE < 8
 #error "event payloads must fit into the esp_event queue entry (no heap)"
 #endif
 
@@ -51,7 +51,7 @@ std::atomic<bool> drop_burst{false};
 void dispatch(void*, esp_event_base_t, int32_t id, void* data) {
   if (id < 0 || static_cast<std::size_t>(id) >= kEventCount) return;
   const auto event = static_cast<Event>(id);
-  uint32_t payload = 0;
+  Payload payload = 0;
   if (data != nullptr) std::memcpy(&payload, data, sizeof(payload));
   admission.release(event);
 
@@ -112,7 +112,7 @@ esp_err_t subscribe(Event event, Callback callback, void* context) {
   return err;
 }
 
-esp_err_t post(Event event, uint32_t payload) {
+esp_err_t post(Event event, Payload payload) {
   if (loop == nullptr) return ESP_ERR_INVALID_STATE;
   if (!admission.admit(event)) {
     if (isStateEvent(event)) return ESP_OK;  // already queued

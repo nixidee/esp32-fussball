@@ -1359,7 +1359,7 @@ esp_err_t init() {
              esp_err_to_name(budget_error));
   const auto subscription = events::subscribe(
       events::Event::kTimeChanged,
-      [](events::Event, uint32_t, void*) { time_changed.store(true); },
+      [](events::Event, events::Payload, void*) { time_changed.store(true); },
       nullptr);
   if (subscription != ESP_OK) return subscription;
   return xTaskCreateStatic(worker, "provider", cfg::kProviderStackBytes,

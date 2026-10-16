@@ -11,6 +11,7 @@ enum class Reason : uint8_t { kSetup, kManual, kOwnMatch, kMatchday, kIdle };
 struct Status {
   cfg::Screen screen = cfg::Screen::kCrest;
   Reason reason = Reason::kSetup;
+  bool starting = true;
 };
 // `backlight` false: the panel cannot dim, so night mode dims the colours.
 esp_err_t init(const hw::DisplayProfile& display, std::size_t inputs,

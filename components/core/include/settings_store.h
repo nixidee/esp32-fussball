@@ -25,18 +25,24 @@ void init(const Limits& limits = {});
 const Limits& limits();
 
 // Copy of the current settings (short lock; sizeof(Model) is about 0.8 KB on
-// the caller's stack, pinned by the host test).
-Model current();
+// the caller's stack, pinned by the host test). If given, out_generation
+// receives the generation of that same snapshot under the same lock.
+Model current(uint32_t* out_generation = nullptr);
+
+// Desired library ids under the same short model lock, without a Model copy.
+// File presence and screen enabled state do not release a desired id.
+ImageMask referencedImages();
 
 // Increases with every successful save or reset, which also posts
 // events::Event::kSettingsChanged (event_bus.h). Work started under one
 // generation can compare it later to detect a change.
 uint32_t generation();
 
-// Increases with every save or reset that changes a value provider data
-// depends on (sameProviderData, settings_model.h), at most as often as
-// generation(). The data service compares it, so display-only saves keep the
-// fetched data and do not interrupt a running request.
+// Successful saves advance this counter only when a provider-dependent value
+// changes (sameProviderData, settings_model.h). Reset always forces an extra
+// invalidation, including when the initial provider values already match.
+// The data service compares it, so display-only saves keep fetched data and
+// do not interrupt a running request.
 uint32_t dataGeneration();
 
 // Where the current settings come from. Every value except kStored means the

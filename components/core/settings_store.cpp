@@ -69,9 +69,9 @@ namespace {
 
 constexpr const char* kTag = "settings";
 
-// Guards current_model, current_competitions and both origins; held only
-// for copies. Writers also hold write_mutex, so a writer may read them
-// without this mutex.
+// Guards current_model, current_competitions, both origins and publication of
+// their generations; held only for short snapshot reads. Writers also hold
+// write_mutex, so a writer may read them without this mutex.
 StaticSemaphore_t model_mutex_buffer;
 SemaphoreHandle_t model_mutex = nullptr;
 Model current_model;
@@ -111,13 +111,12 @@ Presets presets() {
   };
 }
 
-// Counts a change readers must see; 'data_changed' also discards the
-// fetched provider data (dataGeneration()).
-void announce(bool data_changed) {
+// Publish while holding model_mutex, then notify after releasing it.
+// 'data_changed' also discards fetched provider data (dataGeneration()).
+void advanceGenerations(bool data_changed) {
   if (data_changed)
     data_generation_counter.fetch_add(1, std::memory_order_release);
   generation_counter.fetch_add(1, std::memory_order_release);
-  events::post(events::Event::kSettingsChanged);
 }
 
 void setCurrent(const Model& model, Origin from) {
@@ -125,8 +124,9 @@ void setCurrent(const Model& model, Origin from) {
   const bool data_changed = !sameProviderData(current_model, model);
   current_model = model;
   current_source = from;
+  advanceGenerations(data_changed);
   xSemaphoreGive(model_mutex);
-  announce(data_changed);
+  events::post(events::Event::kSettingsChanged);
 }
 
 void setCompetitions(const Competitions& competitions, Origin from) {
@@ -135,8 +135,9 @@ void setCompetitions(const Competitions& competitions, Origin from) {
       !sameProviderData(current_competitions, competitions);
   current_competitions = competitions;
   competitions_source = from;
+  advanceGenerations(data_changed);
   xSemaphoreGive(model_mutex);
-  announce(data_changed);
+  events::post(events::Event::kSettingsChanged);
 }
 
 void logRejectedPresets(FieldMask rejected) {
@@ -422,11 +423,20 @@ void init(const Limits& limits) {
 
 const Limits& limits() { return display_limits; }
 
-Model current() {
+Model current(uint32_t* out_generation) {
   xSemaphoreTake(model_mutex, portMAX_DELAY);
   const Model copy = current_model;
+  if (out_generation != nullptr)
+    *out_generation = generation_counter.load(std::memory_order_acquire);
   xSemaphoreGive(model_mutex);
   return copy;
+}
+
+ImageMask referencedImages() {
+  xSemaphoreTake(model_mutex, portMAX_DELAY);
+  const auto result = referencedImages(current_model);
+  xSemaphoreGive(model_mutex);
+  return result;
 }
 
 Origin origin() {

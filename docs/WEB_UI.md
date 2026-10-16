@@ -29,6 +29,15 @@ System diagnostics label provider request attempts as "since restart". The
 daily caps are separate settings; the boot counter is not displayed as daily
 consumption or as a fraction of a cap.
 
+Local network-service errors appear in the existing overview warnings and
+System diagnostics. A working WiFi connection remains shown as connected
+when only setup DNS, local naming or HTTP advertisement failed. The error
+names the failed phase, likely cause, automatic retry time, short `NET E..`
+code and SDK error; naming/DNS faults with an active IP advise opening that
+IP directly. Normal status polling clears recovered errors and preserves
+unsaved form edits. Local-service readiness is listed with the device
+measurements, separately from the WiFi address.
+
 The overview shows the current screen as a schematic SVG disc that follows the
 display renderer: the same text roles and font steps for the display size and
 text size, the safe-area width of every text band (round or rectangular,
@@ -45,7 +54,10 @@ no-WiFi, waiting-for-time and no-data cards, the notice card of a failing
 competition in the Matchday and Table cycles, the "Demo" line, the status
 pill (no WiFi, waiting for time, the time of the last data when stale, the
 error code of a failing competition or the number of failing ones) and the
-IP chip with its configured duration. The device shows the status pill only
+IP chip with its configured duration. The preview uses the actual display startup flag so recovery does not
+invent a return to the initial three-step card. Local-service pills show
+the short code before the action, keeping the code visible when space is
+tight; full phase/cause text is in the warning. The device shows the status pill only
 for 5 seconds after each change; the preview shows it for as long as the
 state lasts and says so below the disc. The own match uses the device's
 real data (teams, score, minute or kickoff date and countdown, phase). Values
@@ -245,11 +257,26 @@ role (crest or background). Backgrounds and slides can reuse one image
 without spending quota twice. A slideshow id 0 means the crest. The crest is
 not a display setting: it is always the crest role's image, the replacement
 when one exists, else the factory crest. The gallery shows thumbnails using
-per-image revisions and describes every current use.
+per-image revisions and describes every current use. A referenced missing
+file stays in the gallery as "Datei fehlt" / "File missing", with the same
+Replace and Delete actions. Uses include saved settings and the current
+unsaved draft, including disabled screens whose image choice is retained.
+Replace uploads to the same id, preserving screen and slideshow selection;
+successful validation/revision makes the display return automatically.
+The current missing background choice remains visible in its selector, but
+missing files are not offered as new slideshow entries or role-copy sources.
+Explicit Delete clears that id's saved/draft references; Delete all includes
+referenced missing ids and clears only successful deletions on partial failure.
+New image allocation also reserves selected missing ids: saved uses on the
+device and unsaved uses in this browser. The existing capacity text
+distinguishes actual files from free ids; a missing reserved file uses no
+image bytes but still occupies its wanted id. When all ten ids contain files
+or references, remove an image/reference before adding unrelated content.
+Replace can still restore the intended id directly.
 
 The image page shows two fixed tiles beside the library: "Standard-Wappen"
 (crest) and "Standard-Hintergrund" (standard background). Each shows the
-image the display uses, its state ("eingebaut" for the factory image or
+stored role file (replacement or factory), its state ("eingebaut" for the factory image or
 "Ersetzt" with the replacement's size) and where it appears (slides with id
 0, or the crest screen when the slideshow is empty; screens with a
 background but no library image). They cannot be deleted. Three actions:
@@ -272,8 +299,10 @@ Library quota and temporary filesystem reserve are separate checks. Replacing
 an image subtracts its old size from the library quota, but the old file still
 occupies filesystem space while its replacement is written. The firmware
 performs its own baseline-JPEG, dimensions, complete-decode and quota checks.
-A decode that the request deadline stops is answered as `timeout` ("try
-again"), not as a damaged file (`content`).
+An expired validation deadline, including time spent in file I/O, is
+answered as `timeout` ("try again"). A confirmed read, seek or close failure
+is an I/O error; rejected format, dimensions or JPEG content is `content`.
+An already expired deadline stops before opening or decoding the file.
 The kept football data and the short names share the partition (at most
 48 KiB, typically one 4 KiB block per competition); the free-space check of
 an upload counts them, the library quota does not. Images come first: the
@@ -292,8 +321,9 @@ Single deletion is confirmed with the image's saved/draft uses. Delete-all uses
 individual deletes for the library, then resets the crest and the standard
 background to their factory images, and reports each result, including
 partial failure. After
-image mutations the page reloads inventory/settings, removes missing image
-references and preserves unrelated unsaved edits. Refresh failure must not
+image mutations the page reloads inventory/settings, clears only explicitly
+deleted image references and preserves other missing references and unrelated
+unsaved edits. Refresh failure must not
 hide an earlier destructive-operation error.
 
 Separate storage repair requires confirmation. It erases uploads AND stock
@@ -301,7 +331,40 @@ files, preserves other settings, does not restart and reports a failed
 reference save as a partial result. USB uploadfs restores stock files and can
 itself erase uploads. Firmware OTA preserves shared image storage; trial
 firmware blocks persistent image changes. Images are not part of settings
-backup/import. Missing image references use the stock role or skip the slide.
+backup/import. Missing/damaged desired images use the appropriate protected role replacement,
+then its factory file. A damaged replacement uses the unchanged factory file.
+If every candidate fails, football content stays on the configured base colour
+with a warning; the pure crest view shows a repair card. The desired settings
+reference and every slideshow position remain intact. After ten seconds, or
+immediately after a file revision changes, the device checks the desired file
+again and returns on success. This never automatically deletes files or saves
+changed settings. Explicit manual deletion still clears only the deleted id;
+explicit storage repair/reset keeps its confirmed destructive semantics.
+
+The overview and Images page show the selected reference, failed file kind,
+actual fallback (or absence of a usable file), cause, action, short code and
+next retry. System diagnostics retains the image state as well. Status polling
+clears recovered errors while preserving unrelated unsaved edits. The live
+schematic preview reads the actual selected file, including factory fallback
+with a damaged replacement still present. Its status pill remains visible
+while the state lasts; the device uses its existing five-second rule. A
+simultaneous network/provider and image warning combines their codes plus a
+Web hint, for example "NET E11 · IMG E03 · Web". Only then does the individual
+action text yield. A crest repair card already carries the image code, so a
+different network/provider pill can retain its own action.
+
+Image file faults are content errors: a working UI with this fallback/error
+presentation may confirm firmware during the existing ten-second OTA trial.
+Confirmation does not guarantee successful JPEG output. Hardware/LVGL fatal
+rules and the strict network-startup-error veto remain unchanged; firmware
+rollback cannot repair image files shared by both slots.
+
+Startup maintenance only removes legacy named image files outside an update
+trial, once storage is available. It waits without blocking when another
+expensive operation holds exclusive access. Failed legacy removal stays
+pending and retries after 10 s;
+the waiting period holds no exclusive-operation admission. Desired image
+references/positions are retained by the independent content fallback path.
 
 The shipped stock crest/background are generated project artwork, not downloaded
 club crests. Normal firmware does not resize images; host stock generation uses
@@ -344,7 +407,23 @@ new build, return to the previous build and an unresolved result. Equal version
 strings alone are not treated as proof of an update.
 
 Diagnostics show clock/network/signal/reset reason, free/minimum/largest heap,
-filesystem use, request counters, trial and task stack minima. The optional
+filesystem use, request counters, trial and task stack minima. The heap-minimum
+label distinguishes "since boot" from a measurement interval; an unavailable
+minimum is shown as unavailable. Each task shows its minimum free bytes,
+usable stack bytes and percentage when the usable capacity is known. This
+capacity comes from the kernel's aligned bounds, including SDK tasks, rather
+than a second list of configured allocations. Unknown capacity, including the
+current SMP case, is shown as unavailable. Firmware storage shows the running
+image's parsed bytes against the existing OTA-slot capacity and its percentage;
+missing metadata is shown as unavailable. The current targets use unsigned
+images, so the reported length includes the appended image hash but does not
+promise accounting for signature blocks.
+
+Integration acceptance uses 40,960 B minimum free heap, 32,768 B largest free
+block, at least 25% free usable stack per task and at most 85% app-slot
+occupancy. The displayed point values and percentages are diagnostic evidence;
+they do not establish that every required workload or unobserved memory dip
+meets those limits. The optional
 WebSocket sends bounded current state, not the SDK console. It has one client,
 no retained history, and closes when its page/session ends. Admission is checked
 before upgrade; a browser can only report a failed WebSocket connection, not

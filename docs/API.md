@@ -26,7 +26,7 @@ Implementation: `components/web/web_service.cpp`,
 | POST `/api/v1/export` | Explicit export of the settings, the competition store and the short names |
 | POST `/api/v1/wifi/scan`, `/data/select`, `/data/refresh` | Start asynchronous scan, provider list or refresh |
 | POST `/api/v1/display` | Quick display action `{"action":"next"\|"ip"}` (same events as the buttons) |
-| POST `/api/v1/images/upload`, `/images/delete` | Upload a library image (optional `X-Image-Id` replaces one; `X-Image-Role: crest\|background` uploads the replacement of that role instead, answer `{"ok":true,"role":…}`) or delete a library image by id |
+| POST `/api/v1/images/upload`, `/images/delete` | Upload a library image (optional `X-Image-Id` replaces or restores that valid library id; `X-Image-Role: crest\|background` uploads the replacement of that role instead, answer `{"ok":true,"role":…}`) or delete a library image by id |
 | POST `/api/v1/images/role` | `{"role":"crest"\|"background","action":"reset"}` deletes the replacement, so the factory image shows again; `{"role":…,"action":"copy","id":N}` copies library image N as the replacement (the library image stays). Roles cannot be deleted. A replacement counts towards the image budget, not towards the ten library ids |
 | POST `/api/v1/images/repair` | Confirmed image-storage formatting and reference cleanup; preserves other settings and does not restart |
 | POST `/api/v1/ota` | Stream compatible firmware to the inactive slot |
@@ -36,7 +36,85 @@ Implementation: `components/web/web_service.cpp`,
 After the first full path, shortened paths in the table retain `/api/v1`.
 See [WEB_UI.md](WEB_UI.md) for the browser workflow and image contract.
 
+For a new automatic library upload (no `X-Image-Id` or `X-Image-Role`),
+the device chooses the lowest id with neither a file nor a saved screen or
+slideshow reference. Optional `X-Image-Reserved` adds the current browser's
+unsaved references as a decimal bit mask: bit N reserves library id N.
+Valid bits are 1…10 (mask 2046); zero is allowed, bit 0 and other bits are
+rejected. This header conflicts with an explicit id or role. Missing header
+means no additional browser reservation; saved references are always
+reserved. No available id uses the existing capacity error. Explicit
+`X-Image-Id` intentionally replaces/restores that id, irrespective of its
+references. Firmware uploads ignore image headers, as before.
+
 ## Endpoint details
+
+`POST /display` keeps its existing `next` and `ip` bodies. Commands are
+queued with the current settings version internally; callers supply no new
+field. A successful settings/competition save discards earlier commands,
+including delayed delivery, while preserving commands issued for the new
+version. Physical gestures already in progress are cancelled too. A full
+action queue still returns 409 `busy`.
+
+`GET /status` includes `network_init` alongside the existing connection
+state and IP addresses. These are separate facts: working WiFi can remain
+connected while a local naming or setup-DNS service is being recovered.
+
+| Field | Meaning |
+|---|---|
+| `ready` | Every required local network initialization phase is confirmed; Internet and SNTP availability are not required |
+| `step` | Machine key for the first currently failed phase; no failure when empty |
+| `error` | SDK error value for that phase, zero after recovery |
+| `error_name` | SDK error name, such as `ESP_ERR_NO_MEM`; `ESP_OK` without a failure |
+| `code` | Short diagnostic code `NET E01` through `NET E13`, empty without a failure |
+| `retry_ms` | Earliest monotonic device milliseconds for the next retry; zero without a pending failure. Compare with `uptime_s`, not UTC; an admitted heavy operation can delay execution |
+
+The phase keys are `antenna` (antenna switch), `network_stack` (TCP/IP and
+default event loop), `station_interface`, `ap_interface`, `ap_address`
+(setup address/DHCP), `wifi_driver`, `wifi_configuration`, `wifi_events`,
+`radio`, `portal_dns` (setup-DNS responder), `mdns` (local name service),
+`hostname` (current DHCP/mDNS name) and `http_service` (local HTTP
+advertisement), in code order E01–E13. Each retry retains successful
+resources; a failure in one independent service does not restart working
+WiFi. After recovery the active error clears. The existing ten-second OTA
+trial still rejects an initial startup failure even if it later recovers.
+
+`GET /status` also includes one coherent `image` object for the currently
+selected display image. It describes content, independently of UI/hardware
+health and firmware confirmation.
+
+| Field | Meaning |
+|---|---|
+| `active` | The current screen requests an image; off/start screens clear it |
+| `pending` | File selection/check or LVGL source acknowledgement is pending; an already usable fallback can remain visible |
+| `id`, `role` | Desired library id, or id 0 for the protected `crest`/`background` role; automatic fallback never changes this preference |
+| `actual` | Fully validated selected file kind: `library`, `replacement`, `factory`, or empty; while pending it is not yet acknowledged by LVGL |
+| `failed` | File kind that caused the current error; an exhausted chain reports its final failed candidate |
+| `reason`, `error`, `error_name`, `code` | Content failure key, SDK-style error value/name, and short `IMG E01`…`IMG E07`; empty/zero without a failure |
+| `revision`, `attempt` | File revision and full-width source-attempt identity; neither proves completed LCD output |
+| `retry_ms` | Earliest monotonic device milliseconds to retry the desired file, zero without a scheduled failure; heavy-operation admission can delay it |
+
+Image reasons are `missing` (E01), `unavailable` (E02: a file/decoder setup
+could not be read/prepared), `invalid` (E03: full-file validation rejected
+format/dimensions/content), `timeout` (E04), `source` (E05: LVGL did not
+acknowledge the source), `decode` (E06: later block delivery failed), and
+`memory` (E07). A late header/open failure alone does not prove a corrupt
+file; for example the decoder's temporary allocation can fail with the same
+return value. The next full validation can refine that diagnosis.
+
+The full JPEG checker distinguishes rejected content from confirmed file
+read, seek or close errors. Its current deadline takes priority, including
+when I/O used the remaining time; an already expired deadline avoids file
+I/O entirely. This does not impose a deadline on the SDK's later draw calls.
+
+`GET /images/file?display=1` serves the currently selected actual file,
+including its factory fallback while a damaged replacement still exists.
+It returns the existing missing-file error when no candidate is selected.
+This dynamic response always uses `no-cache`; an optional `r` cache-buster
+does not make it immutable. Existing `id=N` and `stock=crest|background`
+downloads retain their original raw-library/role choice and revisioned
+immutable caching. A read error aborts the chunk stream without a normal
+completion marker, rather than reporting a truncated JPEG as complete.
 
 `GET /wifi` returns `busy` for a queued or running user scan and an
 `error_code`: empty after success, `scan_start`, `scan_result`, `net_lost` or
@@ -69,7 +147,10 @@ Conference, 2 Table, 3 Crest/slideshow, 4 Matchday) and the keys of a
 competition's `screens` switches as `competition_screens`. Settings carry
 `table_page_s` (table step, bounds in the schema) and `matchday_mode`
 (matchday the Matchday screen shows: 0 current, 1 next). Status `screen` is the
-index of the shown screen, 0–4.
+index of the shown screen, 0–4. `screen_starting` reports whether the last
+display poll still showed its initial three-step startup card. After a
+network initialization fault ends that card, the browser preview uses this
+existing display state rather than restarting it from connection guesses.
 Status `requests` contains each provider's request attempts since boot,
 including selection requests. It is not a daily usage or remaining-credit
 counter and must not be compared directly with the configured daily caps.
@@ -157,10 +238,46 @@ the field path, for example `competitions[2].primary.competition`.
 
 ## Status fields
 
-`GET /status` reports the numbers needed to judge memory under load without a
-serial port: `heap_free`, `heap_largest` and `heap_min` (lowest free heap since
-boot, internal 8-bit memory) plus `tasks`, an array of `{name, id,
-stack_min_free}` with the lowest free stack in bytes of every task (at most 16).
+`GET /status` reports internal 8-bit memory from one observation by the health
+service's shared heap coordinator. `heap_free` and `heap_largest` are current
+point values in bytes. `heap_min` is the SDK's sum of regional free-heap minima;
+the regions need not have reached their minima at the same instant. Its scope
+is explicit:
+
+| Field | Meaning |
+|---|---|
+| `heap_min_scope` | `lifetime` since boot, `interval` for the currently owned measurement interval, or `unavailable` during an unstable/failed observation |
+| `heap_min` | Minimum bytes for that scope; JSON `null` when unavailable |
+| `heap_min_start_ms` | Monotonic start of an interval; 0 for lifetime or unavailable scope |
+
+`tasks` contains `{name, id, stack_min_free, stack_usable_bytes}` for all
+measured tasks, including SDK tasks (at most 16). `stack_min_free` is the
+lowest free stack in bytes since task creation. `stack_usable_bytes` is the
+inclusive span between the kernel's stack bounds after port alignment, not
+the originally requested allocation: a 12,800 B C6 allocation has a 12,785 B
+usable span. Zero means the usable capacity could not be read safely. On SMP
+targets the name stays empty and usable capacity is 0; copied IDs and free
+minima remain available. A failed, incomplete or over-capacity task snapshot
+returns an empty array rather than a partial list.
+
+`app_bytes` is the cached length of the actual running image, parsed at boot
+from its flash partition with the SDK image-metadata reader. It includes image
+headers, segment data, checksum alignment and an appended hash. The current
+targets use unsigned images; the metadata length does not include signature
+blocks and must not be treated as complete signed-image occupancy. An invalid
+or unreadable length is JSON `null`. This is neither ELF size nor whole-slot
+capacity, and metadata parsing is not an image-integrity verification.
+Existing `/schema` `ota_max` is the actual inactive OTA slot's capacity; the
+supported layouts have equal application slots, so it is also the capacity
+used to judge the running image's occupancy.
+
+The integration acceptance limits are at least 40,960 B free-heap minimum,
+32,768 B largest free block, 25% free of each task's usable stack capacity,
+and at most 85% application-slot occupancy. Interval/unavailable heap minima,
+unknown stack capacity or unknown image length do not establish acceptance.
+Largest-block point samples cover only their observation times, not an
+unobserved continuous minimum. Exposing these fields does not prove that the
+limits hold under the required device workload.
 
 `settings_source` says where the current settings come from: `stored` (the
 stored record or the last save), `initial` (no record, or after a reset),

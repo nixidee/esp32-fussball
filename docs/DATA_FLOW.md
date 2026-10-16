@@ -97,6 +97,12 @@ waits in a loop.
   whistle when finished, to kickoff + 240 minutes while the provider reports
   it running, else to kickoff + 110 minutes. Postponed, cancelled and
   abandoned matches have none. Overlapping windows of a competition merge.
+  This is the request window (`kLiveLeadMinutes`), independent of the
+  configurable display window (`window_before` / `window_after`, 0–180
+  minutes each). Those settings affect Own match and Konferenz selection,
+  so a displayed match need not be inside its live request window. They do
+  not move polling earlier or prolong it; the final table/events requests
+  above remain separate.
 - **Order**: due jobs run by importance: live data of a competition whose own
   match is live and the own-match events first, then live data, fixtures,
   table, live table; within a class the longest due first.
@@ -351,8 +357,10 @@ scheduled request (`retry_ms`).
 - A clock step re-runs the maintenance (expiry and OpenLigaDB estimates) at
   once. Neither a clock step nor a network reconnect requests again: jobs
   that became due meanwhile run anyway.
-- Every request carries the data settings generation and the network epoch;
-  a save or a network change during a request stops it and its run.
+- Every request carries the provider-data settings generation and the
+  network epoch; a change to that generation or the network during a
+  request stops it and its run. A cosmetic settings save does not change
+  the provider-data generation and does not cancel transport.
 
 ### Kept data
 
@@ -403,16 +411,23 @@ successful match request is older than 15 minutes (`kDataStaleS`).
 
 ### Readers
 
-The store (22,728 B) is one static object in BSS. A reader runs under the
-repository mutex and copies what it needs into its own fixed model
-(display view model 1,420 B); it performs no I/O, LVGL work, allocation or
-blocking call there.
+The store (26,712 B) is one static object in BSS. A reader runs under the
+repository mutex and copies what it needs into its own fixed model; the
+display presenter owns one static 1,880-byte view model. A full model copy
+would require separate storage, including stack space if made locally.
+Reader callbacks do not fetch provider data or perform filesystem or LVGL
+work. The presenter can acquire the time-service mutex for local-time
+conversion and the settings mutex for competition lookups while holding
+the repository mutex. These acquisitions wait with `portMAX_DELAY`, so the
+reader is not a nonblocking path. Its total lock hold, including those
+waits under concurrent service work, remains to be measured. Rendering
+runs after the reader returns.
 
 ### Views
 
 The screens and the Web UI read the store through `store_views.h`. The views keep no data; they
-return store indices in small fixed lists on the caller's stack (largest:
-194 B for a match list, 200 B for a table).
+return store indices in fixed lists on the caller's stack (226 B for a
+match list, 232 B for a table on the C6).
 
 - **Shown source:** every active competition shows the matches of its
   source; its club id marks the own matches.

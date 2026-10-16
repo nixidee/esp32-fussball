@@ -411,6 +411,12 @@ scores and tables; the Web UI does not offer them to the user.
   integration-stage reserves stay in force for the next stage: largest free
   block at least 32 KB, minimum free heap at least 40 KB, at least 25 % free in
   every task stack, application slot at most 85 % full.
+  Clarification accepted 2026-10-16: the exact heap and largest-block
+  minimums are 40,960 B and 32,768 B. The stack percentage refers to the
+  actually usable stack span reported by the SDK, after alignment; it
+  does not refer to an inferred original allocation request. Resource
+  metadata is supplied by the existing device services/status, without
+  a separate configured-size registry or SDK modification.
 - **Formatting:** clang-format in one pinned version (23.1.3, latest stable on
   2026-10-09), a project style file matching the existing code, and a
   check-only command for project sources. No mass reformatting. Host tooling
@@ -499,6 +505,29 @@ churn and unbounded latency. Log output had no common rules yet.
   throttled. Development builds keep INFO as default and maximum level;
   no separate log build variant now. The product log level is decided with
   the release configuration.
+
+**Refinement · 2026-10-16:** successful settings saves return all manual
+navigation to automatic selection. A delayed pre-save input must not undo
+that reset. The owner approved retaining the existing bus and UI FIFO while
+expanding their command payload to eight bytes: action plus the full existing
+32-bit settings generation. The four UI slots, five reserved state slots,
+coalescing, overflow reporting and no-allocation-per-post contract remain.
+Model and generation are copied and published together under the existing
+settings mutex; notifications are posted after unlocking. This supersedes
+the original four-byte payload limit above without merging records or
+changing the public API. SDK inline capacity is explicitly eight bytes;
+C6 entries grow 16→20 B. Across the existing 9-entry project and 32-entry
+default queues this requests 164 B more permanent queue storage; the local
+four-entry FIFO adds 16 B static. Allocator charges and runtime reserves
+remain device measurements.
+
+**Gesture refinement · 2026-10-16:** the owner also requires a save to
+cancel recognition already in progress before that save, including pending
+single/double clicks and held-key repeats. A held/debouncing input remains
+silent until release; that release itself emits no action. A fresh press
+uses the newly adopted model. The existing InputPolicy owns this cancellation,
+with its additional flag using existing padding (40 B per policy unchanged
+on C6). No new input path, setting or storage record is introduced.
 
 **Alternatives considered:** the ESP-IDF default loop (no extra task, ≈ 2.3 KB
 less RAM, but a slow subscriber delays WiFi events and the queue is shared);
@@ -751,9 +780,12 @@ The owner decided on 2026-10-11 to use real lists and an image library.
   format 3 (ADR-023 behaviour kept).
 - Images are a library of up to ten files `img<id>.jpg` (id 1–10, lowest free
   id on upload, real delete); id 0 is the stock image. A reference may name a
-  missing image (deleted, or settings imported from another device): the
-  renderer skips it, and the application removes dead references outside an
-  OTA trial. Quota, validation and rename-under-display-lock are unchanged.
+  missing image (deleted, or settings imported from another device).
+  Historical format-3 behavior skipped it and pruned dead references outside
+  an OTA trial; ADR-040 supersedes that automatic behavior with retained
+  desired references/positions and diagnosed fallback/retry. Explicit manual
+  deletion still cleans its target. Quota, validation and rename-under-display-
+  lock are unchanged.
   The earlier fixed-name files are not migrated; they are removed once outside
   the trial and the owner uploads again.
 - The browser OTA gate accepts an image whose settings format is equal or
@@ -1465,3 +1497,128 @@ teams. Bodies at most 202,542 B. A single scoreboard match parses to up to
 32,094 B on the 64-bit host, above the C6 parser cap of 24,576 B; the
 target size is not measured (open, not caused here). The notice is checked
 in the Web UI preview, not in the device renderer.
+
+## ADR-039 — Retry failed local network phases and retain trial startup veto · Accepted 2026-10-16
+
+**Context:** a one-off local initialization error could leave a missing
+network interface, captive DNS or mDNS service disabled until restart. The
+initial hostname/HTTP announcement did not share the later hostname retry.
+Rebuilding every service would disconnect a working setup session for a
+pure naming failure.
+
+**Decision:** the existing network service owns and acknowledges individual
+initialization resources. Automatic ten-second retry batches repeat failed
+phases while keeping confirmed resources and working WiFi. Use SDK
+error-returning interface construction/attachment, with cleanup limited to
+the affected partial interface, and retain the global TCP/IP stack/default
+event loop. One initial/runtime hostname path confirms DHCP and mDNS names.
+The portal DNS socket is configured/bound before the existing worker starts;
+task failure retains that single socket. Recovery uses the existing heavy-
+operation admission, without a new task or settings/storage format.
+
+The existing status/API and display/Web error paths expose the failed phase,
+SDK error, retry time and short code. Loaded football data remain visible;
+setup keeps its network name and IP instructions. Local readiness includes
+all required services, without Internet or successful SNTP as prerequisites.
+The existing display startup flag is exposed through its packed status so
+the schematic preview follows actual startup/recovery state.
+
+A startup failure stays latched as a veto for the same firmware trial even
+if the service later recovers. The ten-second trial deadline and all other
+startup conditions stay unchanged; normal boots still recover.
+
+**Costs and boundaries:** approved preliminary +40…100 B static RAM,
++2…5 KB flash, 0.1…0.4 KB temporary status JSON, own additional stack
+32…96 B, no new application task or duplicate SDK steady-state resources,
+LittleFS/NVS 0. Final linked delta is +72 B static and +5,948 B flash;
+conservative additional JSON allocation is 1,186 B before libc metadata. Both flash and
+JSON exceed those preliminary estimates. The resource ledger distinguishes
+these measured/ABI-derived figures from still-open device reserves. Hardware
+heap/stack, DNS/mDNS reachability and actual rollback remain device acceptance. Lower-level SDK panics, including
+assertions inside initial lwIP allocation, cannot return to this lifecycle;
+this decision neither changes the SDK nor claims retry after a panic.
+
+**Cost confirmation (2026-10-16):** the owner accepts the complete
+implementation with +72 B static RAM, +5,948 B flash and at most 1,186 B
+additional temporary JSON allocator demand derived from C6 ABI before
+libc metadata. The existing JSON processing and full diagnosis are retained.
+This supersedes the preliminary estimates; it does not waive the device
+reserve, network/OTA acceptance or 85% slot-reserve requirements.
+
+
+## ADR-040 — Image-content recovery and observed decoder attempts · Accepted 2026-10-16
+
+**Context:** protected image roles already preserve their factory file beside
+an optional replacement. A shared LittleFS fault can affect both OTA slots;
+rolling firmware back cannot repair those image files. A source setter alone
+cannot acknowledge successful later JPEG drawing, and the installed decoder
+returns the same end value for normal completion and failure.
+
+**Decision:** preserve the desired id/role and slide position. Validate the
+desired file with the existing complete JPEG checker; use role replacement
+and factory candidates in that order when needed. Retry the desired file
+after ten seconds or a file revision, returning on success. Never automatically
+delete files or edit settings for a content fault. Explicit delete/reset keeps
+its existing role. If all candidates fail, preserve football on base colour
+with an error; a pure crest view becomes a repair card. Web/API retain desired,
+actual, failure and retry diagnosis. Simultaneous display warnings combine
+existing and image codes plus Web in the existing five-second pill.
+
+The image service alone owns attempts, retry and fallback. UI acknowledges
+actual source acceptance; display reports matching callback observations.
+Delegate to the installed JPEG callbacks and public filesystem-open callback,
+without copying the decoder or registering another one. Access its private
+callback layout once because public callback getters are absent. Exact source
+hashes, version and cache/draw/filesystem configuration checks reject drift;
+reassess the integration before a library change. No managed library patch or
+update, whole-image buffer or new task. A delivered final block distinguishes
+completion from the following ordinary end value; genuine warnings stay visible.
+
+Image files are content, not a separate firmware-confirmation prerequisite.
+Functioning UI with fallback/error presentation may confirm the existing
+firmware trial. Existing hardware/LVGL fatal handling and the strict network
+startup veto remain. Confirmation does not promise successful JPEG drawing.
+
+**Preliminary common budget:** +64…192 B static RAM, no own permanent heap,
+0…64 B per existing decoder session, +64…160 B own stack, +3…6 KiB flash,
+temporary status JSON up to about +2 KiB including pool rounding, no task or
+LittleFS/NVS quota/format change. Warning collision adds an estimated
+0 B RAM/heap/LittleFS and +0.1…0.4 KiB flash. Linked costs and physical reserve,
+actual pixels, retry, fault and OTA acceptance are separate verification work.
+
+**Built checkpoint (2026-10-16):** common recovery plus warning collision and
+confirmed file-I/O handling adds 6,932 B flash,48 B linked static RAM and
+1,364 B embedded-page gzip (included in flash). Temporary status allocation
+is bounded at 1,282 B by C6 ABI before libc metadata; existing decoder-session
+request grows 16 B inside the fixed LVGL pool. No new task or own permanent
+heap/LittleFS/NVS format change. Flash exceeds the combined preliminary
+6.4 KiB upper estimate; the owner accepted this complete cost on 2026-10-16.
+The successful build and cost acceptance do not accept hardware reserves or
+physical behavior, nor the separate same-id repair increment.
+
+Missing referenced library files remain manageable in the existing gallery
+through Replace/Delete, including current saved and unsaved uses. Explicit
+upload can recreate the same valid id; automatic fallback never changes the
+desired screen or slideshow reference. Settings/storage formats and quotas
+stay unchanged. This repair addition was approved on 2026-10-16, with a
+preliminary +0.1…0.5 KiB flash including page, no additional static/own heap/
+stack/LittleFS apart from the uploaded file. Actual cost is checked separately.
+
+Automatic new uploads reserve saved image references, including disabled
+screens' retained choices. A small coherent store getter collects a mask
+under the existing lock without copying the settings model. The current
+browser supplies its unsaved references in X-Image-Reserved; the existing
+allocator combines both masks. Explicit replacement is intentional and
+still allowed. Availability counts files and reserved ids; all ten used ids
+require removing a reference/image first. This extends the repair decision
+on 2026-10-16, replacing historical lowest-fileless-id reuse. No new settings
+format/quota/state/task/own heap; preliminary own stack +16…96 B and flash
++0.3…1 KiB including page, separate from same-id restoration.
+
+**Repair/reservation build (2026-10-16):** combined linked increment +936 B
+flash, static RAM ±0, binary +944 B and page +545 B gzip (included in flash),
+within the combined preliminary +0.4…1.5 KiB estimate. The selected direct
+project upload stack path stays 1,552 B, while the new small getter branch
+uses 64 B; complete SDK/libc/device peaks remain unmeasured. Settings format,
+quotas, permanent heap and task count are unchanged. The binary now exceeds
+the 85% slot line by 90,420 B; device/resource acceptance remains separate.

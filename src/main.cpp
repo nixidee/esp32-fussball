@@ -180,7 +180,7 @@ void logInputChanges(InputStates& active) {
 // Set in the event bus task, consumed by the application loop.
 std::atomic<bool> settings_changed{false};
 
-void onSettingsChanged(events::Event, uint32_t, void*) {
+void onSettingsChanged(events::Event, events::Payload, void*) {
   settings_changed.store(true, std::memory_order_release);
 }
 

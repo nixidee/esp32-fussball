@@ -20,6 +20,11 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
+# UI actions carry their full 32-bit settings generation plus action code.
+# Keep all 8 payload bytes inline in esp_event, without a heap allocation.
+CONFIG_ESP_EVENT_POST_FROM_ISR=y
+CONFIG_ESP_EVENT_POST_FROM_ISR_SIZE=8
+
 # Task watchdog (15 s) restarts the device instead of only printing. The
 # display supervision relies on it (docs/ARCHITECTURE.md, display failures).
 # Set explicitly, not left to IDF defaults, so the build check covers them.

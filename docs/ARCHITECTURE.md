@@ -73,15 +73,22 @@
   under `display::lock()`. LVGL's own worker renders under the same recursive
   lock. Views only render supplied data; provider and navigation logic stay
   outside the view.
+- The UI controller owns one settings model and one view model, the input
+  queue and the presentation cadence. Pure navigation policy owns screen,
+  row/page and competition-cycle state; separate football and status
+  presenters borrow those objects during a repository callback. They retain
+  no repository pointers and allocate no additional model or view copy.
 - HTTP image publication/deletion is the one explicit cross-task LVGL
   operation: it acquires that lock, drops a cache entry and swaps/removes a
   file after the old reader has finished. Validation and upload run outside
   the lock. No event callback calls LVGL.
 - This keeps the existing app/LVGL tasks rather than adding a separate UI
-  task. It replaces the earlier provisional exclusive-UI-task plan; one
-  persistent scene of 17 objects is reused across modes.
+  task. It replaces the earlier provisional exclusive-UI-task plan. Every
+  mode reuses two persistent child objects (one image and one draw object)
+  under the active LVGL screen. The fixed application draw list and text
+  arena do not replace LVGL's temporary draw-task allocations.
 - One provider worker owns all fetches, parsing, the match store and
-  publication. The store (22,728 B) is one static object; the worker writes
+  publication. The store (26,712 B) is one static object; the worker writes
   each response element into it under a mutex and publishes after every
   request. `football::read()` holds that mutex while the presenter builds
   its bounded owned view model. The worker also keeps each active
@@ -102,10 +109,13 @@
   uploads. Scan/selection/refresh requests signal their owning service.
   The static debug worker permits one fixed in-flight message. Heavy admission
   serializes provider TLS/JSON with image mutation and OTA.
-- Settings live behind a mutex. `settings::current()` returns an 844-byte
-  owned copy on the C6 (it lives on the caller's stack). The competition
-  store has its own lock; readers copy one entry (238 B) or the whole store
-  (2,459 B) into storage they own. NVS saves/reset use a second mutex and execute in the
+- Settings live behind a mutex. `settings::current()` returns an 832-byte
+  owned copy on the C6 (it lives on the caller's stack). Its optional
+  generation output belongs to that same locked snapshot; model publication
+  advances the generation before unlocking and posts the notification after
+  unlocking. The competition
+  store uses that same settings mutex; readers copy one entry (153 B) or the whole store
+  (1,226 B) into storage they own. NVS saves/reset use a second mutex and execute in the
   caller task. They post coalesced `kSettingsChanged` notifications.
 - State notifications and semantic input actions use the existing bounded
   event bus. UI's controller action queue also has four fixed entries and
@@ -154,13 +164,15 @@ be exercised with all services running.
 - **Own loop:** a separate `esp_event` loop with its own task (`events`),
   not the ESP-IDF default loop. The default loop stays reserved for WiFi and
   IP events, so a slow subscriber here cannot delay the network stack.
-- **Notifications only:** an event says *that* something changed, never
-  *what*. The payload is at most 4 B (`uint32_t`), stored inside the queue
-  entry; no post allocates heap. The receiver fetches the current state with
-  a short copy from its owner (for example `settings::current()`).
+- **State notifications:** an event says *that* something changed and
+  carries no data. Its receiver fetches the current state from its owner
+  (for example `settings::current()`). UI actions use an 8 B (`uint64_t`)
+  payload containing the action and the full 32-bit settings generation.
+  All eight bytes stay inside the SDK queue entry; no project-bus post
+  allocates event-data heap.
 - **Catalog** (`event_admission.h`): state events `kSettingsChanged`,
   `kNetworkState`, `kDataUpdated`, `kOtaState`, `kTimeChanged`; the action
-  event `kUiAction` with the action code as payload. Core, network, data,
+  event `kUiAction` with the action code and its model version. Core, network, data,
   OTA and input services now use this catalog.
 - **State events coalesce:** while one is queued, further posts of the same
   kind are absorbed (`post` returns `ESP_OK`). The pending mark is cleared
@@ -189,6 +201,13 @@ be exercised with all services running.
   boot log line `after event bus init` measures the current init cost.
   The earlier flood test used at most 364 B of the `events` stack
   (1,940 B free); subscriber stack usage is checked when services are added.
+  The 2026-10-16 full-generation action transport changes C6 SDK entries
+  from 16 to 20 B. The nine-entry project queue requests 36 B more storage;
+  the 32-entry default loop requests 128 B more because inline capacity is
+  a shared SDK setting. Total queue payload growth is 164 B, plus 16 B
+  static for the existing four-entry UI FIFO. These are ABI/storage-size
+  calculations; current allocator charges and task reserves need device
+  measurement. Queue lengths and tasks remain unchanged.
 - **Diagnostics:** the status log prints the minimum free stack of the
   `events` task and the counters for dropped UI actions and failed posts.
 - **Device test** (`cfg::kEventTest = EventTest::kFlood` in `app_config.h`,
@@ -231,6 +250,14 @@ building and the erased-flash check are the pure component `components/files`
   reserved for the service's own replacement temporary file. Longest path: `/fs/` + 31 characters (36 B with terminator).
 - **Image layer:** quota, replacement reserve and reader-aware publication
   are implemented in `components/images`; see [WEB_UI.md](WEB_UI.md).
+  That same service owns one desired/selected image, file validation,
+  source-attempt acknowledgement, role/factory fallback and bounded retry.
+  Selection uses the shared heavy admission outside LVGL/data locks; status
+  is a coherent bounded snapshot. UI keeps desired references/slide positions
+  and renders the content error independently of health/OTA. Display wraps
+  the existing JPEG/FS callbacks with exact source/version/config guards,
+  observing actual block delivery without another decoder or retry policy.
+  Missing/invalid file content never causes automatic deletion/settings save.
   Formatting acquires the LVGL lock and invalidates image cache readers.
   Trial firmware blocks persistent mutations. The lower-level format API
   still requires that no caller owns an open file.
@@ -311,12 +338,19 @@ free was 2,464/1,940 B in that run.
   Snapshot pause and complete report durations are
   recorded, including the final console write. Console output can delay the
   app loop; its measured duration is part of the acceptance budget.
-- **Task snapshot:** two fixed tables hold at most 16 tasks (960 B together
-  on the C6). The scheduler stays suspended while collecting task data and
-  copying names into owned rows; formatting happens after it resumes. An
-  incomplete or over-capacity scan produces no rows and logs the limit,
-  never a partial or stale list. On multicore targets only copied numeric
-  IDs and watermarks are exposed; names stay empty. S3 acceptance is pending.
+- **Task snapshot:** two fixed tables hold at most 16 tasks (1,024 B together
+  on the C6: 16 SDK records of 36 B and 16 owned rows of 28 B). On the C6 the
+  scheduler stays suspended while collecting task data, reading the public SDK
+  snapshot bounds and copying names into owned rows; formatting happens after
+  it resumes. The usable span is the inclusive kernel range after port
+  alignment, not the original allocation request (12,800 B requested gives
+  12,785 B usable). The same mechanism covers application and SDK tasks without
+  an allocation registry or task-name mapping. An incomplete or over-capacity
+  scan produces no rows; the console reports the limit, and the status API
+  returns an empty array. On multicore targets only copied numeric IDs and
+  watermarks are exposed; names stay empty and usable capacity is 0, explicitly
+  unknown, because suspending one core does not prevent another core deleting
+  a task. S3 acceptance is pending.
   FreeRTOS trace is enabled for this API; CPU runtime statistics and the
   FreeRTOS text-formatting helpers remain disabled.
 - **App-loop watchdog:** after startup work and boot diagnostics finish,
@@ -342,6 +376,27 @@ free was 2,464/1,940 B in that run.
   The SDK sums per-region low-water marks: this is a conservative bound,
   not a simultaneous total or a measurement attributable to one caller.
   An owned interval includes allocations by every concurrent task.
+- **Web observation:** `/api/v1/status` calls that same coordinator once for
+  free/largest/minimum heap values and publishes `heap_min_scope` plus
+  `heap_min_start_ms`. An unavailable minimum is JSON null, rather than the
+  internal observation's sentinel zero. The Web task uses `stackMinima()` for
+  a complete all-task reading: its temporary SDK-record buffer is freed before
+  return, and the caller owns the 16-row result on its stack. It exposes both
+  `stack_min_free` and `stack_usable_bytes`; zero usable bytes remain unknown.
+  The lifetime reserve is 40,960 B, the largest-block reserve is 32,768 B, and
+  each task needs at least 25% of its usable span free. Current largest-block
+  samples cannot establish a continuous lifetime minimum.
+- **Running-image ownership:** the OTA service parses the running partition's
+  SDK image metadata once during its existing boot initialization and caches
+  only a validated nonzero length (4 B on C6). `/status` exposes it as
+  `app_bytes`, or JSON null if unavailable. The length includes image headers,
+  segment data, checksum alignment and appended hash; the SDK metadata parser
+  does not include signature-block bytes. Current targets use unsigned images.
+  Parsing skips segment contents/checksum calculation and does not rehash or
+  independently verify the image. Existing `/schema` `ota_max` remains the
+  actual inactive-slot capacity; both supported layouts use equal app slots.
+  The acceptance limit is at most 85% of that capacity. No second slot-size
+  constant or external firmware-size metadata is introduced.
 - **SDK correction:** `scripts/heap_monitor_patch.py` and `.cmake` replace
   only the heap source in the build with a local corrected copy. Exact
   ESP-IDF 6.1.0 and original-source hash checks fail closed on upgrades; the
@@ -461,8 +516,13 @@ Its inactive/active, slow-client and concurrent-load budgets remain unaccepted.
   allocation-failure budgets.
 - One persistent scene is reused for every screen: one image object and one
   full-screen draw object that paints a fixed list of at most 72 items (text,
-  pill, arc, dots; texts in a 1,280 B arena). A render invalidates only the
-  boxes of items that changed.
+  pill, arc, dots; texts in a 1,280 B arena). The application invalidates
+  added, removed and changed item bounds; unchanged items add no invalidation.
+  LVGL can merge dirty areas, and initial frames, screen transitions and
+  image/style/rotation changes can repaint the whole screen. Partial DMA
+  buffers still transfer it stripe by stripe; JPEG decoding can restart
+  from the top for each stripe. The fixed list/arena, temporary LVGL draw
+  tasks, DMA buffers and decoder work state are separate resource costs.
 - LVGL draw buffers partial, double buffered, internal DMA-capable RAM:
   1/12 of the screen height each (240×240: 2 × 20 rows = 2 × 9600 B), size
   computed from the profile (`components/display/display_port.cpp`).
@@ -519,29 +579,31 @@ shape the image design:
   style setters and `lv_display_set_rotation` invalidate even when the value is
   unchanged, the scene and the display port apply styles, alignment and
   rotation only when they change; otherwise every refresh is a full redraw.
-- LVGL 9.6's TJPGD has no end-of-image check: every image walk ends with a
-  benign `jd_mcu_load error: 6` (or `jd_restart error: 6` with restart
-  intervals). The display port's LVGL log hook drops exactly these two warnings;
-  uploaded images are fully decoded by the same decoder before publication.
+- At that historical measurement, LVGL 9.6's TJPGD lacked an end-of-image
+  check: walks ended with a benign format warning. The current guarded
+  callback wrapper observes successful final-block delivery and returns
+  normal end before requesting an extra block; the old warning suppression
+  is removed, so genuine warnings remain visible. The installed decoder and
+  codec are delegated unchanged. Full-file validation remains separate.
 - LittleFS cannot replace a file that is open, and a draw task keeps the JPEG
   open while it decodes. An image upload must swap the file under the LVGL lock
   (temporary file, then rename), otherwise a replacement during a redraw fails.
 This is integration evidence only, not the supported-maximum envelope.
 
-### Current compiled resource ledger — 2026-10-15 (one source per competition, no fixture pairs, no settings migration, no core-data request, one job outcome protocol; compact match store, request scheduler and plans in the firmware, competition files and short names, Matchday screen and per-competition screen switches, one matchday module with current/next selection, status per competition with error codes and status pill, store envelope of 224 matches and rows with a 64-row table stage, 48 events and the store-full notice E19; settings format 9 with competition store and request plans, image roles, font set 12/14/18/48, display design renderer, start screen, automatic season)
+### Current compiled resource ledger — 2026-10-16 (one source per competition, no fixture pairs, no settings migration, no core-data request, one job outcome protocol; compact match store, request scheduler and plans in the firmware, competition files and short names, Matchday screen and per-competition screen switches, one matchday module with current/next selection, status per competition with error codes and status pill, store envelope of 224 matches and rows with a 64-row table stage, 48 events and the store-full notice E19; settings format 9 with competition store and request plans, image roles, font set 12/14/18/48, display design renderer, start screen, automatic season)
 
 | Item | C6 candidate | Growth over the accepted core image |
 |---|---|---|
-| Firmware binary | 1,625,984 B | +1,109,680 B |
-| PlatformIO flash report | 1,625,234 B, 88.6% of 1,835,008 B | +1,109,570 B |
-| Static data/BSS | 150,652 B | +102,432 B |
+| Firmware binary | 1,650,176 B | +1,133,872 B |
+| PlatformIO flash report | 1,649,420 B, 89.9% of 1,835,008 B | +1,133,756 B |
+| Static data/BSS | 150,940 B | +102,720 B |
 | Linked DIRAM, official IDF size report | not re-measured (266,066 B at the 2026-10-10 image) | — |
 | Match store | 26,712 B (BSS) | Included above; replaced three snapshots of 27,200 B (81,600 B) |
 | Short-name table | 48 entries of 32 B (BSS) | Included above |
 | Football files on LittleFS | about 3 KB (one block) per competition, short names up to 1,552 B | Budget 48 KiB for all football files |
 | Settings model / longest encoded record | 832 / 806 B | Format 9 (variable length, ceiling 2,048 B); formats 1 to 8 are not read (reported as outdated, initial values apply, the old record stays until the next save) |
 | Competition store / longest encoded record | 1,226 / 1,234 B | Own NVS record, format 2 (ceiling 4,096 B); 8 entries of 153 B, one source each; format 1 is not read (outdated) |
-| UI view model / draw list / text store | 1,852 / 2,016 / 1,280 B | Static owned view; 72 draw items of 28 B; view and draw list are initialised data (also stored in flash) |
+| UI view model / draw list / text store | 1,880 / 2,016 / 1,280 B | Static owned view; 72 draw items of 28 B; view and draw list are initialised data (also stored in flash) |
 | Parser live allocation cap | 24,576 B including custom headers | Libc metadata additional |
 | JPEG validation workspace | 4,096 B static | Included above |
 | Stock JPEG files / filesystem image | 7,862 / 458,752 B | Logical files / gross partition |
@@ -689,6 +751,106 @@ texts). Replayed real ESPN fixtures and tables fill the store exactly with
 notice); bodies stay at most 202,542 B (limit 256 KiB). A table row parses
 to at most 10,310 B, a scoreboard match to up to 32,094 B on the 64-bit
 host, above the 24 KiB parser cap; the C6 figure is not measured.
+The following review corrections (provider ids and mapping, Web validation,
+imports and sessions, terminated draw-list strings, JPEG timeout reporting,
+network/time retries and event ordering) add 1,502 B flash and 48 B static
+RAM over that store-envelope build. The embedded page is 64,964 B gzip
+(+489 B); LittleFS use is unchanged. The 2026-10-16 verification build of
+`f233dd4` reproduces these figures. The subsequent AP-state correction adds 32 B flash with no static RAM.
+The later integration build, including resource-status metadata, serialized
+image maintenance, the diagnostic display, the approved ESPN element
+filter, complete table-number widths and responsive diagnostic values,
+measures 1,632,980 B flash / 1,633,728 B binary / 150,796 B static
+RAM / 65,380 B embedded page. Compared with the verified `f233dd4` build,
+this is +6,244 B flash, +96 B static RAM and +416 B page gzip. LittleFS is
+unchanged. The native filter may skip malformed ignored scalar fields;
+retained fields, body/depth/EOF and allocation bounds stay checked.
+This checkpoint precedes the image-source retry and controller split.
+With the image-source retry and the controller/navigation/presenter split,
+after removing the obsolete displayed-page cache, the latest C6 build is
+1,634,964 B flash / 1,635,712 B binary / 150,804 B static RAM. The page
+stays 65,380 B gzip and LittleFS use stays unchanged. This combined block
+adds 1,984 B flash and 8 B linked static RAM; its pure navigation state is
+80 B, presentation state 24 B and a short-lived presenter 32 B on C6.
+No extra settings/view model or heap allocation is introduced by the split.
+The later full-version command transport and physical gesture cancellation
+add 640 B flash and 16 B static RAM: 1,635,604 B flash / 1,636,352 B binary /
+150,820 B static RAM. Both queues preserve the full settings generation;
+pre-save commands are discarded and fresh queued commands survive reload.
+The additional gesture flag fits existing boolean padding: each InputPolicy
+stays 40 B. The existing four-entry UI FIFO grows from 16 to 32 B; requested
+SDK queue storage grows separately by 164 B, as detailed above. There is no
+new per-post allocation or LittleFS/NVS quota change. The reload compiler
+frame is 864 B (16 B above the transport-only version); SDK call-chain and
+runtime stack peaks are not inferred from that single frame.
+The subsequent phase-recovery/status integration adds 5,948 B flash and
+72 B linked static RAM: at that checkpoint, binary
+1,642,304 B and page 66,540 B gzip (+1,160 B). The flash cost is 5.81 KiB,
+above the preliminary 2…5 KB estimate; functional error explanations and
+phase ownership are included. LittleFS/NVS quota and formats are unchanged.
+Network status grows 76→88 B; raw network static symbols grow 63 B before
+linker alignment. There is no second task or duplicated SDK steady-state
+resource. Failed SDK construction may still allocate transiently; actual
+allocator peaks require device measurement. The eight added status members need sixteen C6 variant slots (128 B),
+plus a possible long-integer slot and copied diagnostic strings. A crossed
+pool boundary requests another 1,024-B pool. The conservative additional
+allocator request is 1,186 B before libc metadata, exceeding the earlier
+0.1…0.4 KB estimate. Controlled actual-handler host comparisons (612 pairs,
+75 crossed pool boundaries) plus C6 ABI derivation give at most 5,702 B for
+the complete document in those fixtures under the unchanged 24,576-B cap.
+The owner accepted this corrected incremental cost together with the
+complete network recovery and existing JSON processing on 2026-10-16.
+This is not a runtime heap/fragmentation measurement; concurrent peaks and
+libc metadata are excluded. Largest tested response is 4,867 B, streamed
+through the existing writer in chunks of at most 512 B.
+
+Compiler frame comparisons with the previous checkpoint: network poll
+1,712→1,600 B, previous settings application 1,296 B versus new lifecycle
+1,328 B, publish384→400 B; UI poll224→240 B, status presenter288→304 B,
+Web status1,424→1,440 B. These are individual compiler frames, including
+existing work, not additional buffers or measured runtime stack reserves.
+The already existing display startup flag uses bit16 in its packed atomic;
+the returned status fits one ABI word, with no additional static state.
+
+Initialization recovery is implemented through returned-error paths,
+including initial mDNS hostname/HTTP advertisement. Lower-level SDK panics
+remain fatal. All service/device acceptance and full runtime reserves stay
+open.
+The subsequent image-content recovery/observer/status integration, including
+the shared warning pill and confirmed file-I/O error handling, adds 6,932 B
+flash and 48 B linked static RAM: 1,648,484 B flash/1,649,232 B binary/
+150,940 B static RAM/67,904 B page gzip. The page increment1,364 B is already
+included in flash. This 6.77 KiB flash increment exceeds the combined
+preliminary 6.4 KiB upper estimate; the owner accepted this complete cost on
+2026-10-16. Hardware reserves and the later same-id repair/reservation
+increments remain separate. LittleFS/NVS quotas and formats are unchanged. No new task,
+own permanent heap or extra active decoder is introduced. The existing
+decoder session requests 16 B more from the fixed LVGL pool, before its
+allocator overhead. C6 ABI-derived extra temporary status allocation is at
+most 1,282 B before libc metadata; complete controlled fixtures reach 5,873 B
+and 5,156 B serialized, using the existing 512-B writer/24,576-B cap.
+Selected overlapping project stack paths increase by 144 B (library) or
+160 B (role), including UI poll, and 96 B for status presentation. These
+compiler/disassembly bounds exclude SDK/codec/libc frames and are not runtime
+stack reserves. Actual LCD output, late faults, concurrent heap peaks,
+fragmentation and OTA acceptance remain hardware work. The binary is 89,476 B
+above the 85% slot-reserve line.
+
+The source/version contract for the installed decoder also runs before
+cached PlatformIO builds. Owned CMake inputs and VERSION invalidate only the
+generated build graph; SDK defaults retain their separate guard. This host
+workflow adds no firmware memory, flash or LittleFS cost.
+The later same-id repair and referenced-id reservation add 936 B flash,
+0 B linked static RAM and 545 B page gzip (included in flash). The latest
+binary is 1,650,176 B and page 68,449 B. No task, own persistent heap,
+settings format or LittleFS/NVS quota change. Automatic allocation combines
+a coherent stored-reference mask with the current browser draft mask;
+explicit replacement restores its desired id. The new store getter does not
+copy the settings model. The selected direct project upload path remains
+1,552 B in both linked ELFs: begin's own frame grows 32→48 B but is released
+before tail-calling start; the new getter branch uses 64 B. The enclosing
+HTTP upload frame stays 1,152 B. These exclude SDK/libc/runtime peaks.
+The reserve miss is now 90,420 B; cost approval does not accept this gate.
 No flash-reserve gate is
 accepted. Free heap is not derivable from the static figures: dynamic stacks,
 network, TLS, parser, DMA and library charges must still be accounted for. Peak heap,
@@ -737,7 +899,8 @@ components/
                              rules (gap, over, passed, selection), views from
                              the store, competition and short-name files,
                              provider worker, client, budget
-  ui/                        pure input/navigation policy, presenter, views
+  ui/                        controller, pure input/navigation policy,
+                             football/status presenters, views
   ui/fonts/                  generated fixed glyph subsets
   ui/lvgl_font/              LVGL default-font header (14 px text role)
   images/                    quotas, validation, cache lifetime and publication

@@ -6,6 +6,7 @@
 #include "app_config.h"
 #include "esp_app_desc.h"
 #include "esp_app_format.h"
+#include "esp_image_format.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -32,10 +33,21 @@ std::atomic<bool> pending{false};
 bool writing = false, startup_healthy = true;
 int64_t boot_at = 0;
 std::atomic<int64_t> restart_at{0};
+std::size_t image_bytes = 0;
 }  // namespace
 const Identity& identity() { return fussball_image_identity; }
 void init(bool healthy) {
   boot_at = esp_timer_get_time() / 1000;
+  const auto* running = esp_ota_get_running_partition();
+  image_bytes = 0;
+  if (running != nullptr) {
+    const esp_partition_pos_t position{.offset = running->address,
+                                       .size = running->size};
+    esp_image_metadata_t metadata{};
+    if (esp_image_get_metadata(&position, &metadata) == ESP_OK &&
+        metadata.image_len != 0 && metadata.image_len <= running->size)
+      image_bytes = metadata.image_len;
+  }
   esp_ota_img_states_t state;
   pending = esp_ota_get_state_partition(esp_ota_get_running_partition(),
                                         &state) == ESP_OK &&
@@ -51,6 +63,7 @@ std::size_t capacity() {
   const auto* next = esp_ota_get_next_update_partition(nullptr);
   return next ? next->size : 0;
 }
+std::size_t imageBytes() { return image_bytes; }
 void reboot() { restart_at.store(esp_timer_get_time() / 1000 + 500); }
 void poll(bool healthy) {
   const int64_t now = esp_timer_get_time() / 1000;

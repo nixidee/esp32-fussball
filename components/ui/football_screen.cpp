@@ -5,14 +5,16 @@
 #include <cstring>
 #include <initializer_list>
 
+#include "display_port.h"
+#include "image_service.h"
 #include "lvgl.h"
 #include "ui_fonts.h"
 namespace ui {
 namespace {
 // One full-screen draw object paints every shape and text of a screen from a
 // fixed item list (docs/UI.md "Drawing"). Each render compares the new items
-// with the previous ones and invalidates only the boxes that changed, so the
-// image behind the content is redrawn stripe by stripe, never as a whole.
+// with the previous ones and invalidates changed boxes. LVGL may merge them
+// or repaint the full screen; LCD transfers use partial stripe buffers.
 enum class Kind : uint8_t { kText, kPill, kArc, kDots };
 struct Item {
   Kind kind = Kind::kText;
@@ -42,8 +44,44 @@ constexpr uint8_t kScoreFont = 3;
 constexpr char kEllipsis[] = "\xE2\x80\xA6";
 
 lv_obj_t *image = nullptr, *scene = nullptr;
-char current_source[64]{};
-uint32_t source_revision = UINT32_MAX;
+char requested_source[64]{};
+uint32_t requested_revision = UINT32_MAX;
+enum class SourceState : uint8_t { kPending, kAccepted, kRejected };
+SourceState source_state = SourceState::kPending;
+// A requested file/revision is acknowledged only after LVGL accepted its
+// source. Full decoding happens later; this does not report frame health.
+void applyImageSource(const ViewModel& model) {
+  if (strcmp(requested_source, model.image) ||
+      requested_revision != model.image_revision) {
+    requested_revision = model.image_revision;
+    snprintf(requested_source, sizeof(requested_source), "%s", model.image);
+    source_state = SourceState::kPending;
+  }
+  if (source_state != SourceState::kPending) return;
+  if (!requested_source[0]) {
+    display::observeImageSource(nullptr, requested_revision);
+    if (lv_image_get_src(image) != nullptr) lv_image_set_src(image, nullptr);
+    source_state = SourceState::kAccepted;
+    return;
+  }
+  display::observeImageSource(requested_source, requested_revision);
+  // LVGL 9.6 duplicates file paths before freeing the previous copy. A
+  // successful assignment has a new address even for the same file; an
+  // allocation failure preserves the old pointer. Comparing text alone
+  // would falsely acknowledge a failed reload of a new image revision.
+  const auto previous = reinterpret_cast<uintptr_t>(lv_image_get_src(image));
+  lv_image_set_src(image, requested_source);
+  const void* applied = lv_image_get_src(image);
+  const bool accepted =
+      applied != nullptr && reinterpret_cast<uintptr_t>(applied) != previous &&
+      lv_image_src_get_type(applied) == LV_IMAGE_SRC_FILE &&
+      strcmp(static_cast<const char*>(applied), requested_source) == 0;
+  images::acknowledgeSource(requested_revision, accepted);
+  source_state = accepted ? SourceState::kAccepted : SourceState::kRejected;
+}
+bool imageVisible() {
+  return requested_source[0] && source_state == SourceState::kAccepted;
+}
 // LVGL 9.6 style setters invalidate the object even when the value is
 // unchanged, and a full-screen invalidation redraws the JPEG behind every
 // stripe. Apply a style only when it differs from the current value.
@@ -56,8 +94,8 @@ uint32_t mix(uint32_t a, uint32_t b, unsigned t) {
   uint32_t out = 0;
   for (int shift = 16; shift >= 0; shift -= 8) {
     const int x = (a >> shift) & 0xff, y = (b >> shift) & 0xff;
-    const int v = x + ((y - x) * static_cast<int>(t) +
-                       (y >= x ? 127 : -127)) / 255;
+    const int v =
+        x + ((y - x) * static_cast<int>(t) + (y >= x ? 127 : -127)) / 255;
     out |= static_cast<uint32_t>(std::clamp(v, 0, 255)) << shift;
   }
   return out;
@@ -106,16 +144,14 @@ lv_area_t arcArea(const Item& item, int start, int end) {
 }
 lv_area_t bounds(const Item& item) {
   switch (item.kind) {
-    case Kind::kArc:
-      return arcArea(item, item.start, item.end);
+    case Kind::kArc: return arcArea(item, item.start, item.end);
     case Kind::kDots:
       return {item.x1 - item.x2, item.y1 - item.x2,
               item.x1 + (item.a - 1) * item.y2 + item.x2, item.y1 + item.x2};
     case Kind::kText:
       // Glyphs may overhang their advance; the layer clips, not the box.
       return {item.x1 - 2, item.y1, item.x2 + 2, item.y2};
-    case Kind::kPill:
-      break;
+    case Kind::kPill: break;
   }
   return {item.x1, item.y1, item.x2, item.y2};
 }
@@ -195,9 +231,8 @@ void drawScene(lv_event_t* event) {
       dsc.rounded = 0;
       const int start = (item.start + 270) % 360;
       dsc.start_angle = start;
-      dsc.end_angle = item.end - item.start >= 360
-                          ? start + 360
-                          : (item.end + 270) % 360;
+      dsc.end_angle =
+          item.end - item.start >= 360 ? start + 360 : (item.end + 270) % 360;
       lv_draw_arc(layer, &dsc);
     }
   }
@@ -306,8 +341,8 @@ uint8_t fit(const char* text, const uint8_t* fonts, int count, int w,
 // One text band at y. Without x/w the text takes the chord of the band; a
 // smaller font of the list is centred in the line of the largest.
 int label(int y, const char* text, std::initializer_list<uint8_t> fonts,
-          uint32_t colour, Align align = Align::kCentre, int x = 0,
-          int w = -1, int band = 0) {
+          uint32_t colour, Align align = Align::kCentre, int x = 0, int w = -1,
+          int band = 0) {
   if (!text[0]) return 0;
   const uint8_t* list = fonts.begin();
   const int count = static_cast<int>(fonts.size());
@@ -340,8 +375,7 @@ int label(int y, const char* text, std::initializer_list<uint8_t> fonts,
   item.x2 = static_cast<int16_t>(tx + tw - 1);
   item.y2 = static_cast<int16_t>(ty + line(item.a) - 1);
   item.colour = colour;
-  if (!f.area->contains({tx, ty, std::max(tw, 1), line(item.a)}))
-    f.ok = false;
+  if (!f.area->contains({tx, ty, std::max(tw, 1), line(item.a)})) f.ok = false;
   push(item);
   return tw;
 }
@@ -399,8 +433,9 @@ void chip(int y, bool upward) {
   }
   int w = 0;
   for (int i = 0; i < n; ++i)
-    w = std::max(w, std::min<int>(width(f.cap, m.badge[i]),
-                                  f.area->spanForBand(top + i * cap, cap).width));
+    w = std::max(w,
+                 std::min<int>(width(f.cap, m.badge[i]),
+                               f.area->spanForBand(top + i * cap, cap).width));
   pill(f.cx - (w + 4 * f.g) / 2, top - f.g / 2, w + 4 * f.g, n * cap + f.g,
        f.chip, 235);
   for (int i = 0; i < n; ++i) label(top + i * cap, m.badge[i], {f.cap}, f.text);
@@ -450,8 +485,8 @@ void ownMatch() {
   const auto& own = m.own;
   const int g = f.g, cap = line(f.cap), title = line(f.title),
             score = line(kScoreFont), body = line(f.body);
-  const int heights = cap + g + title + g + score + g + title + 2 * g +
-                      body + g + g + cap + g + cap;
+  const int heights = cap + g + title + g + score + g + title + 2 * g + body +
+                      g + g + cap + g + cap;
   int y = f.cy - heights / 2;
   captionBand(y, m.caption, f.dim);
   y += cap + g;
@@ -505,12 +540,10 @@ void conference() {
       pill(f.cx - half, y, 2 * half, pitch - g, f.chip, 200);
     const uint32_t fg = row.goal ? f.bg : f.text;
     const int ty = y + (pitch - g - line(font)) / 2;
-    label(ty, row.home, {font},
-          row.own_home && !row.goal ? f.accent : fg, Align::kRight,
-          f.cx - score_w / 2 - g - name_w, name_w);
-    label(ty, row.away, {font},
-          row.own_away && !row.goal ? f.accent : fg, Align::kLeft,
-          f.cx + score_w / 2 + g, name_w);
+    label(ty, row.home, {font}, row.own_home && !row.goal ? f.accent : fg,
+          Align::kRight, f.cx - score_w / 2 - g - name_w, name_w);
+    label(ty, row.away, {font}, row.own_away && !row.goal ? f.accent : fg,
+          Align::kLeft, f.cx + score_w / 2 + g, name_w);
     label(y + (pitch - g - body) / 2, row.centre, {f.body, f.cap},
           row.goal ? f.bg : f.tone(row.centre_tone), Align::kCentre,
           f.cx - score_w / 2, score_w, body);
@@ -535,11 +568,19 @@ void table() {
   const int header_y = rows_top - cap - g;
   const int half = f.area->spanForBand(rows_top, rows * pitch).width / 2;
   const int left = f.cx - half + g, right = f.cx + half - g;
-  const int digit = width(f.body, "0");
-  const int pos_w = 2 * digit;
+  int pos_w = std::max(width(f.cap, "#"), width(f.body, "--"));
+  int widths[3];
+  for (int c = 0; c < 3; ++c)
+    widths[c] = std::max(width(f.cap, m.columns[c]), width(f.body, "--"));
+  for (int i = 0; i < rows; ++i) {
+    const auto& row = m.table[i];
+    pos_w = std::max(pos_w, width(f.body, row.position));
+    const char* values[3] = {row.points, row.difference, row.played};
+    for (int c = 0; c < 3; ++c)
+      widths[c] = std::max(widths[c], width(f.body, values[c]));
+  }
   const int name_x = left + pos_w + 2 * g;
   const int min_name = 10 * width(f.cap, "n");
-  const int widths[3] = {2 * digit, width(f.body, "+12"), 2 * digit};
   int column_x[3]{}, shown = 0, x = right;
   for (; shown < 3; ++shown) {
     // Priority points > difference > played while ten letters still fit.
@@ -595,10 +636,8 @@ void crest() {
   const int cap = line(f.cap), r = std::max(2, f.s / 100);
   const int dots_y = f.cy + f.R - 3 * f.g;
   const int bottom = dots_y - r - 2 * f.g - cap;
-  if (m.pages > 1)
-    dots(dots_y, m.pages, m.page, f.dot_on, f.dot_off);
-  if (m.badge_lines && !m.badge_bottom)
-    chip(2 * f.cy - bottom, true);
+  if (m.pages > 1) dots(dots_y, m.pages, m.page, f.dot_on, f.dot_off);
+  if (m.badge_lines && !m.badge_bottom) chip(2 * f.cy - bottom, true);
   // A bottom chip ends on the status line, above the slide dots.
   const bool low_chip = m.badge_lines && m.badge_bottom;
   if (low_chip) chip(bottom + cap, true);
@@ -638,35 +677,29 @@ void card() {
 void rim() {
   const auto& rim = f.m->rim;
   switch (rim.kind) {
-    case RimKind::kNone:
-      break;
+    case RimKind::kNone: break;
     case RimKind::kMatch:
       arc(0, 360, f.track);
       if (rim.minute >= 0)
-        arc(0, std::min(360, rim.minute * 4),
-            rim.finished ? f.dim : f.accent);
+        arc(0, std::min(360, rim.minute * 4), rim.finished ? f.dim : f.accent);
       if (rim.extra && rim.minute > 90)
-        arc(0, std::min(360, (rim.minute - 90) * 12), f.accent, 0,
-            f.rim + 1);
+        arc(0, std::min(360, (rim.minute - 90) * 12), f.accent, 0, f.rim + 1);
       if (rim.gap) arc(179, 181, f.bg);
       break;
-    case RimKind::kRing:
-      arc(0, 360, f.tone(rim.tone));
-      break;
+    case RimKind::kRing: arc(0, 360, f.tone(rim.tone)); break;
     case RimKind::kSegments:
       for (int i = 0; i < 3; ++i)
         arc(i * 120 + 4, i * 120 + 116,
-            i < rim.done        ? f.accent
-            : i == rim.current  ? f.c(mix(f.m->style.colour,
-                                          f.m->style.accent, 115))
-                                : f.track);
+            i < rim.done ? f.accent
+            : i == rim.current
+                ? f.c(mix(f.m->style.colour, f.m->style.accent, 115))
+                : f.track);
       break;
     case RimKind::kScroll:
       if (rim.total == 0) break;
       arc(40, 140, f.track);
       arc(40 + 100 * rim.first / rim.total,
-          40 + 100 * (rim.first + rim.count) / rim.total, f.accent,
-          f.rim + 1);
+          40 + 100 * (rim.first + rim.count) / rim.total, f.accent, f.rim + 1);
       break;
   }
 }
@@ -692,15 +725,11 @@ bool render(const ViewModel& m, const geometry::SafeArea& area) {
     lv_obj_set_size(scene, area.width(), area.height());
   bgColour(root,
            lv_color_hex(m.night ? cfg::kNightBackground : m.style.colour));
-  if (strcmp(current_source, m.image) || source_revision != m.image_revision) {
-    source_revision = m.image_revision;
-    snprintf(current_source, sizeof(current_source), "%s", m.image);
-    if (m.image[0]) lv_image_set_src(image, current_source);
-  }
+  applyImageSource(m);
   const lv_opa_t opacity = m.night ? LV_OPA_20 : LV_OPA_COVER;
   if (lv_obj_get_style_image_opa(image, LV_PART_MAIN) != opacity)
     lv_obj_set_style_image_opa(image, opacity, 0);
-  lv_obj_set_hidden(image, !m.image[0]);
+  lv_obj_set_hidden(image, !imageVisible());
 
   const int s = area.shorterSide();
   const int size_class = s <= cfg::kSizeClassSmallMax    ? 0

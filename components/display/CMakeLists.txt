@@ -5,6 +5,7 @@ idf_component_register(
     "display_port.cpp"
     "gc9a01_panel.cpp"
     "jpeg_validation.cpp"
+    "jpeg_observer.cpp"
   # include/ of the project for hw_profile.h (used by the public header).
   INCLUDE_DIRS
     "include"
@@ -23,3 +24,8 @@ idf_component_register(
     espressif__esp_lvgl_port
     lvgl__lvgl
 )
+
+if(NOT CMAKE_BUILD_EARLY_EXPANSION)
+  idf_component_get_property(JPEG_OBSERVER_LVGL_ROOT lvgl__lvgl COMPONENT_DIR)
+  include("${CMAKE_CURRENT_LIST_DIR}/../../scripts/jpeg_observer_guard.cmake")
+endif()

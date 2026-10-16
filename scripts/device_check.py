@@ -11,8 +11,9 @@ header X-CSRF-Token, JSON bodies, {"error","code"[,"field"]} for errors.
 field-level errors, session slots (LRU, logout), the debug WebSocket (refused
 without token, with a foreign origin and with browser_debug off; one stream at a
 time; ends with browser_debug off and with its session), image upload/replace/
-delete with the cache header and revision, and heap and stack reserve under load
-(read from /status: heap_min, tasks[].stack_min_free).
+delete with the cache header and revision, and heap, stack and app-slot reserves
+(status heap scope, sampled largest block, task usable bounds, running image
+bytes, and schema ota_max). Missing evidence is UNVERIFIED, with exit code 2.
 
 It changes device state and restores it: browser_debug is set and put back,
 one test image is stored and deleted again, harmless saves keep the stored
@@ -32,13 +33,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 API = "/api/v1/"
-# Limits of the load check. Chosen here, not taken from a requirement: a task
-# that comes closer than STACK_RESERVE_BYTES to overflowing, or a heap that
-# drops below HEAP_RESERVE_BYTES since boot (a provider TLS handshake alone
-# takes about 40 KB), fails the check.
-STACK_RESERVE_BYTES = 256
-HEAP_RESERVE_BYTES = 20000
+# Owner-approved integration reserves. Stack percentages use the SDK's
+# usable bounds, after port alignment; unknown measurements never pass.
+HEAP_RESERVE_BYTES = 40960
+LARGEST_RESERVE_BYTES = 32768
 failures = 0
+unverified = 0
 
 
 def report(ok, name, detail=""):
@@ -50,6 +50,12 @@ def report(ok, name, detail=""):
 
 def info(name, detail=""):
     print(f"INFO  {name}" + (f"  [{detail}]" if detail else ""))
+
+
+def unverifiable(name, detail=""):
+    global unverified
+    unverified += 1
+    print(f"UNVERIFIED  {name}" + (f"  [{detail}]" if detail else ""))
 
 
 class Device:
@@ -174,9 +180,6 @@ FIELD_CASES = [
     ("POST", "data/select", {"provider": 0, "teams": True}, 400, "required", "competition"),
     ("POST", "data/select", {"provider": 0, "teams": False, "offset": "x"}, 400, "type", "offset"),
     ("POST", "data/select", {"provider": 0, "teams": False, "search": 5}, 400, "type", "search"),
-    ("POST", "data/fixtures", {"competition": 9}, 400, "range", "competition"),
-    ("POST", "data/fixtures", {}, 400, "required", "competition"),
-    ("POST", "data/fixtures", {"competition": "a"}, 400, "type", "competition"),
     ("POST", "display", {"action": "x"}, 400, "invalid", "action"),
     ("POST", "display", {}, 400, "required", "action"),
     ("POST", "display", {"action": 1}, 400, "type", "action"),
@@ -185,10 +188,6 @@ FIELD_CASES = [
     ("POST", "images/delete", {"id": "a"}, 400, "type", "id"),
     ("POST", "reset", {"confirm": "no"}, 400, "invalid", "confirm"),
     ("POST", "reset", {}, 400, "invalid", "confirm"),
-    ("GET", "fixtures", None, 400, "required", "competition"),
-    ("GET", "fixtures?competition=9&source=primary", None, 400, "range", "competition"),
-    ("GET", "fixtures?competition=0", None, 400, "required", "source"),
-    ("GET", "fixtures?competition=0&source=x", None, 400, "invalid", "source"),
     ("GET", "images/file", None, 400, "required", "id"),
     ("GET", "images/file?id=99", None, 400, "range", "id"),
     ("GET", "images/file?id=abc", None, 400, "range", "id"),
@@ -497,18 +496,56 @@ def check_heap(device, token):
     report(not rebooted, "device did not restart during the load",
            f"uptime {before['uptime_s']} -> {after['uptime_s']} s, last reset: {after['reset_reason']}")
     report(not errors, "2 clients plus a sampler for 20 s without a failed request", f"{len(errors)} errors {errors[:3]}")
-    if "heap_min" not in after or "tasks" not in after:
-        info("heap_min and tasks are missing in /status: firmware without the load-check fields")
-        return
     info("heap now", f"free {before['heap_free']} -> lowest sampled {low_free} -> {after['heap_free']} B; "
          f"largest block lowest {low_largest} B")
-    report(after["heap_min"] >= HEAP_RESERVE_BYTES, f"lowest free heap since boot is at least {HEAP_RESERVE_BYTES} B",
-           f"{after['heap_min']} B")
-    tasks = sorted(after["tasks"], key=lambda t: t["stack_min_free"])
-    tight = [t for t in tasks if t["stack_min_free"] < STACK_RESERVE_BYTES]
-    report(bool(tasks) and not tight, f"every task keeps at least {STACK_RESERVE_BYTES} B of stack free",
-           f"{len(tasks)} tasks; lowest " + ", ".join(
-               f"{t['name'] or '#' + str(t['id'])} {t['stack_min_free']} B" for t in tasks[:4]))
+    try:
+        schema = device.call("GET", "schema")[3]
+    except (OSError, http.client.HTTPException, ValueError, TypeError) as err:
+        schema = None
+        info("schema unavailable for app-slot reserve", f"{type(err).__name__}: {err}")
+    check_reserves(after, min(low_largest, after["heap_largest"]), schema)
+
+
+def check_reserves(status, sampled_largest, schema):
+    """Judge the actual status metadata; this function performs no I/O."""
+    def number(value):
+        return type(value) is int and value >= 0
+
+    heap = status.get("heap_min")
+    scope = status.get("heap_min_scope")
+    if scope != "lifetime" or not number(heap):
+        unverifiable("minimum free heap since boot", f"heap_min={heap}, scope={scope}")
+    else:
+        report(heap >= HEAP_RESERVE_BYTES,
+               f"lowest free heap since boot is at least {HEAP_RESERVE_BYTES} B", f"{heap} B")
+
+    if not number(sampled_largest):
+        unverifiable("largest free block reserve", "no valid sample")
+    else:
+        report(sampled_largest >= LARGEST_RESERVE_BYTES,
+               f"lowest sampled largest free block is at least {LARGEST_RESERVE_BYTES} B",
+               f"{sampled_largest} B; point samples only")
+
+    tasks = status.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+        unverifiable("every task keeps at least 25% usable stack free", "task snapshot unavailable")
+    else:
+        for task in tasks:
+            name = task.get("name") or "#" + str(task.get("id"))
+            free, usable = task.get("stack_min_free"), task.get("stack_usable_bytes")
+            if not number(free) or not number(usable) or usable == 0 or free > usable:
+                unverifiable(f"task {name} stack reserve", f"free={free}, usable={usable}")
+            else:
+                report(free * 4 >= usable, f"task {name} keeps at least 25% usable stack free",
+                       f"{free} / {usable} B ({100 * free / usable:.1f}%)")
+
+    app = status.get("app_bytes")
+    slot = (schema or {}).get("ota_max")
+    if not number(app) or app == 0 or not number(slot) or slot == 0:
+        unverifiable("running image uses at most 85% of the OTA slot", f"app_bytes={app}, ota_max={slot}")
+    else:
+        report(app * 100 <= slot * 85, "running image uses at most 85% of the OTA slot",
+               f"{app} / {slot} B ({100 * app / slot:.1f}%)")
 
 
 # ---- long run: parallel sessions over more than 15 minutes -------------
@@ -550,8 +587,9 @@ def main():
         check_websocket(device, token)
         check_images(device, token)
         check_heap(device, token)
-    print(f"\n{'ALL PASSED' if not failures else str(failures) + ' FAILED'}")
-    return 1 if failures else 0
+    summary = f"{failures} FAILED, {unverified} UNVERIFIED" if failures or unverified else "ALL PASSED"
+    print(f"\n{summary}")
+    return 1 if failures else 2 if unverified else 0
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 
@@ -13,7 +14,9 @@
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "file_service.h"
+#include "freertos/FreeRTOS.h"
 #include "hw_target.h"
+#include "network_service.h"
 #include "ota_service.h"
 #include "settings_store.h"
 namespace images {
@@ -26,6 +29,13 @@ FILE* temporary = nullptr;
 uint8_t destination = 0;  // slot of the running upload or copy
 std::size_t received = 0, expected = 0;
 std::atomic<uint32_t> changed{0};
+// App task only: a failed maintenance write is retried without a tight loop.
+int64_t maintenance_retry_at = 0;
+portMUX_TYPE selection_mux = portMUX_INITIALIZER_UNLOCKED;
+Status selected{};
+// App-task resolution cursor; the public snapshot is copied under the mux.
+uint8_t next_candidate = 0;
+bool resolving = false, cycle_failed = false;
 // Per slot (index slot - 1): increases whenever its file is replaced,
 // deleted or wiped, so '?r=' URLs never show a stale image.
 std::atomic<uint16_t> revisions[kSlots];
@@ -62,9 +72,14 @@ void slotPath(uint8_t slot, char* out, std::size_t size) {
 void tempPath(char* out, std::size_t size) {
   snprintf(out, size, "%s/.image_upload", cfg::kFsBasePath);
 }
-std::size_t bytes(const char* p) {
+std::size_t bytes(const char* p, esp_err_t* error = nullptr) {
   struct stat s{};
-  return stat(p, &s) == 0 ? static_cast<std::size_t>(s.st_size) : 0;
+  const int result = stat(p, &s);
+  if (error != nullptr)
+    *error = result == 0       ? ESP_OK
+             : errno == ENOENT ? ESP_ERR_NOT_FOUND
+                               : ESP_FAIL;
+  return result == 0 ? static_cast<std::size_t>(s.st_size) : 0;
 }
 std::size_t slotBytes(uint8_t slot) {
   char p[96];
@@ -85,6 +100,91 @@ void name(uint8_t id, cfg::StockImage stock, char* out, std::size_t size) {
     roleFile(stock, out, size);
   else
     slotFile(id, out, size);
+}
+void publishSelection(const Status& value) {
+  portENTER_CRITICAL(&selection_mux);
+  selected = value;
+  portEXIT_CRITICAL(&selection_mux);
+}
+FileSource candidate(const Status& value, uint8_t index) {
+  if (value.desired_id != cfg::kStockImageId) {
+    if (index == 0) return FileSource::kLibrary;
+    --index;
+  }
+  return index == 0   ? FileSource::kReplacement
+         : index == 1 ? FileSource::kFactory
+                      : FileSource::kNone;
+}
+uint8_t candidateIndex(const Status& value, FileSource source) {
+  if (source == FileSource::kLibrary) return 0;
+  return static_cast<uint8_t>((value.desired_id != cfg::kStockImageId ? 1 : 0) +
+                              (source == FileSource::kFactory ? 1 : 0));
+}
+bool selectionName(const Status& value, FileSource source, char* out,
+                   std::size_t capacity) {
+  if (!stockRole(value.role) || source == FileSource::kNone) return false;
+  if (source == FileSource::kLibrary && !libraryId(value.desired_id))
+    return false;
+  if (source == FileSource::kFactory) {
+    const int count =
+        snprintf(out, capacity, "%s", cfg::kStockImageFiles[value.role]);
+    return count >= 0 && count < static_cast<int>(capacity);
+  }
+  slotFile(
+      source == FileSource::kLibrary ? value.desired_id : roleSlot(value.role),
+      out, capacity);
+  return true;
+}
+bool candidatePath(const Status& value, FileSource source, char* out,
+                   std::size_t capacity) {
+  char file[32];
+  return selectionName(value, source, file, sizeof(file)) &&
+         files::buildPath(cfg::kFsBasePath, file, {out, capacity});
+}
+void selectionSource(const Status& value, char* out, std::size_t capacity) {
+  if (out == nullptr || capacity == 0) return;
+  out[0] = 0;
+  char file[32];
+  if (value.active && selectionName(value, value.actual, file, sizeof(file))) {
+    const int count = snprintf(out, capacity, "A:%s", file);
+    if (count < 0 || count >= static_cast<int>(capacity)) out[0] = 0;
+  }
+}
+void failure(Status& value, FileSource source, Failure why, esp_err_t error,
+             bool replace = false) {
+  // Keep the first cause of fallback; an exhausted chain or failure of the
+  // currently displayed file replaces it with that directly actionable fault.
+  if (!cycle_failed || replace) {
+    value.failed = source;
+    value.reason = why;
+    value.error = error;
+  }
+  cycle_failed = true;
+  if (value.retry_at_ms == 0)
+    value.retry_at_ms = esp_timer_get_time() / 1000 + cfg::kImageSourceRetryMs;
+}
+void rejected(Status& value, Failure why, esp_err_t error) {
+  const auto source = value.actual;
+  if (source == FileSource::kNone) return;
+  failure(value, source, why, error, true);
+  next_candidate = static_cast<uint8_t>(candidateIndex(value, source) + 1);
+  value.actual = FileSource::kNone;
+  ++value.attempt;
+  value.pending = candidate(value, next_candidate) != FileSource::kNone;
+  resolving = value.pending;
+}
+void newSelection(Status& value, uint8_t id, cfg::StockImage role,
+                  uint32_t revision) {
+  const uint32_t attempt = value.attempt + 1;
+  value = {};
+  value.active = value.pending = true;
+  value.desired_id = id;
+  value.role = role;
+  value.revision = revision;
+  value.attempt = attempt;
+  next_candidate = 0;
+  resolving = true;
+  cycle_failed = false;
 }
 void dropCache(uint8_t slot) {
   char file[32], src[40];
@@ -139,8 +239,7 @@ esp_err_t close() {
   const int synced = fflush(temporary);
   const int closed = fclose(temporary);
   temporary = nullptr;
-  return received == expected && synced == 0 && closed == 0 ? ESP_OK
-                                                            : ESP_FAIL;
+  return received == expected && synced == 0 && closed == 0 ? ESP_OK : ESP_FAIL;
 }
 // Moves the closed temporary file onto its slot under the display lock.
 esp_err_t publish() {
@@ -209,9 +308,7 @@ Usage usage() {
     total.bytes += role(static_cast<cfg::StockImage>(i)).bytes;
   return total;
 }
-uint16_t revisionOf(uint8_t id) {
-  return libraryId(id) ? slotRevision(id) : 0;
-}
+uint16_t revisionOf(uint8_t id) { return libraryId(id) ? slotRevision(id) : 0; }
 uint16_t roleRevision(cfg::StockImage stock) {
   return stockRole(stock) ? slotRevision(roleSlot(stock)) : 0;
 }
@@ -225,26 +322,167 @@ bool filePath(uint8_t id, cfg::StockImage stock, char* out,
   const int count = snprintf(out, capacity, "%s", p);
   return count >= 0 && count < static_cast<int>(capacity);
 }
-bool source(uint8_t id, cfg::StockImage stock, char* out,
-            std::size_t capacity) {
-  if (id == cfg::kStockImageId ? !stockRole(stock) : !info(id).present)
-    return false;
-  char file[32];
-  name(id, stock, file, sizeof(file));
-  const int count = snprintf(out, capacity, "A:%s", file);
-  return count >= 0 && count < static_cast<int>(capacity);
+Status status() {
+  portENTER_CRITICAL(&selection_mux);
+  const auto value = selected;
+  portEXIT_CRITICAL(&selection_mux);
+  return value;
 }
-esp_err_t begin(uint8_t id, std::size_t size) {
+void clearSelection() {
+  const auto old = status();
+  if (!old.active) return;
+  Status value{};
+  value.attempt = old.attempt + 1;
+  value.revision = revision();
+  resolving = cycle_failed = false;
+  next_candidate = 0;
+  publishSelection(value);
+}
+void acknowledgeSource(uint32_t attempt, bool accepted) {
+  auto value = status();
+  if (!value.active || value.attempt != attempt || value.revision != revision())
+    return;
+  if (accepted) {
+    if (!resolving && value.actual != FileSource::kNone) {
+      value.pending = false;
+      publishSelection(value);
+    }
+    return;
+  }
+  rejected(value, Failure::kSource, ESP_FAIL);
+  publishSelection(value);
+}
+bool filePath(const Status& value, char* out, std::size_t capacity) {
+  if (out != nullptr && capacity != 0) out[0] = 0;
+  return out != nullptr && value.active &&
+         candidatePath(value, value.actual, out, capacity);
+}
+Status select(uint8_t id, cfg::StockImage role, char* out,
+              std::size_t capacity) {
+  auto value = status();
+  const uint32_t current_revision = revision();
+  if (!value.active || value.desired_id != id || value.role != role ||
+      value.revision != current_revision)
+    newSelection(value, id, role, current_revision);
+  if (!stockRole(role) || (id != cfg::kStockImageId && !libraryId(id))) {
+    value.pending = false;
+    resolving = false;
+    failure(value, FileSource::kNone, Failure::kInvalid, ESP_ERR_INVALID_ARG,
+            true);
+    publishSelection(value);
+    selectionSource(value, out, capacity);
+    return value;
+  }
+  const auto observed = display::imageObservation();
+  if (value.actual != FileSource::kNone && observed.attempt == value.attempt) {
+    switch (observed.result) {
+      case display::ImageDecodeResult::kHeaderFailed:
+        // An operational header failure can also be an allocation failure;
+        // only complete validation proves malformed content.
+        rejected(value, Failure::kUnavailable, ESP_FAIL);
+        break;
+      case display::ImageDecodeResult::kOpenFailed:
+        rejected(value, Failure::kUnavailable, ESP_FAIL);
+        break;
+      case display::ImageDecodeResult::kDecodeFailed:
+        rejected(value, Failure::kDecode, ESP_ERR_INVALID_RESPONSE);
+        break;
+      default: break;
+    }
+  }
+  const int64_t now = esp_timer_get_time() / 1000;
+  if (!resolving && value.retry_at_ms != 0 && now >= value.retry_at_ms) {
+    next_candidate = 0;
+    resolving = true;
+    cycle_failed = false;
+    value.pending = true;
+    value.retry_at_ms = 0;
+  }
+  if (resolving) {
+    network::HeavyGuard guard;
+    if (guard) {
+      const int64_t deadline = now + cfg::kImageValidationTimeoutMs;
+      if (files::state() != files::State::kMounted) {
+        failure(value, candidate(value, next_candidate), Failure::kUnavailable,
+                ESP_ERR_INVALID_STATE, true);
+        if (value.actual != FileSource::kNone) ++value.attempt;
+        value.actual = FileSource::kNone;
+        resolving = value.pending = false;
+      }
+      while (resolving) {
+        const auto source = candidate(value, next_candidate);
+        if (source == FileSource::kNone) {
+          value.pending = resolving = false;
+          break;
+        }
+        char candidate_path[96];
+        esp_err_t error = ESP_ERR_INVALID_ARG;
+        if (candidatePath(value, source, candidate_path,
+                          sizeof(candidate_path))) {
+          bytes(candidate_path, &error);
+          // No replacement is a normal role choice, not a damaged image.
+          if (error == ESP_ERR_NOT_FOUND &&
+              source == FileSource::kReplacement) {
+            ++next_candidate;
+            continue;
+          }
+          if (error == ESP_OK)
+            error = display::validateJpeg(candidate_path, hw::kDisplay.width,
+                                          hw::kDisplay.height, deadline);
+        }
+        // An upload/reset may supersede the request. Never publish an old
+        // file result or decoder failure as a fault of its fresh revision.
+        if (value.revision != revision()) {
+          newSelection(value, id, role, revision());
+          break;
+        }
+        if (error == ESP_OK) {
+          value.actual = source;
+          ++value.attempt;
+          value.pending =
+              true;  // Await this attempt's LVGL getter acknowledgement.
+          resolving = false;
+          if (!cycle_failed) {
+            value.failed = FileSource::kNone;
+            value.reason = Failure::kNone;
+            value.error = ESP_OK;
+            value.retry_at_ms = 0;
+          }
+          break;
+        }
+        const auto why = error == ESP_ERR_NOT_FOUND ? Failure::kMissing
+                         : error == ESP_ERR_TIMEOUT ? Failure::kTimeout
+                         : error == ESP_ERR_NO_MEM  ? Failure::kMemory
+                         : error == ESP_ERR_INVALID_RESPONSE
+                             ? Failure::kInvalid
+                             : Failure::kUnavailable;
+        ++next_candidate;
+        const bool exhausted =
+            candidate(value, next_candidate) == FileSource::kNone;
+        failure(value, source, why, error, exhausted);
+        if (value.actual == source) {
+          value.actual = FileSource::kNone;
+          ++value.attempt;
+        }
+        if (exhausted) value.pending = resolving = false;
+        if (esp_timer_get_time() / 1000 >= deadline) break;
+      }
+    }
+  }
+  publishSelection(value);
+  selectionSource(value, out, capacity);
+  return value;
+}
+esp_err_t begin(uint8_t id, std::size_t size, settings::ImageMask excluded) {
   if (temporary != nullptr || ota::trial() ||
       files::state() != files::State::kMounted)
     return ESP_ERR_INVALID_STATE;
   if (id != cfg::kStockImageId && !libraryId(id)) return ESP_ERR_INVALID_ARG;
   if (id == cfg::kStockImageId) {
+    excluded |= settings::referencedImages();
     for (uint8_t i = 1; i <= cfg::kImageLibraryMax && id == 0; ++i)
-      if (!info(i).present) id = i;
+      if (((excluded >> i) & 1) == 0 && !info(i).present) id = i;
     if (id == cfg::kStockImageId) return ESP_ERR_NO_MEM;
-  } else if (!info(id).present) {
-    return ESP_ERR_NOT_FOUND;
   }
   return start(id, size);
 }
@@ -291,7 +529,10 @@ esp_err_t remove(uint8_t id) {
   // References first: a failed save keeps the file, so no reference is left
   // pointing to a deleted image.
   auto model = settings::current();
-  const settings::ImageMask others = present() & ~(settings::ImageMask{1} << id);
+  // Explicit deletion changes only this id; unrelated missing desired files
+  // must remain referenced so repair/retry can restore them.
+  const settings::ImageMask others =
+      settings::kLibraryImageMask & ~(settings::ImageMask{1} << id);
   if (settings::dropMissingImages(model, others)) {
     const auto err = settings::save(model);
     if (err != ESP_OK) return err;
@@ -317,24 +558,23 @@ esp_err_t removeAll() {
 }
 bool maintain() {
   if (ota::trial() || files::state() != files::State::kMounted) return false;
+  if (esp_timer_get_time() / 1000 < maintenance_retry_at) return false;
+  network::HeavyGuard guard;
+  if (!guard) return false;
   for (const auto& legacy : cfg::kLegacyImageNames) {
     char file[32], p[96];
     snprintf(file, sizeof(file), "%s.jpg", legacy);
     path(file, p, sizeof(p));
+    errno = 0;
     if (unlink(p) == 0) {
       ESP_LOGI(kTag, "removed legacy image %s", file);
       changed.fetch_add(1);
+    } else if (errno != ENOENT) {
+      ESP_LOGW(kTag, "legacy image removal failed (%d); retry later", errno);
+      maintenance_retry_at =
+          esp_timer_get_time() / 1000 + cfg::kImageMaintenanceRetryMs;
+      return false;
     }
-  }
-  auto model = settings::current();
-  const bool dropped = settings::dropMissingImages(model, present());
-  if (dropped) {
-    const auto err = settings::save(model);
-    if (err == ESP_OK)
-      ESP_LOGI(kTag, "removed references to missing images");
-    else
-      ESP_LOGW(kTag, "settings not saved after image maintenance: %s",
-               esp_err_to_name(err));
   }
   return true;
 }

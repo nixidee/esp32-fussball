@@ -4,8 +4,8 @@
 //
 // State events are notifications without data: at most one per kind is
 // queued, and the subscriber reads the current state from its owner. UI
-// actions carry an action code and share a fixed number of queue slots. The
-// queue is sized so that state events always find room.
+// actions carry an action code and full 32-bit settings generation, sharing
+// a fixed number of queue slots. State events always find room.
 
 #pragma once
 
@@ -25,7 +25,7 @@ enum class Event : uint8_t {
   kDataUpdated,      // producer: repository (P4)
   kOtaState,         // producer: OTA (P3.7)
   kTimeChanged,      // read timekeeping::status() / localNow()
-  kUiAction,         // payload: action code (input mapper, P5.4)
+  kUiAction,         // payload: action code and full settings generation
 };
 
 inline constexpr std::size_t kStateEventCount = 5;

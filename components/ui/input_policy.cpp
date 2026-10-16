@@ -1,6 +1,11 @@
 #include "input_policy.h"
 
 namespace ui {
+void InputPolicy::cancel() {
+  blocked_ = blocked_ || raw_ || stable_;
+  stable_ = long_sent_ = pending_ = false;
+  pressed_ = repeat_ = released_ = 0;
+}
 uint8_t InputPolicy::update(bool active, int64_t now, bool doubles,
                             uint16_t repeat_ms) {
   uint8_t events = 0;
@@ -10,6 +15,10 @@ uint8_t InputPolicy::update(bool active, int64_t now, bool doubles,
   if (raw_ != active) {
     raw_ = active;
     edge_ = now;
+  }
+  if (blocked_) {
+    if (!raw_ && now - edge_ >= cfg::kInputDebounceMs) blocked_ = false;
+    return 0;
   }
   if (stable_ != raw_ && now - edge_ >= cfg::kInputDebounceMs) {
     stable_ = raw_;
@@ -64,8 +73,7 @@ Action mapInput(cfg::InputRole role, RawInput event, bool down) {
       if (event == RawInput::kLong || event == RawInput::kRepeat)
         return down ? Action::kDown : Action::kUp;
       return Action::kNone;
-    case InputRole::kOff:
-      break;
+    case InputRole::kOff: break;
   }
   return Action::kNone;
 }

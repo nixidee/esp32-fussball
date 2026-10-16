@@ -298,34 +298,60 @@ class Stream {
   int look_ = -2;
   bool failed_ = false, number_ = false;
 };
+// Only the ESPN payloads mapped by store_mappers need element filtering.
+// Keep score whole: ESPN supplies both a scalar and an object with value.
+// Other arrays (calendar and selection lists included) retain their fields.
+const char* elementFields(cfg::Provider provider, const char* array_key) {
+  if (provider != cfg::Provider::kEspn || array_key == nullptr) return nullptr;
+  if (strcmp(array_key, "events") == 0)
+    return R"({"id":true,"date":true,"competitions":[{)"
+           R"("status":{"type":{"state":true,"name":true,"completed":true},"displayClock":true},)"
+           R"("competitors":[{"homeAway":true,"team":{"id":true,"displayName":true,"shortDisplayName":true},"score":true,"shootoutScore":true}],)"
+           R"("details":[{"type":{"text":true},"shootout":true,"ownGoal":true,"penaltyKick":true,"scoringPlay":true,)"
+           R"("athletesInvolved":[{"displayName":true}],"clock":{"displayValue":true},"team":{"id":true}}]}]})";
+  if (strcmp(array_key, "entries") == 0)
+    return R"({"team":{"id":true,"displayName":true,"shortDisplayName":true},"stats":[{"name":true,"value":true}]})";
+  if (strcmp(array_key, "keyEvents") == 0)
+    return R"({"id":true,"type":{"type":true},"participants":[{"athlete":{"displayName":true}}],"clock":{"displayValue":true},"team":{"id":true}})";
+  return nullptr;
+}
 // Parse one value through the real parser. A number has no end marker, so
 // ArduinoJson reads the character after it and rejects a number that is not
 // the end of its input. The stream therefore ends after a number while it is
 // parsed; the character after it stays in the stream for the caller.
-ArduinoJson::DeserializationError parseValue(Stream& stream,
-                                             ArduinoJson::JsonDocument& doc,
-                                             unsigned nesting) {
+ArduinoJson::DeserializationError parseValue(
+    Stream& stream, ArduinoJson::JsonDocument& doc, unsigned nesting,
+    const ArduinoJson::JsonDocument* filter = nullptr) {
   int c = stream.peek();
   while (c == ' ' || c == '\r' || c == '\n' || c == '\t') {
     stream.read();
     c = stream.peek();
   }
   stream.endAfterNumber(c == '-' || (c >= '0' && c <= '9'));
-  const auto err = deserializeJson(
-      doc, stream, ArduinoJson::DeserializationOption::NestingLimit(nesting));
+  const auto err =
+      filter ? deserializeJson(
+                   doc, stream,
+                   ArduinoJson::DeserializationOption::Filter(
+                       filter->as<ArduinoJson::JsonVariantConst>()),
+                   ArduinoJson::DeserializationOption::NestingLimit(nesting))
+             : deserializeJson(
+                   doc, stream,
+                   ArduinoJson::DeserializationOption::NestingLimit(nesting));
   stream.endAfterNumber(false);
   return err;
 }
 // Longest wrapper key the walk accepts (bytes).
 constexpr std::size_t kWalkKeyMax = 95;
-// Walk wrapper JSON without retaining discarded fields. Every scalar still
-// goes through the real parser; depth, bytes, document and string allocation
-// limits apply to all content, including fields outside the selected array.
+// Walk wrapper JSON without retaining its fields. Wrapper scalars use the
+// parser without a filter; selected elements use the provider field mask.
+// Body bytes and nesting stay bounded. Mask and retained element allocations
+// share the cap; ignored element tokens follow ArduinoJson's skip policy.
 // '*enough' set by the consumer ends the walk early with success; the rest
 // of the response is not read.
 bool walk(Stream& stream, const char* wanted, JsonConsumer consume,
           void* context, JsonAllocator& alloc, const bool* enough,
-          unsigned depth, bool& found, bool selected = false) {
+          unsigned depth, bool& found, bool selected = false,
+          const ArduinoJson::JsonDocument* filter = nullptr) {
   if (depth > cfg::kJsonDepth) return false;
   int c;
   do {
@@ -348,11 +374,11 @@ bool walk(Stream& stream, const char* wanted, JsonConsumer consume,
     for (;;) {
       if (selected) {
         ArduinoJson::JsonDocument doc(&alloc);
-        if (parseValue(stream, doc, cfg::kJsonDepth - depth) ||
+        if (parseValue(stream, doc, cfg::kJsonDepth - depth, filter) ||
             !consume(doc.as<ArduinoJson::JsonVariantConst>(), context))
           return false;
       } else if (!walk(stream, wanted, consume, context, alloc, enough,
-                       depth + 1, found))
+                       depth + 1, found, false, filter))
         return false;
       if (enough && *enough) return true;
       c = stream.nonSpace();
@@ -379,7 +405,7 @@ bool walk(Stream& stream, const char* wanted, JsonConsumer consume,
       }
       if (stream.nonSpace() != ':') return false;
       if (!walk(stream, wanted, consume, context, alloc, enough, depth + 1,
-                found, same && wanted[n] == 0))
+                found, same && wanted[n] == 0, filter))
         return false;
       if (enough && *enough) return true;
       c = stream.nonSpace();
@@ -486,24 +512,31 @@ esp_err_t fetchJson(const char* url, const char* array_key,
   if (err == ESP_OK) {
     Stream stream(client, generation, limit, context_transport.deadline);
     JsonAllocator allocator;
-    bool ok;
-    if (array_key == nullptr) {
-      ArduinoJson::JsonDocument doc(&allocator);
-      ok = !deserializeJson(doc, stream,
-                            ArduinoJson::DeserializationOption::NestingLimit(
-                                cfg::kJsonDepth)) &&
-           consume(doc.as<ArduinoJson::JsonVariantConst>(), context);
+    // One mask for the request, sharing the unchanged cap with each element.
+    ArduinoJson::JsonDocument filter(&allocator);
+    const char* fields = elementFields(provider, array_key);
+    if (fields && deserializeJson(filter, fields)) {
+      err = ESP_ERR_NO_MEM;
     } else {
-      bool found = false;
-      ok = walk(stream, array_key, consume, context, allocator, enough, 0,
-                found, array_key[0] == 0) &&
-           (found || optional);
+      bool ok;
+      if (array_key == nullptr) {
+        ArduinoJson::JsonDocument doc(&allocator);
+        ok = !deserializeJson(doc, stream,
+                              ArduinoJson::DeserializationOption::NestingLimit(
+                                  cfg::kJsonDepth)) &&
+             consume(doc.as<ArduinoJson::JsonVariantConst>(), context);
+      } else {
+        bool found = false;
+        ok = walk(stream, array_key, consume, context, allocator, enough, 0,
+                  found, array_key[0] == 0, fields ? &filter : nullptr) &&
+             (found || optional);
+      }
+      // A walk ended by the consumer leaves the rest unread.
+      const bool rest = !(enough && *enough);
+      if (!ok || (rest && (stream.nonSpace() != -1 || !stream.complete())) ||
+          context_transport.failed)
+        err = ESP_ERR_INVALID_RESPONSE;
     }
-    // A walk ended by the consumer leaves the rest unread.
-    const bool rest = !(enough && *enough);
-    if (!ok || (rest && (stream.nonSpace() != -1 || !stream.complete())) ||
-        context_transport.failed)
-      err = ESP_ERR_INVALID_RESPONSE;
     if (result) result->bytes = stream.bytes();
   }
   if (result) {

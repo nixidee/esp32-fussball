@@ -38,13 +38,37 @@ canonical data into a fixed view model, then the view renders it.
 Defaults are configurable. Disabled or unavailable screens are skipped.
 With zero inputs the current situation's default remains selected; there is
 no automatic cycling between screens. Manual navigation returns after
-60 seconds without input by default; 0 disables the return.
+60 seconds without input by default; 0 disables the return. A successful save
+of settings or competitions returns navigation to automatic mode at the next
+application pass, even when that timeout is disabled. It clears manual
+rows/pages, the held
+matchday and Scroll direction, restarts both competition-cycle timers and
+resolves the default from the saved configuration. Ordinary provider refreshes
+keep a manual selection. The Default action and the inactivity return resume
+the existing competition cycles and their timers.
+
+Actions queued before that save are rejected even if they arrive later.
+Pending single/double-click recognition and held-key repeats are cancelled.
+A key already held or still being debounced must first be released; that
+release emits no action, including no Scroll-direction toggle. A fresh press
+uses the new assignment. New actions queued after the save are preserved.
 
 The relevant-matchday default applies while the Konferenz has at least one
 member; membership follows kickoff blocks of every active competition,
 including overruns (rules in [DATA_MODEL.md](DATA_MODEL.md#72-konferenz)). Own cup/catch-up
 windows are independent. A missing final status cannot leave a window open
 indefinitely.
+
+The match-window settings (`window_before` and `window_after`, each 0–180
+minutes) decide when a match counts as inside its display window for the
+automatic Own match selection and Konferenz membership, from before kickoff
+until after its bounded end. Outside that window, Own match can still show
+the match with the nearest kickoff. These settings do not extend live
+polling. The request scheduler has its own window from 30 minutes
+before kickoff to the match end, with a bounded estimate when the end is
+unknown ([DATA_FLOW.md](DATA_FLOW.md#request-scheduler)). A match can therefore
+be shown before polling starts or after ordinary live polling ends; the
+final table/events requests follow their separate scheduler rules.
 
 ### Konferenz pages
 
@@ -59,9 +83,11 @@ indefinitely.
   a normal row in kickoff or activity order, drawn in the accent colour.
 - **Show own match for the whole matchday** (default off): see
   [DATA_MODEL.md](DATA_MODEL.md#72-konferenz).
-- Up/Down move one page in kickoff order, also in One page mode, and stop
-  automatic paging until the manual return; with no Up/Down or Scroll input
-  there is no manual paging.
+- Up/Down move one page in kickoff order, wrapping at both ends, and stop
+  automatic paging until the manual return. From automatic One page mode,
+  the first Down enters the first chronological page; the first Up enters
+  the last. Further presses cycle through those chronological pages. With
+  no Up/Down or Scroll input there is no manual paging.
 - Rows keep fixed slots while paging, so a shorter last page does not move
   the rows up.
 
@@ -135,6 +161,8 @@ SafeArea; nothing is placed at a fixed pixel position.
   around the own club; the own club's row is filled with the accent
   colour. Columns are dropped from the right in the order played,
   difference, points while fewer than ten letters of the name would fit;
+  numeric widths include the actual visible values and headers, including
+  every canonical points/difference value from −10,000 to 10,000;
   column titles are shown only when the whole title row fits the chord,
   otherwise only the competition name. Up to five rows use a wider row
   pitch. A competition without a table shows a card; one whose request
@@ -190,6 +218,8 @@ hints, and a coloured ring:
 | Situation | Card | Ring |
 |---|---|---|
 | Not configured, setup network on | "Einrichtung", "Mit WLAN verbinden:", "» network name", "dann im Browser öffnen:", setup IP | accent |
+| Local network initialization failed, no data loaded yet | "Netzwerkstart gestört", failed phase, automatic retry or "IP im Browser öffnen" when usable for a naming/DNS fault, and short code `NET E01`…`NET E13`. Ends the initial startup card, including on the crest screen | warning |
+| Not configured, setup network on, local service failed | retains both setup WiFi instructions, network name and IP; title identifies the failed phase, first hint says to open the IP plus the short code | warning |
 | No data loaded yet, no WiFi | "Kein WLAN" with the reason: "Netz nicht gefunden" (saved network not seen), "Passwort falsch?" (authentication retry), "Setup-Netz aktiv" (setup network only) or "Verbinde …" (scanning, connecting or retry); hint "Neuer Versuch läuft" (not with the setup network only) and "Setup-Netz aktiv" while the setup network runs alongside | warning |
 | No data loaded yet, no valid time | "Warte auf Uhrzeit", "Zeitserver wird gefragt" | warning |
 | No data loaded yet | "Lade Daten" before the first answer; after a failed request "Keine Daten", the name of the first failing competition, its short cause, "Neuer Versuch HH:MM" (next attempt) and its error code with the HTTP status ("OLG E10·503") | neutral / cause colour |
@@ -206,22 +236,29 @@ action in full (codes: [API.md](API.md#error-causes-and-codes)).
 
 The setup card already names the setup network and IP, so no IP chip is
 shown with it. A device without configuration and without the setup
-network shows the crest screen.
+network shows the crest screen unless a local initialization error needs
+its failure card.
 
 ### Status line and status pill
 
 "Demo" is a permanent dim line below the content while the demo runs; the
-demo shows no status pill.
+demo shows no ordinary status pill; a new image-content fault briefly uses
+the existing pill before the permanent Demo line returns.
 
 Every other status is a status pill: a slightly transparent dark pill
 (background opacity 204 of 255) at the bottom that lies over the content —
 page dots, the last row or a card — for 5 seconds (`kStatusPillS`) after a
-change of the status state. The state is the WiFi connection, valid time,
-stale data and, for each active competition, its cause and whether its
-data are stale. Changing the screen does not show it again; while it is
+change of the status state. The state is the WiFi connection, local initialization phase/error, valid
+time, stale data and, for each active competition, its cause and whether its
+data are stale, plus the desired image role/id, failure and actual fallback. Changing the screen does not show it again; while it is
 visible it shows what the current screen reports. With a bottom IP chip the
 pill sits directly above the chip. Content by priority:
 
+- local initialization failure: code first and short action, for example
+  "NET E11 · IP nutzen" or "NET E06 · neuer Versuch" (warning colour).
+  The full phase remains on the failure card and in the Web UI. Loaded
+  football/image content stays visible; retry time alone does not restart
+  the five-second pill;
 - "Kein WLAN", "Warte auf Uhrzeit" (warning colour);
 - on Matchday and Table, the competition on screen: after a failed request
   its error code without the HTTP status and "Stand HH:MM" of its last
@@ -233,20 +270,31 @@ pill sits directly above the chip. Content by priority:
   data as "Stand HH:MM" of the oldest data shown, "Daten veraltet" without
   any (warning colour).
 
-The pill is not shown on a card that already says the same: the setup,
+The pill is not shown on a card that already says the same: the local
+initialization failure card, setup,
 "Kein WLAN" and "Warte auf Uhrzeit" cards for the network and time states,
 and a competition's notice card for that competition's failure. The start
-screen has no status. The Web UI preview shows the pill for as long as the
+screen has no status. A network initialization error ends it; recovery
+continues through the ordinary state/content cards rather than re-entering
+the initial three-step card. The existing packed display status exposes
+this startup flag for the Web preview, without a second state machine. The Web UI preview shows the pill for as long as the
 state lasts and notes that the device shows it only for 5 seconds.
 
 ### Drawing
 
 One full-screen draw object paints every shape and text from a fixed list of
-72 items with a 1,280-byte text store. A render compares the new list with
-the previous one and invalidates only the boxes that changed; a growing
-progress arc invalidates only its new part. The image behind the content is
-therefore redrawn stripe by stripe, never as a whole. Shapes are drawn
-first, all texts above them. A list or store overflow is reported as a
+72 items (2,016 bytes) with a 1,280-byte text store. A render compares the
+new list with the previous one and invalidates added, removed and changed
+item bounds; a growing progress arc normally invalidates only its new part.
+Unchanged items add no invalidation. LVGL can merge those areas, while the
+initial frame, screen transitions and image/style/rotation changes can
+repaint the whole display. LCD transfers use partial buffers stripe by
+stripe even for a full repaint; the JPEG decoder can restart from the top
+for each stripe, so partial repainting does not mean that only dirty image
+pixels are decoded. The two persistent child objects (image and draw object,
+under the active screen), fixed item/text storage, temporary LVGL draw tasks,
+DMA buffers and decoder work state have separate memory costs. Shapes are
+drawn first, all texts above them. A list or store overflow is reported as a
 render failure.
 
 ## Presenter and event display
@@ -256,7 +304,7 @@ estimates show `~`. Half-time, full-time and shootout have explicit labels.
 A separate shootout tally does not change ordinary goals. Kickoff is converted
 to selected local civil time; retries and freshness use monotonic time.
 
-The match store keeps up to 12 events per own match and 32 in total.
+The match store keeps up to 12 events per own match and 48 in total.
 The Own match highlight band rotates through that bounded list every five
 seconds. It displays the event type and player; supplied substitution in/out
 names appear as "out > in", a substitution without direction (ESPN) as
@@ -267,7 +315,8 @@ excluded; truncation and reconciliation behaviour is defined in the model.
 The One page order uses recent principal-value changes, rather than repeated
 initial fetches or source-tag changes; a change not seen since the last
 restart sorts after seen ones. The table defaults to five rows around the own
-club and clamps scrolling at either end. Long names use UTF-8-safe prefixes and
+club, with its initial window clamped to the stored rows; manual Up/Down
+continues across competition boundaries. Long names use UTF-8-safe prefixes and
 LVGL ellipsis. Empty fixture/table, no configuration, no WiFi, no valid time,
 provider error, stale data and demo status have explicit text.
 
@@ -305,8 +354,13 @@ The Scroll direction starts down and resets after 20 seconds without a
 direction change; 0 disables that reset. The setting matters only while an
 input has the Scroll role. Every accepted row remains reachable.
 
-Actions cross the event bus and a four-entry static controller queue. Callbacks
-do not block or call LVGL. Overflow is counted/logged and drops excess input
+Actions carry the full settings version through the event bus and a four-entry
+static controller queue. Old versions have no navigation, start-screen or IP
+timer effect. The 20-ms application poll applies accepted actions in order,
+using the current
+store bounds for each row/page movement; the 500-ms display refresh does not
+delay action consumption. Callbacks do not block or call LVGL. Overflow is
+counted/logged and drops excess input
 rather than accumulating stale actions. Touch screens and encoders remain
 future hardware input types.
 
@@ -333,6 +387,38 @@ The product keeps one persistent LVGL object tree: the image and one draw
 object (see "Drawing"), reused across screens. Image source revision forces
 reopening after a replacement. No full-image cache or new framebuffer is
 added.
+
+### Missing and damaged image content
+
+The image service keeps one desired id/role and selects a fully validated
+file. Library images fall back to the appropriate role replacement, then its
+unchanged factory image; a damaged role replacement falls back to factory.
+Missing desired files do not remove settings references or slideshow positions.
+The desired file is retried after ten seconds or a new file revision; a
+successful check returns to it. Checks share the existing heavy-operation
+admission and JPEG workspace, outside the LVGL and football-data locks.
+
+With no usable candidate, football remains on its configured base colour with
+an error pill. Only a pure crest/image view becomes the repair card; setup,
+network and football notice cards remain. The card has cause, image code,
+Web repair/diagnosis hint and retry indication. A usable fallback is reported
+through the same temporary pill and permanent Web diagnostics. Simultaneous
+network/provider and image warnings share both codes plus a Web hint in the
+existing five-second pill. The image code is not duplicated when the crest
+repair card already shows it. Demo returns to its permanent line after the
+temporary image warning. Retrying or advancing an attempt alone does not
+restart the pill.
+
+A file source is applied only after the LVGL getter confirms the new owned
+source, including same-path/new-revision changes. A rejected change hides the
+old image instead of presenting it as the requested replacement. The installed
+JPEG callbacks and POSIX-open callback report matching source attempts. A
+successful open/close or end-of-image return alone is not decoded-image proof:
+only delivery of the final image block marks decode completion. Later faults
+start the service's fallback path. These are content observations, never an
+additional UI/hardware-health or OTA-confirmation gate. No whole-image buffer,
+second decoder, rendering task or automatic file deletion is added. Actual
+round-screen pixels, clipping and late-fault recovery still need device checks.
 
 ## Fonts and readability
 

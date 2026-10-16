@@ -437,6 +437,16 @@ bool validate(const Competitions& competitions, Violation* violation) noexcept {
   return checkSources(check, competitions);
 }
 
+ImageMask referencedImages(const Model& model) noexcept {
+  ImageMask result = 0;
+  const auto include = [&](uint8_t id) {
+    if (id >= 1 && id <= cfg::kImageLibraryMax) result |= ImageMask{1} << id;
+  };
+  for (const auto& style : model.screens) include(style.image);
+  for (const uint8_t id : model.slides) include(id);
+  return result;
+}
+
 bool dropMissingImages(Model& model, ImageMask present) noexcept {
   const auto missing = [present](uint8_t id) {
     return id != cfg::kStockImageId &&

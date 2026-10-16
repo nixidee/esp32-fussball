@@ -73,6 +73,11 @@ retries the whole reconfiguration every 10 seconds (`kWifiRadioRetryMs`);
 it does not reboot, because the stored settings would meet the same error at
 boot. Until a retry succeeds the local network counts as unhealthy, so an OTA
 trial in that state is not confirmed.
+The stop result is checked before reconfiguration. A failed stop retains
+the AP/client state and applied settings and retries without configuring a
+still-running radio. A successful stop clears the AP/client state before
+antenna, mode or configuration calls can fail; only a successful start can
+report the new AP as active.
 
 The other driver calls that can fail at run time are retried on the same
 10-second delay, without a reboot and without touching a working state:
@@ -81,7 +86,9 @@ The other driver calls that can fail at run time are retried on the same
   accepted the new mode, so a failed start does not show a setup network
   that is not there, and a failed stop does not hide one that still runs.
 - Setting the hostname for DHCP and mDNS (`hostname: <error>`). Until it
-  succeeds the previous name stays in use.
+  succeeds, DHCP and mDNS can temporarily use different names. On an
+  allocation failure, the DHCP interface can fall back to the SDK's default
+  hostname; retaining the previous name is not guaranteed.
 - Starting the SNTP client (`SNTP init: <error>`), while the station is
   connected.
 
@@ -92,10 +99,45 @@ A failed scan-result read releases the driver's scan list, as does a scan
 that ends after it was cancelled; the driver holds that list in heap until
 it is read or released.
 
-The device's `Kein WLAN` / `No WiFi` status means that the connection manager
-has not published a station IP lease. It does not distinguish scanning,
-authentication or initialization errors; the serial boot log reports a
-startup error as `boot: network init: <error>`.
+Local initialization is retried by the existing application loop. Each
+confirmed step retains its resources; only failed steps are retried, with
+at least ten seconds between automatic retry batches. New settings are
+adopted through the same path. Retry requires the existing nonblocking
+heavy-operation token, so it waits while TLS, upload or another admitted
+operation holds that token. A portal-DNS or mDNS failure does
+not stop working WiFi, the setup AP or HTTP. Initial hostname assignment
+and later hostname changes share the same acknowledged retry path; HTTP
+advertisement follows confirmed mDNS hostname assignment. No additional
+application task, second settings model or new stored setting is introduced.
+
+Network-interface creation uses error-returning SDK operations instead of
+convenience constructors that abort on failure. Failed partial interface
+construction releases only that interface's owned resources. The global
+TCP/IP stack and a pre-existing default event loop are retained. The portal
+DNS worker starts only after its socket is configured and bound; failure
+during socket setup closes that socket. If only task creation fails, the
+one configured, bound socket is retained for retry; no second live worker
+is created.
+
+Recovery concerns errors returned by the SDK. Lower-level SDK assertions
+remain fatal: for example, lwIP's first TCP/IP mailbox or core-lock
+allocation may assert inside `tcpip_init()` rather than return an error.
+The lifecycle cannot retry after such a process-ending SDK panic; no SDK
+source or dependency is changed to claim otherwise.
+
+`network_init` in the existing status API reports whether all local phases
+are confirmed, the first active failed phase, its SDK error and short code,
+and the next retry's monotonic time. Other independent phases can finish
+while that failure remains visible. A recovered phase clears its failure;
+a later failure is not hidden by historical errors. Local readiness requires
+the radio, portal DNS, mDNS, current hostname and HTTP advertisement, not
+Internet access or successful SNTP. See [API.md](API.md) for the fields and
+[UI.md](UI.md) for the display behavior.
+
+The ordinary `Kein WLAN` / `No WiFi` state still means that the connection
+manager has not published a station IP lease. Initialization failures have
+separate actionable messages in the Web UI and display, including their
+short codes; the boot log also reports `boot: network init: <error>`.
 
 A bounded UDP DNS responder directs captive-portal lookups to the AP address.
 It answers standard queries with one question of class IN: type A with the AP
@@ -211,7 +253,10 @@ A pending trial has ten seconds to pass local health: initialized event bus,
 settings, filesystem, display/UI, HTTP and local network services (including
 a configured radio) plus the
 application-loop watchdog. Router connectivity, IP, SNTP and provider success
-are not prerequisites. Failed local health explicitly invalidates/reboots the
+are not prerequisites. Any local network initialization error remains a
+startup veto for that particular trial even if retries restore all network
+services later. Recovery during a normal boot remains available. Failed
+local health explicitly invalidates/reboots the
 image; if no previous bootable image exists, the fallback is a reboot path,
 not a promised recovery image.
 

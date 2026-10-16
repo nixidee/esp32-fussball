@@ -21,4 +21,8 @@ esp_err_t finish();
 void abort();
 const Identity& identity();
 std::size_t capacity();
+// Parsed running image length on flash, including checksum/padding and any
+// appended hash. Signature-block bytes are not included by the SDK metadata
+// parser; current targets use unsigned images. Zero means unavailable.
+std::size_t imageBytes();
 }  // namespace ota

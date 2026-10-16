@@ -20,8 +20,8 @@ struct Rim {
   // extra time as a second inner lap, and the half-time mark.
   int16_t minute = -1;
   bool finished = false, extra = false, gap = false;
-  uint8_t done = 0, current = 0;               // kSegments: three steps
-  uint8_t first = 0, count = 0, total = 0;     // kScroll: visible rows
+  uint8_t done = 0, current = 0;            // kSegments: three steps
+  uint8_t first = 0, count = 0, total = 0;  // kScroll: visible rows
 };
 struct MatchRow {
   char home[41]{}, away[41]{}, centre[12]{};
@@ -37,7 +37,9 @@ struct OwnMatch {
   bool own_home = false, own_away = false;
 };
 struct TableRow {
-  char name[41]{}, position[4]{}, played[4]{}, difference[6]{}, points[5]{};
+  // Signed table values accept -10000..10000; difference also shows a '+'
+  // for positive values. Both need six characters plus the terminator.
+  char name[41]{}, position[4]{}, played[4]{}, difference[7]{}, points[7]{};
   bool own = false;
 };
 // Full-screen state: title, up to two lines (an accent line stands out) and
@@ -77,6 +79,7 @@ struct ViewModel {
   // Konferenz pages or slideshow position (dots); pages 0 or 1 = no dots.
   uint8_t page = 0, pages = 0;
   char image[64]{};
+  // Image-service attempt, including fallback/retry of an unchanged file path.
   uint32_t image_revision = 0;
   bool night = false;
   // Night colour level 0..255 towards the night background; 255 = colours

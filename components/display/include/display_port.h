@@ -36,13 +36,36 @@ void unlock();
 // timeout and skips the log if LVGL is busy). Does nothing if init() has not
 // succeeded.
 void logMemory();
-// Decodes the JPEG at `path` once without output. ESP_ERR_TIMEOUT when the
-// deadline stopped the decoder, ESP_ERR_INVALID_RESPONSE for a malformed
-// file or other dimensions.
+// Decodes the JPEG at `path` once without output. Deadline expiry (including
+// during file I/O) takes priority: ESP_ERR_TIMEOUT. Confirmed file I/O failure
+// including close: ESP_FAIL. Otherwise malformed/unsupported content or other
+// dimensions: ESP_ERR_INVALID_RESPONSE. Caller owns shared heavy admission;
+// no output or published file changes.
 esp_err_t validateJpeg(const char* path, uint16_t width, uint16_t height,
                        int64_t deadline_ms);
 // Caller holds the LVGL lock for reader-safe replacement/deletion.
 void dropImageCache(const char* source);
+
+// Decoder observations describe image content, never LCD/frame or OTA health.
+// A failed attempt stays failed until observeImageSource() starts another one.
+enum class ImageDecodeResult : uint8_t {
+  kPending,
+  kDecoded,
+  // Phases only: a rejection can be allocation/I/O, not proven corruption.
+  kHeaderFailed,
+  kOpenFailed,
+  kDecodeFailed,
+};
+struct ImageObservation {
+  uint32_t attempt;
+  ImageDecodeResult result;
+};
+// Caller holds the LVGL lock, before assigning the source. The source buffer
+// stays valid and unchanged until the next call; nullptr/empty stops watching.
+// Every retry/revision uses a new attempt; zero is an ordinary valid value.
+void observeImageSource(const char* source, uint32_t attempt);
+// Coherent and readable from any task; the image service owns retry/fallback.
+ImageObservation imageObservation();
 void setBrightness(uint8_t percent);
 void setRotation(uint8_t quarter_turns);
 

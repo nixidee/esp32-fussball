@@ -55,7 +55,7 @@ inline constexpr DisplayFault kDisplayFault = DisplayFault::kNone;
 // ---- Event bus (docs/ARCHITECTURE.md) --------------------------------------
 // Queue slots shared by UI actions; a UI action posted while all are taken
 // is dropped and counted. State events have one reserved slot per kind on
-// top (queue: 5 state kinds + these slots, 16 B per entry).
+// top (queue: 5 state kinds + these slots, 20 B per entry on the C6).
 inline constexpr std::size_t kEventUiActionSlots = 4;
 // Fixed subscriber table (no heap per subscriber).
 inline constexpr std::size_t kEventMaxSubscribers = 8;
@@ -385,8 +385,8 @@ inline constexpr uint32_t kWifiFallbackMs = 300000;
 // Longest time a phone on the setup AP postpones home-network attempts.
 inline constexpr uint32_t kWifiApClientHoldMs = 300000;
 inline constexpr uint32_t kWifiAuthRetryMs[] = {10000, 30000, 60000};
-// Retry delay after a radio reconfiguration or an AP mode change failed in
-// the WiFi driver.
+// Retry delay for failed local-network initialization phases, radio/AP
+// reconfiguration, initial/runtime hostname acknowledgement and SNTP init.
 inline constexpr uint32_t kWifiRadioRetryMs = 10000;
 // Station modem sleep (IDF default WIFI_PS_MIN_MODEM) is off: the device is
 // mains powered, and in modem sleep the AP holds downlink frames until the
@@ -491,6 +491,12 @@ inline constexpr std::size_t kDrainMaxBytes = 32768;
 inline constexpr std::size_t kImageMaxBytes = 32768;
 inline constexpr std::size_t kImageTotalBytes = 327680;
 inline constexpr std::size_t kImageReserveBytes = 40960;
+// Retry delay after legacy-image removal failed.
+inline constexpr uint32_t kImageMaintenanceRetryMs = 10000;
+// Retry delay for the desired image after file/source/decode failure.
+inline constexpr uint32_t kImageSourceRetryMs = 10000;
+// Whole JPEG/fallback-resolution pass, under the shared heavy admission.
+inline constexpr uint32_t kImageValidationTimeoutMs = 1000;
 // Competition files (football_files.h): "comp_<id>.bin" per competition,
 // written through a temporary file. A competition with new data is written
 // at most every kCompetitionFileGapS and never while one of its matches is
