@@ -153,7 +153,7 @@ bool put(StoredMatch& m, MatchStore& store, const MapContext& c,
          const char* home_name, const char* away_name, bool events) {
   StoredMatch* target = store.upsert(m, c.clock, home_name, away_name);
   return events && target != nullptr && target->isOwn() &&
-         store.beginEvents(*target);
+         store.beginEvents(*target, false, c.clock.utc);
 }
 
 void openLigaGoals(JsonVariantConst row, MatchStore& store) {
@@ -233,7 +233,6 @@ bool openLigaMatch(JsonVariantConst row, MatchStore& store,
 
 void espnMatch(JsonVariantConst row, StoredMatch& m, MatchStore& store,
                const MapContext& c, TeamRef& home, TeamRef& away) {
-  m.id = numericId(row["id"]);
   auto competition = row["competitions"][0];
   m.kickoff = instant(row["date"]);
   auto type = competition["status"]["type"];
@@ -277,7 +276,6 @@ void espnMatch(JsonVariantConst row, StoredMatch& m, MatchStore& store,
 void apiFootballMatch(JsonVariantConst row, StoredMatch& m, MatchStore& store,
                       const MapContext& c, TeamRef& home, TeamRef& away) {
   auto fixture = row["fixture"];
-  m.id = numericId(fixture["id"]);
   m.kickoff = instant(fixture["date"]);
   home = team(row["teams"]["home"], store, c);
   away = team(row["teams"]["away"], store, c);
@@ -293,7 +291,6 @@ void apiFootballMatch(JsonVariantConst row, StoredMatch& m, MatchStore& store,
 
 void footballDataMatch(JsonVariantConst row, StoredMatch& m, MatchStore& store,
                        const MapContext& c, TeamRef& home, TeamRef& away) {
-  m.id = numericId(row["id"]);
   m.kickoff = instant(row["utcDate"]);
   home = team(row["homeTeam"], store, c);
   away = team(row["awayTeam"], store, c);
@@ -325,32 +322,6 @@ Side side(const MatchStore& store, const StoredMatch& match, uint32_t team) {
   if (match.away != kNoIndex && store.teamAt(match.away).id == team)
     return Side::kAway;
   return Side::kUnknown;
-}
-
-bool apiFootballEvent(JsonVariantConst row, StoredEvent& e) {
-  const char* type = text(row["type"]);
-  const char* detail = text(row["detail"]);
-  if (!strcmp(type, "Goal"))
-    e.type = !strcmp(detail, "Own Goal")         ? EventType::kOwnGoal
-             : !strcmp(detail, "Penalty")        ? EventType::kPenaltyGoal
-             : !strcmp(detail, "Missed Penalty") ? EventType::kPenaltyMissed
-                                                 : EventType::kGoal;
-  else if (!strcmp(type, "Card"))
-    e.type = !strcmp(detail, "Red Card")             ? EventType::kRed
-             : !strcmp(detail, "Second Yellow card") ? EventType::kYellowRed
-                                                     : EventType::kYellow;
-  else if (!strcmp(type, "subst"))
-    e.type = EventType::kSubstitution;
-  else if (!strcmp(type, "Var"))
-    e.type = EventType::kVar;
-  else
-    return false;
-  e.minute = small(row["time"]["elapsed"], 240);
-  e.added = small(row["time"]["extra"], 120);
-  e.player.assign(text(row["player"]["name"]));
-  if (e.type == EventType::kSubstitution)
-    e.player_in.assign(text(row["assist"]["name"]));
-  return true;
 }
 
 bool espnEvent(JsonVariantConst row, StoredEvent& e) {
@@ -391,6 +362,18 @@ bool espnEvent(JsonVariantConst row, StoredEvent& e) {
   }
   e.minute = clockMinute(text(row["clock"]["displayValue"]));
   return true;
+}
+
+// One ESPN scoreboard detail of 'match' between MatchStore::beginEvents()
+// and endEvents(). Event types the display does not show are skipped.
+void espnDetail(JsonVariantConst row, MatchStore& store,
+                const StoredMatch& match) {
+  StoredEvent e;
+  if (!espnEvent(row, e)) return;
+  e.actor = side(store, match, numericId(row["team"]["id"]));
+  if (scoring(e.type))
+    e.beneficiary = e.type == EventType::kOwnGoal ? opposite(e.actor) : e.actor;
+  add(store, e);
 }
 
 bool tableRow(JsonVariantConst row, MatchStore& store, const MapContext& c) {
@@ -474,6 +457,11 @@ bool storeMatch(JsonVariantConst row, MatchStore& store, const MapContext& c) {
   StoredMatch m;
   m.competition = c.competition;
   m.provider = c.provider;
+  // The id first: a row without one must not add teams or round labels.
+  m.id =
+      numericId(c.provider == cfg::Provider::kApiFootball ? row["fixture"]["id"]
+                                                          : row["id"]);
+  if (m.id == 0) return false;
   TeamRef home, away;
   if (c.provider == cfg::Provider::kApiFootball)
     apiFootballMatch(row, m, store, c, home, away);
@@ -481,7 +469,6 @@ bool storeMatch(JsonVariantConst row, MatchStore& store, const MapContext& c) {
     footballDataMatch(row, m, store, c, home, away);
   else
     espnMatch(row, m, store, c, home, away);
-  if (m.id == 0) return false;
   m.home = home.index;
   m.away = away.index;
   if (isOwn(c, home, away)) m.flags |= kMatchOwn;
@@ -490,25 +477,10 @@ bool storeMatch(JsonVariantConst row, MatchStore& store, const MapContext& c) {
           c.provider == cfg::Provider::kEspn)) {
     for (JsonVariantConst detail :
          row["competitions"][0]["details"].as<JsonArrayConst>())
-      storeEvent(detail, store, m, c.provider);
+      espnDetail(detail, store, m);
     store.endEvents(true);
   }
   return true;
-}
-
-void storeEvent(JsonVariantConst row, MatchStore& store,
-                const StoredMatch& match, cfg::Provider provider) {
-  StoredEvent e;
-  const bool known = provider == cfg::Provider::kApiFootball
-                         ? apiFootballEvent(row, e)
-                     : provider == cfg::Provider::kEspn ? espnEvent(row, e)
-                                                        : false;
-  if (!known) return;
-  e.actor = side(store, match, numericId(row["team"]["id"]));
-  if (scoring(e.type))
-    e.beneficiary =
-        e.type == EventType::kOwnGoal ? opposite(e.actor) : e.actor;
-  add(store, e);
 }
 
 void storeSummaryEvent(JsonVariantConst row, MatchStore& store,

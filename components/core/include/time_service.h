@@ -47,6 +47,10 @@ void init();
 // the C library parses the rule.
 void applySettings();
 
+// Retries a zone that could not be applied (no memory for the rule) every
+// cfg::kTimeZoneRetryMs; the previous zone stays until then. App task.
+void poll();
+
 // Sets the wall clock (UTC) and marks it valid; logs and counts the first
 // set and every jump above cfg::kTimeJumpThresholdS. ESP_FAIL: the clock
 // refused the value, nothing changed.

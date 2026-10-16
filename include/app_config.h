@@ -144,6 +144,8 @@ inline constexpr TimeZone kTimeZones[] = {
 };
 inline constexpr std::size_t kTimeZoneLabelMaxChars = 32;
 inline constexpr char kTimeZoneDefault[] = "Europe/Berlin";
+// Retry delay after the zone rule could not be applied (no memory).
+inline constexpr uint32_t kTimeZoneRetryMs = 10000;
 // A wall-clock change larger than this is a jump: logged as a warning and
 // counted in timekeeping::Status::step_count (a new provider-data baseline).
 // Smaller changes, such as the regular SNTP resync, are neither.
@@ -336,16 +338,23 @@ inline constexpr std::size_t kNameBytes = 64;
 // Longest search text of a competition or team list request.
 inline constexpr std::size_t kSelectionTextMaxBytes = 48;
 inline constexpr std::size_t kMatchEvents = 12;
-// Compact match store (OQ-227, football::MatchStore), sized for eight
-// competitions: teams of all tables and stored matches (one entry per
-// provider and team id; at most 255, the directory index is one byte),
-// matches of every competition, table rows of all competitions, own-club
-// matches with full names and events, the shared event pool and round labels.
+// Compact match store (OQ-227, football::MatchStore), sized for the
+// envelope of OQ-290: four 36-team and four 20-team competitions with two
+// matchdays each (224 matches, 224 table rows; 224 teams without shared
+// ones). Teams of all tables and stored matches (one entry per provider and
+// team id; at most 254, the directory index is one byte), matches of every
+// competition, table rows of all competitions, own-club matches with full
+// names and events, the shared event pool (four full own matches, OQ-292)
+// and round labels. Beyond it a competition shows a notice (E19).
 inline constexpr std::size_t kStoreTeams = 240;
-inline constexpr std::size_t kStoreMatches = 192;
-inline constexpr std::size_t kStoreTableRows = 192;
+inline constexpr std::size_t kStoreMatches = 224;
+inline constexpr std::size_t kStoreTableRows = 224;
+// Rows a table refresh stages before it replaces the stored table (OQ-291,
+// OQ-309): the largest merged group table known (54 rows) fits; a longer
+// table keeps the stored one and shows the notice.
+inline constexpr std::size_t kStoreTableStageRows = 64;
 inline constexpr std::size_t kStoreOwnMatches = 8;
-inline constexpr std::size_t kStoreEvents = 32;
+inline constexpr std::size_t kStoreEvents = 48;
 inline constexpr std::size_t kStoreRoundLabels = 24;
 // Matches of one competition whose kickoffs are less than this apart form
 // one matchday (OQ-201, OQ-224).
@@ -376,7 +385,8 @@ inline constexpr uint32_t kWifiFallbackMs = 300000;
 // Longest time a phone on the setup AP postpones home-network attempts.
 inline constexpr uint32_t kWifiApClientHoldMs = 300000;
 inline constexpr uint32_t kWifiAuthRetryMs[] = {10000, 30000, 60000};
-// Retry delay after a radio reconfiguration failed in the WiFi driver.
+// Retry delay after a radio reconfiguration or an AP mode change failed in
+// the WiFi driver.
 inline constexpr uint32_t kWifiRadioRetryMs = 10000;
 // Station modem sleep (IDF default WIFI_PS_MIN_MODEM) is off: the device is
 // mains powered, and in modem sleep the AP holds downlink frames until the

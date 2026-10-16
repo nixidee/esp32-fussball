@@ -45,6 +45,9 @@ using namespace ArduinoJson;
 namespace {
 using settings::Reason;
 using Serial = SessionTable::Serial;
+// Longest owner's short name in bytes (the stored text, UTF-8).
+constexpr std::size_t kShortNameBytes =
+    sizeof(football::TeamInfo{}.custom.data) - 1;
 
 SessionTable sessions;
 // Guards 'sessions': the HTTP task changes it, the debug task reads it.
@@ -240,6 +243,40 @@ const Fault& faultFor(esp_err_t err) {
     default: return fault::kInternal;
   }
 }
+// Appends 'text' to out[used..] as JSON string content (quotes, backslashes
+// and control characters escaped) and keeps 'keep' bytes of 'cap' free. A
+// text that does not fit is cut before a whole character and ends in "...".
+std::size_t jsonText(char* out, std::size_t cap, std::size_t used,
+                     const char* text, std::size_t keep) {
+  const std::size_t end = cap - keep - 3;  // room for "..."
+  for (const char* p = text; *p != 0;) {
+    const auto c = static_cast<unsigned char>(*p);
+    char piece[8];
+    std::size_t n = 1;     // bytes written
+    std::size_t step = 1;  // bytes read
+    if (c == '"' || c == '\\') {
+      piece[0] = '\\';
+      piece[1] = static_cast<char>(c);
+      n = 2;
+    } else if (c < 0x20) {
+      n = static_cast<std::size_t>(
+          snprintf(piece, sizeof(piece), "\\u%04x", c));
+    } else {
+      step = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+      // A UTF-8 character moves whole; a cut-off one ends with the text.
+      for (n = 0; n < step && p[n] != 0; ++n) piece[n] = p[n];
+      step = n;
+    }
+    if (used + n > end) {
+      memcpy(out + used, "...", 3);
+      return used + 3;
+    }
+    memcpy(out + used, piece, n);
+    used += n;
+    p += step;
+  }
+  return used;
+}
 // Answers with {"error", "code"[, "field"]}. The unread request body is
 // drained first, so the client receives the answer instead of a reset (D6);
 // only an undrainable body ends in a closed connection.
@@ -257,14 +294,25 @@ esp_err_t error(httpd_req_t* req, const char* status, const char* code,
   httpd_resp_set_type(req, "application/json");
   httpd_resp_set_hdr(req, "Cache-Control", "no-store");
   if (!drained) httpd_resp_set_hdr(req, "Connection", "close");
+  // Each text keeps room for the syntax and texts after it, so the answer is
+  // valid JSON even for a long or odd field (an unknown key).
   char result[256];
-  if (field)
-    snprintf(result, sizeof(result),
-             "{\"error\":\"%s\",\"code\":\"%s\",\"field\":\"%s\"}", message,
-             code, field);
-  else
-    snprintf(result, sizeof(result), "{\"error\":\"%s\",\"code\":\"%s\"}",
-             message, code);
+  std::size_t used = 0;
+  auto syntax = [&](const char* s) {
+    const auto n = strlen(s);
+    memcpy(result + used, s, n);
+    used += n;
+  };
+  syntax("{\"error\":\"");
+  used = jsonText(result, sizeof(result), used, message, 64);
+  syntax("\",\"code\":\"");
+  used = jsonText(result, sizeof(result), used, code, 24);
+  if (field) {
+    syntax("\",\"field\":\"");
+    used = jsonText(result, sizeof(result), used, field, 3);
+  }
+  syntax("\"}");
+  result[used] = 0;
   httpd_resp_sendstr(req, result);
   return drained ? ESP_OK : ESP_FAIL;
 }
@@ -492,7 +540,7 @@ esp_err_t page(httpd_req_t* req) {
 
 // ---- Reading ---------------------------------------------------------------
 // Read endpoints need no session (docs/API.md); a token the request does
-// carry is accepted and moves the expiry of its session.
+// carry is accepted and moves the expiry of its session (readBoundary()).
 esp_err_t getSession(httpd_req_t* req) {
   Request request(req);
   Doc d;
@@ -518,11 +566,13 @@ esp_err_t getSchema(httpd_req_t* req) {
   out["antenna"] = hw::kBoard.has_antenna_switch;
   out["ota_max"] = ota::capacity();
   out["selection_text_max"] = cfg::kSelectionTextMaxBytes;
+  // The page checks imported short names against these before any write.
+  out["short_names_max"] = cfg::kShortNamesMax;
+  out["short_name_max"] = kShortNameBytes;
   return json(req, d.doc);
 }
 esp_err_t getStatus(httpd_req_t* req) {
   Request request(req);
-  if (httpd_req_get_hdr_value_len(req, "X-CSRF-Token") > 0) authenticate(req);
   Doc d;
   auto out = d.doc.to<JsonObject>();
   const auto net = network::status();
@@ -575,7 +625,6 @@ esp_err_t getStatus(httpd_req_t* req) {
   out["provider_busy"] = data.busy;
   out["last_update_ms"] = data.fetched_ms;
   out["data_stale"] = data.stale;
-  out["matches_truncated"] = data.matches_truncated;
   out["next_request_ms"] = data.next_ms;
   out["next_request_reason"] = football::cadenceName(data.cadence);
   auto counts = out["requests"].to<JsonArray>();
@@ -621,6 +670,14 @@ esp_err_t getStatus(httpd_req_t* req) {
       row["code"] = code;
       row["error_provider"] = football::providerName(state->provider);
       if (state->http) row["http"] = state->http;
+    }
+    // What the device could not hold (OQ-310), whatever the cause shown.
+    if (state && state->notices) {
+      auto missing = row["missing"].to<JsonArray>();
+      if (state->notices & football::kNoticeMatches) missing.add("matches");
+      if (state->notices & football::kNoticeTable) missing.add("table");
+      if (state->notices & football::kNoticeTeams) missing.add("teams");
+      if (state->notices & football::kNoticeEvents) missing.add("events");
     }
     if (state && state->fetched_ms) row["last_update_ms"] = state->fetched_ms;
   }
@@ -726,7 +783,7 @@ bool shortNameValid(JsonObjectConst in, Reason& why, const char*& field) {
     return false;
   }
   why = Reason::kTooLong;
-  if (name.size() > sizeof(football::TeamInfo{}.custom.data) - 1) return false;
+  if (name.size() > kShortNameBytes) return false;
   why = Reason::kInvalid;
   for (std::size_t i = 0; i < name.size(); ++i) {
     const auto c = static_cast<unsigned char>(name.c_str()[i]);
@@ -762,7 +819,7 @@ esp_err_t putTeams(httpd_req_t* req) {
   if (const auto* f = admit(req, d.doc, nullptr, true)) return error(req, *f);
   const auto in = d.doc.as<JsonObjectConst>();
   for (const auto key : in)
-    if (strcmp(key.key().c_str(), "short_names"))
+    if (!sameText(key.key(), "short_names"))
       return invalid(req, Reason::kUnknownKey, "key rejected",
                      key.key().c_str());
   const auto list = in["short_names"];
@@ -812,9 +869,9 @@ constexpr const char* kStockNames[] = {"crest", "background"};
 static_assert(std::size(kStockNames) == cfg::kStockImageCount,
               "one API name per stock image");
 // The role called 'name'; cfg::kStockImageCount if there is none.
-cfg::StockImage roleNamed(const char* name) {
-  for (std::size_t i = 0; name != nullptr && i < std::size(kStockNames); ++i)
-    if (!strcmp(name, kStockNames[i])) return static_cast<cfg::StockImage>(i);
+cfg::StockImage roleNamed(std::string_view name) {
+  for (std::size_t i = 0; i < std::size(kStockNames); ++i)
+    if (name == kStockNames[i]) return static_cast<cfg::StockImage>(i);
   return cfg::kStockImageCount;
 }
 esp_err_t getImages(httpd_req_t* req) {
@@ -1035,7 +1092,7 @@ esp_err_t reset(httpd_req_t* req) {
   Doc d;
   if (const auto* f = admit(req, d.doc, nullptr, true)) return error(req, *f);
   const auto in = d.doc.as<JsonObjectConst>();
-  if (strcmp(in["confirm"] | "", "reset"))
+  if (!sameText(in["confirm"].as<JsonString>(), "reset"))
     return invalid(req, Reason::kInvalid, "confirmation required", "confirm");
   for (const char* option : {"images", "format_storage"})
     if (!in[option].isNull() && !in[option].is<bool>())
@@ -1062,7 +1119,7 @@ esp_err_t repairImages(httpd_req_t* req) {
   Request request(req);
   Doc d;
   if (const auto* f = admit(req, d.doc, nullptr, true)) return error(req, *f);
-  if (strcmp(d.doc["confirm"] | "", "repair"))
+  if (!sameText(d.doc["confirm"].as<JsonString>(), "repair"))
     return invalid(req, Reason::kInvalid, "confirmation required", "confirm");
   network::HeavyGuard guard;
   if (!guard) return error(req, fault::kBusy);
@@ -1179,11 +1236,11 @@ esp_err_t postDisplay(httpd_req_t* req) {
     return invalid(req, Reason::kRequired, "display action required", "action");
   if (!value.is<const char*>())
     return invalid(req, Reason::kType, "display action rejected", "action");
-  const char* name = value.as<const char*>();
+  const auto name = value.as<JsonString>();
   ui::Action action;
-  if (!strcmp(name, "next"))
+  if (sameText(name, "next"))
     action = ui::Action::kNext;
-  else if (!strcmp(name, "ip"))
+  else if (sameText(name, "ip"))
     action = ui::Action::kShowIp;
   else
     return invalid(req, Reason::kInvalid, "display action rejected", "action");
@@ -1199,13 +1256,11 @@ esp_err_t deleteImage(httpd_req_t* req) {
   Request request(req);
   Doc d;
   if (const auto* f = admit(req, d.doc, nullptr, true)) return error(req, *f);
-  Reason why;
+  // Id 0 passes smallInt() and is out of range like one above the maximum.
+  Reason why = Reason::kRange;
   if (!smallInt(d.doc["id"], cfg::kImageLibraryMax, why) ||
       d.doc["id"].as<uint8_t>() < 1)
-    return invalid(req, why == Reason::kRequired || why == Reason::kType
-                            ? why
-                            : Reason::kRange,
-                   "image id required", "id");
+    return invalid(req, why, "image id required", "id");
   network::HeavyGuard guard;
   if (!guard) return error(req, fault::kBusy);
   const auto err = images::remove(d.doc["id"].as<uint8_t>());
@@ -1223,7 +1278,8 @@ esp_err_t postImageRole(httpd_req_t* req) {
     return invalid(req, Reason::kRequired, "image role required", "role");
   if (!name.is<const char*>())
     return invalid(req, Reason::kType, "image role rejected", "role");
-  const auto role = roleNamed(name.as<const char*>());
+  const auto text = name.as<JsonString>();
+  const auto role = roleNamed(std::string_view(text.c_str(), text.size()));
   if (role == cfg::kStockImageCount)
     return invalid(req, Reason::kInvalid, "image role rejected", "role");
   const auto action = d.doc["action"];
@@ -1231,8 +1287,8 @@ esp_err_t postImageRole(httpd_req_t* req) {
     return invalid(req, Reason::kRequired, "role action required", "action");
   if (!action.is<const char*>())
     return invalid(req, Reason::kType, "role action rejected", "action");
-  const bool copy = !strcmp(action.as<const char*>(), "copy");
-  if (!copy && strcmp(action.as<const char*>(), "reset"))
+  const bool copy = sameText(action.as<JsonString>(), "copy");
+  if (!copy && !sameText(action.as<JsonString>(), "reset"))
     return invalid(req, Reason::kInvalid, "role action rejected", "action");
   Reason why = Reason::kRange;
   if (copy && (!smallInt(d.doc["id"], cfg::kImageLibraryMax, why) ||
@@ -1475,6 +1531,13 @@ struct Route {
   // WebSocket route when set: decides before httpd answers the handshake.
   esp_err_t (*handshake)(httpd_req_t*);
 };
+// The common boundary of every read route: a token the request carries
+// moves the expiry of its session, then the route answers (a read needs no
+// session, so an unknown or missing token changes nothing).
+esp_err_t readBoundary(httpd_req_t* req) {
+  if (httpd_req_get_hdr_value_len(req, "X-CSRF-Token") > 0) authenticate(req);
+  return static_cast<const Route*>(req->user_ctx)->handler(req);
+}
 constexpr uint16_t kMaxHandlers = 40;
 constexpr Route kRoutes[] = {
     {"/", HTTP_GET, page, nullptr},
@@ -1529,7 +1592,11 @@ esp_err_t init() {
     httpd_uri_t uri{};
     uri.uri = route.path;
     uri.method = route.method;
-    uri.handler = route.handler;
+    // Reads pass the session boundary; the debug socket authenticates in
+    // its handshake.
+    const bool read = route.method == HTTP_GET && route.handshake == nullptr;
+    uri.handler = read ? readBoundary : route.handler;
+    uri.user_ctx = const_cast<Route*>(&route);
     uri.is_websocket = route.handshake != nullptr;
     uri.ws_pre_handshake_cb = route.handshake;
     err = httpd_register_uri_handler(server, &uri);

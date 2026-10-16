@@ -1367,9 +1367,9 @@ start without stored data during the hold time, *Current matchday* with
 ESPN shows the next matchday, because the planner no longer fetches the
 finished one. OpenLigaDB's Champions League 2026 data set holds placeholder
 kickoffs (all on one past date), so that competition shows no matches.
-The stepping is not yet checked in the renderer or on the device.
+The stepping is not yet checked on the device.
 
-## ADR-037 — Status per competition, error codes, status pill · Accepted 2026-10-15
+## ADR-037 — Status per competition, error codes, status pill · Accepted 2026-10-15 · cause E19 added by ADR-038
 
 **Context:** a failure of one competition was reported as one global error
 text, so the owner could not tell which competition failed or why; the
@@ -1405,6 +1405,63 @@ a pill on every screen change (repeats a known state on every cycle step).
 
 **Cost and boundary:** C6 build static RAM −108 B (146,604 B), flash
 +7,138 B (1,623,248 B) against ADR-036, embedded page +3,247 B gzip
-(64,321 B). The mapping of HTTP and transport failures to E07–E15 runs in
-the provider service and is not yet host-tested; the pill and the notice
-cards are checked in the Web UI preview, not yet in the device renderer.
+(64,321 B). The mapping of HTTP statuses and transport results to E07–E15
+is pure football code (`fetchCause` in `football_model`), host-tested since
+2026-10-15 (OQ-288); only the conversion of the ESP-IDF error code into its
+class stays in the provider service. The pill and the notice cards are
+checked in the Web UI preview, not yet in the device renderer.
+
+## ADR-038 — Store envelope, table stage, store-full notice E19 · Accepted 2026-10-15
+
+**Context:** the match store held 192 matches, 192 table rows and 32
+events. A full row pool deleted the stored table of a competition before
+its new table was complete, so a response that broke off lost the table.
+Of the four "did not fit" notices only "matches" was shown (a global Web
+warning without a code); table, teams and events notices were never shown
+and never cleared. Real ESPN group tournaments arrive as one merged table
+of 48 (World Cup 2026) or 54 rows (World Cup qualifying, Nations League).
+
+**Decision:**
+- Envelope: four 36-team and four 20-team competitions with two matchdays
+  each: 224 matches (`kStoreMatches`), 224 table rows (`kStoreTableRows`),
+  240 teams (`kStoreTeams`, unchanged), 8 own-match slots and 48 events
+  (`kStoreEvents`, four full own matches) (OQ-290, OQ-292).
+- A new table is received into its own stage of 64 rows
+  (`kStoreTableStageRows`); the stored table stays until the new one is
+  complete and fits, then replaces it (OQ-291, OQ-309).
+- In a full event pool the own match farthest from now gives up its oldest
+  event to a nearer one, so live and next own matches win (OQ-292).
+- Whatever did not fit is a per-competition notice with the cause
+  `store_full` (E19): the Web UI competition row shows "Unvollständig",
+  what is missing, the action and the code; the display treats it like
+  `unmaintained` (warning tone, data stay visible, no retry); a failed
+  request takes precedence (OQ-310). The global "not all matches loaded"
+  warning and the REST field `matches_truncated` are removed.
+- Each kind of data clears its own part (OQ-311): matches and match teams
+  after a complete fixtures run (live requests set but never clear them),
+  table and table teams when a new table replaces the stored one, events
+  when no own match of the competition still lacks events for lack of
+  space (match flag `kMatchEventsPoolCut`).
+
+**Alternatives:** a larger fixed store (RAM the C6 does not have); a heap
+store (fragmentation next to TLS and the parser); staging in the row pool
+(the old destructive rule); a 36-row stage (loses every group tournament
+table); clearing all notices on any successful request (a live request
+would hide missing fixtures); a global warning without a code (does not say
+which competition or what is missing).
+
+**Cost and boundary:** C6 build static RAM +4,048 B (150,652 B; store
+26,712 B, +3,984 B), flash +1,976 B (1,625,234 B, 88.6 %), embedded page
++239 B gzip (64,475 B) against ADR-037 and the step-5a fixes. Real ESPN
+tables replayed through the host parser and planner: 48, 54, 36, 30 and
+18 rows are stored, a mix of 4 × 36 + 4 × 18 rows fits (216 of 224), a
+48-row table beyond the pool gives the table notice and keeps the stored
+tables, and fits after a competition is removed; table bodies at most
+171,197 B (limit 262,144 B). Real ESPN fixtures and tables of
+2026-10-16 for 4 × Champions League + 4 × Premier League fill the store
+exactly (224 of 224 matches, 224 of 224 rows) without a notice; three UEFA
+cups, the Championship and four leagues need 190 matches, 210 rows and 179
+teams. Bodies at most 202,542 B. A single scoreboard match parses to up to
+32,094 B on the 64-bit host, above the C6 parser cap of 24,576 B; the
+target size is not measured (open, not caused here). The notice is checked
+in the Web UI preview, not in the device renderer.

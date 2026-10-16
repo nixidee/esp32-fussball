@@ -34,6 +34,7 @@ const char* causeKey(Cause cause) {
     case Cause::kUnmaintained: return "unmaintained";
     case Cause::kNoSeason: return "no_season";
     case Cause::kCounter: return "counter";
+    case Cause::kStoreFull: return "store_full";
   }
   return "other";
 }
@@ -58,6 +59,7 @@ uint8_t causeNumber(Cause cause) {
     case Cause::kUnmaintained: return 16;
     case Cause::kNoSeason: return 17;
     case Cause::kCounter: return 18;
+    case Cause::kStoreFull: return 19;
   }
   return 15;
 }
@@ -78,6 +80,27 @@ void errorCode(char (&out)[kErrorCodeBytes], cfg::Provider provider,
              static_cast<unsigned>(http));
   else
     snprintf(out, sizeof(out), "%s E%02u", abbreviation, number);
+}
+Cause errorCause(FetchError error) {
+  switch (error) {
+    case FetchError::kNoMemory: return Cause::kMemory;
+    case FetchError::kTooLarge: return Cause::kTooLarge;
+    case FetchError::kBadResponse: return Cause::kBadResponse;
+    case FetchError::kOther: return Cause::kOther;
+  }
+  return Cause::kOther;
+}
+Cause fetchCause(FetchError error, int status) {
+  if (error != FetchError::kOther) return errorCause(error);
+  if (status == 429) return Cause::kRateLimited;
+  if (status == 401 || status == 403) return Cause::kAuth;
+  if (status == 404) return Cause::kNotFound;
+  if (status == 0) return Cause::kConnect;
+  return status != 200 ? Cause::kHttp : Cause::kOther;
+}
+uint16_t errorStatus(int status) {
+  return status >= 300 && status <= UINT16_MAX ? static_cast<uint16_t>(status)
+                                               : 0;
 }
 const char* phaseName(Phase phase) {
   switch (phase) {

@@ -348,6 +348,41 @@ void test_openliga_live_checks_the_change_date_per_round() {
   TEST_ASSERT_FALSE(feed(r, "[]"));
 }
 
+// OQ-311: only a complete fixtures run sees every match, so only it clears
+// the "match list full" notice; a broken run and live requests keep it.
+void test_matches_notice_clears_only_after_a_complete_fixtures_run() {
+  setSource(cfg::Provider::kOpenLigaDb, "bl1", "", "2026");
+  const int64_t now = football::parseUtc("2026-10-16T18:40:00Z") - kBase;
+  const std::string round6 = "[" + olgRow(1, "2026-10-16T18:30:00Z", 6) + "]";
+  store.flag(entry.id, football::kNoticeMatches, true);
+  Request r = expect(cfg::DataType::kFixtures,
+                     "https://api.openligadb.de/getmatchdata/bl1", now);
+  TEST_ASSERT_TRUE(feed(r, round6.c_str()));
+  TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(now)));
+  expect(cfg::DataType::kFixtures,
+         "https://api.openligadb.de/getmatchdata/bl1/2026/7", now + 2);
+  TEST_ASSERT_EQUAL(Step::kDone, planner.finish(false, at(now + 2)));
+  TEST_ASSERT_EQUAL_UINT8(football::kNoticeMatches, store.notices(entry.id));
+  r = expect(cfg::DataType::kLive,
+             "https://api.openligadb.de/getlastchangedate/bl1/2026/6", now + 4);
+  TEST_ASSERT_TRUE(feed(r, R"("2026-10-16T18:39:00.1")"));
+  TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(now + 4)));
+  r = expect(cfg::DataType::kLive,
+             "https://api.openligadb.de/getmatchdata/bl1/2026/6", now + 6);
+  TEST_ASSERT_TRUE(feed(r, round6.c_str()));
+  TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(now + 6)));
+  TEST_ASSERT_EQUAL_UINT8(football::kNoticeMatches, store.notices(entry.id));
+  r = expect(cfg::DataType::kFixtures,
+             "https://api.openligadb.de/getmatchdata/bl1", now + 60);
+  TEST_ASSERT_TRUE(feed(r, round6.c_str()));
+  TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(now + 60)));
+  r = expect(cfg::DataType::kFixtures,
+             "https://api.openligadb.de/getmatchdata/bl1/2026/7", now + 62);
+  TEST_ASSERT_TRUE(feed(r, "[]"));
+  TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(now + 62)));
+  TEST_ASSERT_EQUAL_UINT8(0, store.notices(entry.id));
+}
+
 void test_espn_fixtures_from_match_days() {
   setSource(cfg::Provider::kEspn, "ger.1", "598");
   Request r = expect(cfg::DataType::kFixtures,
@@ -556,9 +591,15 @@ void test_api_football_season_kept_without_a_clock() {
 
 void test_football_data_urls() {
   setSource(cfg::Provider::kFootballData, "BL1", "", "2026");
+  // dateTo is exclusive: the horizon's last day and today's live matches
+  // need the following day as the end.
   expect(cfg::DataType::kFixtures,
          "https://api.football-data.org/v4/competitions/BL1/"
-         "matches?dateFrom=2026-10-07&dateTo=2026-10-21&season=2026");
+         "matches?dateFrom=2026-10-07&dateTo=2026-10-22&season=2026");
+  planner.finish(true, at(0));
+  expect(cfg::DataType::kLive,
+         "https://api.football-data.org/v4/competitions/BL1/"
+         "matches?dateFrom=2026-10-14&dateTo=2026-10-15&season=2026");
   planner.finish(true, at(0));
   expect(cfg::DataType::kTable,
          "https://api.football-data.org/v4/competitions/BL1/"
@@ -735,6 +776,7 @@ int main() {
   RUN_TEST(test_season_request_without_season_is_invalid);
   RUN_TEST(test_openliga_table);
   RUN_TEST(test_openliga_live_checks_the_change_date_per_round);
+  RUN_TEST(test_matches_notice_clears_only_after_a_complete_fixtures_run);
   RUN_TEST(test_espn_fixtures_from_match_days);
   RUN_TEST(test_espn_live_uses_the_match_day);
   RUN_TEST(test_espn_table);

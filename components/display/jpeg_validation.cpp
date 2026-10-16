@@ -15,16 +15,22 @@ namespace {
 struct Validation {
   FILE* file;
   int64_t deadline;
+  // Set when a callback stopped the decoder at the deadline, so the result
+  // is a timeout and not malformed data.
+  bool expired;
 };
+bool expired(Validation& context) {
+  if (esp_timer_get_time() / 1000 >= context.deadline) context.expired = true;
+  return context.expired;
+}
 size_t input(JDEC* decoder, uint8_t* bytes, size_t count) {
   auto& context = *static_cast<Validation*>(decoder->device);
-  if (esp_timer_get_time() / 1000 >= context.deadline) return 0;
+  if (expired(context)) return 0;
   if (bytes != nullptr) return fread(bytes, 1, count, context.file);
   return fseek(context.file, count, SEEK_CUR) == 0 ? count : 0;
 }
 int output(JDEC* decoder, void*, JRECT*) {
-  return esp_timer_get_time() / 1000 <
-         static_cast<Validation*>(decoder->device)->deadline;
+  return !expired(*static_cast<Validation*>(decoder->device));
 }
 }  // namespace
 esp_err_t validateJpeg(const char* path, uint16_t width, uint16_t height,
@@ -38,8 +44,12 @@ esp_err_t validateJpeg(const char* path, uint16_t width, uint16_t height,
   // Owned by the single admitted image writer, independent of the LVGL pool.
   alignas(4) static uint8_t work[4096];
   JDEC decoder{};
-  Validation context{file, deadline_ms};
+  Validation context{file, deadline_ms, false};
   auto result = jd_prepare(&decoder, input, work, sizeof(work), &context);
+  if (result != JDR_OK && context.expired) {
+    fclose(file);
+    return ESP_ERR_TIMEOUT;
+  }
   if (!end || result != JDR_OK || decoder.width != width ||
       decoder.height != height) {
     fclose(file);
@@ -47,7 +57,8 @@ esp_err_t validateJpeg(const char* path, uint16_t width, uint16_t height,
   }
   result = jd_decomp(&decoder, output, 0);
   fclose(file);
-  return result == JDR_OK ? ESP_OK : ESP_ERR_INVALID_RESPONSE;
+  if (result == JDR_OK) return ESP_OK;
+  return context.expired ? ESP_ERR_TIMEOUT : ESP_ERR_INVALID_RESPONSE;
 }
 void dropImageCache(const char* source) { lv_image_cache_drop(source); }
 }  // namespace display

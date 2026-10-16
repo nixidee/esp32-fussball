@@ -288,7 +288,9 @@ uint8_t fit(const char* text, const uint8_t* fonts, int count, int w,
     while (keep > 0 && text[keep - 1] == ' ') --keep;
   }
   const std::size_t total = keep + (cut ? sizeof(kEllipsis) - 1 : 0);
-  if (arena_used + total > kArena) {
+  // Each slice ends in a NUL: LVGL's expanded label measures the text to
+  // the terminator and ignores text_length there.
+  if (arena_used + total + 1 > kArena) {
     overflow = true;
     length = 0;
     return font;
@@ -296,7 +298,8 @@ uint8_t fit(const char* text, const uint8_t* fonts, int count, int w,
   offset = static_cast<uint16_t>(arena_used);
   memcpy(arena + arena_used, text, keep);
   if (cut) memcpy(arena + arena_used + keep, kEllipsis, sizeof(kEllipsis) - 1);
-  arena_used += total;
+  arena[arena_used + total] = '\0';
+  arena_used += total + 1;
   length = static_cast<uint16_t>(total);
   return font;
 }

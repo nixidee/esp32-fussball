@@ -34,6 +34,10 @@ class Lock {
 // library then uses UTC).
 const cfg::TimeZone* applied_zone = nullptr;
 Status state{false, Source::kNone, 0, 0, 0};
+// The settings' zone could not be applied; poll() retries at this time.
+// App task only, like applySettings().
+bool zone_pending = false;
+int64_t zone_retry_at = 0;
 
 enum class ZoneResult : uint8_t { kUnchanged, kChanged, kFailed };
 
@@ -98,17 +102,26 @@ void applySettings() {
     Lock lock;
     result = applyZoneLocked(*zone);
   }
+  zone_pending = result == ZoneResult::kFailed;
   switch (result) {
     case ZoneResult::kUnchanged: return;
     case ZoneResult::kFailed:
-      ESP_LOGE(kTag, "zone %s not applied (no memory), previous zone stays",
-               zone->label);
+      zone_retry_at = monotonicMs() + cfg::kTimeZoneRetryMs;
+      ESP_LOGE(kTag,
+               "zone %s not applied (no memory), previous zone stays; retry "
+               "in %lu s",
+               zone->label,
+               static_cast<unsigned long>(cfg::kTimeZoneRetryMs / 1000));
       return;
     case ZoneResult::kChanged:
       ESP_LOGI(kTag, "zone %s (%s)", zone->label, zone->rule);
       events::post(events::Event::kTimeChanged);
       return;
   }
+}
+
+void poll() {
+  if (zone_pending && monotonicMs() >= zone_retry_at) applySettings();
 }
 
 esp_err_t setTime(const timeval& utc, Source source) {

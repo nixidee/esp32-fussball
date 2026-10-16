@@ -74,6 +74,24 @@ it does not reboot, because the stored settings would meet the same error at
 boot. Until a retry succeeds the local network counts as unhealthy, so an OTA
 trial in that state is not confirmed.
 
+The other driver calls that can fail at run time are retried on the same
+10-second delay, without a reboot and without touching a working state:
+- Switching the setup AP on or off (`mode: <error>`). The reported AP state
+  (`ap` in the status) is the applied one: it changes only after the driver
+  accepted the new mode, so a failed start does not show a setup network
+  that is not there, and a failed stop does not hide one that still runs.
+- Setting the hostname for DHCP and mDNS (`hostname: <error>`). Until it
+  succeeds the previous name stays in use.
+- Starting the SNTP client (`SNTP init: <error>`), while the station is
+  connected.
+
+If the station lost and regained its IP (or the reverse) before the
+connection manager handled the first event, only the later event counts.
+
+A failed scan-result read releases the driver's scan list, as does a scan
+that ends after it was cancelled; the driver holds that list in heap until
+it is read or released.
+
 The device's `Kein WLAN` / `No WiFi` status means that the connection manager
 has not published a station IP lease. It does not distinguish scanning,
 authentication or initialization errors; the serial boot log reports a
@@ -106,7 +124,9 @@ The standard Picolibc `tzset()` and `localtime_r()` calls run behind the time
 service mutex. Rules derive from IANA tzdata 2026c footers and were compared
 with 2026e for 2026–2028. This is a recurring-rule set, not a historical time-zone
 database. Fixture instants remain UTC; local time is used for display and night
-mode. Clock validity starts false on every boot.
+mode. Clock validity starts false on every boot. If a new zone cannot be
+applied (no memory for the rule), the previous zone stays and the time
+service retries every 10 seconds (`kTimeZoneRetryMs`).
 
 All retries, deadlines, freshness and overlay durations use the monotonic ESP
 timer. A UTC correction cannot move these timers. Night windows include their

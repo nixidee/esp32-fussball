@@ -528,15 +528,15 @@ shape the image design:
   (temporary file, then rename), otherwise a replacement during a redraw fails.
 This is integration evidence only, not the supported-maximum envelope.
 
-### Current compiled resource ledger — 2026-10-15 (one source per competition, no fixture pairs, no settings migration, no core-data request, one job outcome protocol; compact match store, request scheduler and plans in the firmware, competition files and short names, Matchday screen and per-competition screen switches, one matchday module with current/next selection, status per competition with error codes and status pill; settings format 9 with competition store and request plans, image roles, font set 12/14/18/48, display design renderer, start screen, automatic season)
+### Current compiled resource ledger — 2026-10-15 (one source per competition, no fixture pairs, no settings migration, no core-data request, one job outcome protocol; compact match store, request scheduler and plans in the firmware, competition files and short names, Matchday screen and per-competition screen switches, one matchday module with current/next selection, status per competition with error codes and status pill, store envelope of 224 matches and rows with a 64-row table stage, 48 events and the store-full notice E19; settings format 9 with competition store and request plans, image roles, font set 12/14/18/48, display design renderer, start screen, automatic season)
 
 | Item | C6 candidate | Growth over the accepted core image |
 |---|---|---|
-| Firmware binary | 1,624,000 B | +1,107,696 B |
-| PlatformIO flash report | 1,623,248 B, 88.5% of 1,835,008 B | +1,107,584 B |
-| Static data/BSS | 146,604 B | +98,384 B |
+| Firmware binary | 1,625,984 B | +1,109,680 B |
+| PlatformIO flash report | 1,625,234 B, 88.6% of 1,835,008 B | +1,109,570 B |
+| Static data/BSS | 150,652 B | +102,432 B |
 | Linked DIRAM, official IDF size report | not re-measured (266,066 B at the 2026-10-10 image) | — |
-| Match store | 22,728 B (BSS) | Included above; replaced three snapshots of 27,200 B (81,600 B) |
+| Match store | 26,712 B (BSS) | Included above; replaced three snapshots of 27,200 B (81,600 B) |
 | Short-name table | 48 entries of 32 B (BSS) | Included above |
 | Football files on LittleFS | about 3 KB (one block) per competition, short names up to 1,552 B | Budget 48 KiB for all football files |
 | Settings model / longest encoded record | 832 / 806 B | Format 9 (variable length, ceiling 2,048 B); formats 1 to 8 are not read (reported as outdated, initial values apply, the old record stays until the next save) |
@@ -672,6 +672,23 @@ UI cause and action texts) changed flash by +7,138 B to 1,623,248 B and
 static RAM by −108 B to 146,604 B (estimate flash +1…2 KB, static RAM
 +50…100 B; the static RAM reduction is not itemised); the embedded page went from 61,074 B to 64,321 B gzip
 (+3,247 B; the cause and action texts in two languages).
+Moving the mapping of HTTP statuses and transport results to causes into
+host-compiled football code (`fetchCause`, `errorCause`, `errorStatus` in
+`football_model`) and three Web UI fixes (the header connection chip in
+the error state, provider display names in the overview, four unused
+translations removed) changed flash by +10 B to 1,623,258 B and static RAM
+by 0 B (estimate ±0); the embedded page went from 64,321 B to 64,236 B gzip
+(−85 B).
+The store envelope (224 matches and table rows, 240 teams, 48 events, a
+64-row table stage, the store-full notice E19 with per-kind clearing)
+changed static RAM by +4,048 B to 150,652 B (estimate +3.9 KB; the store
+grew by 3,984 B) and flash by +1,976 B to 1,625,234 B (estimate +1…2 KB);
+the embedded page went from 64,236 B to 64,475 B gzip (+239 B; the E19
+texts). Replayed real ESPN fixtures and tables fill the store exactly with
+4 × Champions League + 4 × Premier League (224 matches, 224 rows, no
+notice); bodies stay at most 202,542 B (limit 256 KiB). A table row parses
+to at most 10,310 B, a scoreboard match to up to 32,094 B on the 64-bit
+host, above the 24 KiB parser cap; the C6 figure is not measured.
 No flash-reserve gate is
 accepted. Free heap is not derivable from the static figures: dynamic stacks,
 network, TLS, parser, DMA and library charges must still be accounted for. Peak heap,

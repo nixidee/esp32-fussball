@@ -57,7 +57,9 @@ the request runs or only waits for the 2-second device gap. A waiting list
 never blocks the device: the jobs of other providers run meanwhile.
 
 The schema publishes `ota_max` from the actual inactive OTA slot and
-`selection_text_max` from the shared search/country capacity. `firmware_id`
+`selection_text_max` from the shared search/country capacity, and the
+short-name bounds of `PUT /teams`: `short_names_max` (entries over all
+competitions) and `short_name_max` (bytes per name). `firmware_id`
 in status is the full 64-character lowercase hexadecimal ELF SHA256 from the
 app descriptor. It distinguishes builds with equal version strings; it is
 not the shortened hash printed by the panic handler.
@@ -177,7 +179,10 @@ outdated (older firmware kept the competitions in the settings record).
 and `cause` (a cause key below; empty while the competition is fine). With
 a cause the row adds `code` (short error code), `error_provider` (the
 provider of the failed request or of the unmaintained matches) and `http`
-(the HTTP status it answered with, only when there is one).
+(the HTTP status it answered with, only when there is one). `missing`
+lists what of the competition the device could not hold, whatever the cause
+shown: any of `matches`, `table`, `teams` and `events` (absent when
+everything fitted).
 `last_update_ms` is the monotonic time of the competition's last successful
 request (absent before the first one). `own_match.competition` is the id of
 the competition of the club's current or next match. `provider_started` is
@@ -193,10 +198,16 @@ A competition whose last request failed has a `cause`; it keeps its earlier
 data until a later request succeeds, while the other competitions update.
 `unmaintained` is a state, not a failed request: the provider has left
 matches without a result for more than 24 hours after their kickoff.
-`matches_truncated`
-is true when not every match of a competition fitted the match store; it
-then holds the matches nearest in time and every tracked-club match that
-fits.
+`store_full` is a state as well: the requests succeeded, but not all data of
+the competition fitted the device's store (`missing` names which). The
+device then keeps the matches nearest in time and every tracked-club match
+that fits, keeps a stored table until a new one fits whole, and keeps the
+events of the club's live and next matches first. Each kind of data clears
+its own entry: `matches` (and the match teams) after a complete fixtures
+refresh, never after a live request alone; `table` (and the table teams)
+when a new table replaces the stored one; `events` when no tracked-club
+match of the competition still lacks events for lack of space. A failed
+request shows its own cause instead; `missing` is still reported.
 
 `next_request_ms` is the monotonic time the request scheduler wants to run
 the next provider request (compare with `uptime_s`; 0 = none scheduled) and
@@ -255,6 +266,7 @@ successful request clears the cause.
 | E16 | `unmaintained` | The provider leaves past matches without a result (more than 24 h) |
 | E17 | `no_season` | The provider reports no current season |
 | E18 | `counter` | The daily request counter could not be stored |
+| E19 | `store_full` | Not all data of the competition fit the device's store |
 
 `GET /wifi` reports its own `error_code` keys (above); the browser shows the
 key itself as the code. Failed requests answer with a `code` of their own
@@ -269,7 +281,9 @@ is checked before the token is issued. There are four session slots
 (`cfg::kSessionSlots`); a fifth login replaces the least recently used one, so
 two browsers can work in parallel. A session expires 15 minutes after its last
 authenticated request (sliding, `cfg::kSessionLifetimeMs`); every request that
-carries the token, including reads, moves the expiry. Saving settings keeps all
+carries the token, including every read endpoint, moves the expiry (one
+common boundary in front of all read routes; a read without a token or with
+an unknown one is answered unchanged and opens no session). Saving settings keeps all
 sessions; only changing the admin password ends every other session. `POST
 /logout` ends the caller's session. `GET /session` tells the page whether a
 password is set and whether its stored token is still valid.

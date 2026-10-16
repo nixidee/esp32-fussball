@@ -29,11 +29,17 @@ enum class Cause : uint8_t {
   kOther,         // any other failure
   kUnmaintained,  // the provider leaves past matches without a result
   kNoSeason,      // the provider reports no current season
-  kCounter        // the daily request counter could not be stored
+  kCounter,       // the daily request counter could not be stored
+  kStoreFull      // the device could not hold all data of the competition
 };
 // Number of causes, kNone included (tests walk every cause).
 inline constexpr std::size_t kCauseCount =
-    static_cast<std::size_t>(Cause::kCounter) + 1;
+    static_cast<std::size_t>(Cause::kStoreFull) + 1;
+// A state of the stored data, not a failed request (kUnmaintained,
+// kStoreFull): the data stay shown with a warning, there is no retry.
+inline constexpr bool dataNotice(Cause cause) {
+  return cause == Cause::kUnmaintained || cause == Cause::kStoreFull;
+}
 template <std::size_t N>
 struct Text {
   char data[N + 1]{};
@@ -99,6 +105,20 @@ uint8_t causeNumber(Cause cause);
 inline constexpr std::size_t kErrorCodeBytes = 16;
 void errorCode(char (&out)[kErrorCodeBytes], cfg::Provider provider,
                Cause cause, uint16_t http);
+// Class of a failed provider operation's error, independent of ESP-IDF (the
+// provider service converts its esp_err_t: ESP_ERR_NO_MEM,
+// ESP_ERR_INVALID_SIZE, ESP_ERR_INVALID_RESPONSE, anything else).
+enum class FetchError : uint8_t { kNoMemory, kTooLarge, kBadResponse, kOther };
+// Cause of a failure outside a sent request: memory, too large, bad response,
+// else kOther.
+Cause errorCause(FetchError error);
+// Cause of a failed request that was sent, from its error class and the HTTP
+// status it received (0 = no response): the error class first, then 429,
+// 401/403, 404, no response, any other status than 200; kOther after a 200.
+Cause fetchCause(FetchError error, int status);
+// HTTP status shown in the error code of a failed sent request: 300..65535,
+// else 0 (no response, or a 2xx response that could not be used).
+uint16_t errorStatus(int status);
 // Stable lower-case code of a match phase (REST API).
 const char* phaseName(Phase phase);
 int64_t parseUtc(const char* text);

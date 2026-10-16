@@ -30,6 +30,7 @@ const char* causeText(football::Cause cause, bool english) {
       return pick("Anbieter pflegt nicht", "Provider not updating");
     case Cause::kNoSeason: return pick("Keine Saison", "No season");
     case Cause::kCounter: return pick("Zähler defekt", "Counter failed");
+    case Cause::kStoreFull: return pick("Unvollständig", "Incomplete");
   }
   return pick("Abruf gescheitert", "Request failed");
 }

@@ -24,7 +24,7 @@ open.
 | Data set | Content | Where / lifetime | Size (C6) |
 |---|---|---|---|
 | Competition list | up to 8 entries: stable id, active flag, four screen switches, one source, display names of competition and club | own competition record (NVS), persistent | 1,226 B in RAM, record up to 1,234 B ([CONFIGURATION.md](CONFIGURATION.md)) |
-| Match store | matches, tables, team directory, round labels, own-match events and notices of all competitions | RAM, one static store, updated per provider response; reloaded from the competition files at boot | 22,728 B |
+| Match store | matches, tables, team directory, round labels, own-match events and notices of all competitions | RAM, one static store, updated per provider response; reloaded from the competition files at boot | 26,712 B |
 | Competition files | per active competition: its part of the match store, what its source resolved and when each data type last completed | LittleFS `comp_<id>.bin`, rewritten after new data (section 4.8) | about 3 KB for an 18-team league, one 4 KB block |
 | Short names | the owner's replacements of team short names, per provider and team id | LittleFS `short_names.bin` and RAM, persistent until a settings reset | 48 entries of 32 B in RAM, file up to 1,552 B |
 | Selection page | one page of a provider's competition or club list for the setup wizard | RAM, per request | 64 entries of 131 B |
@@ -83,15 +83,16 @@ football-data.org. Mapping details: [DATA_FLOW.md](DATA_FLOW.md).
 
 | Part | Capacity (`app_config.h`) | Record size | Content |
 |---|---|---|---|
-| Matches | 192 (`kStoreMatches`), all competitions | 40 B | section 4.3 |
+| Matches | 224 (`kStoreMatches`), all competitions | 40 B | section 4.3 |
 | Team directory | 240 (`kStoreTeams`) | 32 B | provider team id, provider, short name |
-| Table rows | 192 (`kStoreTableRows`), every competition | 14 B | section 4.5 |
+| Table rows | 224 (`kStoreTableRows`), every competition | 14 B | section 4.5 |
+| Table stage | 64 (`kStoreTableStageRows`), one table being received | 14 B | rows of a new table until it replaces the stored one |
 | Own matches | 8 (`kStoreOwnMatches`) | 148 B | match id, competition, full team names, up to 12 event indices |
-| Events | 32 (`kStoreEvents`) | 84 B | section 4.4 |
+| Events | 48 (`kStoreEvents`), shared by the own matches | 84 B | section 4.4 |
 | Round labels | 24 (`kStoreRoundLabels`) | 32 B | provider round text, shared by all matches of the round |
-| Notices | one per competition | 2 B | a match, table row, team or event did not fit |
+| Notices | one per competition | 3 B | a match, table row, team or event did not fit (E19), plus the bits noted in the running refresh |
 
-The whole store measures 22,728 B (pinned by the test suite).
+The whole store measures 26,712 B (pinned by the test suite).
 
 Team short name: OL `shortName`, ES `shortDisplayName` (partly English), AF
 none (the full name is used), FD `shortName`. They come with the fixtures,
@@ -156,22 +157,32 @@ the stored one.
   request planner and the display.
 - *Full store:* the match of another club farthest from now makes room
   when the incoming match is nearer or own; otherwise the incoming match is
-  skipped and the competition notes it. The list stays sorted by kickoff.
+  skipped and the competition notes it (notice `store_full`, E19). The
+  list stays sorted by kickoff.
 - *Score change:* the time is set when both scores are known and differ
   from the stored ones. *Final whistle:* the time the match is first seen
   finished; for a match never seen running the earlier of that time and
   kickoff + 110 minutes; both are marked estimated. *Estimates:* OpenLigaDB phases and minutes follow
   the clock every minute.
-- *Tables:* a new table is staged next to the stored one and replaces it
-  only when the response was complete and every row fit; a broken or empty
-  response keeps the stored table. OpenLigaDB positions come from the row
+- *Tables:* a new table is staged in its own buffer of
+  `kStoreTableStageRows` (64) rows next to the stored tables and replaces
+  the stored table of its competition only when the response was complete,
+  every row fit the stage and the row pool holds it after the old rows of
+  that competition are released; otherwise the stored table stays and the
+  competition notes it (E19). A broken or empty response keeps the stored
+  table. OpenLigaDB positions come from the row
   order and are marked estimated.
 - *Events:* own matches only, in provider order per origin (the source's
   list request, or its detail request — the ESPN match summary with the
   substitutions), at most 12. Each origin replaces only its own events;
   the other origin's events stay ahead of a new list. A full list gives way
   first with detail events, then the oldest; dropping a shown event flags
-  the match truncated. An event missing from a later complete list of its
+  the match truncated. The event pool (`kStoreEvents`, 48) is shared by the
+  own matches: when it is full, the own match farthest from now gives up
+  its oldest event to a nearer one (live and next matches win); a match
+  that loses events or gets none for lack of space is flagged and its
+  competition notes it (E19) until no own match of it is flagged any
+  more. An event missing from a later complete list of its
   own origin stays once as a removal marker; a response that broke off
   keeps every previous event.
 - *Settings changes:* a competition whose source changes, that is removed
@@ -197,10 +208,10 @@ list):
 |---|---|
 | `id`, `active` | stable competition id, competition active |
 | `fetched_ms` | monotonic time of its last successful request (0 = none yet); a failed competition keeps its earlier data |
-| `cause` | why its last request failed (`Cause`, keys and codes in [API.md](API.md#error-causes-and-codes)); `unmaintained` when a match of it kicked off more than 24 hours ago (`kUnmaintainedAfterS`), is neither finished, postponed, cancelled nor abandoned and has no result; none after a successful request |
+| `cause` | why its last request failed (`Cause`, keys and codes in [API.md](API.md#error-causes-and-codes)); `unmaintained` when a match of it kicked off more than 24 hours ago (`kUnmaintainedAfterS`), is neither finished, postponed, cancelled nor abandoned and has no result; otherwise `store_full` while it has a notice; none after a successful request |
 | `provider`, `http` | provider of the failed request (or of the unmaintained matches) and its HTTP status (0 = none) |
 | `stale` | its last request failed, or a shown match of it is in its live window and its last successful match request is older than `kDataStaleS` |
-| `matches_truncated` | a competition notes that a match did not fit | REST / Web UI |
+| `notices` | what of it did not fit the store: matches, table, match or table teams, events (`MatchStore::notices()`); REST `competitions[].missing` |
 | `configured` | at least one active competition (or demo) | setup card, stock image |
 
 ### 4.8 Competition files and short names
@@ -354,11 +365,11 @@ Without any matchday: the card "Spieltag / Keine Spiele".
 | Item | Limit | Shared by |
 |---|---|---|
 | Competitions | 8 (`kCompetitionMax`) | – |
-| Matches | 192 (`kStoreMatches`) | all competitions |
-| Table rows | 192 (`kStoreTableRows`) | all competitions' tables |
+| Matches | 224 (`kStoreMatches`) | all competitions |
+| Table rows | 224 (`kStoreTableRows`) | all competitions' tables |
 | Teams | 240 (`kStoreTeams`) | all competitions |
 | Own matches with full names and events | 8 (`kStoreOwnMatches`) | all competitions |
-| Events | 32 (`kStoreEvents`), 12 per match | own matches |
+| Events | 48 (`kStoreEvents`), 12 per match (`kMatchEvents`) | own matches |
 | Round labels | 24 (`kStoreRoundLabels`) | all competitions |
 | Selection page | 64 entries | – |
 | Stored matchdays | what the request plans fetch (current and next matchday, own fixtures within 7 days), until the end of the local day after the matchday | – |

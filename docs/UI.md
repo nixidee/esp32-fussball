@@ -196,9 +196,11 @@ hints, and a coloured ring:
 | Matchday or Table: a competition in the cycle failed and has nothing to show | the competition name, its short cause, "Neuer Versuch HH:MM" and the error code with the HTTP status | cause colour |
 | Own match screen without an own match | "Eigenes Spiel", "Kein Spiel" | neutral |
 
-The cause colour is the error colour, for "Anbieter pflegt nicht" (the
-provider leaves past matches without a result for more than 24 hours) the
-warning colour, which also has no "Neuer Versuch". The short causes are
+The cause colour is the error colour, for the two data notices the
+warning colour, which also has no "Neuer Versuch": "Anbieter pflegt nicht"
+(the provider leaves past matches without a result for more than 24 hours)
+and "Unvollständig" (E19: not all data of the competition fit the device's
+store; the data that fit stay visible). The short causes are
 listed in the firmware's cause texts; the Web UI explains each cause and its
 action in full (codes: [API.md](API.md#error-causes-and-codes)).
 
@@ -226,7 +228,8 @@ pill sits directly above the chip. Content by priority:
   successful request ("OLG E10 · Stand 14:05", cause colour); with stale
   data "Stand HH:MM" (warning colour); nothing else from other competitions;
 - elsewhere one failing competition as "code · name" ("APF E08 · Premier
-  League"), several as "N Wettbewerbe gestört" (error colour); else stale
+  League", cause colour), several as "N Wettbewerbe gestört" (error
+  colour, also when some of them only have a data notice); else stale
   data as "Stand HH:MM" of the oldest data shown, "Daten veraltet" without
   any (warning colour).
 

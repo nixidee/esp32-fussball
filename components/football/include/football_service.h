@@ -34,8 +34,11 @@ struct CompetitionState {
   bool active = false;
   // kNone: the last request succeeded. Otherwise why the last request
   // failed, or kUnmaintained: the provider does not maintain the
-  // competition (MatchStore::unmaintained()).
+  // competition (MatchStore::unmaintained()), or kStoreFull: the device
+  // could not hold all its data (OQ-310). A failed request goes first.
   Cause cause = Cause::kNone;
+  // MatchStore::notices() of the competition: which data did not fit.
+  uint8_t notices = 0;
   // Provider of the failed request (or of the unmaintained matches) and the
   // HTTP status it answered with (0 = no HTTP error status).
   cfg::Provider provider = cfg::kProviderDefault;
@@ -62,8 +65,6 @@ struct Status {
   int64_t fetched_ms;
   uint8_t matches;
   bool stale, busy;
-  // Not every match fitted the match list; it holds the nearest ones.
-  bool matches_truncated;
   CompetitionStates competitions;
   // Monotonic time the next request is due (0 = none scheduled: kNone,
   // kWaiting, kUpdateTest, nothing planned) and why. An owner refresh

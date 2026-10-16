@@ -36,6 +36,9 @@ void unlock();
 // timeout and skips the log if LVGL is busy). Does nothing if init() has not
 // succeeded.
 void logMemory();
+// Decodes the JPEG at `path` once without output. ESP_ERR_TIMEOUT when the
+// deadline stopped the decoder, ESP_ERR_INVALID_RESPONSE for a malformed
+// file or other dimensions.
 esp_err_t validateJpeg(const char* path, uint16_t width, uint16_t height,
                        int64_t deadline_ms);
 // Caller holds the LVGL lock for reader-safe replacement/deletion.

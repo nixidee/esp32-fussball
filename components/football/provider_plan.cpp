@@ -306,6 +306,10 @@ bool Planner::begin(MatchStore& store, const Clock& clock, Request& out) {
         seasonStale(state, clock.utc))
       state.season = {};  // resolved again once a day (OQ-259)
     if (type_ == DataType::kLive) liveItems(store, clock.utc);
+    // A fixtures run stores every match: its notices are settled when it
+    // completes (OQ-311).
+    if (type_ == DataType::kFixtures)
+      store.beginRun(map_.competition, kNoticeFixtures);
     if (type_ == DataType::kEvents) {
       const auto* m = eventsMatch(store, map_.competition, source_.provider,
                                   clock.utc);
@@ -328,7 +332,7 @@ bool Planner::begin(MatchStore& store, const Clock& clock, Request& out) {
   if (sink_ == Sink::kEvents) {
     // The match's own slot takes the events; without one nothing to ask.
     const auto* m = eventsRow();
-    if (m == nullptr || !store.beginEvents(*m, true)) {
+    if (m == nullptr || !store.beginEvents(*m, true, map_.clock.utc)) {
       state.progress[index(type_)] = {};
       current_ = nullptr;
       return false;
@@ -504,7 +508,9 @@ bool Planner::build(Request* out) {
   const bool live = type_ == DataType::kLive;
   const int64_t span = live ? 0 : cfg::kFixtureHorizonDays * int64_t{kDayS};
   date(utc - span, "%Y-%m-%d", from);
-  date(utc + span, "%Y-%m-%d", to);
+  // football-data.org v4 excludes the dateTo day (v4 changelog, checked
+  // 2026-10-16); API-Football's 'to' includes it.
+  date(utc + span + (p == Provider::kFootballData ? kDayS : 0), "%Y-%m-%d", to);
   if (p == Provider::kApiFootball) {
     switch (type_) {
       case DataType::kTable:
@@ -773,7 +779,11 @@ Step Planner::advance(bool ok, const Clock& clock) {
   } else {
     ++progress.step;
   }
-  if (!build(nullptr)) return end(Step::kDone);
+  if (!build(nullptr)) {
+    if (type_ == DataType::kFixtures)
+      store_->settleRun(map_.competition, kNoticeFixtures);
+    return end(Step::kDone);
+  }
   current_ = nullptr;
   return Step::kMore;
 }

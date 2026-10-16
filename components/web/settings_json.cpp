@@ -85,7 +85,7 @@ bool onlyKeys(const Context& c, const FieldPath& at, JsonVariantConst row,
   if (!row.is<JsonObjectConst>()) return c.reject(at, Reason::kType);
   for (JsonPairConst entry : row.as<JsonObjectConst>()) {
     bool known = false;
-    for (const char* name : names) known |= !strcmp(entry.key().c_str(), name);
+    for (const char* name : names) known |= sameText(entry.key(), name);
     if (!known)
       return c.reject(at.with(entry.key().c_str()), Reason::kUnknownKey);
   }
@@ -140,8 +140,8 @@ bool applyPlans(const Context& c, JsonVariantConst rows,
     for (JsonPairConst entry : intervals.as<JsonObjectConst>()) {
       bool known = false;
       for (std::size_t t = 0; t < cfg::kDataTypeCount && !known; ++t) {
-        if (strcmp(entry.key().c_str(),
-                   settings::dataTypeName(static_cast<cfg::DataType>(t))))
+        if (!sameText(entry.key(),
+                      settings::dataTypeName(static_cast<cfg::DataType>(t))))
           continue;
         known = true;
         if (!scalar(c, where.with(entry.key().c_str()), entry.value(),
@@ -224,9 +224,10 @@ bool applyJson(JsonObjectConst in, settings::Model& m,
                const settings::Limits& limits) {
   const Context c{violation};
   for (JsonPairConst entry : in) {
-    const auto* name = entry.key().c_str();
+    const auto key = entry.key();
+    const auto* name = key.c_str();
     bool known = false;
-#define KNOWN(member) known |= strcmp(name, #member) == 0;
+#define KNOWN(member) known |= sameText(key, #member);
     SCALARS(KNOWN)
     TEXTS(KNOWN)
     SECRETS(KNOWN)
@@ -235,11 +236,11 @@ bool applyJson(JsonObjectConst in, settings::Model& m,
          {"slides", "screens", "idle_screen", "matchday_screen",
           "own_match_screen", "conference_mode", "matchday_mode", "input_roles",
           "providers", "global_limit"})
-      known |= strcmp(name, other) == 0;
+      known |= sameText(key, other);
     // Redacted exports carry only these boolean markers; they never clear a
     // key.
     bool marker = false;
-#define MARKER(member) marker |= strcmp(name, #member "_set") == 0;
+#define MARKER(member) marker |= sameText(key, #member "_set");
     SECRETS(MARKER)
 #undef MARKER
     if (marker && entry.value().is<bool>()) continue;

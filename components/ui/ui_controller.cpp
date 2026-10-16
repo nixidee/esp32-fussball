@@ -285,7 +285,7 @@ uint8_t firstFault(int& count) {
   return first;
 }
 Tone causeTone(football::Cause cause) {
-  return cause == football::Cause::kUnmaintained ? Tone::kWarn : Tone::kError;
+  return football::dataNotice(cause) ? Tone::kWarn : Tone::kError;
 }
 // Notice card of competition 'id' with nothing to show (OQ-278): its name,
 // the short cause, the next attempt and the code with the HTTP status. With
@@ -296,9 +296,9 @@ void faultCard(uint8_t id, int64_t now, int64_t utc,
   const auto cause = state ? state->cause : football::Cause::kOther;
   char name[48], retry[40]{}, code[football::kErrorCodeBytes];
   competitionName(name, id);
-  // An unmaintained competition has no failed request to retry.
-  if (cause != football::Cause::kUnmaintained && published &&
-      published->retry_ms > now && utc > 0) {
+  // A data notice has no failed request to retry.
+  if (!football::dataNotice(cause) && published && published->retry_ms > now &&
+      utc > 0) {
     char time[8];
     localTime(time, sizeof(time),
               utc + (published->retry_ms - now + 999) / 1000);

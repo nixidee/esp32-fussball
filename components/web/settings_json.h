@@ -1,8 +1,16 @@
 #pragma once
 #include <ArduinoJson.h>
 
+#include <string_view>
+
 #include "settings_model.h"
 namespace web {
+// True if the JSON text 's' is exactly 'literal'. The comparison uses the
+// text's explicit length, so a key or value with an embedded NUL never
+// passes as the shorter literal (strict API boundary).
+inline bool sameText(ArduinoJson::JsonString s, std::string_view literal) {
+  return !s.isNull() && std::string_view(s.c_str(), s.size()) == literal;
+}
 void settingsJson(ArduinoJson::JsonObject out, const settings::Model& model,
                   bool secrets = false);
 // Applies a settings patch and validates the result. On failure *violation

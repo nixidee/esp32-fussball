@@ -34,6 +34,9 @@ struct Goals {
 // Bits of StoredMatch::flags.
 inline constexpr uint8_t kMatchOwn = 0x01;
 inline constexpr uint8_t kMatchEventsTruncated = 0x02;
+// Events of the own match were lost to the full event pool (kNoticeEvents
+// stays until no own match of the competition carries it, OQ-311).
+inline constexpr uint8_t kMatchEventsPoolCut = 0x04;
 // Bits of StoredMatch::estimated: the value was derived by the device, not
 // reported by the provider.
 inline constexpr uint8_t kEstimatedPhase = 0x01;
@@ -109,11 +112,20 @@ struct OwnMatch {
   Text<cfg::kNameBytes> home_name, away_name;
 };
 
-// Bits of the per-competition notices.
-inline constexpr uint8_t kNoticeMatches = 0x01;  // a match did not fit
-inline constexpr uint8_t kNoticeTable = 0x02;    // a table row did not fit
-inline constexpr uint8_t kNoticeTeams = 0x04;    // team directory full
-inline constexpr uint8_t kNoticeEvents = 0x08;   // an event did not fit
+// Bits of the per-competition notices: data the store could not hold
+// (cause E19 store_full, OQ-310). Each kind is cleared when it is next
+// stored completely (OQ-311): matches and their teams by a complete
+// fixtures run (beginRun()/settleRun(), a live run only adds), the table and
+// its teams by a replaced table, events when no own match of the
+// competition carries kMatchEventsPoolCut.
+inline constexpr uint8_t kNoticeMatches = 0x01;     // a match did not fit
+inline constexpr uint8_t kNoticeTable = 0x02;       // a table did not fit
+inline constexpr uint8_t kNoticeMatchTeams = 0x04;  // directory full (match)
+inline constexpr uint8_t kNoticeEvents = 0x08;      // an event did not fit
+inline constexpr uint8_t kNoticeTableTeams = 0x10;  // directory full (table)
+inline constexpr uint8_t kNoticeTeams = kNoticeMatchTeams | kNoticeTableTeams;
+// Notices a complete fixtures run settles.
+inline constexpr uint8_t kNoticeFixtures = kNoticeMatches | kNoticeMatchTeams;
 
 // Time of an update: UTC and monotonic seconds.
 struct Clock {
@@ -129,8 +141,8 @@ class MatchStore {
   void clear();
 
   // Directory index of a team, added or with its short name updated;
-  // kNoIndex for id 0 or a full directory (also notes kNoticeTeams for
-  // 'competition').
+  // kNoIndex for id 0 or a full directory (also notes kNoticeTableTeams for
+  // 'competition' while its table is staged, else kNoticeMatchTeams).
   uint8_t team(uint8_t competition, cfg::Provider provider, uint32_t id,
                std::string_view short_name);
   // Pool index of a round label; kNoIndex for an empty text or a full pool.
@@ -165,12 +177,13 @@ class MatchStore {
 
   // Replaces the table of 'competition' in three steps, so a response that
   // breaks off keeps the stored table: begin, append the rows in order,
-  // commit. The rows are staged next to the stored ones; when the staging
-  // does not fit, the stored rows of the competition make room first.
-  // commitTable(true) replaces the table with the staged rows unless a row
-  // did not fit or no row was staged; otherwise the staged rows are
-  // dropped. A row that does not fit and a table lost to making room note
-  // kNoticeTable. appendRow() is false when the row was not staged.
+  // commit. The rows are staged in a buffer of their own; the stored table
+  // is untouched until commitTable(true), which replaces it with the staged
+  // rows unless a row did not fit the buffer, no row was staged or the new
+  // table does not fit the row pool; otherwise the stored table stays. A row
+  // that does not fit the buffer and a table that does not fit the pool note
+  // kNoticeTable; a replaced table clears it. appendRow() is false when the
+  // row was not staged.
   void beginTable(uint8_t competition);
   bool appendRow(const StoredRow& row);
   bool commitTable(bool complete);
@@ -186,8 +199,15 @@ class MatchStore {
   // 'detail' events come from the detail request (kEventDetail): the detail
   // and the list events each replace only their own events, the other
   // origin's stay ahead of the new list; when the slot is full detail
-  // events give way first. False if 'match' has no slot.
-  bool beginEvents(const StoredMatch& match, bool detail = false);
+  // events give way first. A full pool gives this match the oldest event of
+  // the own match farthest from 'utc' when this one is nearer (OQ-292, the
+  // rule of the own-match slots); that match is marked truncated and its
+  // competition notes kNoticeEvents. 'utc' 0 = unknown, nothing is taken.
+  // Events lost to the full pool mark the match kMatchEventsPoolCut until
+  // its next complete list keeps every event (endEvents(true)).
+  // False if 'match' has no slot.
+  bool beginEvents(const StoredMatch& match, bool detail = false,
+                   int64_t utc = 0);
   void addEvent(const StoredEvent& event);
   void endEvents(bool complete = true);
   // Appends a saved event (competition file) to the list of own match
@@ -213,6 +233,12 @@ class MatchStore {
   bool unmaintained(uint8_t competition, int64_t utc) const;
   // Sets or clears notice 'bits' of 'competition'.
   void flag(uint8_t competition, uint8_t bits, bool on);
+  // A run that stores every item of notice kinds 'bits' (a fixtures run:
+  // kNoticeFixtures) starts; settleRun() after it completed replaces those
+  // bits by the ones noted since. A run that fails does not settle: its
+  // notes add to the earlier ones.
+  void beginRun(uint8_t competition, uint8_t bits);
+  void settleRun(uint8_t competition, uint8_t bits);
   std::size_t teamCount() const;
 
  private:
@@ -224,36 +250,44 @@ class MatchStore {
   void note(uint8_t competition, uint8_t bits);
   std::size_t sortedPosition(const StoredMatch& match) const;
   void dropRows(uint8_t competition);
+  int takeEvent();
+  StoredMatch* ownRow(uint8_t slot);
+  void settleEvents(uint8_t competition);
   StoredMatch* place(StoredMatch m, std::size_t from);
 
   std::array<StoredMatch, cfg::kStoreMatches> matches_{};
   std::array<StoredTeam, cfg::kStoreTeams> teams_{};
   std::array<StoredRow, cfg::kStoreTableRows> rows_{};
+  std::array<StoredRow, cfg::kStoreTableStageRows> stage_{};
   std::array<OwnMatch, cfg::kStoreOwnMatches> own_{};
   std::array<StoredEvent, cfg::kStoreEvents> events_{};
   std::array<Text<31>, cfg::kStoreRoundLabels> labels_{};
   struct Notice {
-    uint8_t competition = 0, bits = 0;
+    // 'noted': bits noted since beginRun().
+    uint8_t competition = 0, bits = 0, noted = 0;
   };
   std::array<Notice, cfg::kCompetitionMax> notices_{};
   // Event list being built between beginEvents() and endEvents().
+  int64_t pending_utc_ = 0;
   std::array<uint8_t, cfg::kMatchEvents> pending_{};
   uint8_t pending_count_ = 0, pending_slot_ = kNoIndex;
   bool pending_cut_ : 1 = false;
+  bool pending_pool_ : 1 = false;  // an event was lost to the full pool
   bool pending_detail_ : 1 = false;
-  // Table being staged between beginTable() and commitTable(); staged rows
-  // carry competition 0.
+  // Table being staged between beginTable() and commitTable().
   uint8_t table_competition_ = 0;
-  bool table_cut_ = false, table_dropped_ = false;
+  bool table_cut_ = false;
   uint16_t match_count_ = 0, row_count_ = 0, staged_rows_ = 0;
 };
 
+// Store indices are one byte (views, file headers and event lists).
 static_assert(cfg::kStoreTeams < kNoIndex && cfg::kStoreOwnMatches < kNoIndex &&
               cfg::kStoreEvents < kNoIndex &&
-              cfg::kStoreRoundLabels < kNoIndex);
+              cfg::kStoreRoundLabels < kNoIndex &&
+              cfg::kStoreMatches < kNoIndex && cfg::kStoreTableRows < kNoIndex);
 
-// A provider id from settings text: decimal digits only (at most nine),
-// else 0.
+// A provider id from settings text: decimal digits only, 1…4,294,967,295
+// like the JSON mapper (OQ-298), else 0.
 uint32_t decimalId(std::string_view text);
 // Phase and minute from the kickoff alone for a match without a provider
 // phase.

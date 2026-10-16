@@ -160,7 +160,7 @@ bool parse(In& in, Saved& out, MatchStore* store, const Clock& clock) {
         return false;
     }
     StoredMatch* stored = nullptr;
-    const bool truncated = (m.flags & kMatchEventsTruncated) != 0;
+    const uint8_t cut = m.flags & (kMatchEventsTruncated | kMatchEventsPoolCut);
     if (store != nullptr) {
       m.home = team(m.home);
       m.away = team(m.away);
@@ -175,8 +175,7 @@ bool parse(In& in, Saved& out, MatchStore* store, const Clock& clock) {
       if (!in.get(&e, sizeof(e)) || !validEvent(e)) return false;
       if (stored != nullptr) store->restoreEvent(*stored, e);
     }
-    if (stored != nullptr && truncated && stored->own != kNoIndex)
-      stored->flags |= kMatchEventsTruncated;
+    if (stored != nullptr && stored->own != kNoIndex) stored->flags |= cut;
   }
   if (store != nullptr && h.rows > 0) store->beginTable(h.competition);
   bool rows_ok = true;

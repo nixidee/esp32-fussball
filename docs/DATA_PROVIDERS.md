@@ -447,9 +447,11 @@ Supported, not refined now (section 1).
 - Response headers: `X-Requests-Available` (documented as
   `X-RequestsAvailable`), `X-RequestCounter-Reset`, `X-Authenticated-Client`.
 - Clients that poll too often are banned (documentation).
-- Date ranges exclude `dateTo`. Match lists hide goals, bookings,
-  substitutions and lineups unless `X-Unfold-Goals`, `X-Unfold-Bookings`,
-  `X-Unfold-Subs`, `X-Unfold-Lineups: true` are sent.
+- Date ranges exclude `dateTo` (v4 changelog, checked 2026-10-16); the
+  firmware therefore ends every range one day later (live: today to
+  tomorrow). Match lists hide goals, bookings, substitutions and lineups
+  unless `X-Unfold-Goals`, `X-Unfold-Bookings`, `X-Unfold-Subs`,
+  `X-Unfold-Lineups: true` are sent.
 - Match statuses: SCHEDULED, TIMED, IN_PLAY, PAUSED, EXTRA_TIME,
   PENALTY_SHOOTOUT, FINISHED, SUSPENDED, POSTPONED, CANCELLED, AWARDED; the
   match page describes nine of them (SUSPENDED and AWARDED are not

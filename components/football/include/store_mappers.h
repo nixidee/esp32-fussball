@@ -26,16 +26,10 @@ struct MapContext {
 // for a row without a numeric match id.
 bool storeMatch(ArduinoJson::JsonVariantConst row, MatchStore& store,
                 const MapContext& context);
-// One event of 'match' between MatchStore::beginEvents() and endEvents():
-// an API-Football fixtures/events item or an ESPN scoreboard detail. Event
-// types the display does not show are skipped. 'match' names the teams the
-// event's team id is compared with (the provider's own match row).
-void storeEvent(ArduinoJson::JsonVariantConst row, MatchStore& store,
-                const StoredMatch& match, cfg::Provider provider);
 // One ESPN match summary key event between MatchStore::beginEvents(...,
 // detail) and endEvents(): only substitutions (OQ-207); the summary names
-// the player coming on first, then the one going off. 'match' as for
-// storeEvent().
+// the player coming on first, then the one going off. 'match' names the
+// teams the event's team id is compared with (the provider's own match row).
 void storeSummaryEvent(ArduinoJson::JsonVariantConst row, MatchStore& store,
                        const StoredMatch& match);
 // One table element between MatchStore::beginTable() and commitTable(): an

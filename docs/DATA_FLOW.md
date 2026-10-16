@@ -208,8 +208,9 @@ plus the context of the request in progress.
   competition and provider updates the stored match.
 - A full store makes room by the rule of
   [DATA_MODEL.md](DATA_MODEL.md#46-store-rules) and notes the competition
-  (`matches_truncated`).
-- Events are kept only for the own club's matches (12 per match).
+  (cause `store_full`, E19, with what is missing).
+- Events are kept only for the own club's matches (12 per match, 48 in
+  all; the live and next own matches win when the pool is full).
 - Discarded bytes still count toward the transport limits (section 8).
 
 ## 5. Mapping rules
@@ -282,9 +283,8 @@ only); ESPN none.
   not say who comes on. The match summary's `keyEvents` substitutions give
   player in and out (participants [in, out]) and the minute with added time;
   they are the only events read from the summary.
-- **API-Football:** the mapper reads `fixtures/events` (goal types, cards,
-  substitution with player in from `assist`, VAR, minute and added time),
-  but no request plan asks for them.
+- **API-Football:** no events are mapped; the provider stays limited to
+  matches and tables (OQ-206).
 - **football-data.org:** no events are mapped.
 - A supplied event id is preferred; otherwise a deterministic hash of type,
   minute, added time, team, player, substitution and shootout identity.

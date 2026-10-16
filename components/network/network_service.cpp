@@ -30,7 +30,11 @@ portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 Status current{};
 settings::Model applied;
 esp_netif_t *sta = nullptr, *ap = nullptr;
-std::atomic<bool> heavy{false}, got_ip{false}, lost_ip{false};
+std::atomic<bool> heavy{false};
+// Last station transition since the previous poll(): the later event wins,
+// so "lost, then got an IP" ends connected and the reverse disconnected.
+enum class Station : uint8_t { kNone, kGotIp, kLost };
+std::atomic<Station> station_event{Station::kNone};
 std::atomic<int> scan_done{-1};  // -1 = none, SDK scan status 0 = successful
 std::atomic<uint16_t> reason{0};
 std::atomic<uint8_t> clients{0};
@@ -47,8 +51,15 @@ UserScanState scan_state = UserScanState::kIdle;  // protected by mux
 int64_t user_scan_at = 0;
 bool started = false, ap_on = false, scanning = false, user_scan = false;
 bool sntp_on = false, configured_radio = false, mdns_ready = false;
-// A failed radio reconfiguration is retried from poll() at this time.
-int64_t published_at = 0, radio_retry_at = 0;
+// A failed radio reconfiguration or AP mode change is retried from poll()
+// at these times.
+int64_t published_at = 0, radio_retry_at = 0, mode_retry_at = 0;
+// The hostname of `applied` is not yet set in the driver and mDNS.
+bool hostname_pending = false;
+int64_t hostname_retry_at = 0;
+// esp_netif_sntp_init() failed (it allocates); retried while connected.
+bool sntp_pending = false;
+int64_t sntp_retry_at = 0;
 AccessPoint results[cfg::kScanEntries]{};
 std::size_t result_count = 0;
 char ntp_server[cfg::kNtpServerMaxChars + 1]{};
@@ -115,13 +126,13 @@ void event(void*, esp_event_base_t base, int32_t id, void* data) {
       scan_done.store(static_cast<wifi_event_sta_scan_done_t*>(data)->status);
     if (id == WIFI_EVENT_STA_DISCONNECTED) {
       reason.store(static_cast<wifi_event_sta_disconnected_t*>(data)->reason);
-      lost_ip.store(true);
+      station_event.store(Station::kLost);
     }
     if (id == WIFI_EVENT_AP_STACONNECTED) clients.fetch_add(1);
     if (id == WIFI_EVENT_AP_STADISCONNECTED && clients.load() > 0)
       clients.fetch_sub(1);
   } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP)
-    got_ip.store(true);
+    station_event.store(Station::kGotIp);
 }
 void dns(void*) {
   const int fd = dns_fd;
@@ -202,6 +213,19 @@ esp_err_t antenna(bool external) {
                          external == b.antenna_external_level_high);
   return err;
 }
+// Sets the hostname of `applied` for DHCP and mDNS; a failed setter (they
+// allocate) is retried from poll().
+void applyHostname() {
+  char hostname[64]{};
+  memcpy(hostname, applied.hostname.data.data(), applied.hostname.length);
+  esp_err_t err = esp_netif_set_hostname(sta, hostname);
+  if (err == ESP_OK && mdns_ready) err = mdns_hostname_set(hostname);
+  hostname_pending = err != ESP_OK;
+  if (!hostname_pending) return;
+  hostname_retry_at = timekeeping::monotonicMs() + cfg::kWifiRadioRetryMs;
+  ESP_LOGE(kTag, "hostname: %s; retry in %lu s", esp_err_to_name(err),
+           static_cast<unsigned long>(cfg::kWifiRadioRetryMs / 1000));
+}
 void sntp() {
   if (sntp_on) return;
   memcpy(ntp_server, applied.ntp_server.data.data(), applied.ntp_server.length);
@@ -209,7 +233,11 @@ void sntp() {
   esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG(ntp_server);
   const esp_err_t err = esp_netif_sntp_init(&config);
   sntp_on = err == ESP_OK;
-  if (err != ESP_OK) ESP_LOGE(kTag, "SNTP init: %s", esp_err_to_name(err));
+  sntp_pending = !sntp_on;
+  if (sntp_on) return;
+  sntp_retry_at = timekeeping::monotonicMs() + cfg::kWifiRadioRetryMs;
+  ESP_LOGE(kTag, "SNTP init: %s; retry in %lu s", esp_err_to_name(err),
+           static_cast<unsigned long>(cfg::kWifiRadioRetryMs / 1000));
 }
 // Driver steps of a radio reconfiguration; 'step' names the failed one.
 esp_err_t configureRadio(const settings::Model& model, const char*& step) {
@@ -240,22 +268,23 @@ esp_err_t configureRadio(const settings::Model& model, const char*& step) {
   access.ap.channel = cfg::kApChannel;
   step = "AP config";
   if ((err = esp_wifi_set_config(WIFI_IF_AP, &access)) != ESP_OK) return err;
-  char hostname[64]{};
-  memcpy(hostname, model.hostname.data.data(), model.hostname.length);
-  esp_netif_set_hostname(sta, hostname);
-  if (mdns_ready) mdns_hostname_set(hostname);
+  applyHostname();
   policy.start(!model.wifi_ssid.empty(), timekeeping::monotonicMs());
-  ap_on = policy.ap();
+  // The radio is stopped: no AP until the driver started in the new mode.
+  const bool want_ap = policy.ap();
+  ap_on = false;
+  mode_retry_at = 0;
   clients.store(0);
-  lost_ip.store(false);
-  got_ip.store(false);
+  station_event.store(Station::kNone);
   scan_done.store(-1);
   step = "mode";
-  if ((err = esp_wifi_set_mode(ap_on ? WIFI_MODE_APSTA : WIFI_MODE_STA)) !=
+  if ((err = esp_wifi_set_mode(want_ap ? WIFI_MODE_APSTA : WIFI_MODE_STA)) !=
       ESP_OK)
     return err;
   step = "start";
-  return esp_wifi_start();
+  if ((err = esp_wifi_start()) != ESP_OK) return err;
+  ap_on = want_ap;
+  return ESP_OK;
 }
 }  // namespace
 esp_err_t init() {
@@ -333,12 +362,7 @@ void applySettings() {
     const bool hostname_changed = model.hostname != applied.hostname;
     const bool ntp_changed = model.ntp_server != applied.ntp_server;
     applied = model;
-    if (hostname_changed) {
-      char hostname[64]{};
-      memcpy(hostname, model.hostname.data.data(), model.hostname.length);
-      esp_netif_set_hostname(sta, hostname);
-      if (mdns_ready) mdns_hostname_set(hostname);
-    }
+    if (hostname_changed) applyHostname();
     if (ntp_changed) {
       if (sntp_on) esp_netif_sntp_deinit();
       sntp_on = false;
@@ -376,11 +400,16 @@ void poll() {
     if (now >= radio_retry_at) applySettings();
     return;
   }
-  if (got_ip.exchange(false)) {
+  if (hostname_pending && now >= hostname_retry_at) applyHostname();
+  const Station transition = station_event.exchange(Station::kNone);
+  if (transition == Station::kGotIp) {
     policy.gotIp(now);
     sntp();
+  } else if (sntp_pending && policy.state() == State::kConnected &&
+             now >= sntp_retry_at) {
+    sntp();
   }
-  if (lost_ip.exchange(false)) {
+  if (transition == Station::kLost) {
     cancelUserScan();
     const auto r = reason.load();
     policy.lost(r == WIFI_REASON_AUTH_FAIL ||
@@ -393,6 +422,8 @@ void poll() {
     wifi_ap_record_t records[cfg::kScanEntries]{};
     uint16_t count = cfg::kScanEntries;
     const auto result = esp_wifi_scan_get_ap_records(&count, records);
+    // Only a successful getter frees the driver's list (SDK contract).
+    if (result != ESP_OK) esp_wifi_clear_ap_list();
     const bool ok = completed == 0 && result == ESP_OK;
     bool found = false;
     portENTER_CRITICAL(&mux);
@@ -414,19 +445,31 @@ void poll() {
     scanning = false;
     if (!user_scan) policy.scanDone(ok, found, now);
     user_scan = false;
+  } else if (completed >= 0) {
+    // A cancelled scan finished late: nobody reads its list.
+    esp_wifi_clear_ap_list();
   }
   if (user_scan && now - user_scan_at >= cfg::kWifiScanDeadlineMs)
     cancelUserScan(UserScanState::kTimeout);
   const auto command = user_scan
                            ? Command::kNone
                            : policy.poll(now, clients.load() > 0, esp_random());
-  if (policy.ap() != ap_on) {
-    ap_on = policy.ap();
-    const auto err = esp_wifi_set_mode(ap_on ? WIFI_MODE_APSTA : WIFI_MODE_STA);
-    if (err != ESP_OK) ESP_LOGE(kTag, "mode: %s", esp_err_to_name(err));
-    // The driver does not document a disconnect event for the clients of
-    // an AP it stops; a stale count would postpone the next fallback.
-    if (!ap_on) clients.store(0);
+  // ap_on is the applied AP state: it follows the policy only after the
+  // driver accepted the mode, a failed change is retried later.
+  if (policy.ap() != ap_on && now >= mode_retry_at) {
+    const bool want = policy.ap();
+    const auto err = esp_wifi_set_mode(want ? WIFI_MODE_APSTA : WIFI_MODE_STA);
+    if (err == ESP_OK) {
+      ap_on = want;
+      mode_retry_at = 0;
+      // The driver does not document a disconnect event for the clients of
+      // an AP it stops; a stale count would postpone the next fallback.
+      if (!ap_on) clients.store(0);
+    } else {
+      mode_retry_at = now + cfg::kWifiRadioRetryMs;
+      ESP_LOGE(kTag, "mode: %s; retry in %lu s", esp_err_to_name(err),
+               static_cast<unsigned long>(cfg::kWifiRadioRetryMs / 1000));
+    }
   }
   esp_err_t err = ESP_OK;
   if (command == Command::kScan) {

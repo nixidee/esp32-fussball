@@ -204,37 +204,27 @@ esp_err_t stop(esp_err_t err, Cause cause) {
   failure_code = err;
   return err;
 }
+// Error class of an esp_err_t for the pure cause mapping (football_model.h).
+FetchError fetchErrorOf(esp_err_t err) {
+  switch (err) {
+    case ESP_ERR_NO_MEM: return FetchError::kNoMemory;
+    case ESP_ERR_INVALID_SIZE: return FetchError::kTooLarge;
+    case ESP_ERR_INVALID_RESPONSE: return FetchError::kBadResponse;
+    default: return FetchError::kOther;
+  }
+}
 // The cause recorded for this error, else one derived from the plain error
 // code (failures outside get()).
 Cause causeOf(esp_err_t err) {
   if (failure_cause != Cause::kNone && failure_code == err)
     return failure_cause;
-  switch (err) {
-    case ESP_ERR_NO_MEM: return Cause::kMemory;
-    case ESP_ERR_INVALID_SIZE: return Cause::kTooLarge;
-    case ESP_ERR_INVALID_RESPONSE: return Cause::kBadResponse;
-    default: return Cause::kOther;
-  }
+  return errorCause(fetchErrorOf(err));
 }
 // The HTTP error status behind 'err' (0 = none: refused before sending, no
 // response, or a 2xx response that could not be used).
 uint16_t httpOf(esp_err_t err) {
   if (!sent || failure_code != err) return 0;
-  return failure_status >= 300 && failure_status <= UINT16_MAX
-             ? static_cast<uint16_t>(failure_status)
-             : 0;
-}
-// A request that was sent: the error of fetchJson() and the HTTP status it
-// received (0 = none, so no response came).
-Cause fetchCause(esp_err_t err, int status) {
-  if (err == ESP_ERR_NO_MEM) return Cause::kMemory;
-  if (err == ESP_ERR_INVALID_SIZE) return Cause::kTooLarge;
-  if (err == ESP_ERR_INVALID_RESPONSE) return Cause::kBadResponse;
-  if (status == 429) return Cause::kRateLimited;
-  if (status == 401 || status == 403) return Cause::kAuth;
-  if (status == 404) return Cause::kNotFound;
-  if (status == 0) return Cause::kConnect;
-  return status != 200 ? Cause::kHttp : Cause::kOther;
+  return errorStatus(failure_status);
 }
 struct Interruption {
   const char* why = nullptr;
@@ -324,7 +314,7 @@ esp_err_t get(const char* url, const char* array, bool optional,
     if (const auto stopped = interrupted(generation, epoch))
       stop(err, stopped.cause);
     else {
-      failure_cause = fetchCause(err, result.status);
+      failure_cause = fetchCause(fetchErrorOf(err), result.status);
       failure_code = err;
       failure_status = result.status;
     }
@@ -359,8 +349,10 @@ void publish() {
     state.fetched_ms = slot.fetched_ms;
     if (!slot.active) continue;
     if (slot.failed) error_routes |= 1u << i;
+    state.notices = store.notices(slot.id);
     state.cause = slot.failed         ? slot.cause
                   : slot.unmaintained ? Cause::kUnmaintained
+                  : state.notices     ? Cause::kStoreFull
                                       : Cause::kNone;
     state.provider = slot.provider;
     state.http = slot.failed ? slot.http : 0;
@@ -1392,9 +1384,6 @@ Status status() {
       std::min<std::size_t>(UINT8_MAX, store.matchCount()));
   s.competitions = states;
   s.stale = markStale(s.competitions, valid ? utc : 0, now);
-  for (uint8_t i = 0; i < route_count; ++i)
-    s.matches_truncated |=
-        slots[i].active && (store.notices(slots[i].id) & kNoticeMatches) != 0;
   s.cadence = cadence_now;
   const bool scheduled = cadence_now != Cadence::kNone &&
                          cadence_now != Cadence::kWaiting &&

@@ -159,18 +159,20 @@ invalid, damaged, unreadable or not storable, the overview shows a warning;
 for an invalid or damaged record the first save asks before it overwrites
 the stored settings. Settings or competitions written by an older firmware
 format are not read: the overview says they were discarded and asks to set
-them up again; the old record stays until the next save replaces it. When the shared match list could not hold every match,
-the overview says that not all matches were loaded and that the matches
-nearest in time are shown. While the device is not connected to the home
+them up again; the old record stays until the next save replaces it. While the device is not connected to the home
 network the overview shows "Kein WLAN" with the reason the display card
 shows (network not found, wrong password, setup network on, connecting).
 Each competition row of the overview shows its provider, match count and
 the time of its last successful request, and a state tag (current, stale,
 loading, "Gestört" after a failed request, "Nicht gepflegt" when the
-provider leaves past matches without a result). A failed competition adds
-the cause, what to do and the error code ("Fehlercode: OLG E10·503"); an
+provider leaves past matches without a result, "Unvollständig" when not
+all data of the competition fit the device's store). A failed competition
+adds the cause, what to do and the error code ("Fehlercode: OLG E10·503"); an
 unmaintained one names the other enabled providers, or asks to enable one
-under Settings. Every error message of the Web UI follows that pattern —
+under Settings; an incomplete one names what is missing (match list,
+table, team names, match events) and asks for fewer or smaller
+competitions ("Fehlercode: ESPN E19"). The two notices use the warning
+tag and offer no retry. Every error message of the Web UI follows that pattern —
 what failed, what to do, a short error code — without a serial console.
 Below the data age the overview shows when the next provider round is due
 ("in 45 s" up to two minutes ahead, otherwise the browser's clock time) and
@@ -270,6 +272,8 @@ Library quota and temporary filesystem reserve are separate checks. Replacing
 an image subtracts its old size from the library quota, but the old file still
 occupies filesystem space while its replacement is written. The firmware
 performs its own baseline-JPEG, dimensions, complete-decode and quota checks.
+A decode that the request deadline stops is answered as `timeout` ("try
+again"), not as a damaged file (`content`).
 The kept football data and the short names share the partition (at most
 48 KiB, typically one 4 KiB block per competition); the free-space check of
 an upload counts them, the library quota does not. Images come first: the
@@ -309,8 +313,15 @@ Export optionally includes secrets with an explicit notice; it carries the
 settings, the competitions and the owner's short names.
 Import sends them as up to three requests (settings, competitions, short
 names), each at most the API body limit; it checks size,
-JSON shape, types and the same validation rules before confirmation (an old
-matchday default of Own match is converted to Conference first; the crest
+JSON shape, types and the same validation rules before confirmation, the
+short names included (provider, team id 1…4,294,967,295, a non-empty name
+within the schema's byte bound without control characters, every team once,
+at most the schema's count), so an invalid backup sends no request at all. The
+size bound applies to the file (three request bodies) and to each request
+part, not to the combined data (an old
+matchday default of Own match is converted to Conference first, in the data
+that is sent; a backup of earlier firmware with fewer screen styles sets
+those, the later screens keep their values; the crest
 choice of an older backup is dropped, and the result message says so,
 because the crest is an image role now and images are not in the backup; the
 API-Football daily budget of an older backup becomes API-Football's daily cap,

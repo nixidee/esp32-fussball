@@ -208,6 +208,7 @@ void runDiagnosticLoop() {
       // generation itself and starts only the changed competitions afresh.
     }
     health::poll();
+    timekeeping::poll();
     network::poll();
     ui::poll();
     ota::poll(network::healthy() && web::healthy() && ui::healthy());

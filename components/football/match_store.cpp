@@ -92,7 +92,8 @@ uint8_t MatchStore::team(uint8_t competition, cfg::Provider provider,
     if (t.id == 0 && free < 0) free = static_cast<int>(i);
   }
   if (free < 0) {
-    note(competition, kNoticeTeams);
+    note(competition, table_competition_ == competition ? kNoticeTableTeams
+                                                        : kNoticeMatchTeams);
     return kNoIndex;
   }
   teams_[free] = {id, provider, name};
@@ -175,7 +176,7 @@ uint8_t MatchStore::ownSlot(const StoredMatch& m, int64_t utc) {
   if (utc == 0 || distance(m, utc) >= farthest) return kNoIndex;
   auto& row = matches_[victim_row];
   row.own = kNoIndex;
-  row.flags &= ~kMatchEventsTruncated;
+  row.flags &= ~(kMatchEventsTruncated | kMatchEventsPoolCut);
   freeSlot(static_cast<uint8_t>(victim));
   return static_cast<uint8_t>(victim);
 }
@@ -187,7 +188,7 @@ StoredMatch* MatchStore::upsert(const StoredMatch& incoming,
   if (incoming.id == 0) return nullptr;
   StoredMatch m = incoming;
   m.own = kNoIndex;
-  m.flags &= ~kMatchEventsTruncated;
+  m.flags &= ~(kMatchEventsTruncated | kMatchEventsPoolCut);
   uint8_t slot = kNoIndex;
   bool seen_running = false;
   const int at = matchIndex(m.competition, m.provider, m.id);
@@ -198,13 +199,16 @@ StoredMatch* MatchStore::upsert(const StoredMatch& incoming,
         !(m.principal == prior.principal))
       m.score_changed = clock.mono_s ? clock.mono_s : 1;
     seen_running = running(prior.phase);
-    if (m.finished_at == 0 && prior.finished_at != 0) {
+    // The final whistle belongs to a finished match only: a provider that
+    // reports the match running again (a correction or a restart) drops it.
+    if (m.phase == Phase::kFinished && m.finished_at == 0 &&
+        prior.finished_at != 0) {
       m.finished_at = prior.finished_at;
       m.estimated = (m.estimated & ~kEstimatedFinish) |
                     (prior.estimated & kEstimatedFinish);
     }
     slot = prior.own;
-    m.flags |= prior.flags & kMatchEventsTruncated;
+    m.flags |= prior.flags & (kMatchEventsTruncated | kMatchEventsPoolCut);
     prior.own = kNoIndex;  // the slot moves with the match
     removeMatch(static_cast<std::size_t>(at));
   }
@@ -244,7 +248,8 @@ StoredMatch* MatchStore::upsert(const StoredMatch& incoming,
     slot = kNoIndex;
   }
   m.own = slot;
-  if (slot == kNoIndex) m.flags &= ~kMatchEventsTruncated;
+  if (slot == kNoIndex)
+    m.flags &= ~(kMatchEventsTruncated | kMatchEventsPoolCut);
   const std::size_t pos = sortedPosition(m);
   for (std::size_t j = match_count_; j > pos; --j) matches_[j] = matches_[j - 1];
   matches_[pos] = m;
@@ -320,10 +325,16 @@ void MatchStore::collect() {
   }
   for (std::size_t i = 0; i < row_count_; ++i)
     if (rows_[i].team < teams.size()) teams.set(rows_[i].team);
+  // A table being staged keeps its teams until commitTable().
+  for (std::size_t i = 0; table_competition_ != 0 && i < staged_rows_; ++i)
+    if (stage_[i].team < teams.size()) teams.set(stage_[i].team);
   for (std::size_t i = 0; i < teams_.size(); ++i)
     if (!teams.test(i)) teams_[i] = {};
   for (std::size_t i = 0; i < labels_.size(); ++i)
     if (!labels.test(i)) labels_[i] = {};
+  // Events notices of own matches that left the store.
+  for (const auto& n : notices_)
+    if (n.bits & kNoticeEvents) settleEvents(n.competition);
 }
 
 void MatchStore::dropRows(uint8_t competition) {
@@ -335,53 +346,54 @@ void MatchStore::dropRows(uint8_t competition) {
 }
 
 void MatchStore::beginTable(uint8_t competition) {
-  dropRows(0);
+  beginRun(competition, kNoticeTable | kNoticeTableTeams);
   staged_rows_ = 0;
   table_competition_ = competition;
-  table_cut_ = table_dropped_ = false;
+  table_cut_ = false;
 }
 
 bool MatchStore::appendRow(const StoredRow& row) {
   if (table_competition_ == 0) return false;
-  if (row_count_ == rows_.size() && !table_dropped_) {
-    dropRows(table_competition_);
-    table_dropped_ = true;
-  }
-  if (row_count_ == rows_.size()) {
+  if (staged_rows_ == stage_.size()) {
     table_cut_ = true;
     note(table_competition_, kNoticeTable);
     return false;
   }
-  rows_[row_count_] = row;
-  rows_[row_count_++].competition = 0;
-  ++staged_rows_;
+  stage_[staged_rows_] = row;
+  stage_[staged_rows_++].competition = table_competition_;
   return true;
 }
 
 bool MatchStore::commitTable(bool complete) {
   const uint8_t competition = table_competition_;
+  const std::size_t staged = staged_rows_;
   table_competition_ = 0;
-  if (competition == 0) return false;
-  const bool commit = complete && !table_cut_ && staged_rows_ > 0;
-  if (commit) {
-    dropRows(competition);
-    for (std::size_t i = 0; i < row_count_; ++i)
-      if (rows_[i].competition == 0) rows_[i].competition = competition;
-  } else {
-    dropRows(0);
-    if (table_dropped_) note(competition, kNoticeTable);
-  }
   staged_rows_ = 0;
-  return commit;
+  if (competition == 0 || !complete || table_cut_ || staged == 0) return false;
+  const auto stored = static_cast<std::size_t>(std::count_if(
+      rows_.begin(), rows_.begin() + row_count_,
+      [&](const StoredRow& r) { return r.competition == competition; }));
+  if (row_count_ - stored + staged > rows_.size()) {
+    note(competition, kNoticeTable);
+    return false;
+  }
+  dropRows(competition);
+  std::copy_n(stage_.begin(), staged, rows_.begin() + row_count_);
+  row_count_ = static_cast<uint16_t>(row_count_ + staged);
+  settleRun(competition, kNoticeTable | kNoticeTableTeams);
+  return true;
 }
 
-bool MatchStore::beginEvents(const StoredMatch& match, bool detail) {
+bool MatchStore::beginEvents(const StoredMatch& match, bool detail,
+                             int64_t utc) {
   pending_slot_ = kNoIndex;
   if (match.own >= own_.size() || own_[match.own].match != match.id)
     return false;
   pending_slot_ = match.own;
+  pending_utc_ = utc;
   pending_count_ = 0;
   pending_cut_ = false;
+  pending_pool_ = false;
   pending_detail_ = detail;
   return true;
 }
@@ -412,14 +424,49 @@ void MatchStore::addEvent(const StoredEvent& incoming) {
       at = static_cast<int>(i);
   for (std::size_t i = 0; i < events_.size() && at < 0; ++i)
     if (events_[i].slot == kNoIndex) at = static_cast<int>(i);
+  if (at < 0) at = takeEvent();
   if (at >= 0) {
     events_[at] = event;
     events_[at].slot = kPendingSlot;
     pending_[pending_count_++] = static_cast<uint8_t>(at);
     return;
   }
-  pending_cut_ = true;
+  pending_cut_ = pending_pool_ = true;
   note(own_[pending_slot_].competition, kNoticeEvents);
+}
+
+int MatchStore::takeEvent() {
+  if (pending_utc_ == 0) return -1;
+  const StoredMatch* mine = nullptr;
+  for (std::size_t j = 0; j < match_count_ && mine == nullptr; ++j)
+    if (matches_[j].own == pending_slot_) mine = &matches_[j];
+  if (mine == nullptr) return -1;
+  // The own match farthest from now that holds an event.
+  int victim = -1;
+  StoredMatch* victim_row = nullptr;
+  uint64_t farthest = 0;
+  for (std::size_t j = 0; j < match_count_; ++j) {
+    auto& m = matches_[j];
+    if (m.own >= own_.size() || m.own == pending_slot_ ||
+        own_[m.own].event_count == 0)
+      continue;
+    const auto d = distance(m, pending_utc_);
+    if (victim < 0 || d > farthest) {
+      victim = m.own;
+      victim_row = &m;
+      farthest = d;
+    }
+  }
+  if (victim < 0 || distance(*mine, pending_utc_) >= farthest) return -1;
+  auto& own = own_[victim];
+  const uint8_t taken = own.events[0];
+  for (std::size_t n = 1; n < own.event_count; ++n)
+    own.events[n - 1] = own.events[n];
+  --own.event_count;
+  events_[taken] = {};
+  victim_row->flags |= kMatchEventsTruncated | kMatchEventsPoolCut;
+  note(own.competition, kNoticeEvents);
+  return taken;
 }
 
 bool MatchStore::restoreEvent(const StoredMatch& match,
@@ -435,8 +482,25 @@ bool MatchStore::restoreEvent(const StoredMatch& match,
     own.events[own.event_count++] = static_cast<uint8_t>(i);
     return true;
   }
+  if (auto* row = ownRow(match.own)) row->flags |= kMatchEventsPoolCut;
   note(own.competition, kNoticeEvents);
   return false;
+}
+
+StoredMatch* MatchStore::ownRow(uint8_t slot) {
+  for (std::size_t i = 0; i < match_count_; ++i)
+    if (matches_[i].own == slot) return &matches_[i];
+  return nullptr;
+}
+
+void MatchStore::settleEvents(uint8_t competition) {
+  for (std::size_t i = 0; i < match_count_; ++i) {
+    const auto& m = matches_[i];
+    if (m.competition == competition && m.own < own_.size() &&
+        (m.flags & kMatchEventsPoolCut))
+      return;
+  }
+  flag(competition, kNoticeEvents, false);
 }
 
 void MatchStore::endEvents(bool complete) {
@@ -444,9 +508,7 @@ void MatchStore::endEvents(bool complete) {
   const uint8_t s = pending_slot_;
   pending_slot_ = kNoIndex;
   auto& own = own_[s];
-  StoredMatch* row = nullptr;
-  for (std::size_t i = 0; i < match_count_ && row == nullptr; ++i)
-    if (matches_[i].own == s) row = &matches_[i];
+  StoredMatch* row = ownRow(s);
   if (!complete) {
     // Broken off: the previous list (updated in place where seen again)
     // followed by the new events; the oldest go when it overflows.
@@ -468,6 +530,7 @@ void MatchStore::endEvents(bool complete) {
     }
     if (row != nullptr && (drop > 0 || pending_cut_))
       row->flags |= kMatchEventsTruncated;
+    if (row != nullptr && pending_pool_) row->flags |= kMatchEventsPoolCut;
     return;
   }
   const bool whole =
@@ -522,7 +585,12 @@ void MatchStore::endEvents(bool complete) {
       row->flags |= kMatchEventsTruncated;
     else
       row->flags &= ~kMatchEventsTruncated;
+    if (pending_pool_)
+      row->flags |= kMatchEventsPoolCut;
+    else
+      row->flags &= ~kMatchEventsPoolCut;
   }
+  settleEvents(own.competition);
 }
 
 void MatchStore::note(uint8_t competition, uint8_t bits) {
@@ -530,11 +598,23 @@ void MatchStore::note(uint8_t competition, uint8_t bits) {
   for (auto& n : notices_) {
     if (n.competition == competition) {
       n.bits |= bits;
+      n.noted |= bits;
       return;
     }
     if (n.competition == 0 && free == nullptr) free = &n;
   }
-  if (free != nullptr) *free = {competition, bits};
+  if (free != nullptr) *free = {competition, bits, bits};
+}
+
+void MatchStore::beginRun(uint8_t competition, uint8_t bits) {
+  for (auto& n : notices_)
+    if (n.competition == competition) n.noted &= ~bits;
+}
+
+void MatchStore::settleRun(uint8_t competition, uint8_t bits) {
+  for (auto& n : notices_)
+    if (n.competition == competition)
+      n.bits = (n.bits & ~bits) | (n.noted & bits);
 }
 
 void MatchStore::flag(uint8_t competition, uint8_t bits, bool on) {
@@ -558,13 +638,14 @@ std::size_t MatchStore::teamCount() const {
 }
 
 uint32_t decimalId(std::string_view text) {
-  if (text.empty() || text.size() > 9) return 0;
-  uint32_t value = 0;
+  if (text.empty()) return 0;
+  uint64_t value = 0;
   for (const char c : text) {
     if (c < '0' || c > '9') return 0;
-    value = value * 10 + static_cast<uint32_t>(c - '0');
+    value = value * 10 + static_cast<uint64_t>(c - '0');
+    if (value > UINT32_MAX) return 0;
   }
-  return value;
+  return static_cast<uint32_t>(value);
 }
 
 }  // namespace football
