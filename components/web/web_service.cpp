@@ -15,6 +15,7 @@
 #include <string_view>
 
 #include "app_config.h"
+#include "display_port.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
 #include "esp_http_server.h"
@@ -193,6 +194,9 @@ inline constexpr Fault kTrial{"409 Conflict", "trial", "OTA trial is read only"}
 inline constexpr Fault kBusy{"409 Conflict", "busy", "operation busy"};
 inline constexpr Fault kDebugOff{"403 Forbidden", "debug_disabled",
                                  "browser debug is disabled"};
+inline constexpr Fault kScreenshotUnavailable{
+    "503 Service Unavailable", "screenshot_unavailable",
+    "display is unavailable for capture"};
 // The Web UI waits for the running job and then sends again.
 inline constexpr Fault kSelectionBusy{"409 Conflict", "busy", "selection busy"};
 inline constexpr Fault kChanged{"409 Conflict", "changed", "selection changed"};
@@ -1587,6 +1591,109 @@ void streamDebug(void*) {
   }
 }
 
+// ---- Screenshot ------------------------------------------------------------
+// Used only on the screenshot socket, which is closed after its response.
+// The SDK repeats its send function on partial writes: each invocation must
+// share the absolute capture deadline, not start another socket timeout.
+int screenshotSend(httpd_handle_t, int fd, const char* bytes, size_t count,
+                   int flags) {
+  if (bytes == nullptr) return HTTPD_SOCK_ERR_INVALID;
+  const auto left = request_deadline - timekeeping::monotonicMs();
+  if (left <= 0) return HTTPD_SOCK_ERR_FAIL;
+  const auto wait_ms = std::min<int64_t>(cfg::kSocketTimeoutMs, left);
+  timeval timeout{static_cast<long>(wait_ms / 1000),
+                  static_cast<long>((wait_ms % 1000) * 1000)};
+  if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) != 0)
+    return HTTPD_SOCK_ERR_FAIL;
+  const int result = send(fd, bytes, count, flags);
+  // Zero progress must also terminate httpd_send_all(), which otherwise loops.
+  return result > 0 && timekeeping::monotonicMs() < request_deadline
+             ? result
+             : HTTPD_SOCK_ERR_FAIL;
+}
+struct ScreenshotResponse {
+  httpd_req_t* req;
+  bool started = false;
+
+  static void word(uint8_t* out, uint16_t value) {
+    out[0] = static_cast<uint8_t>(value);
+    out[1] = static_cast<uint8_t>(value >> 8);
+  }
+  esp_err_t sendChunk(const uint8_t* bytes, std::size_t count) {
+    return httpd_resp_send_chunk(req, reinterpret_cast<const char*>(bytes),
+                                 count);
+  }
+  static esp_err_t begin(const display::ScreenshotFrame& frame, void* ctx) {
+    auto& self = *static_cast<ScreenshotResponse*>(ctx);
+    const auto err = httpd_sess_set_send_override(
+        server, httpd_req_to_sockfd(self.req), screenshotSend);
+    if (err != ESP_OK) return err;
+    // From here even a partially sent header requires closing the socket.
+    // A null override cannot restore the SDK's private default send function.
+    self.started = true;
+    if (httpd_resp_set_type(self.req, "application/octet-stream") != ESP_OK ||
+        httpd_resp_set_hdr(self.req, "Cache-Control", "no-store") != ESP_OK ||
+        httpd_resp_set_hdr(self.req, "Connection", "close") != ESP_OK ||
+        httpd_resp_set_hdr(self.req, "X-Content-Type-Options", "nosniff") !=
+            ESP_OK)
+      return ESP_FAIL;
+    uint8_t header[12]{'F', 'B', 'S', '1'};
+    word(header + 4, frame.width);
+    word(header + 6, frame.height);
+    header[8] = frame.rotation;
+    header[9] = frame.round ? 1 : 0;
+    header[10] = 1;  // Compact little-endian RGB565.
+    header[11] = cfg::kScreenshotRows;
+    return self.sendChunk(header, sizeof(header));
+  }
+  static esp_err_t strip(const display::ScreenshotStrip& strip, void* ctx) {
+    auto& self = *static_cast<ScreenshotResponse*>(ctx);
+    uint8_t header[8];
+    word(header, strip.x);
+    word(header + 2, strip.y);
+    word(header + 4, strip.width);
+    word(header + 6, strip.height);
+    const auto err = self.sendChunk(header, sizeof(header));
+    return err == ESP_OK
+               ? self.sendChunk(strip.pixels,
+                                std::size_t{strip.width} * strip.height * 2)
+               : err;
+  }
+};
+esp_err_t postScreenshot(httpd_req_t* req) {
+  Request request(req);
+  {
+    Doc d;
+    // Diagnostics do not change saved settings and remain useful in OTA trial.
+    if (const auto* f = admit(req, d.doc)) return error(req, *f);
+  }
+  network::HeavyGuard guard;
+  if (!guard) return error(req, fault::kBusy);
+  request_deadline = std::min(request_deadline, timekeeping::monotonicMs() +
+                                                    cfg::kScreenshotDeadlineMs);
+  ScreenshotResponse response{req};
+  const display::ScreenshotSink sink{ScreenshotResponse::begin,
+                                     ScreenshotResponse::strip};
+  const auto err = display::screenshot(sink, &response, request_deadline);
+  if (!response.started) {
+    // This is temporary capture RAM, not a full image-storage quota.
+    if (err == ESP_ERR_NO_MEM) return error(req, fault::kMemory);
+    return err == ESP_ERR_INVALID_STATE || err == ESP_ERR_NOT_SUPPORTED
+               ? error(req, fault::kScreenshotUnavailable)
+               : failed(req, err);
+  }
+  // Do not turn an incomplete stream into a valid image or append JSON to it.
+  if (err != ESP_OK) return ESP_FAIL;
+  const uint8_t end[8]{};
+  if (response.sendChunk(end, sizeof(end)) != ESP_OK ||
+      httpd_resp_send_chunk(req, nullptr, 0) != ESP_OK)
+    return ESP_FAIL;
+  // Queue the close only after capture has detached and released its strip.
+  // No producer waits for work on this HTTP task. A failed enqueue makes the
+  // handler fail, so the server closes the socket directly instead.
+  return httpd_sess_trigger_close(server, httpd_req_to_sockfd(req));
+}
+
 // ---- Routes ----------------------------------------------------------------
 struct Route {
   const char* path;
@@ -1629,6 +1736,7 @@ constexpr Route kRoutes[] = {
     {"/api/v1/teams", HTTP_POST, postTeam, nullptr},
     {"/api/v1/teams", HTTP_PUT, putTeams, nullptr},
     {"/api/v1/display", HTTP_POST, postDisplay, nullptr},
+    {"/api/v1/screenshot", HTTP_POST, postScreenshot, nullptr},
     {"/api/v1/images/delete", HTTP_POST, deleteImage, nullptr},
     {"/api/v1/images/repair", HTTP_POST, repairImages, nullptr},
     {"/api/v1/images/role", HTTP_POST, postImageRole, nullptr},

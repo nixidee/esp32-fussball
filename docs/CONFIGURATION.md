@@ -211,6 +211,15 @@ its own destructive semantics. Image errors never automatically save settings.
 
 ## Record format and consistent saves
 
+The on-demand screenshot has compile-time limits in `app_config.h`:
+`kScreenshotRows = 20` and `kScreenshotDeadlineMs = 5000`. The port also
+limits capture to half the configured watchdog window, keeping shorter
+watchdog profiles safe. These are not saved settings; no record format,
+NVS entry, image quota or LittleFS allocation changes. The active 240×240
+C6 requests one temporary 9,600 B internal RGB565 strip plus allocator
+metadata, released after success or cancellation. See [API.md](API.md) for
+the wire protocol and [WEB_UI.md](WEB_UI.md) for access and download behavior.
+
 Current format is **9**, with explicit little-endian encoding, not a structure
 memory dump. The record has a variable length: the slide list stores only its
 entries. The longest possible record (five slides, every text at capacity)

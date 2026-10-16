@@ -6,15 +6,15 @@ Configured through a built-in web interface.
 
 > **Project status: implementation candidate, 0.1.0-dev.** WiFi/setup AP,
 > all four data adapters, bounded routing, five device screens, navigation,
-> images, the German/English Web UI, live debug and OTA/rollback are implemented.
+> images, the German/English Web UI, screenshot download, live debug and OTA/rollback are implemented.
 > The active C6 firmware and stock filesystem image build successfully.
 > Device acceptance is pending; provider fixture, browser, maximum-load and
 > long-run tests remain. Earlier boot/core tests
 > do not establish acceptance of these new services.
 >
-> Last verified C6 checkpoint (2026-10-16): 1,650,176 B firmware binary, 1,649,420 B PlatformIO flash
-> (89.9% of one OTA slot), 150,940 B static RAM and 68,449 B embedded UI gzip.
-> The binary fits the slot and is 90,420 B above the 85% flash-reserve line; the
+> Last verified C6 checkpoint (2026-10-16): 1,656,288 B firmware binary, 1,655,528 B PlatformIO flash
+> (90.2% of one OTA slot), 150,972 B static RAM and 71,204 B embedded UI gzip.
+> The binary fits the slot and is 96,532 B above the 85% flash-reserve line; the
 > savings are decided at alpha from a size map.
 > Peak heap, largest
 > block, stack and LVGL reserves remain unmeasured
@@ -52,6 +52,7 @@ environments below.
 | Run only the timekeeping suite | `pio test -e native -f test_timekeeping` |
 | Run only the heap-meter suite | `pio test -e native -f test_health` |
 | Run browser logic regression tests on the host (Node.js) | `node scripts/tests/test_web_ui.cjs` |
+| Run screenshot protocol/client checks on the host (Node.js) | `node scripts/tests/test_web_screenshot.cjs` |
 | Set up host tools (once) | see “Code formatting” below |
 | Check formatting of changed lines | `.venv-tools/bin/python scripts/check_format.py` |
 
@@ -160,12 +161,19 @@ argument to check a range, e.g. `scripts/check_format.py main`.
 
 The C6 candidate uses the existing 4 MB dual-OTA layout, a fixed 32 KB LVGL
 pool and two 9,600 B DMA draw buffers. One fixed match store holds the
-football data of all competitions in 22,728 B; parser allocations are
+football data of all competitions in 26,712 B; parser allocations are
 capped at 24 KB. Shared admission prevents
-simultaneous provider TLS/JSON, image mutation and OTA. Normal JPEG redraw
+simultaneous provider TLS/JSON, image mutation, screenshot capture and OTA. Normal JPEG redraw
 can overlap provider traffic and still needs peak-memory measurement.
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) records ownership and the current
 linker budget.
+
+**System → Diagnose → Bildschirmfoto herunterladen** saves a round PNG of
+the next real device redraw, with transparent corners and a dated filename.
+It uses the existing login policy and keeps the current reading orientation.
+The C6 temporarily copies one 9,600 B strip; the browser makes the PNG.
+The display may pause for up to five seconds. Physical panel/output and
+runtime reserve acceptance remain pending after the owner flashes the build.
 
 The stock filesystem contains two baseline JPEG aliases (7,862 logical bytes)
 for the crest/slideshow and screen backgrounds. These factory images stay on

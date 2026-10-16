@@ -1622,3 +1622,42 @@ project upload stack path stays 1,552 B, while the new small getter branch
 uses 64 B; complete SDK/libc/device peaks remain unmeasured. Settings format,
 quotas, permanent heap and task count are unchanged. The binary now exceeds
 the 85% slot line by 90,420 B; device/resource acceptance remains separate.
+
+## ADR-041 — On-demand device screenshot with browser PNG · Accepted 2026-10-16
+
+**Requirement:** independently of the schematic preview, download a round
+screenshot to document spontaneous display problems without a camera.
+
+**Decision:** force one redraw through the real LVGL display. Copy raw
+RGB565 output into one owned strip of at most 20 rows before the existing
+port swaps bytes and submits the normal LCD transfer. The existing HTTP
+task consumes the strip and sends a versioned binary response; the browser
+validates complete coverage and makes a PNG with transparent round corners
+and a dated filename. Preserve the current reading orientation, with no
+additional browser rotation. No host LCD renderer, firmware PNG codec,
+full-frame device buffer, new task or device screenshot file is used.
+
+Use the existing same-origin/session policy, including silent sessions with
+no configured admin password. The live-log switch is independent. Shared
+heavy admission prevents overlap with provider TLS, upload and OTA. Diagnostic
+capture can be used during OTA trial because it changes no persistent data.
+
+The C6 capture has a five-second absolute deadline across producer/consumer
+waits and partial socket sends; shorter watchdog profiles additionally cap
+capture at half their watchdog window. The display may pause during capture.
+The HTTP consumer never waits under the LVGL mutex. Cancellation detaches
+borrowed state and frees the strip only after capture work has released it;
+normal SPI completion and flush-ready ownership remain with the old port.
+The screenshot connection closes after the transfer rather than reusing an
+SDK send override whose private default cannot be restored through a getter.
+
+**Accepted preliminary envelope:** +4–10 KiB flash including +1–3 KiB gzip
+page, +16–128 B static RAM, 9,600 B temporary C6 strip heap plus allocator
+metadata, about +0.3–0.8 KiB own additional stack frames; no persistent heap,
+LittleFS/NVS format/quota or task change. Actual linked cost is recorded in
+[ARCHITECTURE.md](ARCHITECTURE.md). This is not a reserve waiver.
+
+**Acceptance:** host capture/protocol/error evidence and browser downloads
+are distinct from physical C6 output, all screens/rotations, slow-client
+timing, watchdog and complete heap/stack reserve acceptance. A forced redraw
+captures new LVGL output, not existing LCD RAM or an optically faulty panel.

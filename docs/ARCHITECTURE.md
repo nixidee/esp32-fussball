@@ -78,10 +78,17 @@
   row/page and competition-cycle state; separate football and status
   presenters borrow those objects during a repository callback. They retain
   no repository pointers and allocate no additional model or view copy.
-- HTTP image publication/deletion is the one explicit cross-task LVGL
-  operation: it acquires that lock, drops a cache entry and swaps/removes a
+- HTTP image publication/deletion acquires the cross-task LVGL
+  lock, drops a cache entry and swaps/removes a
   file after the old reader has finished. Validation and upload run outside
-  the lock. No event callback calls LVGL.
+  the lock. Screenshot admission also takes that lock briefly to invalidate
+  the active screen. A permanent flush wrapper copies before byte swapping,
+  then hands one owned strip to the HTTP caller using bounded ready/ACK
+  ownership. The consumer never waits under the LVGL lock. The producer
+  retains the existing task's LVGL lock during its coherent redraw and can
+  wait only until the capture deadline. Cancellation detaches the active
+  pointer and joins only capture copying/ACK work, before the original SPI
+  callback. No event callback calls LVGL.
 - This keeps the existing app/LVGL tasks rather than adding a separate UI
   task. It replaces the earlier provisional exclusive-UI-task plan. Every
   mode reuses two persistent child objects (one image and one draw object)
@@ -108,7 +115,7 @@
 - The HTTP worker performs strict settings mutations and bounded streaming
   uploads. Scan/selection/refresh requests signal their owning service.
   The static debug worker permits one fixed in-flight message. Heavy admission
-  serializes provider TLS/JSON with image mutation and OTA.
+  serializes provider TLS/JSON with image mutation, screenshots and OTA.
 - Settings live behind a mutex. `settings::current()` returns an 832-byte
   owned copy on the C6 (it lives on the caller's stack). Its optional
   generation output belongs to that same locked snapshot; model publication
@@ -594,9 +601,9 @@ This is integration evidence only, not the supported-maximum envelope.
 
 | Item | C6 candidate | Growth over the accepted core image |
 |---|---|---|
-| Firmware binary | 1,650,176 B | +1,133,872 B |
-| PlatformIO flash report | 1,649,420 B, 89.9% of 1,835,008 B | +1,133,756 B |
-| Static data/BSS | 150,940 B | +102,720 B |
+| Firmware binary | 1,656,288 B | +1,139,984 B |
+| PlatformIO flash report | 1,655,528 B, 90.2% of 1,835,008 B | +1,139,864 B |
+| Static data/BSS | 150,972 B | +102,752 B |
 | Linked DIRAM, official IDF size report | not re-measured (266,066 B at the 2026-10-10 image) | — |
 | Match store | 26,712 B (BSS) | Included above; replaced three snapshots of 27,200 B (81,600 B) |
 | Short-name table | 48 entries of 32 B (BSS) | Included above |
@@ -606,6 +613,8 @@ This is integration evidence only, not the supported-maximum envelope.
 | UI view model / draw list / text store | 1,880 / 2,016 / 1,280 B | Static owned view; 72 draw items of 28 B; view and draw list are initialised data (also stored in flash) |
 | Parser live allocation cap | 24,576 B including custom headers | Libc metadata additional |
 | JPEG validation workspace | 4,096 B static | Included above |
+| Screenshot copy strip | 9,600 B temporary internal heap plus allocator metadata | One admitted capture; released after success/cancellation |
+| Embedded Web UI | 71,204 B gzip | Included in flash; screenshot adds 2,755 B |
 | Stock JPEG files / filesystem image | 7,862 / 458,752 B | Logical files / gross partition |
 
 The DIRAM split (179,000 B BSS, 17,736 B data, 69,330 B RAM-resident code) is
@@ -842,7 +851,7 @@ generated build graph; SDK defaults retain their separate guard. This host
 workflow adds no firmware memory, flash or LittleFS cost.
 The later same-id repair and referenced-id reservation add 936 B flash,
 0 B linked static RAM and 545 B page gzip (included in flash). The latest
-binary is 1,650,176 B and page 68,449 B. No task, own persistent heap,
+binary at that checkpoint is 1,650,176 B and page 68,449 B. No task, own persistent heap,
 settings format or LittleFS/NVS quota change. Automatic allocation combines
 a coherent stored-reference mask with the current browser draft mask;
 explicit replacement restores its desired id. The new store getter does not
@@ -850,7 +859,24 @@ copy the settings model. The selected direct project upload path remains
 1,552 B in both linked ELFs: begin's own frame grows 32→48 B but is released
 before tail-calling start; the new getter branch uses 64 B. The enclosing
 HTTP upload frame stays 1,152 B. These exclude SDK/libc/runtime peaks.
-The reserve miss is now 90,420 B; cost approval does not accept this gate.
+The reserve miss at that checkpoint is 90,420 B; cost approval does not accept this gate.
+
+The subsequent on-demand screenshot adds 6,108 B flash, 32 B linked static
+RAM and 6,112 B binary over that repair checkpoint; page gzip grows 2,755 B
+and is already included in flash. Linked static growth comprises 17 B named
+capture state, 3 B section padding and 12 B retained LVGL warning flags.
+The C6 capture context is 56 B on the existing HTTP stack, with one temporary
+9,600 B internal strip and no separately allocated synchronization metadata.
+No own persistent heap, task, full framebuffer or LittleFS/NVS change.
+
+Target compiler/disassembly accounts for 336 B of selected simultaneous own
+transfer frames: HTTP endpoint 112 B + capture consumer 128 B + response
+callback 32 B + underlying send override 64 B. The new LVGL flush wrapper
+uses 96 B including inlined copy/ACK helpers; cleanup uses 16 B. These are
+own project frames, not complete call-chain or runtime stack peaks: SDK,
+LVGL callers, libc/socket routines and other shared helpers remain additional.
+The final binary exceeds the 85% slot floor by 96,532 B. A RAM allocation
+failure in this route uses `memory`, distinct from image-storage capacity.
 No flash-reserve gate is
 accepted. Free heap is not derivable from the static figures: dynamic stacks,
 network, TLS, parser, DMA and library charges must still be accounted for. Peak heap,

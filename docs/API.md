@@ -26,6 +26,7 @@ Implementation: `components/web/web_service.cpp`,
 | POST `/api/v1/export` | Explicit export of the settings, the competition store and the short names |
 | POST `/api/v1/wifi/scan`, `/data/select`, `/data/refresh` | Start asynchronous scan, provider list or refresh |
 | POST `/api/v1/display` | Quick display action `{"action":"next"\|"ip"}` (same events as the buttons) |
+| POST `/api/v1/screenshot` | Authenticated forced redraw streamed as raw RGB565 strips; the browser creates the PNG |
 | POST `/api/v1/images/upload`, `/images/delete` | Upload a library image (optional `X-Image-Id` replaces or restores that valid library id; `X-Image-Role: crest\|background` uploads the replacement of that role instead, answer `{"ok":true,"role":…}`) or delete a library image by id |
 | POST `/api/v1/images/role` | `{"role":"crest"\|"background","action":"reset"}` deletes the replacement, so the factory image shows again; `{"role":…,"action":"copy","id":N}` copies library image N as the replacement (the library image stays). Roles cannot be deleted. A replacement counts towards the image budget, not towards the ten library ids |
 | POST `/api/v1/images/repair` | Confirmed image-storage formatting and reference cleanup; preserves other settings and does not restart |
@@ -48,6 +49,53 @@ reserved. No available id uses the existing capacity error. Explicit
 references. Firmware uploads ignore image headers, as before.
 
 ## Endpoint details
+
+### Screenshot download
+
+`POST /screenshot` accepts the usual JSON object body (`{}`), same-origin
+check and session token. With no admin password, the Web UI opens the
+existing silent session. The live-debug setting does not gate screenshots.
+Capture is also available during an OTA trial; it does not change settings
+or files. Shared heavy admission rejects competing work with 409 `busy`.
+
+The device invalidates the active screen once and copies its next real LVGL
+output before normal LCD byte swapping. The response is an uncached
+`application/octet-stream`, with `Connection: close`. It describes the
+current logical reading orientation, rather than a fixed case orientation.
+This redraw is not LCD RAM readback or evidence of an optically stuck panel.
+The display can pause during capture, bounded to five seconds on the C6.
+
+All integers below are unsigned and little-endian. The version-1 header is
+12 bytes:
+
+| Offset | Bytes | Meaning |
+|---|---|---|
+| 0 | 4 | ASCII `FBS1` |
+| 4 / 6 | 2 each | Logical width / height; odd quarter-turns swap the profile dimensions |
+| 8 | 1 | Rotation, 0…3 quarter-turns; descriptive, no extra client rotation |
+| 9 | 1 | Shape: 0 rectangular, 1 round |
+| 10 | 1 | Pixel format: 1 = RGB565 little-endian |
+| 11 | 1 | Maximum rows per strip, currently 20 |
+
+Each record has four 16-bit values (`x`, `y`, `width`, `height`), then
+`width × height × 2` compact pixel bytes without source stride padding.
+Rectangles need not be full-width or arrive in coordinate order. Eight zero
+bytes terminate a successful capture; no bytes follow that record. Clients
+must reject missing/overlapping pixels, invalid dimensions, truncated or
+trailing data and an absent terminal before creating an image. The browser
+expands RGB565 and masks pixels outside the round display to transparent
+alpha, then downloads `fussball-YYYY-MM-DD_HH-MM-SS.png` in local browser time.
+It stores no screenshot file on the device.
+
+Before streaming, errors use the normal JSON body: 503
+`screenshot_unavailable` for an unavailable/unsupported display, 507 `memory`
+for insufficient capture RAM, or the existing admission/timeout errors.
+After streaming starts, a failed capture/send closes the connection without
+a success terminal or appended JSON. Every partial underlying socket send
+shares the same absolute capture deadline. The original LCD transfer and
+flush-ready ownership remain unchanged on success, timeout and disconnect.
+
+### Display actions and status
 
 `POST /display` keeps its existing `next` and `ip` bodies. Commands are
 queued with the current settings version internally; callers supply no new
@@ -425,7 +473,7 @@ and the slot is freed when the TCP connection ends.
 
 ## Errors
 
-Every failed request answers `{"error": "<English text>", "code": "<stable
+Before a response body starts, a failed request answers `{"error": "<English text>", "code": "<stable
 code>"[, "field": "<name>"]}` with `Cache-Control: no-store`. `code` is for
 programs, `error` for people, `field` names the one value that caused a 400:
 the dotted settings path (for example `competitions[0].primary.competition`),
@@ -437,7 +485,9 @@ a body key (`competition`, `season`, `id`, `role`, `action`, `confirm`) or a hea
 `unknown_route`, `not_found` (404), `method` (405), `body_missing`,
 `body_incomplete`, `json`, `size`, `content`, `invalid` (400),
 `body_too_large` (413), `content_type` (415), `timeout` (408), `memory`,
-`storage_full` (507), `internal` (500).
+`storage_full` (507), `screenshot_unavailable` (503), `internal` (500).
+Once a binary stream has started, transfer failures abort the connection
+instead of adding an incompatible JSON body.
 
 "Every 400 names its field" applies to value errors: a settings value, a
 body key or a header that is present but wrong. Errors about the request as a

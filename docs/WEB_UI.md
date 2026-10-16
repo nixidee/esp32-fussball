@@ -372,6 +372,25 @@ scripts/build_assets.py. Automatic provider-crest import is still deferred.
 
 ## System and diagnostics
 
+Under **System → Diagnose**, **Bildschirmfoto herunterladen** downloads a
+real redraw as a PNG, independently of the schematic overview preview and
+the optional live log. The adjacent `?` explains the five-second maximum
+display pause, login, orientation and capture limits. The existing session
+policy applies: login with the configured admin password, otherwise a silent
+session. The live-log switch need not be enabled.
+
+The PNG keeps the display's current reading orientation, with transparent
+pixels outside a round display and a local date/time in its filename. The
+device streams copied strips rather than retaining a full frame or encoding
+PNG. No screenshot is saved in device storage. A forced redraw captures
+LVGL's new output, not existing LCD RAM or physical panel faults.
+
+An incomplete or malformed transfer never becomes a download. The action is
+available again after an error; messages give an action and API/HTTP code or
+local `SCREEN E01` (timeout), `E02` (connection), `E03` (incomplete/invalid
+format), `E04` (browser PNG creation). A busy provider/upload asks the owner
+to retry, while a RAM shortage asks them to let other work finish.
+
 Export optionally includes secrets with an explicit notice; it carries the
 settings, the competitions and the owner's short names.
 Import sends them as up to three requests (settings, competitions, short
@@ -430,6 +449,13 @@ before upgrade; a browser can only report a failed WebSocket connection, not
 its refusal status. Console health logging is a separate setting.
 
 ## Acceptance boundary
+
+The screenshot client has production-page browser evidence at 1440×900 and
+375×812 against synthetic RGB565 records: native PNG downloads, exact colors,
+all-pixel round transparency, dated names, German/English help and recoverable
+format/busy errors. This verifies browser composition and controls, not LCD
+pixels, radio transfer time or device memory reserves. The owner must flash
+the C6 candidate and compare captures with each real screen and rotation.
 
 The rewritten source is checked with targeted host logic/render tests. These
 are not a simulated-device acceptance. The actual page was loaded locally with

@@ -473,6 +473,13 @@ behaviour is untested.
 
 ## Acceptance boundary
 
+System → Diagnose can download the next real LVGL redraw in the display's
+current reading orientation. This is a separate screenshot function, not
+the schematic Web preview; see [WEB_UI.md](WEB_UI.md). A full-frame device
+buffer and a host LCD renderer are not used. Device acceptance must compare
+the PNG with Own match, Konferenz, Matchday, Table, crest/slideshow, notice
+and startup/setup cards, status/IP overlays and night mode at all rotations.
+
 C6 firmware build and fixed sizes are verified. Visual alignment, real names,
 text scaling, overlay overlap, all input counts, bottom-row reachability,
 JPEG redraw responsiveness, night brightness and the full rendered safe-area

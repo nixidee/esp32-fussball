@@ -1,7 +1,7 @@
 idf_component_register(SRCS "web_service.cpp" "settings_json.cpp"
   INCLUDE_DIRS "include" PRIV_INCLUDE_DIRS "../../include" "../.."
   REQUIRES core football images network settings system
-  PRIV_REQUIRES esp_http_server esp_app_format esp_hw_support heap lwip freertos ui)
+  PRIV_REQUIRES esp_http_server esp_app_format esp_hw_support heap lwip freertos ui display)
 # The embed_web.py pre-script regenerates web_asset.h on every PlatformIO run
 # (a changed web/index.html alone does not trigger a CMake reconfigure, W129);
 # CMake only consumes the result.

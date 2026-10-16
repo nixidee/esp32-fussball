@@ -28,6 +28,7 @@
 #include "hw_target.h"
 #include "jpeg_observer.h"
 #include "lvgl.h"
+#include "screenshot_capture.h"
 #include "sdkconfig.h"
 
 namespace display {
@@ -353,7 +354,7 @@ esp_err_t initLvgl(const hw::DisplayProfile& profile, uint32_t buffer_pixels) {
   g_display = lvgl_port_add_disp(&disp);
   ESP_RETURN_ON_FALSE(g_display != nullptr, ESP_ERR_NO_MEM, kTag,
                       "LVGL display registration failed");
-  return ESP_OK;
+  return initScreenshotCapture(g_display, profile);
 }
 
 }  // namespace

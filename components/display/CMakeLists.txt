@@ -6,6 +6,7 @@ idf_component_register(
     "gc9a01_panel.cpp"
     "jpeg_validation.cpp"
     "jpeg_observer.cpp"
+    "screenshot_capture.cpp"
   # include/ of the project for hw_profile.h (used by the public header).
   INCLUDE_DIRS
     "include"

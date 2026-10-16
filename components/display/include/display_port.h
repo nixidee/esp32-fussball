@@ -36,6 +36,35 @@ void unlock();
 // timeout and skips the log if LVGL is busy). Does nothing if init() has not
 // succeeded.
 void logMemory();
+
+struct ScreenshotFrame {
+  uint16_t width;
+  uint16_t height;
+  uint8_t rotation;
+  bool round;
+};
+struct ScreenshotStrip {
+  uint16_t x;
+  uint16_t y;
+  uint16_t width;
+  uint16_t height;
+  const uint8_t* pixels;
+};
+struct ScreenshotSink {
+  esp_err_t (*begin)(const ScreenshotFrame&, void*);
+  esp_err_t (*strip)(const ScreenshotStrip&, void*);
+};
+// Forces one real LVGL redraw, copying compact RGB565 little-endian strips
+// before the normal LCD transfer. Coordinates and rotation describe LVGL's
+// logical display. Pixels are borrowed only for the synchronous strip call.
+// Caller owns heavy-operation admission; callbacks run in the caller task,
+// without the LVGL lock, and must respect deadline_ms (monotonic milliseconds).
+// The internal producer also has a watchdog-safe deadline. No LCD RAM readback,
+// full framebuffer, new task, or filesystem write. Allocation/admission/LVGL
+// validation failures happen before begin(); after begin(), an error means
+// the sink must discard the incomplete image. Only one capture at a time.
+esp_err_t screenshot(const ScreenshotSink& sink, void* context,
+                     int64_t deadline_ms);
 // Decodes the JPEG at `path` once without output. Deadline expiry (including
 // during file I/O) takes priority: ESP_ERR_TIMEOUT. Confirmed file I/O failure
 // including close: ESP_FAIL. Otherwise malformed/unsupported content or other

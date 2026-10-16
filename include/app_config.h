@@ -369,6 +369,10 @@ inline constexpr std::size_t kProviderSummaryBodyBytes = 524288;
 inline constexpr uint8_t kJsonDepth = 16;
 inline constexpr uint32_t kOperationDeadlineMs = 30000;
 inline constexpr uint32_t kSocketTimeoutMs = 1000;
+// On-demand screenshot: one copied RGB565 strip, no full frame on the device.
+// Bound all producer/consumer waits below the LVGL task watchdog timeout.
+inline constexpr uint16_t kScreenshotRows = 20;
+inline constexpr uint32_t kScreenshotDeadlineMs = 5000;
 // Longest provider silence tolerated while sending a request or receiving
 // its response; waits run in kSocketTimeoutMs slices within the deadline.
 inline constexpr uint32_t kProviderIdleTimeoutMs = 8000;

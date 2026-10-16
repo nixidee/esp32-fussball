@@ -183,7 +183,7 @@ corrections and reconnect behaviour in this candidate remain unaccepted.
 ## Admission and operation bounds
 
 One shared heavy-operation guard admits provider TLS/JSON work, image
-validation/publication/deletion and OTA. Competing heavy operations return
+validation/publication/deletion, screenshot capture and OTA. Competing heavy operations return
 HTTP 409 or wait for a later scheduled provider attempt: a provider request
 that finds the guard taken is not sent, counts neither as a request nor as
 a failure, and the scheduler offers it again after the 2-second device gap. Normal screen redraw,
@@ -221,6 +221,14 @@ Idle socket wait slices are one second. JSON bodies are at most 8 KB and use a
 24 KB bounded allocator; firmware/image bodies are streamed. Slow headers,
 bodies and readers must be exercised on hardware. The configured ten lwIP
 sockets must also be checked with all permitted services active.
+
+Screenshot responses additionally share a five-second C6 capture deadline
+across producer waits and every underlying partial socket send. A screenshot
+send override is scoped to its connection, which is closed after completion
+or failure. The producer never sends on the HTTP task's behalf or waits for
+queued work there. Cleanup detaches its copy buffer before scheduling the
+connection close. This does not establish slow-reader or watchdog timing on
+the device. The existing ordinary-response timeout behavior is unchanged.
 
 The 24 KB JSON limit is per allocator. The HTTP document and its temporary
 8 KB receive buffer can overlap the provider's separate 24 KB document/TLS
