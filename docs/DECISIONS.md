@@ -1,9 +1,11 @@
 # Architecture decisions (ADR)
 
 Status values: **Proposed** (waiting for approval) · **Accepted** · **Superseded
-by ADR-xxx**. Accepted ADRs change only via a new ADR.
+by ADR-xxx**. Accepted ADRs change only via a new ADR. Acceptance of a future
+product direction is labelled explicitly and does not establish implementation,
+an approved storage/API design or measured resource acceptance.
 Dated entries preserve their original decision context; ADR-022 records the
-current candidate and the explicit ownership/budget refinements. Current code
+earlier candidate and its explicit ownership/budget refinements. Current code
 and contracts are described in ARCHITECTURE and the relevant product documents.
 
 ---
@@ -760,6 +762,11 @@ test was performed for this correction.
 
 ## ADR-024 — Settings format 3: lists, image library, equal-or-newer OTA gate · Accepted 2026-10-12 · record extended by ADR-026 · table competition replaced by ADR-033 · fallback sources and fixture pairs removed by ADR-034
 
+**Planned refinement:** ADR-042 separates crest and slideshow as sequence
+entries. The combined-screen behavior recorded here remains historical context
+and current code; the replacement representation and migration are not yet
+approved.
+
 **Context:** the fixed slots of format 2 (three routes, three fallbacks, eight
 mappings, each with an enabled flag) show empty entries in the interface, cap
 the record near the NVS ceiling, and tie each of ten fixed image roles to its
@@ -959,6 +966,11 @@ conversion; device behaviour is not yet checked.
 
 ## ADR-027 — Settings format 5: Konferenz mode, whole matchday, input roles · Accepted 2026-10-13 · crest byte removed by ADR-028
 
+**Planned refinement:** ADR-042 replaces the whole-matchday own-game switch
+with the confirmed future screen rules. Conference modes, own-game highlighting
+and input capabilities are preserved unless explicitly changed by that design.
+The stored switch and current navigation still exist in the implementation.
+
 **Context:** the owner decided the Konferenz content (kickoff blocks of every
 active competition), two display modes (All pages, One page), an optional
 "show own match for the whole matchday" and a free role per input (Off,
@@ -999,6 +1011,12 @@ layout, format-3/4 reads and the role rules; the input mapping has its own
 host suite. Device behaviour is not yet checked.
 
 ## ADR-028 — Protected stock images as roles, settings format 6 without a crest setting · Accepted 2026-10-13 · crest hand-over removed by ADR-034
+
+**Planned refinement:** ADR-042 separates the crest entry from the image
+slideshow and adds picture frame mode. Protected crest/background roles,
+image management and content recovery remain part of the product; the old
+combined sequence and crest-as-slide representation must not become a second
+mechanism alongside the replacement. Storage/migration details remain open.
 
 **Context:** the owner asked for the management of all images under "Images":
 the stock crest and the stock background must be replaceable there and can
@@ -1230,10 +1248,18 @@ writing during live play (flash wear for data that change every minute).
 **Cost and boundary:** C6 build flash +12,030 B (1,624,064 B, 88.5 %),
 static RAM +2,128 B (150,960 B). An 18-team league with an own match takes
 2,947 B (one 4 KiB block, host measurement); a full short-name file
-1,552 B. The last minutes before a power loss can be missing. The device
+1,552 B in the historical accounting (corrected2026-10-17: 1,548 B, comprising
+a 12-B header and 48×32-B entries; same one-block allocation). The last minutes
+before a power loss can be missing. The device
 evidence (data after a reboot without a request) is open.
 
 ## ADR-033 — Matchday screen, screen switches per competition, table cycle, ESPN substitutions · Accepted 2026-10-14 · matchday selection and button stepping changed by ADR-036
+
+**Planned refinement:** ADR-042 replaces the single-default screen selection,
+mixed-competition Conference and independent competition-cycle selection with
+one situation-based sequence model. Existing per-competition switches and page
+timers below describe current code, not a constraint on the new model. Their
+replacement and migration await the implementation-design gate.
 
 **Context:** the owner wants to see "nur den letzten bzw. aktuellen
 spieltag und die tabelle aus liga 2 und 3", wants competitions usable only
@@ -1402,6 +1428,10 @@ kickoffs (all on one past date), so that competition shows no matches.
 The stepping is not yet checked on the device.
 
 ## ADR-037 — Status per competition, error codes, status pill · Accepted 2026-10-15 · cause E19 added by ADR-038
+
+**Planned refinement:** ADR-042 requires fixed, separate opposite IP and
+status/error overlays. This reopens the content-relative pill placement below;
+the cause/code mapping and actionable error behavior remain required.
 
 **Context:** a failure of one competition was reported as one global error
 text, so the owner could not tell which competition failed or why; the
@@ -1661,3 +1691,88 @@ LittleFS/NVS format/quota or task change. Actual linked cost is recorded in
 are distinct from physical C6 output, all screens/rotations, slow-client
 timing, watchdog and complete heap/stack reserve acceptance. A forced redraw
 captures new LVGL output, not existing LCD RAM or an optically faulty panel.
+
+## ADR-042 — Situation-based screen sequences · Accepted direction 2026-10-17
+
+**Requirement:** screen selection, order, timing, competition priority and
+manual navigation form one coherent product concept. New behavior must not be
+bolted onto the old default-screen resolver or lose existing information and
+features without an explicit owner decision.
+
+**Decision:** accept the future behavior documented once in
+[UI — planned screen-system redesign](UI.md#planned-screen-system-redesign).
+It includes a global highest-priority situation, timed automatic and filtered
+manual sequences with one shared type order, competition-specific content,
+separate crest/slideshow entries, picture frame mode and the new ring roles.
+Competition order also supplies own-game focus priority. Per-competition
+Conferences replace the mixed view; the old whole-matchday own-game option is
+replaced. The implementation must have one place for each selection rule and
+retain existing Conference modes, canonical data and image-management recovery
+where the new contract does not explicitly change them.
+
+**Boundary:** this accepts product direction and documentation persistence,
+not production implementation or an exact architecture/API/settings/file
+format. The next design proposal must establish those interfaces, migration
+and defaults, and account for all retained settings copies, bounded traversal
+and draw-list capacity, heap/stack/fragmentation, flash and storage. Do not
+invent new wire keys, caps or dependencies from this decision. The existing
+resource reserve and OTA gates stay in force.
+
+**Process and acceptance:** approve the control model and its costs first;
+then implement the model/options and repeatable match/event testability, agree
+device drafts of the main screens, design clock/shootout rings on those
+layouts, implement the chosen ring behavior and finally restructure the Web UI.
+The owner flashes the C6; actual device screenshots establish layout evidence.
+No host screen renderer is reintroduced. Current provider data must pass the
+real parsers for affected states. Builds and synthetic examples are not device
+or provider acceptance. Visible screen-construction latency still requires
+measurement; input/cadence delays alone are not its established cause.
+
+**Initial effect, before continuation:** documentation only, with 0 B target RAM/heap/stack/flash,
+NVS or LittleFS change. No build, test, upload, commit or push is implied.
+
+**Continuation clarification, 2026-10-17:** the owner selected one complete
+screen-policy snapshot and versioned NVS record/API in the existing settings
+service. Retain only settings-service/UI policy copies; derive the information
+needed by network/provider services. The bounded integration estimate is net
++1.5–2.5 KiB static RAM, up to 2.5 KiB additional transient heap, +8–16 KiB
+flash including its Web contribution, and up to 1.25 KiB added NVS payload;
+settings alone add no LittleFS data. Estimated effort 2–4 working days.
+These are planning estimates, not measured costs, an exact schema, an
+application-wide atomic transaction guarantee or approval of every following
+data/layout block. Reorder/delete/import must preserve identities without
+letting reused IDs inherit unrelated rules. Existing limits remain constraints.
+Manual entry/return, hidden manual-only page timing, frame hold/in-flight
+completion, stale focus and end-date result retention are refined in the
+linked planned behavior. No production implementation is claimed here.
+
+**Pagination clarification, 2026-10-17:** when incoming data add pages, keep
+the running timed visit's page count, elapsed time and duration. Adopt the new
+pages and calculate their duration on the next visit. This includes a manually
+selected entry whose pages are still rotating automatically; explicit held
+manual paging retains its complete content. The pure sequence implements this
+without another state field. The current integration/build boundary and costs
+are recorded in [ARCHITECTURE](ARCHITECTURE.md#screen-system-integration-checkpoint--2026-10-17);
+active-controller and device acceptance remain separate.
+
+**Implementation continuation, 2026-10-17:** the approved control/data/options/
+Demo source is now integrated. A dedicated policy owns all screen rules;
+general and competition development records use formats11/4, with image files
+preserved. Existing identity/incarnation binding applies to Demo's first two
+saved competition rules through runtime-only datasets. Missing saved slots use
+common rules and are explicitly labelled. Scenario data and test time are never
+saved to real provider files or system time.
+
+Conference and Matchday share minimum2 maximum-row capacity. Pin reserves one
+place only when the own member is present. Redistribute other rows without more
+pages, from later donors first (at most1 each with>2pages, or2 with2pages),
+keeping larger pages first. A single actual fixture shows alone. This partition
+is part of control integration; fonts and final geometry still need device drafts.
+
+The owner selected sequential use of the existing heavy-operation token for
+complete policy HTTP and provider work. Admission precedes allocations and
+covers payload completion/release; there is no second task/queue or higher heap
+budget. C6 source/build sizes and logical/physical allocator qualifications are
+in [ARCHITECTURE](ARCHITECTURE.md#datacontroller-integration-checkpoint--2026-10-17).
+Source compilation and targeted checks do not establish device, provider,
+OTA/soak or runtime-reserve acceptance.

@@ -201,9 +201,11 @@ esp_err_t unlinkImage(uint8_t slot) {
   char p[96];
   slotPath(slot, p, sizeof(p));
   if (rendering) dropCache(slot);
-  const bool exists = bytes(p) > 0;
-  const auto err = !exists || unlink(p) == 0 ? ESP_OK : ESP_FAIL;
-  if (err == ESP_OK && exists) bump(slot);
+  // A zero-byte file still exists; a failed stat never proves absence.
+  // Attempt deletion directly and accept only ENOENT as already removed.
+  const bool removed = unlink(p) == 0;
+  const auto err = removed || errno == ENOENT ? ESP_OK : ESP_FAIL;
+  if (removed) bump(slot);
   if (rendering) display::unlock();
   return err;
 }
@@ -526,18 +528,15 @@ esp_err_t finish(int64_t deadline_ms) {
 esp_err_t remove(uint8_t id) {
   if (!libraryId(id)) return ESP_ERR_INVALID_ARG;
   if (ota::trial()) return ESP_ERR_INVALID_STATE;
-  // References first: a failed save keeps the file, so no reference is left
-  // pointing to a deleted image.
-  auto model = settings::current();
   // Explicit deletion changes only this id; unrelated missing desired files
-  // must remain referenced so repair/retry can restore them.
+  // remain referenced. Keep the settings writer through unlink, so a save
+  // cannot restore a reference between the cleanup and deleting its file.
   const settings::ImageMask others =
       settings::kLibraryImageMask & ~(settings::ImageMask{1} << id);
-  if (settings::dropMissingImages(model, others)) {
-    const auto err = settings::save(model);
-    if (err != ESP_OK) return err;
-  }
-  return unlinkImage(id);
+  return settings::dropMissingImages(
+      others,
+      [](void* value) { return unlinkImage(*static_cast<uint8_t*>(value)); },
+      &id);
 }
 esp_err_t copyToRole(uint8_t id, cfg::StockImage stock) {
   if (ota::trial()) return ESP_ERR_INVALID_STATE;

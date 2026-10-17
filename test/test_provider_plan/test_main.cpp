@@ -178,16 +178,15 @@ void test_change_hash() {
   const uint32_t a = football::plan::changeHash("2026-10-16T19:01:02.5");
   TEST_ASSERT_NOT_EQUAL(0, a);
   TEST_ASSERT_NOT_EQUAL(a, football::plan::changeHash("2026-10-16T19:01:03.5"));
-  TEST_ASSERT_EQUAL_UINT32(a, football::plan::changeHash("2026-10-16T19:01:02.5"));
+  TEST_ASSERT_EQUAL_UINT32(a,
+                           football::plan::changeHash("2026-10-16T19:01:02.5"));
 }
 
-void test_wanted_types_and_costs() {
+void test_request_costs_and_inactive_source_no_demand() {
   setSource(cfg::Provider::kOpenLigaDb, "bl1", "91");
   Wanted w;
   planner.wanted(0, &entry, store, at(0), w);
   TEST_ASSERT_EQUAL_UINT8(3, w.id);
-  // Every data type but the own-match events (they come with live data).
-  TEST_ASSERT_EQUAL_UINT8(0x0f, w.types);
   TEST_ASSERT_EQUAL_UINT8(3, w.cost[0]);  // fixtures with club
   TEST_ASSERT_EQUAL_UINT8(2, w.cost[1]);  // table: season first
   TEST_ASSERT_EQUAL_UINT8(2, w.cost[2]);  // live: change date + round
@@ -226,10 +225,10 @@ void test_openliga_fixtures_run() {
   // The club's fixtures: rows of other competitions and seasons are skipped.
   r = expect(cfg::DataType::kFixtures,
              "https://api.openligadb.de/getmatchesbyteamid/91/1/1", 4);
-  const std::string club =
-      "[" + olgRow(4, "2026-10-21T18:30:00Z", 4) + "," +
-      olgRow(5, "2026-10-28T18:30:00Z", 2, "dfb") + "," +
-      olgRow(6, "2025-10-28T18:30:00Z", 9, "BL1", 2025) + "]";
+  const std::string club = "[" + olgRow(4, "2026-10-21T18:30:00Z", 4) + "," +
+                           olgRow(5, "2026-10-28T18:30:00Z", 2, "dfb") + "," +
+                           olgRow(6, "2025-10-28T18:30:00Z", 9, "BL1", 2025) +
+                           "]";
   TEST_ASSERT_TRUE(feed(r, club.c_str()));
   TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(4)));
   TEST_ASSERT_TRUE(stored(3) && stored(4));
@@ -237,8 +236,8 @@ void test_openliga_fixtures_run() {
   TEST_ASSERT_FALSE(stored(6));
 
   // The next run starts again with the current round.
-  expect(cfg::DataType::kFixtures,
-         "https://api.openligadb.de/getmatchdata/bl1", 6);
+  expect(cfg::DataType::kFixtures, "https://api.openligadb.de/getmatchdata/bl1",
+         6);
 }
 
 void test_openliga_fixtures_without_club_and_explicit_season() {
@@ -262,14 +261,14 @@ void test_failure_ends_the_run() {
   setSource(cfg::Provider::kOpenLigaDb, "bl1", "91");
   Request r = expect(cfg::DataType::kFixtures,
                      "https://api.openligadb.de/getmatchdata/bl1");
-  TEST_ASSERT_TRUE(feed(r, ("[" + olgRow(1, "2026-10-16T18:30:00Z", 6) + "]")
-                               .c_str()));
+  TEST_ASSERT_TRUE(
+      feed(r, ("[" + olgRow(1, "2026-10-16T18:30:00Z", 6) + "]").c_str()));
   TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(0)));
   expect(cfg::DataType::kFixtures,
          "https://api.openligadb.de/getmatchdata/bl1/2026/7", 2);
   TEST_ASSERT_EQUAL(Step::kDone, planner.finish(false, at(2)));
-  expect(cfg::DataType::kFixtures,
-         "https://api.openligadb.de/getmatchdata/bl1", 60);
+  expect(cfg::DataType::kFixtures, "https://api.openligadb.de/getmatchdata/bl1",
+         60);
 }
 
 void test_season_request_without_season_is_invalid() {
@@ -302,8 +301,8 @@ void test_openliga_live_checks_the_change_date_per_round() {
   const int64_t now = football::parseUtc("2026-10-16T18:40:00Z") - kBase;
   Request r = expect(cfg::DataType::kFixtures,
                      "https://api.openligadb.de/getmatchdata/bl1", now);
-  TEST_ASSERT_TRUE(feed(r, ("[" + olgRow(1, "2026-10-16T18:30:00Z", 6) + "]")
-                               .c_str()));
+  TEST_ASSERT_TRUE(
+      feed(r, ("[" + olgRow(1, "2026-10-16T18:30:00Z", 6) + "]").c_str()));
   planner.finish(true, at(now));
   r = expect(cfg::DataType::kLive,
              "https://api.openligadb.de/getlastchangedate/bl1/2026/6", now);
@@ -400,8 +399,9 @@ void test_espn_fixtures_from_match_days() {
                             "20261023", "20261024", "20261025"};
   for (int i = 0; i < 6; ++i) {
     const std::string url =
-        std::string("https://site.api.espn.com/apis/site/v2/sports/soccer/"
-                    "ger.1/scoreboard?dates=") +
+        std::string(
+            "https://site.api.espn.com/apis/site/v2/sports/soccer/"
+            "ger.1/scoreboard?dates=") +
         expected[i];
     r = expect(cfg::DataType::kFixtures, url.c_str(), 2 + i);
     TEST_ASSERT_EQUAL_STRING("events", r.array);
@@ -469,8 +469,9 @@ void test_api_football_resolves_the_season() {
   Request r = expect(cfg::DataType::kFixtures,
                      "https://v3.football.api-sports.io/"
                      "leagues?id=78&current=true");
-  TEST_ASSERT_TRUE(feed(r, R"({"response":[{"seasons":[{"year":2025,)"
-                           R"("current":false},{"year":2026,"current":true}]}]})"));
+  TEST_ASSERT_TRUE(
+      feed(r, R"({"response":[{"seasons":[{"year":2025,)"
+              R"("current":false},{"year":2026,"current":true}]}]})"));
   TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(0)));
   r = expect(cfg::DataType::kFixtures,
              "https://v3.football.api-sports.io/fixtures?league=78&season=2026"
@@ -618,8 +619,8 @@ void test_events_have_no_request_and_a_source_change_starts_fresh() {
   planner.finish(true, at(0));
   TEST_ASSERT_EQUAL_UINT8(6, planner.state(0).round);
   setSource(cfg::Provider::kOpenLigaDb, "bl2", "91");
-  expect(cfg::DataType::kFixtures,
-         "https://api.openligadb.de/getmatchdata/bl2", 2);
+  expect(cfg::DataType::kFixtures, "https://api.openligadb.de/getmatchdata/bl2",
+         2);
   TEST_ASSERT_EQUAL_UINT8(0, planner.state(0).round);
 }
 
@@ -631,62 +632,13 @@ void feedDays(const Request& r) {
   (void)r;
 }
 
-uint8_t bit(cfg::DataType type) {
-  return static_cast<uint8_t>(1u << static_cast<unsigned>(type));
-}
-
-// The competition's screen switches limit the data types (OQ-192).
-void test_screen_switches_mask_the_wanted_types() {
-  using Screen = cfg::CompetitionScreen;
-  const auto only = [](Screen screen) {
-    return static_cast<uint8_t>(1u << static_cast<unsigned>(screen));
-  };
-  const uint8_t matches =
-      bit(cfg::DataType::kFixtures) | bit(cfg::DataType::kLive);
-  const uint8_t table = bit(cfg::DataType::kFixtures) |
-                        bit(cfg::DataType::kTable) |
-                        bit(cfg::DataType::kLiveTable);
-  setSource(cfg::Provider::kOpenLigaDb, "bl1", "91");
-  Wanted w;
-  entry.screens = only(Screen::kTable);
-  planner.wanted(0, &entry, store, at(0), w);
-  TEST_ASSERT_EQUAL_UINT8(table, w.types);
-  entry.screens = only(Screen::kOwnMatch);
-  planner.wanted(0, &entry, store, at(0), w);
-  TEST_ASSERT_EQUAL_UINT8(matches, w.types);
-  entry.screens = only(Screen::kConference);
-  planner.wanted(0, &entry, store, at(0), w);
-  TEST_ASSERT_EQUAL_UINT8(matches, w.types);
-  entry.screens = only(Screen::kMatchday);
-  planner.wanted(0, &entry, store, at(0), w);
-  TEST_ASSERT_EQUAL_UINT8(matches, w.types);
-  // The own match needs a club.
-  setSource(cfg::Provider::kOpenLigaDb, "bl1");
-  entry.screens = only(Screen::kOwnMatch);
-  planner.wanted(0, &entry, store, at(0), w);
-  TEST_ASSERT_EQUAL_UINT8(0, w.types);
-  entry.screens = 0;
-  planner.wanted(0, &entry, store, at(0), w);
-  TEST_ASSERT_EQUAL_UINT8(0, w.types);
-}
-
-// ESPN's own-match substitutions: the match summary of the latest own
-// match whose live window opened, once it kicked off (OQ-207). The summary
+// ESPN substitutions from an exact canonical match target. The summary
 // rows below are written by the agent after the shape checked on
 // 2026-10-14 (keyEvents, type.type "substitution", participants: on, off).
-void test_espn_events_from_the_match_summary() {
-  using Screen = cfg::CompetitionScreen;
+void test_exact_target_summary_maps_available_substitutions() {
   setSource(cfg::Provider::kEspn, "ger.1", "125");
-  Wanted w;
-  planner.wanted(0, &entry, store, at(0), w);
-  TEST_ASSERT_EQUAL_UINT8(0x0f | bit(cfg::DataType::kEvents), w.types);
-  TEST_ASSERT_EQUAL_UINT8(1, w.cost[4]);
-  entry.screens = static_cast<uint8_t>(
-      cfg::kCompetitionScreensDefault &
-      ~(1u << static_cast<unsigned>(Screen::kOwnMatch)));
-  planner.wanted(0, &entry, store, at(0), w);
-  TEST_ASSERT_EQUAL_UINT8(0x0f, w.types);
-  entry.screens = cfg::kCompetitionScreensDefault;
+  auto events_job = job(cfg::DataType::kEvents);
+  events_job.event_match = 401884770;
 
   // Kickoff 2026-10-16 18:30 UTC; ten minutes later.
   const int64_t now = football::parseUtc("2026-10-16T18:40:00Z") - kBase;
@@ -697,8 +649,7 @@ void test_espn_events_from_the_match_summary() {
     football::storeMatch(e, store, c);
   // Not kicked off according to the provider: nothing to ask.
   Request r;
-  TEST_ASSERT_FALSE(
-      planner.request(job(cfg::DataType::kEvents), entry, store, at(now), r));
+  TEST_ASSERT_FALSE(planner.request(events_job, entry, store, at(now), r));
   std::string running = kEspnUpcoming;
   const std::string pre =
       R"("displayClock":"0'","type":{"name":"STATUS_SCHEDULED","state":"pre")";
@@ -708,10 +659,11 @@ void test_espn_events_from_the_match_summary() {
   deserializeJson(doc, running);
   for (JsonVariantConst e : doc["events"].as<JsonArrayConst>())
     football::storeMatch(e, store, c);
-  r = expect(cfg::DataType::kEvents,
-             "https://site.api.espn.com/apis/site/v2/sports/soccer/"
-             "ger.1/summary?event=401884770",
-             now);
+  TEST_ASSERT_TRUE(planner.request(events_job, entry, store, at(now), r));
+  TEST_ASSERT_EQUAL_STRING(
+      "https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/"
+      "summary?event=401884770",
+      r.url);
   TEST_ASSERT_EQUAL_STRING("keyEvents", r.array);
   TEST_ASSERT_TRUE(r.optional);
   TEST_ASSERT_EQUAL_UINT32(cfg::kProviderSummaryBodyBytes, r.body);
@@ -732,7 +684,7 @@ void test_espn_events_from_the_match_summary() {
   TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(now)));
   const auto* m = store.find(entry.id, cfg::Provider::kEspn, 401884770);
   TEST_ASSERT_NOT_NULL(m);
-  const auto& own = store.ownAt(m->own);
+  const auto& own = store.detailAt(m->detail);
   // Only the substitutions; goals come with the scoreboard.
   TEST_ASSERT_EQUAL_UINT8(2, own.event_count);
   const auto& home = store.eventAt(own.events[0]);
@@ -757,8 +709,8 @@ void test_openliga_live_without_a_known_round_asks_the_current_one() {
   setSource(cfg::Provider::kOpenLigaDb, "bl1", "", "2026");
   Request r = expect(cfg::DataType::kLive,
                      "https://api.openligadb.de/getmatchdata/bl1");
-  TEST_ASSERT_TRUE(feed(r, ("[" + olgRow(1, "2026-10-14T11:50:00Z", 6) + "]")
-                               .c_str()));
+  TEST_ASSERT_TRUE(
+      feed(r, ("[" + olgRow(1, "2026-10-14T11:50:00Z", 6) + "]").c_str()));
   TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(0)));
   TEST_ASSERT_EQUAL_UINT8(6, planner.state(0).round);
   TEST_ASSERT_TRUE(stored(1));
@@ -769,7 +721,7 @@ int main() {
   RUN_TEST(test_encode_escapes_and_cuts_at_a_whole_escape);
   RUN_TEST(test_matchday_days_current_and_next);
   RUN_TEST(test_change_hash);
-  RUN_TEST(test_wanted_types_and_costs);
+  RUN_TEST(test_request_costs_and_inactive_source_no_demand);
   RUN_TEST(test_openliga_fixtures_run);
   RUN_TEST(test_openliga_fixtures_without_club_and_explicit_season);
   RUN_TEST(test_failure_ends_the_run);
@@ -786,8 +738,7 @@ int main() {
   RUN_TEST(test_api_football_season_kept_without_a_clock);
   RUN_TEST(test_football_data_urls);
   RUN_TEST(test_events_have_no_request_and_a_source_change_starts_fresh);
-  RUN_TEST(test_screen_switches_mask_the_wanted_types);
-  RUN_TEST(test_espn_events_from_the_match_summary);
+  RUN_TEST(test_exact_target_summary_maps_available_substitutions);
   RUN_TEST(test_openliga_live_without_a_known_round_asks_the_current_one);
   return UNITY_END();
 }

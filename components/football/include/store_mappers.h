@@ -7,21 +7,37 @@
 #include <ArduinoJson.h>
 
 #include <cstdint>
+#include <string_view>
 
 #include "match_store.h"
 
 namespace football {
+
+// Receives every mapped identity and full provider name, including rows that
+// the store cannot admit, while the row
+// is alive. It may copy bounded transient candidates, but must not mutate the
+// store. Selection and committing names after a complete request belong to the
+// caller, not the provider mapper.
+using MatchNameObserver = void (*)(const StoredMatch& match,
+                                   std::string_view home, std::string_view away,
+                                   void* context);
+
+using MatchEventObserver = void (*)(const StoredEvent& event, void* context);
 
 struct MapContext {
   uint8_t competition = 0;  // stable competition id (1-255)
   cfg::Provider provider = cfg::Provider::kOpenLigaDb;
   uint32_t club = 0;  // own club's team id at this provider, 0 = none
   Clock clock;
+  MatchNameObserver observe_names = nullptr;
+  void* names_context = nullptr;
+  MatchEventObserver observe_events = nullptr;
+  void* events_context = nullptr;
 };
 
 // One match: an OpenLigaDB match, an ESPN scoreboard event, an API-Football
-// fixture item or a football-data.org match. An own-club match also gets
-// its events when the row carries them (OpenLigaDB goals, ESPN details).
+// fixture item or a football-data.org match. A match with a detail slot also
+// gets its events when the row carries them (OpenLigaDB goals, ESPN details).
 // A match that does not fit is noted by the store and skipped. False only
 // for a row without a numeric match id.
 bool storeMatch(ArduinoJson::JsonVariantConst row, MatchStore& store,

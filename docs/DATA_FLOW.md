@@ -13,6 +13,29 @@ build compiles and the scheduler, plans, mappers, store and views are
 host-tested. Firmware requests and keyed-provider coverage have not been
 accepted on the device.
 
+
+The [common screen policy](UI.md#planned-screen-system-redesign) now derives
+content demand and phase classification. Every active competition retains fixture
+and live classification data; current-phase enabled entries add Table and exact
+ESPN Single-summary demand, including manual-only access. Special own priority
+is separate from ownership and from an ordinary Single's exact event target.
+
+Picture frame stops automatic demand, including continuations. DNS/TLS reserves
+no provider request; the first nonblocking HTTP write checks both copied settings
+generations and serializes admission with publication. Already admitted requests
+finish across policy-only changes. Explicit setup queries bypass frame only,
+retain all request limits, and never authorize a general refresh on frame exit.
+
+Ordinary row names/events are staged through a complete response, then committed
+only for the final selected identity. Two bounded candidates and duplicate-id
+tracking retain1192B metadata (+1188B static versus the response pointer); their
+24 events use2016B transient heap, allocated only at the first body callback
+after the816B durable pre-send fence has released. Duplicate/overflow/allocation/final-target
+mismatch is visibly marked through existing loss notices; no ordinary match is
+relabeled as owned. A timing-boundary selection change can require a later full
+response to fill the newly selected detail target. Existing own-bank capacity and
+provider limitations remain unchanged.
+
 ## 1. Pipeline
 
 1. **Settings** supply the competition list (up to eight entries, own
@@ -55,7 +78,7 @@ API-Football / ESPN / football-data.org):
   competitions; counted exactly (below).
 - **Device gap**: 2 seconds between the starts of any two requests of the
   device, independent of the limits.
-- **Intervals per data type** (fixtures 8 h, table 4 h, live 1 min, live table 10 min, own-match events 10 min; 10 s–7 days): the
+- **Intervals per data type** (fixtures 8 h, table 4 h, live 1 min, live table 10 min, selected-summary events 10 min; 10 s–7 days): the
   due times of the jobs.
 - **Global limit** over all providers (daily cap and window limit, default
   off): the window limit is counted like a provider's; the daily cap has its
@@ -81,8 +104,9 @@ waits in a loop.
 - **Jobs**: one per competition slot (8) and data type (5). Fixtures and
   table are due one interval after their
   last start. Live data and the live table are due only while a match of the
-  competition is in its live window, own-match events only while the own
-  match is; entering a window makes them due at once. The live table and
+  competition is in its live window; summary events use the exact eligible
+  selected Single identity and its bounded/held window, independently of the
+  owned flag. Entering/changing the selected target makes it due at once. The live table and
   the events get one more request after a window ends, while the end is less
   than one interval ago in real time (final table, last events; a window
   that ended before boot counts with its real end). The table and the live
@@ -95,8 +119,14 @@ waits in a loop.
   with no screen switched on requests nothing.
 - **Live window** of a match: from 30 minutes before kickoff to the final
   whistle when finished, to kickoff + 240 minutes while the provider reports
-  it running, else to kickoff + 110 minutes. Postponed, cancelled and
-  abandoned matches have none. Overlapping windows of a competition merge.
+  it running or an earlier live observation justifies a reported suspension,
+  else to kickoff + 110 minutes. Without kickoff, a confirmed live match or
+  justified suspension starts at its first live observation and keeps the
+  240-minute hard bound. An unjustified suspension has no request window.
+  A finished match without kickoff retains its final-whistle boundary for
+  final table/events requests. No kickoff time is invented. Postponed,
+  cancelled and abandoned matches have none. Overlapping windows merge by
+  their actual bounds, independent of the display store's kickoff order.
   This is the request window (`kLiveLeadMinutes`), independent of the
   configurable display window (`window_before` / `window_after`, 0–180
   minutes each). Those settings affect Own match and Konferenz selection,
@@ -360,7 +390,13 @@ scheduled request (`retry_ms`).
 - Every request carries the provider-data settings generation and the
   network epoch; a change to that generation or the network during a
   request stops it and its run. A cosmetic settings save does not change
-  the provider-data generation and does not cancel transport.
+  the provider-data generation and does not cancel already-started transport.
+  Before the first HTTP send, both generations must still match the worker's
+  coherent snapshot. A policy or request-limit save therefore refuses an
+  obsolete unsent request without discarding valid cached data. The setup
+  wizard bypasses the frame pause only, so it cannot send using limits saved
+  before a concurrent change either. Its current requests remain available
+  when frame mode is already active.
 
 ### Kept data
 
@@ -439,38 +475,42 @@ match list, 232 B for a table on the C6).
   known, up to 240 minutes after kickoff while the provider reports it
   running, else 110 minutes after kickoff; never later than 240 minutes
   after kickoff.
-- **Own match:** the own-match screen takes the first own match inside its
-  window, else the one with the closest kickoff; the Web UI overview takes a
-  running own match first, else the closest kickoff.
-- **Names:** the owner's short name for the team, else the team
-  directory's short name, else the own match's full name; the full name is
-  kept only for own matches.
-- **Screen filter:** each screen reads only the competitions whose switch
-  for it is on (Own match, Konferenz, Matchday, Table).
-- **Table:** the stored rows of one competition in table order with the own
-  row marked. The Table screen cycles through the competitions with a
-  stored table in settings order ([DATA_MODEL.md](DATA_MODEL.md#73-table)).
-- **Matchday:** the reachable matchdays of one competition among its
-  shown matches with a kickoff (kickoffs less than `kMatchdayGapHours`
-  apart; at most held, selected and next) and the matches of one of them
-  in kickoff order. The selection follows `matchday_mode` and the local
-  clock: "current" holds a finished matchday until the end of the
-  following local day, "next" moves on at midnight after its last kickoff
-  ([DATA_MODEL.md](DATA_MODEL.md#73a-matchday)). A passed matchday is
-  never listed, even before the store drops it.
-- **Events:** only for own matches; removal markers are left out. Order: regular time
-  before the shoot-out, then minute and added minute; an event without a
-  minute keeps the minute of the event before it, equal keys keep the
-  provider order.
-- **Demo:** one running own match (2:1, minute 67, no kickoff, no goal
-  highlight) and a five-row table, both stored like provider data.
+- **Single and phase:** the common canonical selector resolves focused own,
+  unique ordinary, held result or next preview. Owned flags and special-own
+  treatment are independent. Current-phase enabled/manual rules derive provider
+  demand; no old screen mask or independent resolver gates content.
+- **Names/events:** selected ordinary and own identities share full names and
+  bounded event banks. Owner custom names take priority. Removal markers stay
+  hidden; regular time precedes shootout, then minute/added time/provider order.
+  Truncation is visible and another match's successful update cannot clear it.
+- **Table:** automatic pages centre around the selected club where present;
+  held manual paging reaches all stored rows. Visit time supplies page timing.
+- **Matchday:** canonical verified rounds include known rescheduled fixtures
+  outside the date cluster. Held/current/next round navigation is separate from
+  the global phase's local-date grouping.
+- **Conference:** one competition per entry, complete chronological paging or
+  One-page activity ranking. Shared match capacity is at least2; own pin counts
+  toward capacity and leaves remaining places for other fixtures. Bounded
+  redistribution keeps page count, places larger pages first and creates no
+  empty remainder page. Manual anchors use actual page boundaries.
+- **Demo:** seven controllable canonical scenarios (own, ordinary, conference,
+  cup, rounds, break, empty), with ordered steps and a separate clock. First two
+  saved competition identities supply order and screen rules through a runtime
+  projection. Missing saved associations use common rules and are exposed as
+  unbound. Synthetic sources are never saved; no real cache sweep/write or
+  provider HTTP occurs. Exit reloads retained real data. Store/routes/clock/
+  bindings/phase proof publish atomically; command acknowledgement is separate
+  from completion. Fixture identities/names/events use recorded public data;
+  timings, intermediate states and table values are explicitly simulated.
 
 ## 8. Request bounds
 
 - HTTPS verifies the common-root IDF CA bundle and needs a valid clock. No
   redirect is followed.
 - One heavy-operation token serializes TLS and parsing with uploads, image
-  validation/deletion and OTA. A routine LVGL JPEG redraw can still overlap
+  validation/deletion, complete screen-policy HTTP and OTA. Ordinary jobs keep
+  it through detail commit/release; discovery takes it before state allocation
+  and releases after proof persistence/cleanup. A routine LVGL JPEG redraw can still overlap
   TLS inside its fixed pool (device measurement pending).
 - A 30-second monotonic deadline covers DNS, TLS connection and handshake,
   headers, framing and reads; socket waits are at most one second. One DNS
@@ -502,3 +542,61 @@ request runs. Real keys and maximum configured data are required for
 coverage and resource acceptance. SDK scheduling and cryptographic step
 duration need measurement; the deadline is not a measured hard real-time
 bound. None of these suites was run for this candidate.
+
+
+## Schedule evidence and provider protocol — 2026-10-17
+
+The HTTP client and host replay use one streaming parser kernel and unchanged
+body/24-KiB allocator limits. Optional anchored metadata and name observers share
+the existing filter/value lifetime; no complete body is retained. A bounded
+syntax guard also validates skipped tokens. Parent array counts and wrapper
+shape prevent metadata from unrelated league objects being combined. Callers
+must stage and validate metadata, then commit only after a complete successful
+response with all required fields, types, uniqueness and parent identity proven.
+An early wizard stop is successful list pagination, never a complete schedule.
+
+The worker owns one compact evidence array independently of the224display
+matches. Complete spans require source/season identity, semantic metadata,
+complete framing/counts/pages, freshness and actual neighbouring kickoffs.
+Normal rows are checked before store admission/eviction, using the planner's
+same source filter. Display absence and calendar day markers prove no gap.
+
+`schedule.bin` stores the explicit816B CRC record; its temporary replacement
+also needs physical filesystem headroom. It counts toward the existing48KiB
+football quota and preserves the image reserve. Corrupt file bytes still count
+until replaced or removed. Before any match/discovery first-send, a durable
+conservative version fences that source's existing proof. A reset during an
+unfinished response therefore reloads Unknown. Publication remains conservative
+until the safe replacement succeeds. Optional coverage write failures do not
+starve established competition/short-name persistence.
+
+The authoritative48B discovery guard is in the existing budget NVS namespace.
+The file contains a non-authoritative guard snapshot. Formatting/missing files,
+reboot or midnight cannot replenish the16extra requests of an active run.
+Ordered source/incarnation/access fingerprints reject changed routes or access
+after reboot. Changed data settings retire an old run without granting another
+same-day run. At most one new run starts per UTC day and at most two seasons
+are considered; ordinary due/live jobs, setup and provider limits retain priority.
+
+OpenLigaDB full-season proof is limited to actual outer kickoffs of a complete
+validated response; an oversized season remains Unknown. Keyed date ranges
+require matching filters, counts and complete pages. ESPN calendar labels do
+not define UTC kickoff buckets, so currently replayed league/cup replies remain
+Partial instead of inventing coverage. Keyed-provider and full hardware coverage
+acceptance remain open.
+
+The worker reads its model, competition order and both version markers in one
+short settings-service snapshot. The optional derived eligibility uses exactly
+that route order; later saves are detected by the existing generation/admission
+checks. No complete screen policy is copied into provider-owned storage.
+
+### Selected summary cadence checks
+
+The maintained host tests exercise actual selection→Planner demand→Scheduler→
+summary URL for both own and ordinary selected Singles: initial request, exactly
+one final request within its interval, and no final request after that interval.
+A zero target never infers demand from an owned flag; a job naming a different
+currently selected match is rejected by the Planner. The unknown-kickoff case
+also runs after a prior request, so it cannot pass solely through initial-target
+admission. These synthetic boundary checks do not establish real provider
+update speed or device transport acceptance.

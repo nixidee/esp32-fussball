@@ -5,21 +5,42 @@ scores, conference view of all running matches, league table and club crest.
 Configured through a built-in web interface.
 
 > **Project status: implementation candidate, 0.1.0-dev.** WiFi/setup AP,
-> all four data adapters, bounded routing, five device screens, navigation,
+> all four data adapters, bounded routing, six screen types with a common phase/sequence controller, navigation,
 > images, the German/English Web UI, screenshot download, live debug and OTA/rollback are implemented.
 > The active C6 firmware and stock filesystem image build successfully.
 > Device acceptance is pending; provider fixture, browser, maximum-load and
 > long-run tests remain. Earlier boot/core tests
 > do not establish acceptance of these new services.
 >
-> Last verified C6 checkpoint (2026-10-16): 1,656,288 B firmware binary, 1,655,528 B PlatformIO flash
+> Baseline C6 checkpoint (2026-10-16): 1,656,288 B firmware binary, 1,655,528 B PlatformIO flash
 > (90.2% of one OTA slot), 150,972 B static RAM and 71,204 B embedded UI gzip.
 > The binary fits the slot and is 96,532 B above the 85% flash-reserve line; the
 > savings are decided at alpha from a size map.
 > Peak heap, largest
 > block, stack and LVGL reserves remain unmeasured
-> for the complete candidate. Visual/resource polish and acceptance are next;
-> this is not a release. S3 development remains paused.
+> for the complete candidate. The [screen-system integration](docs/UI.md#planned-screen-system-redesign)
+> now includes data demand, coverage, the common controller/options and a
+> controllable canonical Demo. Current combined resource/build and browser
+> verification is recorded separately; device drafts and complete website redesign follow.
+> Existing resource/device acceptance remains open; this is not a release.
+> S3 development remains paused.
+
+Current integrated C6 source checkpoint (2026-10-17): **1,719,344 B linked flash,
+161,452 B static RAM, 1,720,096 B binary, 75,656 B Web gzip**. Baseline deltas:
++63,816 B flash/+10,480 B RAM; the binary remains160,340 B above the85% reserve
+line. Data demand, the common controller/options and seven runtime Demo scenarios
+are linked. General/competition settings formats11/4 reset development records;
+image files stay separate. The event-target test fixtures now supply explicit
+selected identities:70scoped host cases pass with original assertions preserved.
+Production firmware is unchanged by this test-only correction; target heap/stack,
+providers and device acceptance remain open. Enable/save Demo under Settings, then load/select steps;
+the first two saved competition rules apply to its runtime datasets.
+
+Owner testing on2026-10-17 supplied a matching upload/runtime log. Focused
+investigation reproduced misleading busy feedback after a confirmed save and
+lost edits in the per-row short-name editor. Corrections, optional Overview
+diagnostics and manual advancement of the Demo automatic sequence are planned before
+the complete interface redesign. See [current limits](docs/WEB_UI.md#owner-feedback-follow-up--2026-10-17).
 
 ---
 
@@ -32,7 +53,7 @@ environments below.
 |---|---|---|
 | `xiao_esp32c6_gc9a01` | Seeed XIAO ESP32-C6 + 1.28" GC9A01 round display | current implementation candidate compiled; earlier boot/display/input acceptance only; current device acceptance pending; default env |
 | `waveshare_esp32s3_lcd128` | Waveshare ESP32-S3-LCD-1.28 | paused; last build and boot log before the display code (P1.2); not built with the display code yet; if the first log lines are missing after upload, press RST |
-| `native` | Host computer, unit tests only | pure-logic suites (list in the testing notes); the provider mapper suite uses ArduinoJson 7.4.3, the version the firmware pins; all suites pass on macOS for the current candidate |
+| `native` | Host computer, unit tests only | pure-logic suites; provider mapping uses ArduinoJson 7.4.3 like the firmware; checks are scoped to the suites actually run |
 
 | Task | Command |
 |---|---|
@@ -47,12 +68,19 @@ environments below.
 | Run host unit tests | `pio test -e native` |
 | Run only the SafeArea suite | `pio test -e native -f test_safe_area` |
 | Run only the settings suite | `pio test -e native -f test_settings` |
+| Run only screen-policy model/codec checks | `pio test -e native -f test_screen_policy` |
+| Run classification and sequence checks | `pio test -e native -f test_screen_selection -f test_screen_sequence -f test_screen_eligibility` |
+| Run bounded provider parser and coverage checks | `pio test -e native -f test_provider_json -f test_provider_coverage -f test_schedule_coverage -f test_coverage_persistence` |
+| Run live-window scheduling checks, including unknown kickoff and suspension | `pio test -e native -f test_live_window` |
+| Run screen API and image-reference checks | `pio test -e native -f test_screen_json -f test_screen_images` |
+| Run selected ordinary details, Demo and event visibility checks | `pio test -e native -f test_ordinary_details -f test_demo_scenarios -f test_event_visibility` |
 | Run only the event admission suite | `pio test -e native -f test_events` |
 | Run only the file name suite | `pio test -e native -f test_files` |
 | Run only the timekeeping suite | `pio test -e native -f test_timekeeping` |
 | Run only the heap-meter suite | `pio test -e native -f test_health` |
 | Run browser logic regression tests on the host (Node.js) | `node scripts/tests/test_web_ui.cjs` |
 | Run screenshot protocol/client checks on the host (Node.js) | `node scripts/tests/test_web_screenshot.cjs` |
+| Run screen-policy draft/save/import checks on the host (Node.js) | `node scripts/tests/test_web_screen_policy.cjs` |
 | Set up host tools (once) | see “Code formatting” below |
 | Check formatting of changed lines | `.venv-tools/bin/python scripts/check_format.py` |
 
@@ -202,6 +230,15 @@ and inputs still require their own buffer, font and hardware acceptance.
 The C6 antenna driver is implemented; RF switching has not been tested.
 
 ## What it shows
+
+The table and selection rules below describe the current firmware. A confirmed
+[screen-system redesign](docs/UI.md#planned-screen-system-redesign) is planned:
+timed sequences for different match situations, separate crest/slideshow slots,
+competition-specific screen rules and a picture frame mode. Its behavior has
+been discussed; model/API/storage design, resource approval, implementation and
+device acceptance still follow. The current build does not contain these new
+controls.
+
 | Screen | When |
 |---|---|
 | Live (single match) | Your club plays: big score, match minute, teams, highlights |

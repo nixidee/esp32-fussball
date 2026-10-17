@@ -1,5 +1,7 @@
 #include "football_service.h"
 
+#include <sys/stat.h>
+
 #include <algorithm>
 #include <atomic>
 #include <bitset>
@@ -8,8 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
-
-#include <sys/stat.h>
+#include <new>
 
 #include "dirent.h"
 #include "esp_log.h"
@@ -20,8 +21,10 @@
 #include "freertos/task.h"
 #include "image_service.h"
 #include "network_service.h"
+#include "nvs.h"
 #include "ota_service.h"
 #include "provider_client.h"
+#include "provider_coverage.h"
 #include "provider_plan.h"
 #include "request_budget.h"
 #include "request_scheduler.h"
@@ -56,6 +59,23 @@ plan::Request request;
 // slot), refreshed with its settings copy. Static: 2.5 KB would not fit the
 // worker's stack.
 settings::Competitions routes;
+settings::screen_policy::Eligibility eligibility;
+coverage::EvidenceArray coverage_evidence;
+coverage::Discovery discovery;
+std::atomic<uint32_t> coverage_bytes{0};
+bool coverage_dirty = false, coverage_streaming = false;
+bool discovery_retire = false;
+int64_t coverage_write_ms = 0;
+coverage::Progress discovery_progress;
+uint64_t coverage_binding = 0;
+
+// The caller already owns the heavy token. All durable guards complete before
+// the first HTTP write, not during DNS/TLS. Implemented with the file helpers
+// below; no file I/O is performed under the repository read mutex.
+bool storeCoverage(uint8_t pending_competition = 0);
+bool fenceCoverage(uint8_t competition);
+bool reserveDiscovery(uint32_t utc_day);
+coverage::Evidence* coverageOf(uint8_t id);
 
 // Per route (mutex-protected; written by the worker). 'key' hashes the
 // competition's source: a changed key drops its stored data.
@@ -80,13 +100,19 @@ struct Slot {
   // since (0 = none).
   std::array<int64_t, persist::kKeptTypes> done{};
   bool dirty = false, on_file = false;
+  bool matches_loaded = false, table_loaded = false;
   uint32_t file_bytes = 0;
   int64_t written_ms = 0, restored_utc = 0;
 };
 std::array<Slot, cfg::kCompetitionMax> slots{};
-// 'demo_competition': the competition the demo data fills.
-uint8_t route_count = 0, demo_competition = 0;
+uint8_t route_count = 0;
 bool configured = false, demo_mode = false;
+demo::Scenario demo_scenario = demo::Scenario::kOwn;
+uint8_t demo_step = 0;
+Clock demo_clock;
+demo::Bindings demo_bindings;
+constexpr uint16_t kNoDemoCommand = UINT16_MAX;
+std::atomic<uint16_t> demo_command{kNoDemoCommand};
 uint32_t revision = 0, published_generation = 0;
 uint32_t requests[cfg::kProviderCount]{};
 // Bit i set: route i failed. 'states': what publish() derived from the
@@ -130,6 +156,10 @@ Clock nowClock() {
   return {static_cast<int64_t>(utc),
           static_cast<uint32_t>(timekeeping::monotonicMs() / 1000)};
 }
+DateContext localDates(int64_t utc) {
+  return {[](int64_t at, void*) { return timekeeping::localOffset(at); },
+          nullptr, utc > 0 ? timekeeping::localOffset(utc) : 0};
+}
 uint32_t fnv(uint32_t hash, std::string_view bytes) {
   for (const char c : bytes) {
     hash ^= static_cast<uint8_t>(c);
@@ -150,9 +180,10 @@ uint32_t sourceHash(uint32_t hash, const settings::Source& s) {
   hash = fnv(hash, s.season.view());
   return fnv(hash, s.team.view());
 }
-// What the stored data of a competition depends on: its source.
+// What the stored data of a competition depends on: its service-owned
+// identity and source. A reused small id must not retain an old slot/cache.
 uint32_t routeKey(const settings::Competition& e) {
-  return sourceHash(fnv(2166136261u, e.id), e.primary);
+  return sourceHash(fnv(fnv(2166136261u, e.id), e.incarnation), e.primary);
 }
 // Per provider, what its access depends on: its key (API-Football,
 // football-data.org) or the ESPN opt-in. A change drops the data of the
@@ -173,6 +204,20 @@ uint8_t changedProviders(const Access& a, const Access& b) {
   for (std::size_t p = 0; p < cfg::kProviderCount; ++p)
     if (a[p] != b[p]) mask |= static_cast<uint8_t>(1u << p);
   return mask;
+}
+uint64_t coverageBinding(const settings::Model& model) {
+  uint32_t low = 2166136261u, high = 0x9e3779b9u;
+  for (const auto& entry : routes.entries) {
+    for (const auto word : {routeKey(entry), uint32_t{entry.active}}) {
+      low = fnv(low, word);
+      high = fnv(high, word);
+    }
+  }
+  for (const auto word : accessOf(model)) {
+    low = fnv(low, word);
+    high = fnv(high, word);
+  }
+  return (uint64_t{high} << 32) | low;
 }
 bool usesAny(const settings::Competition& e, uint8_t providers) {
   return !e.primary.competition.empty() &&
@@ -239,23 +284,91 @@ Interruption interrupted(uint32_t generation, uint32_t epoch) {
     return {"network changed", Cause::kNetwork};
   return {};
 }
-// The last get() stopped because settings or the network changed.
+// The last get() stopped because settings, network or the valid clock changed.
 bool interruption(esp_err_t err) {
-  return failure_code == err && (failure_cause == Cause::kSettings ||
-                                 failure_cause == Cause::kNetwork);
+  return failure_code == err &&
+         (failure_cause == Cause::kSettings ||
+          failure_cause == Cause::kNetwork || failure_cause == Cause::kTime);
 }
+enum class HttpPurpose : uint8_t { kAutomatic, kSetup, kDiscovery };
+
+// The first actual HTTP send attempt owns the durable reservation and the
+// scheduler/counter charge. DNS/TLS alone reserve nothing. The client calls
+// this exactly once, immediately before its first nonblocking HTTP write.
+uint32_t sent_s = 0;
+struct SendContext {
+  cfg::Provider provider;
+  const settings::Model& model;
+  uint32_t generation, settings_generation, epoch;
+  HttpPurpose purpose;
+  uint8_t competition;
+};
+esp_err_t beginSend(void* context) {
+  const auto& send = *static_cast<SendContext*>(context);
+  const auto admitted =
+      settings::beginFootballSend(send.purpose == HttpPurpose::kSetup,
+                                  send.generation, send.settings_generation);
+  if (admitted != ESP_OK)
+    return stop(admitted, admitted == ESP_ERR_INVALID_STATE ? Cause::kSettings
+                                                            : Cause::kBusy);
+  // Success holds the existing settings writer mutex. Every refusal releases
+  // it here; a successful admission transfers it to endSend after one write.
+  const auto refuse = [](esp_err_t err, Cause cause) {
+    settings::endFootballSend();
+    return stop(err, cause);
+  };
+  if (const auto stopped = interrupted(send.generation, send.epoch))
+    return refuse(ESP_ERR_INVALID_STATE, stopped.cause);
+  time_t utc = 0;
+  if (!timekeeping::utcNow(utc))
+    return refuse(ESP_ERR_INVALID_STATE, Cause::kTime);
+  // DNS/TLS may cross UTC midnight. Charge the send's actual day, not the
+  // day on which the worker began resolving the request.
+  const auto send_day = static_cast<uint32_t>(utc / 86400);
+  if (send_day != day) {
+    day = send_day;
+    budget::settle(day);
+  }
+  const auto index = static_cast<unsigned>(send.provider);
+  const auto& global = send.model.global_limit;
+  if (global.daily && budget::remainingGlobal(day, global.daily) == 0)
+    return refuse(ESP_ERR_NOT_ALLOWED, Cause::kBudget);
+  if (send.purpose == HttpPurpose::kDiscovery && !reserveDiscovery(send_day))
+    return refuse(ESP_ERR_NOT_ALLOWED, Cause::kCounter);
+  if (send.competition != 0 && !fenceCoverage(send.competition))
+    return refuse(ESP_ERR_INVALID_STATE, Cause::kCounter);
+  auto err = budget::admit(send.provider, day,
+                           send.model.providers[index].limit.daily);
+  if (err == ESP_OK) err = budget::admitGlobal(day, global.daily);
+  if (err != ESP_OK)
+    return refuse(
+        err, err == ESP_ERR_NOT_ALLOWED ? Cause::kBudget : Cause::kCounter);
+  sent_s = static_cast<uint32_t>(timekeeping::monotonicMs() / 1000);
+  scheduler.sent(send.provider, sent_s);
+  lock();
+  ++requests[index];
+  unlock();
+  sent = true;
+  return ESP_OK;
+}
+void endSend(void*) { settings::endFootballSend(); }
+
 // One provider request the scheduler has admitted (a job, or a step of the
 // owner's selection that asked admissibleAt()). It never waits: a busy heavy
 // token, a used daily budget or changed settings refuse it before anything is
 // sent, and the caller reschedules. The scheduler counts the request when it
 // is really sent (sent()); 'sent_s' keeps that second for finished(). 'body'
 // caps the response body (plan::Request::body).
-uint32_t sent_s = 0;
 esp_err_t get(const char* url, const char* array, bool optional,
               cfg::Provider p, const settings::Model& m, uint32_t generation,
-              uint32_t epoch, JsonConsumer consumer, void* context,
+              uint32_t settings_generation, uint32_t epoch,
+              JsonConsumer consumer, void* context,
               const bool* enough = nullptr,
-              std::size_t body = cfg::kProviderBodyBytes) {
+              std::size_t body = cfg::kProviderBodyBytes,
+              HttpPurpose purpose = HttpPurpose::kAutomatic,
+              const JsonObserver* observer = nullptr, JsonScan* scan = nullptr,
+              uint8_t pending_competition = 0,
+              const network::HeavyGuard* admission = nullptr) {
   clearFailure();
   // One log line per provider request, sent or not. Keys travel in headers,
   // never in the URL.
@@ -266,44 +379,45 @@ esp_err_t get(const char* url, const char* array, bool optional,
   if (!settings::providerUsable(p, m))
     return skip("provider not enabled", ESP_ERR_INVALID_STATE,
                 Cause::kProviderOff);
+  if (purpose != HttpPurpose::kSetup && settings::footballPaused())
+    return skip("picture frame", ESP_ERR_TIMEOUT, Cause::kBusy);
   if (const auto stopped = interrupted(generation, epoch))
     return skip(stopped.why, ESP_ERR_INVALID_STATE, stopped.cause);
   // Another heavy operation (OTA, upload, image work) runs: the request
   // waits for the next pass. Debug level, since it repeats until the token
   // is free.
-  if (!network::tryHeavy()) {
+  const bool owns_admission = admission == nullptr;
+  if ((admission && !*admission) || (owns_admission && !network::tryHeavy())) {
     ESP_LOGD("provider", "not sent: %s (operation busy)", url);
     return stop(ESP_ERR_TIMEOUT, Cause::kBusy);
   }
-  const auto index = static_cast<unsigned>(p);
-  const auto& global = m.global_limit;
-  // The global cap is checked before the provider's counter takes the
-  // request, so a refusal there costs the provider nothing.
-  if (global.daily && budget::remainingGlobal(day, global.daily) == 0) {
-    network::releaseHeavy();
-    return skip("daily budget used", ESP_ERR_NOT_ALLOWED, Cause::kBudget);
+  if (purpose != HttpPurpose::kSetup && settings::footballPaused()) {
+    if (owns_admission) network::releaseHeavy();
+    return skip("picture frame", ESP_ERR_TIMEOUT, Cause::kBusy);
   }
-  auto admitted = budget::admit(p, day, m.providers[index].limit.daily);
-  if (admitted == ESP_OK) admitted = budget::admitGlobal(day, global.daily);
-  if (admitted != ESP_OK) {
-    network::releaseHeavy();
-    if (admitted == ESP_ERR_NOT_ALLOWED)
-      return skip("daily budget used", admitted, Cause::kBudget);
-    return skip("budget unavailable", admitted, Cause::kCounter);
-  }
-  sent_s = static_cast<uint32_t>(timekeeping::monotonicMs() / 1000);
-  scheduler.sent(p, sent_s);
-  lock();
-  ++requests[index];
-  unlock();
-  sent = true;
+  SendContext send_context{
+      p,     m,       generation,         settings_generation,
+      epoch, purpose, pending_competition};
+  const SendHooks send_hooks{beginSend, endSend, &send_context,
+                             purpose != HttpPurpose::kSetup};
   FetchResult result;
   const int64_t started = timekeeping::monotonicMs();
-  const auto err = fetchJson(url, array, p, m, generation, consumer, context,
-                             body, &result, optional, enough);
-  network::releaseHeavy();
+  const auto err =
+      fetchJson(url, array, p, m, generation, consumer, context, body, &result,
+                optional, enough, &send_hooks, observer, scan);
+  if (owns_admission) network::releaseHeavy();
   const auto elapsed =
       static_cast<long long>(timekeeping::monotonicMs() - started);
+  if (result.paused) {
+    ESP_LOGD("provider", "not sent: %s (picture frame during DNS/TLS)", url);
+    return stop(ESP_ERR_TIMEOUT, Cause::kBusy);
+  }
+  if (result.admission_error != ESP_OK) {
+    ESP_LOGD("provider", "not sent: %s (local admission: %s)", url,
+             esp_err_to_name(result.admission_error));
+    // beginSend already paired the exact local reason with this code.
+    return result.admission_error;
+  }
   if (err == ESP_OK) {
     ESP_LOGI("provider", "%s: HTTP %d, %u B, %lld ms", url, result.status,
              static_cast<unsigned>(result.bytes), elapsed);
@@ -323,8 +437,13 @@ esp_err_t get(const char* url, const char* array, bool optional,
 }
 // fetchJson consumer of the provider plan: each element is mapped into the
 // store under the mutex.
-bool consumeLocked(ArduinoJson::JsonVariantConst element, void*) {
+bool consumeLocked(ArduinoJson::JsonVariantConst element, void* raw) {
   lock();
+  if (raw != nullptr && planner.acceptsMatch(element)) {
+    const auto& entry = *static_cast<const settings::Competition*>(raw);
+    if (auto* evidence = coverageOf(entry.id))
+      coverage_dirty |= coverage::observeNormalRow(*evidence, entry, element);
+  }
   const bool ok = plan::Planner::consume(element, &planner);
   unlock();
   return ok;
@@ -334,11 +453,7 @@ bool consumeLocked(ArduinoJson::JsonVariantConst element, void*) {
 // store or the slots changed; a new revision.
 void publish() {
   shown = {};
-  if (demo_mode) {
-    shown.add(view::Source{demo_competition, cfg::Provider::kOpenLigaDb, 0});
-  } else {
-    for (const auto& entry : routes.entries) shown.add(entry);
-  }
+  for (const auto& entry : routes.entries) shown.add(entry);
   error_routes = 0;
   states = {};
   for (uint8_t i = 0; i < route_count; ++i) {
@@ -428,8 +543,8 @@ uint8_t competitionOf(const char* name) {
       text.substr(text.size() - suffix.size()) != suffix)
     return 0;
   unsigned id = 0;
-  for (const char c : text.substr(prefix.size(), text.size() - prefix.size() -
-                                                     suffix.size())) {
+  for (const char c : text.substr(
+           prefix.size(), text.size() - prefix.size() - suffix.size())) {
     if (c < '0' || c > '9' || id > UINT8_MAX) return 0;
     id = id * 10 + static_cast<unsigned>(c - '0');
   }
@@ -450,14 +565,12 @@ bool heavyWithin(uint32_t ms) {
 template <class Encode>
 bool writeFile(const char* path, std::size_t size, Encode encode) {
   files::Usage usage{};
-  if (files::state() != files::State::kMounted ||
-      files::usage(usage) != ESP_OK)
+  if (files::state() != files::State::kMounted || files::usage(usage) != ESP_OK)
     return false;
   const std::size_t image_bytes = images::usage().bytes;
-  const std::size_t unused =
-      image_bytes < cfg::kImageTotalBytes
-          ? blocks(cfg::kImageTotalBytes - image_bytes)
-          : 0;
+  const std::size_t unused = image_bytes < cfg::kImageTotalBytes
+                                 ? blocks(cfg::kImageTotalBytes - image_bytes)
+                                 : 0;
   if (usage.used_bytes + blocks(size) + unused + cfg::kImageReserveBytes >
       usage.total_bytes)
     return false;
@@ -475,10 +588,190 @@ bool writeFile(const char* path, std::size_t size, Encode encode) {
 // Football file bytes (whole blocks) besides slot 'except' (worker or token
 // holder).
 std::size_t keptBytes(int except) {
-  std::size_t total = blocks(names_bytes.load());
+  std::size_t total =
+      blocks(names_bytes.load()) + blocks(coverage_bytes.load());
   for (uint8_t i = 0; i < route_count; ++i)
     if (i != except && slots[i].on_file) total += blocks(slots[i].file_bytes);
   return total;
+}
+
+coverage::Evidence* coverageOf(uint8_t id) {
+  for (auto& row : coverage_evidence)
+    if (id != 0 && row.id == id) return &row;
+  return nullptr;
+}
+void bindCoverage() {
+  for (auto& row : coverage_evidence) {
+    const auto* entry = routes.find(row.id);
+    if (entry == nullptr || !entry->active) row = {};
+  }
+  for (const auto& entry : routes.entries) {
+    if (!entry.active || entry.id == 0) continue;
+    auto* row = coverageOf(entry.id);
+    if (row == nullptr)
+      for (auto& free : coverage_evidence)
+        if (free.id == 0) {
+          row = &free;
+          break;
+        }
+    if (row != nullptr && !coverage::matches(*row, coverage::identity(entry)))
+      coverage::bind(*row, coverage::identity(entry));
+  }
+  coverage_dirty = true;
+}
+
+// NVS remains the single authority for run/request credits even when image
+// formatting removes every football file. The file's encoded guard is only a
+// transaction snapshot, never a second source of credits.
+void loadDiscovery() {
+  std::array<uint8_t, coverage::record::kGuardBytes> bytes{};
+  std::size_t size = bytes.size();
+  coverage::DiscoveryRecord record;
+  budget::Load state = budget::Load::kMissing;
+  nvs_handle_t handle;
+  const auto opened = nvs_open(cfg::kBudgetNvsNamespace, NVS_READONLY, &handle);
+  if (opened == ESP_OK) {
+    const auto err =
+        nvs_get_blob(handle, cfg::kCoverageGuardNvsKey, bytes.data(), &size);
+    state = err == ESP_ERR_NVS_NOT_FOUND ? budget::Load::kMissing
+            : err == ESP_OK && coverage::record::decodeGuard(
+                                   {bytes.data(), size}, record) ==
+                                   coverage::record::DecodeResult::kOk
+                ? budget::Load::kValid
+                : budget::Load::kDamaged;
+    nvs_close(handle);
+  } else if (opened != ESP_ERR_NVS_NOT_FOUND) {
+    state = budget::Load::kDamaged;
+  }
+  discovery.load(state, record);
+  discovery_progress = discovery.stored().progress;
+}
+bool storeDiscovery(const coverage::DiscoveryRecord& record) {
+  std::array<uint8_t, coverage::record::kGuardBytes> bytes{};
+  if (coverage::record::encodeGuard(record, bytes) != bytes.size())
+    return false;
+  nvs_handle_t handle;
+  if (nvs_open(cfg::kBudgetNvsNamespace, NVS_READWRITE, &handle) != ESP_OK)
+    return false;
+  auto err = nvs_set_blob(handle, cfg::kCoverageGuardNvsKey, bytes.data(),
+                          bytes.size());
+  if (err == ESP_OK) err = nvs_commit(handle);
+  nvs_close(handle);
+  return err == ESP_OK;
+}
+bool reserveDiscovery(uint32_t utc_day) {
+  if (discovery_retire) return false;
+  using Admission = coverage::Discovery::Admission;
+  coverage::DiscoveryRecord proposed;
+  if (!discovery.stored().progress.active) {
+    if (discovery.start(utc_day, proposed) != Admission::kStore) return false;
+    proposed.binding = coverage_binding;
+    if (!storeDiscovery(proposed)) return false;
+    discovery.commitStart(proposed);
+  }
+  auto progress = discovery_progress;
+  progress.active = true;
+  progress.run_day = discovery.stored().progress.run_day;
+  if (!discovery.stage(progress, proposed) || !storeDiscovery(proposed))
+    return false;
+  discovery.commitProgress(proposed);
+  discovery_progress = progress;
+  switch (discovery.request(proposed)) {
+    case Admission::kAllowed: return true;
+    case Admission::kStore:
+      if (!storeDiscovery(proposed)) return false;
+      discovery.commitRequest(proposed);
+      return true;
+    default: return false;
+  }
+}
+
+bool saveDiscoveryProgress(const coverage::Progress& progress) {
+  coverage::DiscoveryRecord proposed;
+  if (!discovery.stage(progress, proposed) || !storeDiscovery(proposed))
+    return false;
+  discovery.commitProgress(proposed);
+  discovery_progress = progress;
+  return true;
+}
+
+bool storeCoverage(uint8_t pending_competition) {
+  if (ota::trial() || files::state() != files::State::kMounted) return false;
+  auto* bytes =
+      new (std::nothrow) std::array<uint8_t, coverage::record::kRecordBytes>;
+  if (bytes == nullptr) return false;
+  lock();
+  auto snapshot = discovery.stored();
+  snapshot.binding = coverage_binding;
+  const auto size = coverage::record::encode(coverage_evidence, snapshot,
+                                             *bytes, pending_competition);
+  const auto others = keptBytes(-1) - blocks(coverage_bytes.load());
+  unlock();
+  char path[files::kPathBufferBytes];
+  footballPath(cfg::kCoverageFile, path, sizeof(path));
+  const bool ok = size != 0 &&
+                  others + blocks(size) <= cfg::kFootballFilesBytes &&
+                  writeFile(path, size, [bytes, size](FILE* file) {
+                    return fileWrite(bytes->data(), size, file) ? size : 0;
+                  });
+  delete bytes;
+  if (ok) {
+    coverage_bytes.store(size);
+    if (pending_competition == 0) {
+      lock();
+      coverage_dirty = false;
+      unlock();
+    }
+  }
+  return ok;
+}
+bool fenceCoverage(uint8_t competition) {
+  bool complete = false;
+  lock();
+  if (const auto* row = coverageOf(competition))
+    for (const auto& span : row->seasons)
+      complete |= span.completeness == coverage::Completeness::kComplete;
+  unlock();
+  if (complete && !storeCoverage(competition)) return false;
+  lock();
+  coverage_streaming = true;
+  coverage_dirty |= complete;
+  unlock();
+  return true;
+}
+
+// Called with the heavy token during the existing kept-file load. Decoding
+// directly into the sole owner is safe only while readers are excluded; any
+// semantic/I/O failure clears that candidate before the lock is released.
+void loadCoverage() {
+  auto* bytes =
+      new (std::nothrow) std::array<uint8_t, coverage::record::kRecordBytes>;
+  if (bytes == nullptr) return;
+  char path[files::kPathBufferBytes];
+  footballPath(cfg::kCoverageFile, path, sizeof(path));
+  struct stat info{};
+  const auto actual_size = stat(path, &info) == 0 && info.st_size > 0
+                               ? static_cast<uint32_t>(info.st_size)
+                               : 0;
+  FILE* file = fopen(path, "rb");
+  bool ok = file != nullptr;
+  if (file != nullptr) {
+    ok = fread(bytes->data(), 1, bytes->size(), file) == bytes->size() &&
+         fgetc(file) == EOF && !ferror(file);
+    ok = fclose(file) == 0 && ok;
+  }
+  coverage::DiscoveryRecord snapshot;
+  lock();
+  ok = ok &&
+       coverage::record::decode(*bytes, coverage_evidence, snapshot) ==
+           coverage::record::DecodeResult::kOk &&
+       snapshot.binding == coverage_binding;
+  if (!ok) coverage_evidence = {};
+  bindCoverage();
+  unlock();
+  // Even a corrupt file occupies quota until replacement/delete succeeds.
+  coverage_bytes.store(actual_size);
+  delete bytes;
 }
 // Token holder: deletes the competition files 'keep' rejects, one directory
 // pass per file (no deletion while the directory is open).
@@ -502,7 +795,8 @@ void deleteFiles(Keep keep) {
 }
 // Worker: deletes the competition files that hold no active slot's data.
 void sweep() {
-  if (!sweep_pending || files::state() != files::State::kMounted) return;
+  if (!sweep_pending || demo_mode || files::state() != files::State::kMounted)
+    return;
   if (!network::tryHeavy()) return;
   deleteFiles([](uint8_t id) {
     const Slot* slot = slotOf(id);
@@ -548,9 +842,8 @@ bool storeNames() {
   const auto others = keptBytes(-1) - blocks(names_bytes.load());
   unlock();
   if (others + blocks(size) > cfg::kFootballFilesBytes ||
-      !writeFile(path, size, [](FILE* file) {
-        return names.encode(fileWrite, file);
-      }))
+      !writeFile(path, size,
+                 [](FILE* file) { return names.encode(fileWrite, file); }))
     return false;
   names_bytes.store(size);
   return true;
@@ -560,8 +853,21 @@ bool storeNames() {
 // short-name file after a wipe. The worker alone writes the store, so it
 // reads it without the mutex.
 void writeKept(int64_t utc) {
-  if (files::state() != files::State::kMounted || ota::trial()) return;
+  if (files::state() != files::State::kMounted || ota::trial() || demo_mode)
+    return;
   const int64_t now = timekeeping::monotonicMs();
+  if (coverage_dirty && !demo_mode &&
+      (coverage_write_ms == 0 ||
+       now - coverage_write_ms >= cfg::kStoreMaintenanceS * 1000LL)) {
+    if (!network::tryHeavy()) return;
+    const bool ok = storeCoverage();
+    network::releaseHeavy();
+    coverage_write_ms = ok ? 0 : now;
+    if (ok) return;
+    ESP_LOGW("provider", "schedule evidence not written");
+    // Failure of optional coverage persistence must not starve the existing
+    // short-name and competition-file owners of their idle write turns.
+  }
   if (names_pending) {
     if (!network::tryHeavy()) return;
     const bool ok = storeNames();
@@ -621,6 +927,7 @@ void loadKept() {
   if (files::state() != files::State::kMounted ||
       !heavyWithin(cfg::kOperationDeadlineMs))
     return;
+  loadCoverage();
   char path[files::kPathBufferBytes];
   footballPath(cfg::kShortNameFile, path, sizeof(path));
   if (FILE* file = fopen(path, "rb")) {
@@ -655,6 +962,12 @@ void loadKept() {
         slot.on_file = true;
         slot.file_bytes = static_cast<uint32_t>(info.st_size);
         slot.restored_utc = saved.saved_utc;
+        slot.matches_loaded =
+            saved.source
+                .done[static_cast<std::size_t>(cfg::DataType::kFixtures)] > 0;
+        slot.table_loaded =
+            saved.source.done[static_cast<std::size_t>(cfg::DataType::kTable)] >
+            0;
         slot.fetched_ms = slot.matches_ms = loadedMs(
             saved.saved_utc, valid ? utc : 0, timekeeping::monotonicMs());
       }
@@ -691,8 +1004,8 @@ void seedKept(int64_t utc) {
   lock();
   for (uint8_t i = 0; i < route_count; ++i)
     if (slots[i].restored_utc != 0)
-      slots[i].fetched_ms = slots[i].matches_ms = loadedMs(
-          slots[i].restored_utc, utc, timekeeping::monotonicMs());
+      slots[i].fetched_ms = slots[i].matches_ms =
+          loadedMs(slots[i].restored_utc, utc, timekeeping::monotonicMs());
   unlock();
 }
 // Worker: after images::format() every competition with data and the short
@@ -709,6 +1022,8 @@ void relost() {
   }
   names_bytes.store(0);
   names_pending = names.count() > 0;
+  coverage_bytes.store(0);
+  coverage_dirty = true;
   unlock();
 }
 
@@ -717,9 +1032,8 @@ void relost() {
 // competitions whose source changed, that were removed or paused,
 // or that use a provider in 'providers' (its key or the ESPN opt-in
 // changed) lose their data and jobs, the others keep theirs.
-void applyRoutes(const settings::Model& model, uint32_t generation,
-                 bool reset, uint8_t providers = 0) {
-  lock();
+void applyRoutesLocked(const settings::Model& model, uint32_t generation,
+                       bool reset, uint8_t providers = 0) {
   if (reset) {
     store.clear();
     planner.reset();
@@ -753,37 +1067,55 @@ void applyRoutes(const settings::Model& model, uint32_t generation,
   }
   slots = next;
   route_count = count;
+  bindCoverage();
+  for (auto& proof : coverage_evidence) {
+    const auto* entry = routes.find(proof.id);
+    if (entry != nullptr && usesAny(*entry, providers))
+      coverage::invalidate(proof, coverage::Reason::kIdentity);
+  }
   demo_mode = model.demo;
-  demo_competition = 0;
+  if (!model.demo) demo_command.store(kNoDemoCommand);
   configured = model.demo;
   for (uint8_t i = 0; i < count; ++i)
     if (slots[i].active) {
       configured = true;
-      if (demo_competition == 0) demo_competition = slots[i].id;
     }
   if (model.demo) {
-    if (demo_competition == 0) demo_competition = 1;
-    view::demo(store, demo_competition);
+    demo_clock = demo::apply(store, routes, demo_bindings, demo_scenario,
+                             demo_step, nowClock().mono_s);
     const auto now = timekeeping::monotonicMs();
-    for (auto& slot : slots) slot.fetched_ms = slot.matches_ms = now;
+    for (auto& slot : slots) {
+      slot.fetched_ms = slot.matches_ms = now;
+      slot.matches_loaded = slot.table_loaded = true;
+    }
   }
   store.collect();
   published_generation = generation;
   publish();
-  unlock();
+  demo_command.store(kNoDemoCommand);
+}
+void routesApplied() {
   // Files of removed, paused or changed competitions go (kept slots keep
   // 'on_file'; a reset clears it for every slot).
   sweep_pending = true;
   events::post(events::Event::kDataUpdated);
 }
+void applyRoutes(const settings::Model& model, uint32_t generation, bool reset,
+                 uint8_t providers = 0) {
+  lock();
+  applyRoutesLocked(model, generation, reset, providers);
+  unlock();
+  routesApplied();
+}
 // Every kStoreMaintenanceS: estimated phases and minutes follow the clock,
 // passed matchdays go (OQ-202), unused directory entries are freed.
 void maintain(int64_t utc) {
-  const int32_t offset = timekeeping::localOffset(utc);
+  const auto dates = localDates(utc);
   lock();
   store.estimateAll(utc);
   for (uint8_t i = 0; i < route_count; ++i)
-    if (slots[i].active) store.expire(slots[i].id, utc, offset);
+    if (slots[i].active)
+      store.expire(slots[i].id, utc, dates.fallback_offset_s, &dates);
   store.collect();
   publish();
   unlock();
@@ -810,8 +1142,8 @@ plan::Fetch fetchOf(esp_err_t err) {
 
 // Runs one request of 'job' and reports its outcome to the scheduler.
 void runJob(const schedule::Job& job, const settings::Model& model,
-            uint32_t generation, uint32_t epoch) {
-  const auto& entry = routes.entries[job.slot];
+            uint32_t generation, uint32_t settings_generation, uint32_t epoch) {
+  auto& entry = routes.entries[job.slot];
   lock();
   const bool has = planner.request(job, entry, store, nowClock(), request);
   unlock();
@@ -821,15 +1153,20 @@ void runJob(const schedule::Job& job, const settings::Model& model,
         static_cast<uint32_t>(timekeeping::monotonicMs() / 1000));
     return;
   }
+  // Keep the existing token through complete(), which frees response event
+  // staging. Policy HTTP must not overlap even this short completion window.
+  network::HeavyGuard admission;
   busy.store(true);
   auto err =
       get(request.url, request.array, request.optional, job.provider, model,
-          generation, epoch, consumeLocked, nullptr, nullptr, request.body);
+          generation, settings_generation, epoch, consumeLocked,
+          request.sink == plan::Sink::kMatches ? &entry : nullptr, nullptr,
+          request.body, HttpPurpose::kAutomatic, nullptr, nullptr,
+          request.sink == plan::Sink::kMatches ? entry.id : 0, &admission);
   busy.store(false);
   const auto clock = nowClock();
   const auto fetch = fetchOf(err);
-  const int32_t offset =
-      clock.utc > 0 ? timekeeping::localOffset(clock.utc) : 0;
+  const auto dates = localDates(clock.utc);
   lock();
   const auto done = planner.complete(fetch, clock);
   if (done.invalid) {
@@ -839,8 +1176,15 @@ void runJob(const schedule::Job& job, const settings::Model& model,
   const auto outcome = done.outcome;
   const bool more = done.more, ok = outcome == schedule::Outcome::kOk;
   auto& slot = slots[job.slot];
-  const bool matches = job.type == cfg::DataType::kFixtures ||
-                       job.type == cfg::DataType::kLive;
+  const bool matches =
+      job.type == cfg::DataType::kFixtures || job.type == cfg::DataType::kLive;
+  coverage_streaming = false;
+  if (matches && sent && err != ESP_OK) {
+    if (auto* proof = coverageOf(entry.id)) {
+      coverage::invalidate(*proof, coverage::Reason::kPartialResponse);
+      coverage_dirty = true;
+    }
+  }
   if (ok) {
     slot.fetched_ms = timekeeping::monotonicMs();
     if (matches) slot.matches_ms = slot.fetched_ms;
@@ -848,6 +1192,10 @@ void runJob(const schedule::Job& job, const settings::Model& model,
     slot.dirty = true;
     slot.restored_utc = 0;
     const auto type = static_cast<std::size_t>(job.type);
+    if (!more && matches) slot.matches_loaded = true;
+    if (!more && (job.type == cfg::DataType::kTable ||
+                  job.type == cfg::DataType::kLiveTable))
+      slot.table_loaded = true;
     if (!more && type < persist::kKeptTypes && clock.utc > 0)
       slot.done[type] = clock.utc;
     // Asked before expire() drops the passed matchday that holds such a
@@ -858,7 +1206,8 @@ void runJob(const schedule::Job& job, const settings::Model& model,
     }
     // A provider still serving a passed matchday (an old OpenLigaDB current
     // round) re-inserts it: drop it now, not at the next maintenance.
-    if (matches && clock.utc > 0) store.expire(slot.id, clock.utc, offset);
+    if (matches && clock.utc > 0)
+      store.expire(slot.id, clock.utc, dates.fallback_offset_s, &dates);
   } else if (outcome != schedule::Outcome::kDeferred ||
              fetch == plan::Fetch::kCapped) {
     // A busy token or changed settings is no failure of the source; a used
@@ -1093,7 +1442,8 @@ void setSelectionWait(Cadence wait, int64_t wait_ms) {
 // worker then decides again); otherwise 'wake_ms' is the monotonic ms it may
 // go on.
 bool stepSelection(const settings::Model& model, uint32_t generation,
-                   int64_t utc, int64_t& wake_ms) {
+                   uint32_t settings_generation, int64_t utc,
+                   int64_t& wake_ms) {
   SelectionRequest request;
   lock();
   request = selection_request;
@@ -1131,17 +1481,17 @@ bool stepSelection(const settings::Model& model, uint32_t generation,
   busy.store(true);
   if (run.stage == SelectionRun::kSeason) {
     run.season[0] = '\0';
-    err =
-        get(url, key, false, request.provider, model, run.generation, run.epoch,
-            request.provider == cfg::Provider::kOpenLigaDb ? seasonRow
-                                                           : apiSeasonRow,
-            &run, nullptr, cfg::kSelectionBodyBytes);
+    err = get(url, key, false, request.provider, model, run.generation,
+              settings_generation, run.epoch,
+              request.provider == cfg::Provider::kOpenLigaDb ? seasonRow
+                                                             : apiSeasonRow,
+              &run, nullptr, cfg::kSelectionBodyBytes, HttpPurpose::kSetup);
     if (err == ESP_OK && run.season[0] == '\0') err = ESP_ERR_INVALID_RESPONSE;
   } else {
     SelectContext context{&request};
-    err =
-        get(url, key, false, request.provider, model, run.generation, run.epoch,
-            selectionRow, &context, &context.enough, cfg::kSelectionBodyBytes);
+    err = get(url, key, false, request.provider, model, run.generation,
+              settings_generation, run.epoch, selectionRow, &context,
+              &context.enough, cfg::kSelectionBodyBytes, HttpPurpose::kSetup);
   }
   busy.store(false);
   if (fetchOf(err) == plan::Fetch::kBusy) {
@@ -1210,12 +1560,157 @@ Cadence cadenceOf(const schedule::Decision& d, int64_t utc, uint32_t now_s) {
          : opens     ? Cadence::kWindow
                      : Cadence::kIdle;
 }
-// Replaces the worker's settings and competition copies. Out of line, so the
-// temporary copy lives in this frame only and not in the worker's frame
-// during requests.
-[[gnu::noinline]] void reload(settings::Model& model) {
-  model = settings::current();
-  settings::competitions(routes);
+
+// Extra fixture discovery only gets the idle turn after all ordinary due/live
+// jobs and explicit setup work. It uses the same parser, transport, limits and
+// first-send admission; no separate request queue or provider resolver exists.
+bool stepDiscovery(const settings::Model& model, uint32_t generation,
+                   uint32_t settings_generation, uint32_t utc) {
+  discovery_retire |= discovery.stored().progress.active &&
+                      discovery.stored().binding != coverage_binding;
+  if (discovery_retire) {
+    if (discovery.stored().progress.active) {
+      auto progress = discovery.stored().progress;
+      progress.active = false;
+      if (!saveDiscoveryProgress(progress)) return false;
+    }
+    discovery_retire = false;
+    discovery_progress = {};
+  }
+  if (!eligibility.selection.automatic_break || eligibility.frame || utc == 0 ||
+      routes.entries.empty())
+    return false;
+  const auto today = utc / 86400;
+  const auto& stored = discovery.stored();
+  if (!stored.progress.active && stored.progress.run_day != 0 &&
+      today <= stored.progress.run_day)
+    return false;
+  if (!stored.progress.active) discovery_progress = {};
+  if (stored.progress.active) discovery_progress = stored.progress;
+  // Skip only already proven sources. A Partial/failed/stale source needs a
+  // new complete response; old display rows or an eight-day list prove none.
+  while (discovery_progress.route < route_count) {
+    const auto route = discovery_progress.route;
+    const auto& entry = routes.entries[route];
+    if (!entry.active || entry.primary.competition.empty() ||
+        !settings::providerUsable(entry.primary.provider, model)) {
+      ++discovery_progress.route;
+      discovery_progress.season = 0;
+      continue;
+    }
+    const auto now_s = static_cast<uint32_t>(timekeeping::monotonicMs() / 1000);
+    if (scheduler.admissibleAt(entry.primary.provider, now_s) > now_s)
+      return false;
+    // Reserve the same operation before allocating discovery state, and
+    // retain it through proof persistence and release of that state.
+    network::HeavyGuard admission;
+    if (!admission) return false;
+    auto* query = new (std::nothrow) coverage::Query;
+    auto* response = new (std::nothrow) coverage::Response;
+    if (query == nullptr || response == nullptr) {
+      delete query;
+      delete response;
+      return false;
+    }
+    const bool prepared = coverage::discoveryQuery(
+        entry, planner.state(route).season.view(), utc, eligibility.break_days,
+        discovery_progress.season, *query);
+    if (!prepared) {
+      delete query;
+      delete response;
+      ++discovery_progress.route;
+      discovery_progress.season = 0;
+      continue;
+    }
+    response->begin(entry, *query, utc);
+    busy.store(true);
+    const auto err = get(
+        query->http.url, query->http.array, query->http.optional,
+        entry.primary.provider, model, generation, settings_generation,
+        network::status().epoch,
+        [](ArduinoJson::JsonVariantConst row, void* raw) {
+          static_cast<coverage::Response*>(raw)->observe(row);
+          return true;
+        },
+        response, nullptr, query->http.body, HttpPurpose::kDiscovery,
+        response->observer(), &response->scan(), entry.id, &admission);
+    busy.store(false);
+    lock();
+    coverage_streaming = false;
+    unlock();
+    if (!sent) {
+      // DNS/TLS alone do not spend a discovery request. A reserved run that
+      // reached its fixed cap closes instead of retrying indefinitely.
+      delete response;
+      delete query;
+      if (failure_cause == Cause::kCounter &&
+          discovery.stored().progress.active) {
+        auto progress = discovery.stored().progress;
+        progress.active = false;
+        saveDiscoveryProgress(progress);
+      }
+      return false;
+    }
+    const auto clock = nowClock();
+    const auto& span = response->finish(err == ESP_OK, clock.utc);
+    lock();
+    if (auto* proof = coverageOf(entry.id)) {
+      coverage::accept(*proof, response->source(), span);
+      coverage_dirty = true;
+    }
+    unlock();
+    // Proof is unusable until its replacement has completed. Its first-send
+    // NVS guard is already durable, independently of this file operation.
+    storeCoverage();
+    delete response;
+    delete query;
+    auto progress = discovery.stored().progress;
+    if (++progress.season >= cfg::kCoverageMaxSeasons) {
+      progress.season = 0;
+      ++progress.route;
+    }
+    if (progress.route >= route_count) {
+      progress.route = 0;
+      progress.active = false;
+    }
+    saveDiscoveryProgress(progress);
+    lock();
+    publish();
+    unlock();
+    events::post(events::Event::kDataUpdated);
+    return true;
+  }
+  if (discovery.stored().progress.active) {
+    auto progress = discovery.stored().progress;
+    progress.active = false;
+    saveDiscoveryProgress(progress);
+  }
+  return false;
+}
+// Fill the worker's existing storage from one locked generation. Separately
+// reading model/routes/counters could mix a concurrent competition reorder
+// with another snapshot's positions and identities.
+void reloadLocked(settings::Model& model, uint32_t& settings_generation,
+                  uint32_t& data_generation) {
+  settings::footballSettings(
+      model, routes, settings_generation, data_generation, &eligibility,
+      [](const settings::Model& snapshot, settings::Competitions& effective,
+         bool saved_competitions) {
+        if (snapshot.demo)
+          demo_bindings =
+              demo::configure(effective, demo_scenario, saved_competitions);
+        else
+          demo_bindings = {};
+      });
+  coverage_binding = coverageBinding(model);
+}
+void reload(settings::Model& model, uint32_t& settings_generation,
+            uint32_t& data_generation) {
+  // Readers borrow routes. Keep its replacement under the same repository
+  // mutex; their generation check rejects a not-yet-applied data generation.
+  lock();
+  reloadLocked(model, settings_generation, data_generation);
+  unlock();
 }
 void setCadence(Cadence cadence, int64_t due) {
   lock();
@@ -1224,10 +1719,10 @@ void setCadence(Cadence cadence, int64_t due) {
   unlock();
 }
 void worker(void*) {
-  uint32_t settings_seen = settings::generation();
+  uint32_t settings_seen = 0, applied = 0;
   settings::Model model;
-  reload(model);
-  uint32_t applied = settings::dataGeneration();
+  loadDiscovery();
+  reload(model, settings_seen, applied);
   Access access = accessOf(model);
   applyRoutes(model, applied, true);
   if (!model.demo) loadKept();
@@ -1236,18 +1731,25 @@ void worker(void*) {
     vTaskDelay(pdMS_TO_TICKS(cfg::kProviderWaitSliceMs));
     relost();
     // Read before the copy: a save in between then interrupts the request.
-    const auto generation = settings::dataGeneration();
+    auto generation = settings::dataGeneration();
     if (const auto seen = settings::generation();
         seen != settings_seen || generation != applied) {
-      settings_seen = seen;
       const bool demo = model.demo;
       const Access prior_access = access;
-      reload(model);
+      lock();
+      reloadLocked(model, settings_seen, generation);
       access = accessOf(model);
-      if (generation != applied) {
-        applyRoutes(model, generation, model.demo != demo,
-                    changedProviders(prior_access, access));
+      const bool data_changed = generation != applied;
+      if (data_changed) {
+        discovery_retire = true;
+        applyRoutesLocked(model, generation, model.demo != demo,
+                          changedProviders(prior_access, access));
         applied = generation;
+      }
+      unlock();
+      if (data_changed) {
+        routesApplied();
+        if (demo && !model.demo) loadKept();
       }
       // Changed request plans and limits apply with the next decision.
     }
@@ -1285,19 +1787,64 @@ void worker(void*) {
     // (the demo runs without a valid clock: no day to settle).
     if (clock_valid) budget::settle(day);
     const int64_t now = timekeeping::monotonicMs();
-    if (!model.demo && (maintained_ms == 0 ||
-                        now - maintained_ms >= cfg::kStoreMaintenanceS * 1000LL)) {
+    if (!model.demo &&
+        (maintained_ms == 0 ||
+         now - maintained_ms >= cfg::kStoreMaintenanceS * 1000LL)) {
       maintained_ms = now;
       maintain(utc);
     }
     // The owner's selection goes first; while it waits for its provider,
-    // the jobs run.
+    // the jobs run. Configure limits independently of automatic next(): in
+    // frame mode that path stays paused, but wizard limits must still apply.
+    scheduler.configure(model.providers, model.global_limit);
     int64_t selection_wake = INT64_MAX;
     if (selecting.load() &&
-        stepSelection(model, generation, utc, selection_wake))
+        stepSelection(model, generation, settings_seen, utc, selection_wake))
       continue;
     if (model.demo) {
+      const auto command = demo_command.load();
+      if (command != kNoDemoCommand) {
+        lock();
+        const bool changed =
+            demo_scenario != static_cast<demo::Scenario>(command >> 8);
+        demo_scenario = static_cast<demo::Scenario>(command >> 8);
+        demo_step = static_cast<uint8_t>(command);
+        ESP_LOGI(kTag, "demo scenario %u step %u",
+                 static_cast<unsigned>(demo_scenario), demo_step);
+        if (changed) {
+          // Publish identity, policy association, fixture data and test clock
+          // together. Readers cannot combine the new scenario's proof with
+          // the previous scenario's store while projection is in progress.
+          reloadLocked(model, settings_seen, generation);
+          applyRoutesLocked(model, generation, true);
+          unlock();
+          access = accessOf(model);
+          applied = generation;
+          routesApplied();
+          if (!model.demo) loadKept();
+          continue;
+        }
+        demo_clock = demo::apply(store, routes, demo_bindings, demo_scenario,
+                                 demo_step, nowClock().mono_s);
+        publish();
+        demo_command.store(kNoDemoCommand);
+        unlock();
+        events::post(events::Event::kDataUpdated);
+      }
       setCadence(Cadence::kIdle, 0);
+      continue;
+    }
+    if (settings::footballPaused()) {
+      // The explicit setup flow above retains all of its normal limits and
+      // retries. Automatic jobs, including pending Planner continuations,
+      // stay untouched until frame ends; no forced refresh is queued for it.
+      requested.store(false);
+      sweep();
+      writeKept(utc);
+      lock();
+      cadence_now = Cadence::kNone;
+      due_ms = retry_ms = 0;
+      unlock();
       continue;
     }
     if (seed_pending) {
@@ -1305,10 +1852,21 @@ void worker(void*) {
       seedKept(utc);
     }
     if (requested.exchange(false)) scheduler.refresh();
+    const auto decision_clock = nowClock();
+    const auto decision_dates = localDates(utc);
+    const bool break_proven =
+        !coverage_streaming && !coverage_dirty &&
+        coverage::assess(coverage_evidence, routes, utc, eligibility.break_days)
+                .verdict == coverage::Verdict::kBreak;
+    const selection::Input selection_input{
+        eligibility.selection, routes,         store,
+        decision_clock,        decision_dates, break_proven};
+    const auto selected = selection::select(selection_input);
+    planner.context(routes, eligibility, decision_dates, break_proven);
     for (uint8_t i = 0; i < cfg::kCompetitionMax; ++i)
       planner.wanted(i,
                      i < routes.entries.size() ? &routes.entries[i] : nullptr,
-                     store, nowClock(), inputs.competitions[i]);
+                     store, decision_clock, inputs.competitions[i], &selected);
     inputs.plans = &model.providers;
     inputs.global = model.global_limit;
     for (unsigned p = 0; p < cfg::kProviderCount; ++p) {
@@ -1325,9 +1883,11 @@ void worker(void*) {
     inputs.clock = nowClock();
     const auto decision = scheduler.next(inputs);
     if (decision.run) {
-      runJob(decision.job, model, generation, network::status().epoch);
+      runJob(decision.job, model, generation, settings_seen,
+             network::status().epoch);
       continue;
     }
+    if (stepDiscovery(model, generation, settings_seen, utc)) continue;
     sweep();
     writeKept(utc);
     const int64_t due = decision.wake_s ? decision.wake_s * 1000LL : 0;
@@ -1367,15 +1927,14 @@ esp_err_t init() {
              ? ESP_OK
              : ESP_ERR_NO_MEM;
 }
-void refresh() { requested.store(true); }
-Status status() {
-  Status s{};
-  if (mutex == nullptr) return s;
+void refresh() {
+  // An explicit setup list is the frame exception; a refresh must not turn
+  // every job into overdue work when normal football operation resumes.
+  if (!settings::footballPaused()) requested.store(true);
+}
+namespace {
+void statusLocked(Status& s, int64_t utc, int64_t now) {
   s.started = true;
-  time_t utc = 0;
-  const bool valid = timekeeping::utcNow(utc);
-  const int64_t now = timekeeping::monotonicMs();
-  lock();
   s.revision = revision;
   s.generation = published_generation;
   memcpy(s.requests, requests, sizeof(requests));
@@ -1383,15 +1942,55 @@ Status status() {
   s.matches = static_cast<uint8_t>(
       std::min<std::size_t>(UINT8_MAX, store.matchCount()));
   s.competitions = states;
-  s.stale = markStale(s.competitions, valid ? utc : 0, now);
+  s.stale = markStale(s.competitions, utc, now);
   s.cadence = cadence_now;
   const bool scheduled = cadence_now != Cadence::kNone &&
                          cadence_now != Cadence::kWaiting &&
                          cadence_now != Cadence::kUpdateTest;
   s.next_ms = scheduled ? due_ms : 0;
-  unlock();
   s.busy = busy.load();
+}
+}  // namespace
+Status status() {
+  Status s{};
+  if (mutex == nullptr) return s;
+  time_t utc = 0;
+  const bool valid = timekeeping::utcNow(utc);
+  const int64_t now = timekeeping::monotonicMs();
+  lock();
+  statusLocked(s, valid ? utc : 0, now);
+  unlock();
   return s;
+}
+DemoStatus demoStatus() {
+  DemoStatus status;
+  if (mutex == nullptr) return status;
+  lock();
+  status.enabled = demo_mode;
+  status.pending = demo_command.load() != kNoDemoCommand;
+  status.scenario = demo_scenario;
+  status.step = demo_step;
+  status.revision = revision;
+  status.clock = demo_clock;
+  if (demo_mode) status.bindings = demo_bindings;
+  unlock();
+  return status;
+}
+esp_err_t demoScenario(demo::Scenario scenario, uint8_t step) {
+  if (!demo::valid(scenario) || step >= demo::steps(scenario))
+    return ESP_ERR_INVALID_ARG;
+  if (mutex == nullptr) return ESP_ERR_INVALID_STATE;
+  lock();
+  const bool enabled =
+      demo_mode && published_generation == settings::dataGeneration();
+  uint16_t expected = kNoDemoCommand;
+  const bool queued =
+      enabled &&
+      demo_command.compare_exchange_strong(
+          expected,
+          static_cast<uint16_t>(static_cast<unsigned>(scenario) << 8 | step));
+  unlock();
+  return queued ? ESP_OK : enabled ? ESP_ERR_TIMEOUT : ESP_ERR_INVALID_STATE;
 }
 const char* cadenceName(Cadence cadence) {
   switch (cadence) {
@@ -1417,9 +2016,31 @@ void read(Reader reader, void* context) {
   const int64_t now = timekeeping::monotonicMs();
   lock();
   const bool stale = markStale(states, valid ? utc : 0, now);
+  uint8_t loaded_matches = 0, loaded_tables = 0;
+  for (uint8_t i = 0; i < route_count; ++i) {
+    if (slots[i].matches_loaded || demo_mode) loaded_matches |= 1u << i;
+    if (slots[i].table_loaded || demo_mode) loaded_tables |= 1u << i;
+  }
   const Published data{
-      store,      shown, names,         revision, published_generation,
-      configured, stale, oldestFetch(), retry_ms, states};
+      store,
+      shown,
+      names,
+      revision,
+      published_generation,
+      configured,
+      stale,
+      oldestFetch(),
+      retry_ms,
+      states,
+      routes,
+      demo_mode ? demo::breakProven(demo_scenario, eligibility.break_days)
+                : !coverage_streaming && !coverage_dirty && valid &&
+                      coverage::assess(coverage_evidence, routes, utc,
+                                       eligibility.break_days)
+                              .verdict == coverage::Verdict::kBreak,
+      loaded_matches,
+      loaded_tables,
+      demo_mode ? demo_clock : nowClock()};
   reader(data, context);
   unlock();
 }
@@ -1459,16 +2080,25 @@ bool selectionAt(uint16_t index, uint32_t revision, Selection& out) {
   unlock();
   return ok;
 }
-Overview overview(int64_t utc) {
+Overview overview(int64_t utc, Status* status_out) {
   Overview result{};
+  if (status_out != nullptr) status_out->started = false;
   if (mutex == nullptr) return result;
+  const int64_t now = status_out != nullptr ? timekeeping::monotonicMs() : 0;
   lock();
+  if (status_out != nullptr) statusLocked(*status_out, utc, now);
+  result.demo = demo_mode;
+  if (demo_mode) {
+    utc = demo_clock.utc;
+    result.demo_bindings = demo_bindings;
+  }
   for (uint8_t i = 0; i < route_count; ++i) {
     const auto& slot = slots[i];
-    if (!slot.active) continue;
     auto& info = result.routes[i];
-    info.matches = static_cast<uint8_t>(std::min<uint16_t>(
-        UINT8_MAX, view::matchCount(store, shown, slot.id)));
+    info.id = slot.id;
+    if (!slot.active) continue;
+    info.matches = static_cast<uint8_t>(
+        std::min<uint16_t>(UINT8_MAX, view::matchCount(store, shown, slot.id)));
     if (const auto* source = shown.source(slot.id))
       info.provider = source->provider;
   }
@@ -1477,8 +2107,7 @@ Overview overview(int64_t utc) {
     const auto& m = store.match(best);
     auto& own = result.own;
     own.present = true;
-    for (uint8_t i = 0; i < route_count; ++i)
-      if (slots[i].id == m.competition) own.route = i;
+    own.competition = m.competition;
     own.phase = m.phase;
     own.kickoff = m.kickoff;
     if (m.principal.valid()) {
@@ -1592,6 +2221,8 @@ void eraseFiles() {
   footballPath(cfg::kShortNameFile, path, sizeof(path));
   unlink(path);
   footballPath(cfg::kFootballTempFile, path, sizeof(path));
+  unlink(path);
+  footballPath(cfg::kCoverageFile, path, sizeof(path));
   unlink(path);
 }
 }  // namespace football

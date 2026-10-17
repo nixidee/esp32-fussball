@@ -74,9 +74,7 @@ struct List {
   bool empty() const noexcept { return count == 0; }
   bool full() const noexcept { return count == Capacity; }
   T& operator[](std::size_t index) noexcept { return items[index]; }
-  const T& operator[](std::size_t index) const noexcept {
-    return items[index];
-  }
+  const T& operator[](std::size_t index) const noexcept { return items[index]; }
   T* begin() noexcept { return items.data(); }
   T* end() noexcept { return items.data() + count; }
   const T* begin() const noexcept { return items.data(); }
@@ -115,31 +113,27 @@ struct Source {
 // visible). One source per competition (OQ-247). The display
 // names are stored when a competition and club are picked from a provider
 // list (OQ-75); they may be empty. 'id' is the stable id the competition
-// store assigns (OQ-209; 0 = not stored yet); 'screens' has one bit per
-// cfg::CompetitionScreen (OQ-192).
+// store assigns (OQ-209; 0 = not stored yet).
 struct Competition {
   uint8_t id = 0;
   bool active = cfg::kEntryActiveDefault;
   Source primary;
   Bytes<cfg::kDisplayNameMaxBytes> competition_name;
   Bytes<cfg::kDisplayNameMaxBytes> team_name;
-  uint8_t screens = cfg::kCompetitionScreensDefault;
-  bool uses(cfg::CompetitionScreen screen) const noexcept {
-    return (screens >> static_cast<unsigned>(screen)) & 1;
-  }
+  // Service-owned identity revision. Never reused when a small id wraps.
+  uint32_t incarnation = 0;
   bool hasClub() const noexcept { return !primary.team.empty(); }
   bool operator==(const Competition&) const noexcept = default;
 };
 
 struct ScreenStyle {
-  bool enabled = cfg::kScreenEnabledDefault;
   bool background = cfg::kBackgroundsDefault;
   uint32_t colour = cfg::kThemeBackgroundDefault;
   uint32_t text = cfg::kThemeTextDefault;
   uint32_t accent = cfg::kThemeAccentDefault;
   uint8_t text_scale = cfg::kTextScaleDefault;
   // Library image id (1..cfg::kImageLibraryMax) or cfg::kStockImageId. The
-  // crest screen shows the crest or its slides and has no background image.
+  // Values are projected from the screen policy by the presenter.
   uint8_t image = cfg::kStockImageId;
   bool operator==(const ScreenStyle&) const noexcept = default;
 };
@@ -151,6 +145,7 @@ const char* fieldName(Field field) noexcept;
 struct Competitions {
   List<Competition, cfg::kCompetitionMax> entries;
   uint8_t next_id = 1;
+  uint32_t next_incarnation = 1;
   // The entry with this id, or null.
   const Competition* find(uint8_t id) const noexcept {
     for (const auto& entry : entries)
@@ -160,6 +155,7 @@ struct Competitions {
   void clear() noexcept {
     entries.clear();
     next_id = 1;
+    next_incarnation = 1;
   }
   bool operator==(const Competitions&) const noexcept = default;
 };
@@ -195,7 +191,8 @@ constexpr ProviderPlans providerPlansDefault() noexcept {
 // Stable lower-case key of a data type (settings JSON, logs).
 const char* dataTypeName(cfg::DataType type) noexcept;
 
-// Role per input slot of a profile with `inputs` inputs (cfg::inputRoleDefault).
+// Role per input slot of a profile with `inputs` inputs
+// (cfg::inputRoleDefault).
 using InputRoles = std::array<cfg::InputRole, hw::kMaxInputs>;
 constexpr InputRoles inputRolesDefault(std::size_t inputs) noexcept {
   InputRoles roles{};
@@ -218,57 +215,36 @@ struct Model {
   Bytes<cfg::kTimeZoneLabelMaxChars> time_zone;  // label of cfg::kTimeZones
   Bytes<cfg::kNtpServerMaxChars> ntp_server;
 
-  // Append-only application settings, after the original nine fields.
+  // General application settings; screen rules/appearance have one owner in
+  // Policy.
   Bytes<cfg::kAdminPasswordMaxBytes> admin_password;
   Bytes<cfg::kApiFootballKeyMaxBytes> api_football_key;
   Bytes<cfg::kFootballDataKeyMaxBytes> football_data_key;
-  std::array<ScreenStyle, cfg::kScreenCount> screens{};
   bool espn_opt_in = cfg::kEspnOptInDefault;
   bool demo = cfg::kDemoDefault;
-  bool backgrounds = cfg::kBackgroundsDefault;
   bool night_enabled = cfg::kNightEnabledDefault;
   bool ip_badge_ap_permanent = cfg::kIpBadgeApPermanentDefault;
   bool ip_badge_bottom = cfg::kIpBadgeBottomDefault;
   bool browser_debug = cfg::kBrowserDebugDefault;
-  bool pin_own_match = cfg::kPinOwnMatchDefault;  // format 4
-  bool whole_matchday = cfg::kWholeMatchdayDefault;  // format 5
-  cfg::ConferenceMode conference_mode = cfg::kConferenceModeDefault;  // format 5
   uint8_t language = cfg::kLanguageDefault;  // 0 German, 1 English
   uint8_t brightness = cfg::kBrightnessDefault;
   uint8_t night_brightness = cfg::kNightBrightnessDefault;
   uint8_t rotation = cfg::kRotationDefault;
-  uint8_t visible_matches = cfg::kVisibleMatchesDefault;
-  uint8_t table_window = cfg::kTableWindowDefault;
-  cfg::Screen idle_screen = cfg::kIdleScreenDefault;
-  cfg::Screen matchday_screen = cfg::kMatchdayScreenDefault;
-  cfg::Screen own_match_screen = cfg::kOwnMatchScreenDefault;
-  uint16_t manual_return_s = cfg::kManualReturnDefaultS;
   uint16_t scroll_reset_s = cfg::kScrollResetDefaultS;
   uint16_t scroll_repeat_ms = cfg::kScrollRepeatDefaultMs;
-  uint16_t slideshow_s = cfg::kSlideshowDefaultS;
   uint16_t night_start = cfg::kNightStartDefaultMinutes;
   uint16_t night_end = cfg::kNightEndDefaultMinutes;
   uint16_t ip_badge_s = cfg::kIpBadgeDefaultS;
-  uint16_t window_before = cfg::kMatchWindowDefaultMinutes;
-  uint16_t window_after = cfg::kMatchWindowDefaultMinutes;
 
-  // Crest screen slideshow in play order: 0 = the crest, else a library id.
-  List<uint8_t, cfg::kSlideMax> slides;
-
-  // Format 5 (stored after pin_own_match). Input slots after the profile's
-  // inputs are stored but unused.
+  // Input slots after the profile's inputs are stored but unused.
   InputRoles input_roles = inputRolesDefault(hw::kMaxInputs);
 
   // Request plan per provider (index cfg::Provider) and the optional limit
   // over all providers together (default off, OQ-222).
   ProviderPlans providers = providerPlansDefault();
   RequestLimit global_limit;
-  // Later tail after the global limit: the matchday screen's style is
-  // screens[cfg::Screen::kMatchday] above; the table step time follows it
-  // (OQ-196), then which matchday the Matchday screen shows (OQ-244, OQ-270).
-  uint16_t table_page_s = cfg::kTablePageDefaultS;
-  cfg::MatchdayMode matchday_mode = cfg::kMatchdayModeDefault;
-
+  // Capture remains available under Debug; this only adds its Overview trigger.
+  bool overview_screenshot = cfg::kOverviewScreenshotDefault;
   bool operator==(const Model& other) const noexcept = default;
 };
 
@@ -290,7 +266,8 @@ bool isValidSeason(cfg::Provider provider, std::string_view season) noexcept;
 // (OQ-85, OQ-92) and the number of inputs of the target (OQ-141). The boot
 // code passes the profile's values; the defaults are the widest bounds.
 struct Limits {
-  uint8_t visible_matches_max = static_cast<uint8_t>(cfg::kVisibleMatchesRange.max);
+  uint8_t visible_matches_max =
+      static_cast<uint8_t>(cfg::kVisibleMatchesRange.max);
   uint8_t table_window_max = static_cast<uint8_t>(cfg::kTableWindowRange.max);
   uint8_t inputs = static_cast<uint8_t>(hw::kMaxInputs);
 };
@@ -298,16 +275,15 @@ struct Limits {
 // Why a value was rejected. The names (reasonName) are the stable codes the
 // REST API reports next to the field path.
 enum class Reason : uint8_t {
-  kInvalid,      // wrong format or characters
-  kRange,        // number outside its bounds
-  kType,         // JSON value of the wrong type
-  kUnknownKey,   // JSON key the device does not know
-  kTooLong,      // text longer than its capacity
-  kTooMany,      // more list entries than the capacity
-  kRequired,     // empty where a value is needed
-  kDuplicate,    // value used twice where it must be unique
-  kConflict,     // contradicts another field
-  kNoneEnabled,  // not a single screen enabled
+  kInvalid,     // wrong format or characters
+  kRange,       // number outside its bounds
+  kType,        // JSON value of the wrong type
+  kUnknownKey,  // JSON key the device does not know
+  kTooLong,     // text longer than its capacity
+  kTooMany,     // more list entries than the capacity
+  kRequired,    // empty where a value is needed
+  kDuplicate,   // value used twice where it must be unique
+  kConflict,    // contradicts another field
 };
 const char* reasonName(Reason reason) noexcept;
 
@@ -400,6 +376,23 @@ bool checkProviderAccess(const Model& model, const Competitions& competitions,
 // advances 'next_id' past it (1..255, wrapping). Entries with an id keep it.
 void assignIds(Competitions& competitions) noexcept;
 
+// Service-side allocation: takes both counters from current, preserves the
+// incarnation of existing ids across edits/reorders, and gives new entries
+// (id 0 or an unknown id) a fresh incarnation. Caller-supplied incarnations
+// are never trusted. Refuses exhaustion rather than wrapping the counter.
+// Candidate is scratch and may change on failure; current remains unchanged.
+bool assignIncarnations(Competitions& candidate, const Competitions& current,
+                        Violation* violation = nullptr) noexcept;
+
+// Reserves every incarnation <= highwater from an independently retained
+// policy before orphan bindings are pruned. Stored identities stay unchanged;
+// provisional fallback identities are reissued above the floor so they cannot
+// resurrect an old binding after their first save/reboot. Refuses overflow
+// before changing any provisional entry; UINT32_MAX leaves allocation
+// exhausted.
+bool reserveIncarnationFloor(Competitions& competitions, uint32_t highwater,
+                             bool provisional) noexcept;
+
 // Bit n identifies library image n (bit 0, the stock image, is ignored).
 using ImageMask = uint16_t;
 static_assert(cfg::kImageLibraryMax < 16, "ImageMask has 16 bits");
@@ -408,12 +401,16 @@ inline constexpr ImageMask kLibraryImageMask =
 
 // Saved desired library ids, including disabled screens and every slide.
 // Missing files remain references; stock id 0 and invalid ids are ignored.
-ImageMask referencedImages(const Model& model) noexcept;
+namespace screen_policy {
+struct Policy;
+}
+ImageMask referencedImages(const screen_policy::Policy& policy) noexcept;
 
 // Replaces every reference to a library image missing from 'present' by the
 // stock image and removes it from the slides (a slide never stays empty).
 // True if the model changed.
-bool dropMissingImages(Model& model, ImageMask present) noexcept;
+bool dropMissingImages(screen_policy::Policy& policy,
+                       ImageMask present) noexcept;
 
 // Values from secrets.h; empty = not set.
 struct Presets {
@@ -439,8 +436,7 @@ inline constexpr FieldMask fieldBit(Field field) noexcept {
 
 // Defaults from app_config.h, each overridden by its preset when set and
 // valid. Invalid presets are skipped (default kept) and reported in *rejected.
-// 'limits' clamps the layout-dependent defaults (the default equals the
-// maximum, OQ-85).
+// 'limits' selects input-role defaults for the hardware profile.
 Model initialValues(const Presets& presets, FieldMask* rejected = nullptr,
                     const Limits& limits = {}) noexcept;
 

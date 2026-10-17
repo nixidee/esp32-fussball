@@ -16,6 +16,7 @@ struct BindContext {
   bool valid, connected, ap;
   const network::Status* net;
   uint32_t status_state = 0;
+  bool bound = false;
 };
 struct PresentationState {
   uint32_t pill_state = 0, screen_status = 0;
@@ -31,11 +32,13 @@ struct Subject {
 class Presenter {
  public:
   Presenter(const settings::Model& settings, ViewModel& output,
+            const settings::screen_policy::Policy& rules,
             NavigationState& navigation, PresentationState& presentation,
             std::size_t inputs,
             const football::Published* publication = nullptr,
-            const NavigationData* facts = nullptr)
+            NavigationContext* facts = nullptr)
       : model(settings),
+        policy(rules),
         view(output),
         nav(navigation),
         presentation(presentation),
@@ -52,13 +55,15 @@ class Presenter {
 
  private:
   const settings::Model& model;
+  const settings::screen_policy::Policy& policy;
   ViewModel& view;
   NavigationState& nav;
   PresentationState& presentation;
   std::size_t input_count;
   const football::Published* published;
   const football::persist::ShortNames* short_names;
-  const NavigationData* navigation_data;
+  NavigationContext* navigation_data;
+  void setStyle(screen::Type type);
   const char* translated(const char* de, const char* en) const {
     return model.language ? en : de;
   }
@@ -75,7 +80,9 @@ class Presenter {
     prefix<N - 1>(out, text);
   }
   bool started(const football::StoredMatch& match) const {
-    return football::view::started(match.phase);
+    return football::view::started(match.phase) ||
+           (match.phase == football::Phase::kSuspended &&
+            match.first_live_observed_utc != 0);
   }
   void value(char* out, std::size_t size, int n, bool known);
   void value(char* out, std::size_t size, uint8_t n);
@@ -110,8 +117,7 @@ class Presenter {
                       const BindContext& context);
   void bindTable(const football::MatchStore& store,
                  const TableSelection& selection);
-  void bindTables(const football::MatchStore& store,
-                  const football::view::Shown& shown, int64_t now, int64_t utc);
+
   void bindMatchday(const football::MatchStore& store,
                     const football::view::Shown& shown,
                     const BindContext& context);

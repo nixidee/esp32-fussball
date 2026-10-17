@@ -1,121 +1,77 @@
 # UI — screens, navigation and overlays
 
-The start screen, all five football screens, the state cards, navigation,
-the IP chip and night rendering follow the approved display design in
-0.1.0-dev. Current C6 source compiles. Rendered boundary checks and physical
-input/display acceptance remain open. The earlier boot-screen and geometry
-acceptance covers that earlier workload.
+The active controller uses one five-phase policy and one common sequence for
+six types: Crest, Images, Single, Matchday, Conference and Table. Settings,
+provider demand and navigation use the same competition identities and order.
+The [complete control contract](#planned-screen-system-redesign) below also
+specifies the later device-layout and ring work, which remains unaccepted.
+Source/host checks and a C6 integration build cover the controller cutover;
+physical input, round-screen layout and runtime reserves still need device checks.
 
-## Screens and automatic selection
+## Current screens and automatic sequence
 
-| Screen | Content |
+| Type | Content |
 |---|---|
-| Own match | principal score, supplied/estimated minute or kickoff, teams, separate shootout tally, bounded recent events |
-| Conference | matches of the current kickoff blocks of every competition with the Konferenz switch; up to the configured rows per page (profile maximum four on 240 round), the own match included; mode All pages or One page; own match pinned as the first row or shown as a normal accent row |
-| Matchday | the current matchday of each competition with the Matchday switch, one competition after another, every match with result or kickoff; also without a running match |
-| Table | the tables of the competitions with the Table switch, one after another; profile-limited rows (seven maximum on 240 round) around the own club, without an own club page by page; every stored row reachable by scrolling |
-| Crest / slideshow | the crest role's image (replacement or factory crest); up to five slides (the crest or library images) rotate within this screen |
+| Single | The focused own match, a unique ordinary active match, or the selected club's held result/next preview; the same full names and available event presentation |
+| Conference | One competition's applicable kickoff blocks; All pages or One page; optional own pin and independent own highlighting |
+| Matchday | One competition's complete known sporting round, including rescheduled fixtures outside the phase's local-date cluster |
+| Table | One competition's table, automatically centred around the selected club or paginated without one; complete manual row access |
+| Crest | The crest role's replacement/factory image |
+| Images | Configured library images, without the crest; visible-time rotation and continuation from the next actually shown image |
 
-Screens are listed and stepped through in the order Own match, Konferenz,
-Matchday, Table, Crest / slideshow. Each competition has four switches
-(Own match, Konferenz, Matchday, Table; all on by default) that decide on
-which screens its data appears; a competition is only requested for the
-data its switched-on screens need (see
-[DATA_FLOW.md](DATA_FLOW.md)). Own match needs a club. Matchday and Table
-show the competitions in the order of the competition list.
+One global phase wins: Own, Other games, Matchday, Idle, optional Break. Actual
+running own matches beat own buffers; competition order resolves own focus and
+within-type order. Own special treatment can be disabled without losing club
+highlighting or ordinary unique-match eligibility. Unknown kickoff and justified
+interruption retain only their bounded canonical time basis. A failed fetch
+alone does not invent a final whistle or erase retained content.
 
-Each screen has an enable switch, colour/text/accent, background switch and
-text-scale setting. No view fetches data or reads GPIO. The controller copies
-canonical data into a fixed view model, then the view renders it.
+Each phase enables entries as automatic, manual-only or disabled. One common
+type order is used throughout. Per-competition overrides inherit each shared
+field until explicitly changed. Crest/Images are global automatic entries when
+enabled. Confirmed empty entries are skipped; unloaded/failed content remains an
+actionable card, while available content keeps its warning. No implicit sports
+exception bypasses the configured first entry.
 
-| Situation | Default |
-|---|---|
-| No configured competition | stock image |
-| Outside relevant windows | Table |
-| Relevant matchday | Conference |
-| Own fixture window | Own match |
+Every phase change exits manual mode and starts the first eligible automatic
+entry. Ordinary data updates preserve the current eligible visit and its time;
+a changed own focus updates the Single immediately. A save cancels pending
+click/double-click/held gestures and old queued actions. Fresh commands wait for
+the matching data generation and retain FIFO order.
 
-Defaults are configurable. Disabled or unavailable screens are skipped.
-With zero inputs the current situation's default remains selected; there is
-no automatic cycling between screens. Manual navigation returns after
-60 seconds without input by default; 0 disables the return. A successful save
-of settings or competitions returns navigation to automatic mode at the next
-application pass, even when that timeout is disabled. It clears manual
-rows/pages, the held
-matchday and Scroll direction, restarts both competition-cycle timers and
-resolves the default from the saved configuration. Ordinary provider refreshes
-keep a manual selection. The Default action and the inactivity return resume
-the existing competition cycles and their timers.
+Manual Next/Previous follows enabled sporting type-by-competition entries,
+skipping images. Up/Down holds an internal page: all table row positions and
+held/current/next round pages remain reachable. Before that first page action,
+a manually selected entry still rotates its automatic pages. Every input
+renews the configurable return timer; timeout/Default starts the first
+eligible automatic entry. A held key must be released after settings change.
 
-Actions queued before that save are rejected even if they arrive later.
-Pending single/double-click recognition and held-key repeats are cancelled.
-A key already held or still being debounced must first be released; that
-release emits no action, including no Scroll-direction toggle. A fresh press
-uses the new assignment. New actions queued after the save are preserved.
+Visit time is divided equally across pages, with effective total at least
+15 seconds and five seconds per page. Extra incoming pages join the next visit;
+shrinking content removes invalid pages immediately. Time is credited only
+after successful display output, so lock/render/image failures consume no unseen
+image or page. There are no separate Table, Conference or Matchday page clocks.
 
-The relevant-matchday default applies while the Konferenz has at least one
-member; membership follows kickoff blocks of every active competition,
-including overruns (rules in [DATA_MODEL.md](DATA_MODEL.md#72-konferenz)). Own cup/catch-up
-windows are independent. A missing final status cannot leave a window open
-indefinitely.
+Conference pinning keeps the own match first while it is a member. Automatic
+One page ranks activity; manual paging uses complete kickoff order and anchors
+from the visible automatic match. Conference and Matchday share a maximum row count, minimum2. The pin
+uses one place; only remaining actual fixtures are split. Page count stays
+unchanged, with up to one donated row per earlier page (>2pages) or two
+(2pages), taking from the back first. Larger pages stay first. One actual
+fixture displays alone without paging. The old whole-matchday own
+retention switch is replaced by the separate own/other pre/post windows.
 
-The match-window settings (`window_before` and `window_after`, each 0–180
-minutes) decide when a match counts as inside its display window for the
-automatic Own match selection and Konferenz membership, from before kickoff
-until after its bounded end. Outside that window, Own match can still show
-the match with the nearest kickoff. These settings do not extend live
-polling. The request scheduler has its own window from 30 minutes
-before kickoff to the match end, with a bounded estimate when the end is
-unknown ([DATA_FLOW.md](DATA_FLOW.md#request-scheduler)). A match can therefore
-be shown before polling starts or after ordinary live polling ends; the
-final table/events requests follow their separate scheduler rules.
+Picture frame overrides normal profiles without clearing them or the football
+store. It shows the permitted crest/library sequence, lets navigation browse
+images, hides football faults and stops automatic football demand. Setup queries
+retain their normal admission limits. Reconnects do not repeatedly restore a
+permanent setup-IP overlay in frame mode. Night mode, image recovery and settings
+cancellation remain active.
 
-### Konferenz pages
-
-- **All pages** (default): every member in kickoff order. With more members
-  than rows, pages change every 8 seconds; the title shows "Konferenz · n/m"
-  and page dots sit below the rows.
-- **One page**: a single page. Running matches with goals come first, the
-  latest goal first; then goalless running matches, finished matches and
-  matches not yet started, each in kickoff order.
-- **Pin own match** (default on): the own match is the first row of every
-  page while it is a member and counts towards the rows per page. Off: it is
-  a normal row in kickoff or activity order, drawn in the accent colour.
-- **Show own match for the whole matchday** (default off): see
-  [DATA_MODEL.md](DATA_MODEL.md#72-konferenz).
-- Up/Down move one page in kickoff order, wrapping at both ends, and stop
-  automatic paging until the manual return. From automatic One page mode,
-  the first Down enters the first chronological page; the first Up enters
-  the last. Further presses cycle through those chronological pages. With
-  no Up/Down or Scroll input there is no manual paging.
-- Rows keep fixed slots while paging, so a shorter last page does not move
-  the rows up.
-
-### Matchday and table cycles
-
-- **Matchday**: per competition its selected matchday in kickoff order —
-  with "Current matchday" (default) the running or next one, a finished
-  one until the end of the following local day; with "Next matchday" the
-  next one from midnight after the last kickoff, and a competition without
-  an upcoming stored matchday is skipped — as many matches per page as the
-  Konferenz rows per page. Pages change every 8 seconds; after the last
-  page the next competition follows, wrapping. Down/Up move one page
-  forward/back and stop the automatic change until the manual return; past
-  the last (first) page they move to the next (previous) stored matchday
-  of the same competition (at most the held, the selected and the next
-  one), then to the next competition on page 1 of its selected matchday
-  (the previous competition on the last page of its selected matchday;
-  without a selected one, its last reachable matchday). The automatic
-  cycle shows only the selected matchday. Without any match: card
-  "Spieltag / Keine Spiele".
-- **Table**: competitions without a stored table are skipped. Without an
-  own club the table pages every *table step* (default 8 s, 3–600 s) by
-  the number of table rows; after the last page the next competition
-  follows. With an own club the view stays around the club and the next
-  competition follows after one table step. Up/Down move one row and stop
-  the automatic step; past the last (first) row the next (previous)
-  competition follows. With no table at all a card names the first
-  competition.
+Appearance comes from the screen policy: colours, text scale, background, image
+and dots. Actual dot placement, the Table dot display, score-centred layouts,
+final rings and readable font/layout choices remain device-layout work. Views render
+fixed view models; they do not fetch data, resolve policy or read GPIO.
 
 ## Layout rules
 
@@ -124,8 +80,11 @@ SafeArea; nothing is placed at a fixed pixel position.
 
 - **Size class**: small up to 260 px shorter side, medium up to 400 px,
   large above. Each class has font role sizes for caption, body, title and
-  score. The screen's text scale multiplies them; the largest compiled font
-  at or below the result is used (caption font as the minimum).
+  score. Caption, body and title select the largest compiled text font at or
+  below their scaled role size (caption font as the minimum). The current
+  score uses the fixed nominal 48 px font regardless of text scale; its
+  generated line height is 35 px. Larger score and text choices belong to
+  the planned device-layout trials.
 - **Gap unit** `g` = max(2, s/60); every spacing is a multiple of it. The
   rim stroke is max(2, s/80) px.
 - **Fitting**: a text line takes the chord of its band on a round panel (the
@@ -435,9 +394,12 @@ is compiled.
 Role sizes (caption/body/title/score) are 12/14/18/48 px for the small
 class (shorter side ≤260), 16/20/26/72 for medium and 20/26/34/96 for large.
 Only 12, 14, 18 and 48 px are compiled, so medium and large currently use
-the largest compiled font at or below each role; geometry still scales
-separately. Text scale selects among compiled fonts; it does not rasterize
-arbitrary font sizes on the device. Large-profile fonts and actual
+the largest compiled text font at or below each caption/body/title role;
+the score remains the fixed nominal 48 px font (35 px generated line height).
+Geometry still scales separately. Text scale selects among compiled text
+fonts; it does not rasterize arbitrary font sizes on the device. These are
+current implementation limits, not the planned readability target.
+Large-profile fonts and actual
 names/boundary acceptance are still required. Bitmap payloads
 are 8165/10960/17846/5718 bytes (12/14/18/48); descriptors/maps add flash
 beyond those numbers.
@@ -485,3 +447,345 @@ text scaling, overlay overlap, all input counts, bottom-row reachability,
 JPEG redraw responsiveness, night brightness and the full rendered safe-area
 matrix remain polish/testing. No screenshot is represented as device evidence,
 and the boundary harness has not been implemented/run for these new screens.
+
+## Planned screen-system redesign
+
+Confirmed product direction, 2026-10-17, reviewed against the clean `efae218`
+candidate. This section is the public future-behavior contract. It does not
+describe available firmware settings or authorize implementation. Exact model,
+API, storage, compatibility/migration and resource budgets are the next design
+gate; [ADR-042](DECISIONS.md#adr-042--situation-based-screen-sequences--accepted-direction-2026-10-17)
+records that boundary. Setup/startup and fault handling remain part of the
+complete screen inventory, not extra normal sequence entries.
+
+### Situations and match periods
+
+The device uses one global situation, taking the highest applicable priority:
+
+| Priority | Situation | Meaning |
+|---|---|---|
+| Highest | Own game | An own fixture is inside its before/live/after period, with a club selected and separate own-game handling enabled for that competition |
+| Next | Games in a competition | Relevant fixtures are inside their before/live/after periods, including own fixtures whose separate handling is disabled |
+| Next | Matchday | Inside a related matchday's local-date span, without a higher situation |
+| Otherwise | No game / optional season break | Normal quiet-time profile, or its separately enabled break profile when the known fixture gap qualifies |
+
+Each situation has its own screen choices, automatic/manual eligibility and
+durations. Separate own-game handling can be disabled per competition; that
+fixture then contributes to Games in a competition, and stays highlighted in
+its Conference. This switch does not erase the club identity or turn off the
+competition's other selected screens.
+
+A confirmed running report may establish the live situation even without a
+usable kickoff. Use its first confirmed observation as a bounded 240-minute
+selection anchor, visibly retain the unknown kickoff, and return to the normal
+kickoff basis when supplied. Do not invent a kickoff or minute. An explicitly
+interrupted game retains its already justified active slot within the same
+bound, with an interruption label and no clock advancement; later provider
+reports determine resumption or abandonment.
+
+A matchday period extends continuously from 00:00 on its first local date
+through the end of its last local date, including an empty day in between.
+Use the actual sporting round where the provider supplies a reliable mapping;
+split distant fixtures of that round into date clusters with at most one fully
+empty intermediate local day. Two empty days split the phase periods. Without
+a reliable round, use explicit temporal fallback groups: at most one empty
+intermediate day and at most four calendar days from the group's start. This
+fallback must not be presented as a verified sporting round. Date clusters
+determine the device situation; the Matchday screen still shows the full known
+sporting round, including separated catch-up fixtures. Without a real round it
+shows the documented fallback group.
+
+Optional season break means a gap of more than the configurable threshold
+between the previous and next fixtures, default 21 days, across **all active
+competitions**. A competition without a club still counts; a configured World
+Cup or European Championship can interrupt a league's summer break. Known
+fixture coverage is required: missing, stale, not-yet-published or failed
+schedule data cannot establish that no game exists. A higher situation wins.
+The break profile can differ from the ordinary no-game profile without
+altering its settings.
+The threshold uses elapsed time between kickoffs (days times 24 hours), not
+local date subtraction. Its range is 1–366 days. Compact source/season/interval
+coverage evidence remains separate from retained match rows. Discovery may
+inspect two adjacent seasons with up to 16 additional requests per device-wide
+run, at most one new run daily; ordinary live/due work and provider limits take
+priority. Reaching a bound leaves coverage unknown.
+
+### Own-game focus and individual-match content
+
+Only one own game has individual-match focus at a time. A genuinely running
+own match outranks another own match's before/after buffer. Concurrent running
+own games follow the ordered competition list; this same list supplies the
+competition order within every screen type. When the focused game finishes,
+another running own game can take over immediately without waiting for the
+first game's after-buffer.
+
+Use four global buffer settings: before/after for own games, and before/after
+for other games. For overlapping own-game buffers, hand over near the midpoint
+between the actual finish and the next kickoff, clamped to the configured
+windows: shorten buffers as needed, never lengthen them. A 30-minute gap can
+therefore give 15 minutes to the result and 15 minutes to the next preview.
+Actual running own games continue to outrank buffers. The old option to retain
+the own game for the entire matchday is replaced by these rules, rather than
+kept as a competing rule.
+
+In Own game, at most the focused own match contributes an Individual match
+entry. Other competitions can contribute their other enabled screen types,
+but no extra static individual-match entries during that situation.
+
+Outside Own game, the static Individual match screen requires a selected club.
+It keeps the latest result through the end of the local calendar day following
+the game's finish date, then switches to the next fixture's preview. A game
+finishing after midnight uses that later date; an estimated finish remains
+identifiable as estimated. The fresh result remains
+for that period even if no next fixture is known; after the hold, no next
+fixture makes the entry empty. A competition without a club has no static
+result/preview entry.
+
+In Games in a competition, Individual match can instead show an eligible
+game: one actual running candidate wins over other games' before/after
+buffers; without a running game there must be exactly one candidate in the
+window. If no unique eligible active candidate exists, the selected club's
+static result/preview remains available under the same hold/empty rules.
+Disabling separate own-game handling removes its special situation and focus
+priority, not its eligibility for this generic candidate rule: one own live
+game, separate handling off and the general Individual match entry enabled
+means Games in a competition with that game shown as the ordinary unique
+candidate, still highlighted as own. Do not filter it out merely for being
+own, or restore the special Own game situation/priority through this path. The
+active other-game presentation has the **same available information scope**
+as an own game, including events and shootout attempts where the provider
+supplies them; it must be labelled as the actual game, not as the owner's
+game. Missing provider detail must be explicit, not silently filled in.
+
+### One sequence model, shared order and overrides
+
+There are six screen types: Crest, Images, Individual match, Matchday,
+Conference and Table. Crest and Images are global. The four football types
+can have entries per competition. One configurable **type order applies to
+every situation**; entries within a type follow competition order. There is no
+second priority list or arbitrary per-entry ordering.
+
+New development settings start with the order Crest, Images, Individual match,
+Matchday, Conference, Table. All football types are enabled for manual access;
+the initial automatic choice per situation is Individual match for Own game,
+Conference for Games in a competition, Matchday for Matchday, and Table for
+No game and optional Break. Crest/Images start disabled. Initial visits are
+15 s for Crest, 60 s for Images/Table and 30 s for Individual match/Matchday/
+Conference, configurable from 15 s to 12 hours. Picture frame and automatic
+Break start off; frame includes Crest when enabled. During development settings
+may start fresh; migration is reconsidered after alpha/beta, while image files
+need not be deleted.
+
+Each situation has shared enabled/automatic/duration values. Its optional
+competition-specific controls provide live overrides of those shared values,
+not one-time copies. The UI identifies overrides and can return a field to its
+shared value. Switching competition-specific mode off retains overrides but
+temporarily ignores them; switching it back on restores them.
+
+- Disabled: absent from automatic and manual navigation; hide its options.
+- Enabled with Automatic: present in the automatic sequence and manually
+  reachable for football types; show its duration.
+- Enabled without Automatic: reachable only manually; hide its duration.
+- Crest and Images are always automatic when enabled and are skipped by normal
+  manual football navigation.
+
+For example, Crest 15 s and Images 60 s can precede Individual match 3. Liga
+30 s, Matchday Bundesliga 30 s, Table Bundesliga 60 s and Table 3. Liga 60 s.
+Additional manual-only Matchday/Conference entries appear in the manual
+sequence in the same type/competition order, without entering that automatic
+sequence. Next/Previous starts relative to the currently visible automatic
+type/competition position, skips Crest/Images, and wraps through eligible
+manual football entries. An inactivity timeout or long Default returns to the
+first eligible automatic entry; successful saves also use a coherent automatic state and
+must not revive queued actions or gestures from the old configuration.
+
+Every situation change, higher or lower, ends manual mode and starts at the
+first eligible automatic entry of the shared type order, even if that entry
+is a long Crest/Images visit. A focus change inside Own game applies
+immediately. Ordinary updates preserve a still-valid current entry and visit
+time; an entry that ceases to be valid cannot remain selected.
+
+Skip entries known to be empty, such as a cup table that does not exist or an
+empty image list. A failed fetch is not confirmed emptiness: retain older
+data with a warning, or present the competition's actionable error card when
+no data exists. If the automatic sequence has no eligible entries, show an
+actionable neutral notice instead of re-enabling a disabled or manual-only
+screen. No eligible manual entry means no hidden football fallback.
+
+An unsuccessful match update alone does not change the situation. Keep the
+last justified data with a warning while evaluating the existing bounded
+match windows. At their limit release focus without inventing a final score
+or confirmed whistle. New data enters the ordinary selection rules again;
+a failed table update alone does not make match information stale.
+
+### Pagination, images and Conference
+
+Paginated football screens divide one configured total visit time equally
+between their pages. There is no separately adjustable page duration. Their
+effective total is the largest of the configured total, 15 seconds and
+five seconds times the page count. Thus eight pages need at least 40 seconds,
+even when the configured total is 15 seconds. Help and the UI must explain the
+effective duration. The old fixed eight-second Conference timer and separate
+table-step setting must not survive as another timing mechanism.
+
+If incoming data add pages during a timed visit, keep that visit's current
+page count, elapsed time and total duration. Show the additional pages when
+the next visit begins and calculate its duration from the new page count.
+This also applies while a manually selected entry rotates its pages
+automatically. Explicit held manual paging continues to expose all available
+content.
+
+A manually selected football entry continues its automatic internal page
+rotation using that computed timing until the user pages with Up/Down.
+For a manual-only entry the retained visit-time value still supplies this
+calculation even though its duration field is hidden; help explains that use.
+After that, hold the manually chosen page. Every input refreshes the manual
+return deadline. The outer entry remains manual until timeout, Default or a
+situation change; internal page rotation does not advance to the next outer
+entry on its own.
+
+Separate Conferences per competition replace the mixed Conference. Preserve
+All pages versus One page/activity-ranked behavior, own-game highlighting
+whether pinned or not, and fixed chronological manual paging. Optional own
+pinning retains shown own games at the top while the other rows change.
+Page partition is bounded and keeps the original page count. Unpinned
+counts5,5,5,1 become4,4,4,4;5,5,5,2 become5,4,4,4;5,5,1 become4,4,3;
+4,4,1 become3,3,3;5,1 become3,3. A pin is added to every nonempty page
+after partitioning the other fixtures. The shared minimum row maximum is2;
+actual content can be one. Readable fonts and final geometry require device
+screenshots.
+
+Normal Images contains library images only; Crest has its own screen and is
+no longer a normal slideshow item. One image duration applies to all images;
+the Images visit is a multiple of that duration. Continue with the next image
+on the next visit instead of advancing invisibly while football is shown.
+Four images at 15 s each with a 30 s Images visit show 1+2, then 3+4 on the
+next cycle. Development settings may restart rather than convert old crest-slide
+references; library and protected image files are retained.
+
+### Picture frame mode
+
+Picture frame mode temporarily overrides the normal profiles and restores
+them on exit. It shows library images, optionally including Crest, with one
+common per-image/crest duration. It stops competition data demand and hides
+the corresponding football errors. A single HTTP request already sent may
+finish and publish its actual outcome and request cost; no further autonomous
+football request or continuation starts while frame mode is active.
+Explicit user-started competition-wizard queries are permitted within existing
+limits so setup remains usable. On exit, resume
+due work within the existing request limits, retaining data and profiles.
+It does not remove network/setup access, image
+validation, fallback, repair or retry behavior. IP appears only for the
+configured time after start, rather than indefinitely because football data
+are absent. With no usable frame content, show the applicable neutral or
+image-repair state, never a hidden football screen.
+
+Next/Previous and Up/Down select and hold frame images using the normal manual
+return timer, renewing it on input; zero disables timed return. Timeout or long
+Default resumes frame automation at the currently viewed image with its full
+image duration. No football entry is accessible in this mode.
+
+### Ring roles and subpage dots
+
+Navigation and sport rings are independent functions. The navigation switch
+controls automatic position plus the manual-return countdown. The sport
+switch permits match-time or shootout information in automatic mode. Manual
+mode always gives priority to its return countdown over sport information;
+without a return deadline the manual ring is off. Sport information must
+still be considered in the screen content; if it cannot fit legibly, report
+that conflict for a decision instead of removing it silently.
+
+The automatic position ring counts automatic entries only. It groups entries
+by screen type, or optionally separates the football types by competition.
+Crest and Images form one global image category. Optional remaining segments
+are shown subdued. The image category still counts when enabled, even if the
+ring is hidden while Crest/Images are visible: with Images and Table enabled,
+Table can show both segments. The image-hide option also applies to the
+manual/sport display rules where relevant; hiding a ring does not remove its
+category from the automatic sequence.
+
+Dots continue to mean subpages of the current screen, not screen types. They
+default on from two pages, can be disabled per screen and must be larger and
+anchored consistently. When the navigation ring replaces the current
+Table/Matchday scroll arc, preserve the information about the visible part of
+the list in the accepted layout rather than silently discarding it.
+
+The sport ring replaces automatic sequence position on Individual match or
+Conference during an active game when enabled. Regulation time has 18
+five-minute segments, nine per half, plus top and bottom markers. The top
+marker is yellow before the first kickoff and clears on kickoff. The bottom
+marker is yellow for first-half added time, red in the halftime interval and
+clears for the second half. The top marker handles second-half added time
+through the final whistle, then clears. Played segments fill in the green
+progress color. Extra time switches to six five-minute segments, three per
+half, with equivalent markers at 105/120 minutes; the top marker indicates
+waiting for extra time to start.
+
+A Conference uses its earliest relevant kickoff slot, then the next after
+that slot finishes. Progress follows that slot's first kickoff. Its halftime
+marker turns red when the last first half of the slot ends and clears when
+the last game has resumed; similarly, the final marker turns yellow when the
+first game reaches the second-half endpoint and clears at the last final
+whistle. Extra-time behavior follows the same half-based rules. Provider
+clocks may be estimated only with a visible estimate indication; estimates
+must not be presented as provider-confirmed whistles, extra time or attempts.
+
+For an Individual match with supplied shootout attempts, show `11m` at the
+bottom center. Attempts grow upward from that point on both sides: home on
+the left, away on the right, green for scored and red for missed. A tally
+alone cannot reconstruct attempts or misses. Provider completeness, ordering,
+corrections, longer shootouts and bounded storage require the upcoming model
+and feasibility design; no attempt cap or fabricated history is approved here.
+
+### Device layouts, testability and website
+
+Inventory every affected screen/state and retain its information before
+redesigning. The single-match score must be central and prominent, with the
+other information arranged around it; test short names as well as long names
+and avoid solving fit solely with smaller fonts. IP and status/error overlays
+need fixed, separate opposite anchors independent of content. The reported
+slow visible construction of images/text still needs measurement of the real
+draw/decode/flush path; composition cadence and button recognition delays do
+not establish its cause.
+
+The extended device Demo provides controllable, provider-faithful
+match/event scenario playback through the canonical model and production
+screens. Use a separate test time without changing the system clock, redirecting
+provider endpoints or adding a host screen renderer. Its scenario flash and
+runtime costs must be included in the proposal. Synthetic playback supports
+repeatability; current real provider responses still need checks through the
+real parsers for affected states and limits.
+
+The owner selected a Demo-only advance through the automatic screen sequence
+with normal timings and no new stored Demo settings. Shortened test visits
+or clock acceleration are excluded. The screenshot remains always available
+near the top of the intended Debug tab, with Demo controls just below where
+practical; one default-off preference additionally shows screenshot on Overview.
+These controls are planned before layout acceptance and complete Web redesign;
+they are not implemented yet. The current Demo uses fixed selected scenario
+steps, the saved eligibility rules and normal visit/manual-return times. A
+scenario step does not necessarily change the shown screen. Keep diagnostic
+state sufficient to explain the active phase, manual/frame state and missing
+content before attributing an observed Table-only sequence to a selector fault.
+
+Agree the selection/control model and costs first; then implement that model,
+its options and testability. Present alternative device drafts of the main
+screens before deciding them. Only after those layouts are sufficiently final
+design the time/shootout ring variants on them, choose the presentation and
+implement its final logic. The owner flashes; screenshots from the real
+240 px round device supply layout evidence. No build or host logic test
+substitutes for those screen checks.
+
+Restructure the website after the device model and layouts are stable. Keep
+one consistent design system, frequent sequence controls on Overview, per-screen
+appearance under Display and file management under Images. Put the picture-frame
+mode control at the top; keep general navigation-ring options together under
+general settings, distinct from per-screen colors/appearance and subpage-dot
+options. Phase screen controls
+can align horizontally on desktop and wrap on phones; disabled options collapse,
+and non-obvious options have code-checked `?` help. Preserve actionable errors
+and save/session safeguards. The agreed target is no whole-page desktop scroll
+at 1440×900 except long lists inside their areas; at 375 px phone width there is
+no horizontal scroll and pages stay around two screen heights. Use the device
+draw list for the actual preview and on-demand sequence thumbnails, with one
+layout implementation. Browser and physical-device acceptance remain separate.

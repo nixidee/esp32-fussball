@@ -9,9 +9,9 @@
 // requests in any W seconds (OQ-225, OQ-226), plus the small device gap
 // kRequestGapMs (OQ-212). When a daily cap cannot cover the expected
 // requests of the rest of the UTC day, data types are stretched or skipped
-// in the order live table, table, fixtures, live; the own match is served
-// last (OQ-221; no core data since OQ-248). The live table and the own-match
-// events get one more request after a window ends (final table, last events),
+// in the order live table, table, fixtures, live; the globally focused special
+// own match is served last. The live table and the exact Single's summary get
+// one more request after their window ends (final table, last events),
 // unless the window ended longer ago than their interval. Not thread-safe: the
 // provider worker owns it.
 
@@ -57,13 +57,16 @@ class Window {
 // to make (0 counts as 1); the daily-cap degradation multiplies its demand
 // by it. 'held': data types (bits as in 'types') that count in the daily
 // demand but do not run now, because their request is not possible yet
-// (the own-match events before kickoff).
+// (a Single summary before kickoff).
 struct Wanted {
   uint8_t id = 0;
   cfg::Provider provider{};
   uint8_t types = 0;
   uint8_t held = 0;
   std::array<uint8_t, cfg::kDataTypeCount> cost{};
+  uint32_t event_match = 0;  // exact eligible Single, independent of ownership
+  uint32_t priority_match = 0;  // globally focused special own fixture only
+  bool event_priority = false;
 };
 
 // Unlimited remaining daily requests (no daily cap).
@@ -85,6 +88,8 @@ struct Job {
   uint8_t slot = 0, competition = 0;  // slot index and competition id
   cfg::DataType type = cfg::DataType::kFixtures;
   cfg::Provider provider = cfg::Provider::kOpenLigaDb;
+  uint32_t event_match = 0;
+  bool event_priority = false;
 };
 
 // Why nothing runs now.
@@ -99,7 +104,7 @@ enum class Wait : uint8_t {
 
 struct Decision {
   bool run = false;
-  Job job;              // valid when 'run'
+  Job job;  // valid when 'run'
   Wait wait = Wait::kIdle;
   uint32_t wake_s = 0;  // monotonic second to ask again; 0 = nothing planned
 };
@@ -110,8 +115,7 @@ enum class Class : uint8_t {
   kTable,
   kFixtures,
   kLive,
-  kOwn,  // live data of a competition whose own match is in its window,
-         // and the events of an own match
+  kOwn,  // live data/summary of the globally focused special own fixture
 };
 inline constexpr std::size_t kClassCount = 5;
 // Interval factor of a class: 1 normal, n stretched n times, 0 skipped.
@@ -197,6 +201,7 @@ class Scheduler {
   // Jobs whose run continues with another request.
   std::bitset<cfg::kCompetitionMax * cfg::kDataTypeCount> pending_;
   std::array<uint8_t, cfg::kCompetitionMax> ids_{};
+  std::array<uint32_t, cfg::kCompetitionMax> event_ids_{};
   std::array<Window, cfg::kProviderCount> windows_{};
   Window global_window_;
   std::array<uint32_t, cfg::kProviderCount> paused_until_{};
@@ -210,15 +215,17 @@ class Scheduler {
 // class until the end of the day. Classes give way in Class order: a class
 // is skipped while the others alone need the whole allowance, otherwise
 // stretched just enough (0 when it would need more than 255 times).
-Factors degrade(const std::array<uint32_t, kClassCount>& demand,
-                uint32_t left);
+Factors degrade(const std::array<uint32_t, kClassCount>& demand, uint32_t left);
 
 // Live window of a stored match in UTC seconds: from kLiveLeadMinutes
 // before kickoff to the final whistle when finished, to kickoff +
-// kUnknownMatchEndMinutes while the provider reports it running, else to
-// kickoff + kExpectedMatchMinutes. False without kickoff, for a finished
-// match without final-whistle time and for postponed, cancelled or
-// abandoned matches.
+// kUnknownMatchEndMinutes while the provider reports it running or a previous
+// live observation justifies its suspension, else to kickoff +
+// kExpectedMatchMinutes. Without kickoff, confirmed live/suspended matches
+// begin at first_live_observed_utc with the same hard bound; a finished match
+// has a zero-length final-whistle boundary for the final request. No kickoff
+// is invented. False for an unknown time basis, unjustified suspension,
+// finished without final-whistle time, postponed, cancelled or abandoned.
 bool liveWindow(const StoredMatch& match, uint32_t& start, uint32_t& end);
 
 }  // namespace football::schedule

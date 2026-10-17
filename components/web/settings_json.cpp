@@ -4,8 +4,7 @@
 #include <iterator>
 #include <type_traits>
 
-#include "hw_target.h"
-#include "provider_client.h"
+#include "football_model.h"
 namespace web {
 using namespace ArduinoJson;
 #define SCALARS(X)            \
@@ -14,29 +13,20 @@ using namespace ArduinoJson;
   X(debug_status_interval_s); \
   X(espn_opt_in);             \
   X(demo);                    \
-  X(backgrounds);             \
   X(night_enabled);           \
   X(ip_badge_ap_permanent);   \
   X(ip_badge_bottom);         \
   X(browser_debug);           \
-  X(pin_own_match);           \
-  X(whole_matchday);          \
+  X(overview_screenshot);     \
   X(language);                \
   X(brightness);              \
   X(night_brightness);        \
   X(rotation);                \
-  X(visible_matches);         \
-  X(table_window);            \
-  X(manual_return_s);         \
   X(scroll_reset_s);          \
   X(scroll_repeat_ms);        \
-  X(slideshow_s);             \
-  X(table_page_s);            \
   X(night_start);             \
   X(night_end);               \
-  X(ip_badge_s);              \
-  X(window_before);           \
-  X(window_after);
+  X(ip_badge_s);
 #define TEXTS(X) \
   X(wifi_ssid);  \
   X(hostname);   \
@@ -97,11 +87,6 @@ bool listOf(const Context& c, const FieldPath& at, JsonVariantConst rows,
   if (!rows.is<JsonArrayConst>()) return c.reject(at, Reason::kType);
   return rows.size() <= capacity || c.reject(at, Reason::kTooMany);
 }
-// JSON keys of the competition screen switches, in cfg::CompetitionScreen
-// order.
-constexpr const char* kScreenKeys[] = {"own_match", "conference", "matchday",
-                                       "table"};
-static_assert(std::size(kScreenKeys) == cfg::kCompetitionScreenCount);
 void limitJson(JsonObject out, const settings::RequestLimit& limit) {
   out["daily_requests"] = limit.daily;
   out["window_requests"] = limit.window_requests;
@@ -129,9 +114,9 @@ bool applyPlans(const Context& c, JsonVariantConst rows,
   for (JsonVariantConst row : rows.as<JsonArrayConst>()) {
     const auto at = list.withIndex(n);
     auto& plan = plans[n++];
-    if (!applyLimit(c, at, row, plan.limit,
-                    {"daily_requests", "window_requests", "window_s",
-                     "intervals"}))
+    if (!applyLimit(
+            c, at, row, plan.limit,
+            {"daily_requests", "window_requests", "window_s", "intervals"}))
       return false;
     const auto intervals = row["intervals"];
     if (intervals.isNull()) continue;
@@ -187,11 +172,6 @@ void settingsJson(JsonObject out, const settings::Model& m, bool secrets) {
   if (secrets) out[#name] = std::string_view(m.name.view());
   SECRETS(PUTSECRET)
 #undef PUTSECRET
-  out["idle_screen"] = static_cast<unsigned>(m.idle_screen);
-  out["matchday_screen"] = static_cast<unsigned>(m.matchday_screen);
-  out["own_match_screen"] = static_cast<unsigned>(m.own_match_screen);
-  out["conference_mode"] = static_cast<unsigned>(m.conference_mode);
-  out["matchday_mode"] = static_cast<unsigned>(m.matchday_mode);
   // Every stored slot; the schema's "inputs" says how many the device has.
   auto roles = out["input_roles"].to<JsonArray>();
   for (const auto role : m.input_roles) roles.add(static_cast<unsigned>(role));
@@ -205,23 +185,9 @@ void settingsJson(JsonObject out, const settings::Model& m, bool secrets) {
           plan.interval_s[t];
   }
   limitJson(out["global_limit"].to<JsonObject>(), m.global_limit);
-  auto slides = out["slides"].to<JsonArray>();
-  for (const uint8_t id : m.slides) slides.add(id);
-  auto screens = out["screens"].to<JsonArray>();
-  for (const auto& style : m.screens) {
-    auto item = screens.add<JsonObject>();
-    item["enabled"] = style.enabled;
-    item["background"] = style.background;
-    item["colour"] = style.colour;
-    item["text"] = style.text;
-    item["accent"] = style.accent;
-    item["text_scale"] = style.text_scale;
-    item["image"] = style.image;
-  }
 }
 bool applyJson(JsonObjectConst in, settings::Model& m,
-               settings::Violation* violation,
-               const settings::Limits& limits) {
+               settings::Violation* violation, const settings::Limits& limits) {
   const Context c{violation};
   for (JsonPairConst entry : in) {
     const auto key = entry.key();
@@ -232,10 +198,7 @@ bool applyJson(JsonObjectConst in, settings::Model& m,
     TEXTS(KNOWN)
     SECRETS(KNOWN)
 #undef KNOWN
-    for (const char* other :
-         {"slides", "screens", "idle_screen", "matchday_screen",
-          "own_match_screen", "conference_mode", "matchday_mode", "input_roles",
-          "providers", "global_limit"})
+    for (const char* other : {"input_roles", "providers", "global_limit"})
       known |= sameText(key, other);
     // Redacted exports carry only these boolean markers; they never clear a
     // key.
@@ -255,25 +218,6 @@ bool applyJson(JsonObjectConst in, settings::Model& m,
   TEXTS(GETTEXT)
   SECRETS(GETTEXT)
 #undef GETTEXT
-  for (auto pair : {std::pair{"idle_screen", &m.idle_screen},
-                    std::pair{"matchday_screen", &m.matchday_screen},
-                    std::pair{"own_match_screen", &m.own_match_screen}}) {
-    if (in[pair.first].isNull()) continue;
-    if (!in[pair.first].is<uint8_t>())
-      return c.reject(FieldPath().key(pair.first),
-                      in[pair.first].is<long long>() ? Reason::kRange
-                                                     : Reason::kType);
-    *pair.second = static_cast<cfg::Screen>(in[pair.first].as<uint8_t>());
-  }
-  uint8_t mode = static_cast<uint8_t>(m.conference_mode);
-  if (!scalar(c, FieldPath().key("conference_mode"), in["conference_mode"],
-              mode))
-    return false;
-  m.conference_mode = static_cast<cfg::ConferenceMode>(mode);
-  mode = static_cast<uint8_t>(m.matchday_mode);
-  if (!scalar(c, FieldPath().key("matchday_mode"), in["matchday_mode"], mode))
-    return false;
-  m.matchday_mode = static_cast<cfg::MatchdayMode>(mode);
   // A role list replaces the first slots; the slots after it keep theirs.
   if (!in["input_roles"].isNull()) {
     const auto list = FieldPath().key("input_roles");
@@ -282,8 +226,8 @@ bool applyJson(JsonObjectConst in, settings::Model& m,
     unsigned n = 0;
     for (JsonVariantConst row : rows.as<JsonArrayConst>()) {
       if (!row.is<uint8_t>())
-        return c.reject(list.withIndex(n), row.is<long long>() ? Reason::kRange
-                                                               : Reason::kType);
+        return c.reject(list.withIndex(n),
+                        row.is<long long>() ? Reason::kRange : Reason::kType);
       m.input_roles[n++] = static_cast<cfg::InputRole>(row.as<uint8_t>());
     }
   }
@@ -293,46 +237,6 @@ bool applyJson(JsonObjectConst in, settings::Model& m,
                   m.global_limit,
                   {"daily_requests", "window_requests", "window_s"}))
     return false;
-  if (!in["slides"].isNull()) {
-    const auto list = FieldPath().key("slides");
-    const auto rows = in["slides"];
-    if (!listOf(c, list, rows, m.slides.kCapacity)) return false;
-    m.slides.clear();
-    unsigned n = 0;
-    for (JsonVariantConst row : rows.as<JsonArrayConst>()) {
-      const auto at = list.withIndex(n++);
-      if (!row.is<uint8_t>())
-        return c.reject(at, row.is<long long>() ? Reason::kRange
-                                                : Reason::kType);
-      m.slides.push(row.as<uint8_t>());
-    }
-  }
-  if (!in["screens"].isNull()) {
-    const auto list = FieldPath().key("screens");
-    if (!in["screens"].is<JsonArrayConst>())
-      return c.reject(list, Reason::kType);
-    // An export of earlier firmware lists fewer screens: the later ones
-    // keep their values.
-    const std::size_t listed = in["screens"].size();
-    if (listed > m.screens.size()) return c.reject(list, Reason::kTooMany);
-    if (listed == 0) return c.reject(list, Reason::kInvalid);
-    for (unsigned i = 0; i < listed; ++i) {
-      const auto at = list.withIndex(i);
-      auto row = in["screens"][i];
-      auto& s = m.screens[i];
-      if (!onlyKeys(c, at, row,
-                    {"enabled", "background", "colour", "text", "accent",
-                     "text_scale", "image"}) ||
-          !scalar(c, at.with("enabled"), row["enabled"], s.enabled) ||
-          !scalar(c, at.with("background"), row["background"], s.background) ||
-          !scalar(c, at.with("colour"), row["colour"], s.colour) ||
-          !scalar(c, at.with("text"), row["text"], s.text) ||
-          !scalar(c, at.with("accent"), row["accent"], s.accent) ||
-          !scalar(c, at.with("text_scale"), row["text_scale"], s.text_scale) ||
-          !scalar(c, at.with("image"), row["image"], s.image))
-        return false;
-    }
-  }
   return settings::validate(m, nullptr, violation, limits);
 }
 void competitionsJson(JsonObject out, const settings::Competitions& list) {
@@ -340,14 +244,11 @@ void competitionsJson(JsonObject out, const settings::Competitions& list) {
   for (const auto& entry : list.entries) {
     auto item = competitions.add<JsonObject>();
     item["id"] = entry.id;
+    item["incarnation"] = entry.incarnation;
     item["active"] = entry.active;
     sourceJson(item["primary"].to<JsonObject>(), entry.primary);
     item["competition_name"] = std::string_view(entry.competition_name.view());
     item["team_name"] = std::string_view(entry.team_name.view());
-    auto screens = item["screens"].to<JsonObject>();
-    for (std::size_t i = 0; i < cfg::kCompetitionScreenCount; ++i)
-      screens[kScreenKeys[i]] =
-          entry.uses(static_cast<cfg::CompetitionScreen>(i));
   }
 }
 bool applyCompetitionsJson(JsonObjectConst in, settings::Competitions& list,
@@ -366,58 +267,35 @@ bool applyCompetitionsJson(JsonObjectConst in, settings::Competitions& list,
       const auto at = at_list.withIndex(n++);
       settings::Competition entry;
       if (!onlyKeys(c, at, row,
-                    {"id", "active", "primary", "competition_name", "team_name",
-                     "screens"}) ||
+                    {"id", "incarnation", "active", "primary",
+                     "competition_name", "team_name"}) ||
           !scalar(c, at.with("id"), row["id"], entry.id) ||
+          !scalar(c, at.with("incarnation"), row["incarnation"],
+                  entry.incarnation) ||
           !scalar(c, at.with("active"), row["active"], entry.active) ||
           !applySource(c, at.with("primary"), row["primary"], entry.primary) ||
           !bytes(c, at.with("competition_name"), row["competition_name"],
                  entry.competition_name) ||
           !bytes(c, at.with("team_name"), row["team_name"], entry.team_name))
         return false;
-      const auto screens = row["screens"];
-      if (!screens.isNull()) {
-        const auto where = at.with("screens");
-        if (!onlyKeys(c, where, screens,
-                      {kScreenKeys[0], kScreenKeys[1], kScreenKeys[2],
-                       kScreenKeys[3]}))
-          return false;
-        for (std::size_t i = 0; i < cfg::kCompetitionScreenCount; ++i) {
-          bool on = entry.uses(static_cast<cfg::CompetitionScreen>(i));
-          if (!scalar(c, where.with(kScreenKeys[i]), screens[kScreenKeys[i]],
-                      on))
-            return false;
-          const auto bit = static_cast<uint8_t>(1u << i);
-          entry.screens = static_cast<uint8_t>(on ? entry.screens | bit
-                                                  : entry.screens & ~bit);
-        }
-      }
       list.entries.push(entry);
     }
   }
   return true;
 }
-void schemaJson(JsonObject out, const settings::Limits& limits) {
+void schemaJson(JsonObject out, const settings::Limits& limits,
+                bool backlight) {
   out["version"] = cfg::kSettingsFormatVersion;
   out["max_body"] = cfg::kApiBodyBytes;
   auto lists = out["limits"].to<JsonObject>();
   lists["competitions"] = cfg::kCompetitionMax;
-  lists["slides"] = cfg::kSlideMax;
   lists["images"] = cfg::kImageLibraryMax;
-  lists["screens"] = cfg::kScreenCount;
-  // Display order of the screens (indices into "screens").
-  auto order = out["screen_order"].to<JsonArray>();
-  for (const auto screen : cfg::kScreenOrder)
-    order.add(static_cast<unsigned>(screen));
   // Inputs of this device (the first entries of "input_roles").
   out["inputs"] = limits.inputs;
-  out["backlight"] = hw::kTarget.wiring.backlight != hw::kNoPin;
+  out["backlight"] = backlight;
   out["image_max"] = cfg::kImageMaxBytes;
   out["selection_entries"] = cfg::kSelectionEntries;
   out["selection_country_default"] = cfg::kSelectionCountryDefault;
-  auto scale = out["text_scale"].to<JsonArray>();
-  scale.add(cfg::kTextScaleRange.min);
-  scale.add(cfg::kTextScaleRange.max);
   out["image_quota"] = cfg::kImageTotalBytes;
   out["image_reserve"] = cfg::kImageReserveBytes;
   auto zones = out["time_zones"].to<JsonArray>();
@@ -456,21 +334,11 @@ void schemaJson(JsonObject out, const settings::Limits& limits) {
   bounded("brightness", cfg::kBrightnessRange);
   bounded("night_brightness", cfg::kBrightnessRange);
   bounded("rotation", cfg::kRotationRange);
-  // The display profile narrows the two layout-dependent maxima (OQ-92).
-  bounded("visible_matches",
-          {cfg::kVisibleMatchesRange.min, limits.visible_matches_max});
-  bounded("table_window",
-          {cfg::kTableWindowRange.min, limits.table_window_max});
-  bounded("manual_return_s", cfg::kReturnTimeRange);
   bounded("scroll_reset_s", cfg::kReturnTimeRange);
   bounded("scroll_repeat_ms", cfg::kScrollRepeatRange);
-  bounded("slideshow_s", cfg::kSlideshowRange);
-  bounded("table_page_s", cfg::kTablePageRange);
   bounded("night_start", cfg::kDayMinutesRange);
   bounded("night_end", cfg::kDayMinutesRange);
   bounded("ip_badge_s", cfg::kReturnTimeRange);
-  bounded("window_before", cfg::kMatchWindowRange);
-  bounded("window_after", cfg::kMatchWindowRange);
   bounded("daily_requests", cfg::kDailyRequestsRange);
   bounded("window_requests", cfg::kWindowRequestsRange);
   bounded("window_s", cfg::kWindowRange);
@@ -479,7 +347,5 @@ void schemaJson(JsonObject out, const settings::Limits& limits) {
   auto types = out["data_types"].to<JsonArray>();
   for (std::size_t t = 0; t < cfg::kDataTypeCount; ++t)
     types.add(settings::dataTypeName(static_cast<cfg::DataType>(t)));
-  auto screen_keys = out["competition_screens"].to<JsonArray>();
-  for (const char* key : kScreenKeys) screen_keys.add(key);
 }
 }  // namespace web

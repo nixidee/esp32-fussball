@@ -2,7 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cstdlib>
+#include <cerrno>
 #include <cstring>
 
 #include "esp_crt_bundle.h"
@@ -11,17 +11,16 @@
 #include "esp_transport_ssl.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "http_send_admission.h"
 #include "lwip/dns.h"
 #include "lwip/sockets.h"
 #include "lwip/tcpip.h"
 #include "network_service.h"
+#include "provider_json_stream.h"
 #include "settings_store.h"
 #include "time_service.h"
 namespace football {
 namespace {
-struct alignas(std::max_align_t) Header {
-  std::size_t size;
-};
 // The SDK header-fetch loop has no whole-operation deadline of its own.
 // Bound the transport itself, including trickled headers, without sharing
 // or closing a live TLS handle from another task.
@@ -32,13 +31,19 @@ struct Transport {
   std::size_t wire_limit, wire_bytes = 0, header_bytes = 0;
   uint32_t ending = 0;
   bool headers = true, failed = false;
+  const SendHooks* send_hooks = nullptr;
+  http::SendAdmission send{};
   // Where the request stopped and the socket's pending error, for the log.
   const char* stage = "dns";
   int socket_error = 0;
   bool valid() {
+    const bool allowed =
+        send.allowed(settings::footballPaused(),
+                     send_hooks != nullptr && send_hooks->pause_with_frame);
     const bool ok = timekeeping::monotonicMs() < deadline &&
-                    settings::dataGeneration() == generation && network::ready() &&
-                    network::status().epoch == epoch;
+                    settings::dataGeneration() == generation &&
+                    network::ready() && network::status().epoch == epoch &&
+                    allowed;
     failed |= !ok;
     return ok;
   }
@@ -192,15 +197,40 @@ int writeTransport(esp_transport_handle_t t, const char* bytes, int length,
                    int timeout) {
   auto& c = transport(t);
   const int64_t idle_end = timekeeping::monotonicMs() + timeout;
+  bool want_read = false;
   while (c.valid()) {
-    const int ready = esp_transport_poll_write(c.tls, c.slice(idle_end));
+    const int ready = want_read
+                          ? esp_transport_poll_read(c.tls, c.slice(idle_end))
+                          : esp_transport_poll_write(c.tls, c.slice(idle_end));
     if (ready < 0) return -1;
     if (ready > 0) {
-      const int count =
-          esp_transport_write(c.tls, bytes, length, c.slice(idle_end));
-      if (count != ESP_TLS_ERR_SSL_WANT_WRITE &&
-          count != ESP_TLS_ERR_SSL_WANT_READ)
+      // Linearization point: the service has reserved this actual HTTP
+      // send attempt under the same mutex that publishes frame changes.
+      // The underlying TLS socket is nonblocking; poll_write was above.
+      int write_errno = 0;
+      const int count = c.send.write(
+          [&] {
+            return c.send_hooks != nullptr
+                       ? c.send_hooks->begin(c.send_hooks->context)
+                       : ESP_OK;
+          },
+          [&] {
+            // The SDK ssl_write has its OWN poll_write(timeout). It must
+            // not wait while the first-send callback owns the writer mutex.
+            errno = 0;
+            const int result = esp_transport_write(c.tls, bytes, length, 0);
+            write_errno = errno;
+            return result;
+          },
+          [&] {
+            if (c.send_hooks != nullptr)
+              c.send_hooks->end(c.send_hooks->context);
+          });
+      if (c.send.refusal() != ESP_OK ||
+          !http::retryWrite(count, write_errno, ESP_TLS_ERR_SSL_WANT_READ,
+                            ESP_TLS_ERR_SSL_WANT_WRITE))
         return count;
+      want_read = count == ESP_TLS_ERR_SSL_WANT_READ;
     }
     if (timekeeping::monotonicMs() >= idle_end) return 0;
   }
@@ -298,165 +328,27 @@ class Stream {
   int look_ = -2;
   bool failed_ = false, number_ = false;
 };
-// Only the ESPN payloads mapped by store_mappers need element filtering.
-// Keep score whole: ESPN supplies both a scalar and an object with value.
-// Other arrays (calendar and selection lists included) retain their fields.
-const char* elementFields(cfg::Provider provider, const char* array_key) {
-  if (provider != cfg::Provider::kEspn || array_key == nullptr) return nullptr;
-  if (strcmp(array_key, "events") == 0)
-    return R"({"id":true,"date":true,"competitions":[{)"
-           R"("status":{"type":{"state":true,"name":true,"completed":true},"displayClock":true},)"
-           R"("competitors":[{"homeAway":true,"team":{"id":true,"displayName":true,"shortDisplayName":true},"score":true,"shootoutScore":true}],)"
-           R"("details":[{"type":{"text":true},"shootout":true,"ownGoal":true,"penaltyKick":true,"scoringPlay":true,)"
-           R"("athletesInvolved":[{"displayName":true}],"clock":{"displayValue":true},"team":{"id":true}}]}]})";
-  if (strcmp(array_key, "entries") == 0)
-    return R"({"team":{"id":true,"displayName":true,"shortDisplayName":true},"stats":[{"name":true,"value":true}]})";
-  if (strcmp(array_key, "keyEvents") == 0)
-    return R"({"id":true,"type":{"type":true},"participants":[{"athlete":{"displayName":true}}],"clock":{"displayValue":true},"team":{"id":true}})";
-  return nullptr;
-}
-// Parse one value through the real parser. A number has no end marker, so
-// ArduinoJson reads the character after it and rejects a number that is not
-// the end of its input. The stream therefore ends after a number while it is
-// parsed; the character after it stays in the stream for the caller.
-ArduinoJson::DeserializationError parseValue(
-    Stream& stream, ArduinoJson::JsonDocument& doc, unsigned nesting,
-    const ArduinoJson::JsonDocument* filter = nullptr) {
-  int c = stream.peek();
-  while (c == ' ' || c == '\r' || c == '\n' || c == '\t') {
-    stream.read();
-    c = stream.peek();
-  }
-  stream.endAfterNumber(c == '-' || (c >= '0' && c <= '9'));
-  const auto err =
-      filter ? deserializeJson(
-                   doc, stream,
-                   ArduinoJson::DeserializationOption::Filter(
-                       filter->as<ArduinoJson::JsonVariantConst>()),
-                   ArduinoJson::DeserializationOption::NestingLimit(nesting))
-             : deserializeJson(
-                   doc, stream,
-                   ArduinoJson::DeserializationOption::NestingLimit(nesting));
-  stream.endAfterNumber(false);
-  return err;
-}
-// Longest wrapper key the walk accepts (bytes).
-constexpr std::size_t kWalkKeyMax = 95;
-// Walk wrapper JSON without retaining its fields. Wrapper scalars use the
-// parser without a filter; selected elements use the provider field mask.
-// Body bytes and nesting stay bounded. Mask and retained element allocations
-// share the cap; ignored element tokens follow ArduinoJson's skip policy.
-// '*enough' set by the consumer ends the walk early with success; the rest
-// of the response is not read.
-bool walk(Stream& stream, const char* wanted, JsonConsumer consume,
-          void* context, JsonAllocator& alloc, const bool* enough,
-          unsigned depth, bool& found, bool selected = false,
-          const ArduinoJson::JsonDocument* filter = nullptr) {
-  if (depth > cfg::kJsonDepth) return false;
-  int c;
-  do {
-    c = stream.peek();
-    if (c == ' ' || c == '\r' || c == '\n' || c == '\t')
-      stream.read();
-    else
-      break;
-  } while (true);
-  if (c == '[') {
-    found |= selected;
-    stream.read();
-    while (stream.peek() == ' ' || stream.peek() == '\r' ||
-           stream.peek() == '\n' || stream.peek() == '\t')
-      stream.read();
-    if (stream.peek() == ']') {
-      stream.read();
-      return true;
-    }
-    for (;;) {
-      if (selected) {
-        ArduinoJson::JsonDocument doc(&alloc);
-        if (parseValue(stream, doc, cfg::kJsonDepth - depth, filter) ||
-            !consume(doc.as<ArduinoJson::JsonVariantConst>(), context))
-          return false;
-      } else if (!walk(stream, wanted, consume, context, alloc, enough,
-                       depth + 1, found, false, filter))
-        return false;
-      if (enough && *enough) return true;
-      c = stream.nonSpace();
-      if (c == ']') return true;
-      if (c != ',') return false;
-    }
-  }
-  if (c == '{') {
-    stream.read();
-    c = stream.nonSpace();
-    if (c == '}') return true;
-    // Escaped wrapper keys are rejected rather than matched incorrectly.
-    // The key is compared while it is read: a buffer for it would cost
-    // every nesting level of the walk its size in stack (ESPN match
-    // summaries nest 12 levels deep).
-    for (;;) {
-      if (c != '"') return false;
-      std::size_t n = 0;
-      bool same = true;
-      while ((c = stream.read()) != '"') {
-        if (c < 0 || c == '\\' || c < 32 || n >= kWalkKeyMax) return false;
-        same = same && static_cast<unsigned char>(wanted[n]) == c;
-        ++n;
-      }
-      if (stream.nonSpace() != ':') return false;
-      if (!walk(stream, wanted, consume, context, alloc, enough, depth + 1,
-                found, same && wanted[n] == 0, filter))
-        return false;
-      if (enough && *enough) return true;
-      c = stream.nonSpace();
-      if (c == '}') return true;
-      if (c != ',') return false;
-      c = stream.nonSpace();
-    }
-  }
-  ArduinoJson::JsonDocument doc(&alloc);
-  if (parseValue(stream, doc, cfg::kJsonDepth - depth)) return false;
-  // A requested array represented by a scalar is a malformed response.
-  return !selected;
-}
 }  // namespace
-void* JsonAllocator::allocate(std::size_t size) {
-  if (size > cfg::kJsonHeapBytes - used_ ||
-      sizeof(Header) > cfg::kJsonHeapBytes - used_ - size)
-    return nullptr;
-  auto* p = static_cast<Header*>(std::malloc(sizeof(Header) + size));
-  if (p == nullptr) return nullptr;
-  p->size = size;
-  used_ += size + sizeof(Header);
-  return p + 1;
-}
-void JsonAllocator::deallocate(void* pointer) {
-  if (pointer == nullptr) return;
-  auto* p = static_cast<Header*>(pointer) - 1;
-  used_ -= p->size + sizeof(Header);
-  std::free(p);
-}
-void* JsonAllocator::reallocate(void* pointer, std::size_t size) {
-  if (pointer == nullptr) return allocate(size);
-  auto* p = static_cast<Header*>(pointer) - 1;
-  const auto old = p->size;
-  if (size > cfg::kJsonHeapBytes - (used_ - old)) return nullptr;
-  auto* next = static_cast<Header*>(std::realloc(p, sizeof(Header) + size));
-  if (next == nullptr) return nullptr;
-  next->size = size;
-  used_ = used_ - old + size;
-  return next + 1;
-}
 esp_err_t fetchJson(const char* url, const char* array_key,
                     cfg::Provider provider, const settings::Model& model,
                     uint32_t generation, JsonConsumer consume, void* context,
                     std::size_t limit, FetchResult* result, bool optional,
-                    const bool* enough) {
+                    const bool* enough, const SendHooks* send_hooks,
+                    const JsonObserver* observer, JsonScan* scan) {
+  if (scan) *scan = {};
+  if (consume == nullptr || !validJsonObserver(observer, array_key)) {
+    if (scan) scan->invalid_configuration = true;
+    return ESP_ERR_INVALID_ARG;
+  }
+  if (send_hooks != nullptr &&
+      (send_hooks->begin == nullptr || send_hooks->end == nullptr))
+    return ESP_ERR_INVALID_ARG;
   esp_http_client_config_t config{};
   Transport context_transport{
       esp_transport_ssl_init(), generation, network::status().epoch,
       timekeeping::monotonicMs() + cfg::kOperationDeadlineMs,
       limit + cfg::kProviderHeaderBytes + cfg::kProviderWireOverheadBytes};
+  context_transport.send_hooks = send_hooks;
   auto bounded = esp_transport_init();
   if (bounded == nullptr || context_transport.tls == nullptr) {
     if (bounded) esp_transport_destroy(bounded);
@@ -512,36 +404,18 @@ esp_err_t fetchJson(const char* url, const char* array_key,
   if (err == ESP_OK) {
     Stream stream(client, generation, limit, context_transport.deadline);
     JsonAllocator allocator;
-    // One mask for the request, sharing the unchanged cap with each element.
-    ArduinoJson::JsonDocument filter(&allocator);
-    const char* fields = elementFields(provider, array_key);
-    if (fields && deserializeJson(filter, fields)) {
-      err = ESP_ERR_NO_MEM;
-    } else {
-      bool ok;
-      if (array_key == nullptr) {
-        ArduinoJson::JsonDocument doc(&allocator);
-        ok = !deserializeJson(doc, stream,
-                              ArduinoJson::DeserializationOption::NestingLimit(
-                                  cfg::kJsonDepth)) &&
-             consume(doc.as<ArduinoJson::JsonVariantConst>(), context);
-      } else {
-        bool found = false;
-        ok = walk(stream, array_key, consume, context, allocator, enough, 0,
-                  found, array_key[0] == 0, fields ? &filter : nullptr) &&
-             (found || optional);
-      }
-      // A walk ended by the consumer leaves the rest unread.
-      const bool rest = !(enough && *enough);
-      if (!ok || (rest && (stream.nonSpace() != -1 || !stream.complete())) ||
-          context_transport.failed)
-        err = ESP_ERR_INVALID_RESPONSE;
-    }
+    if (!readJson(stream, array_key, provider, consume, context, allocator,
+                  optional, enough, observer, scan) ||
+        context_transport.failed)
+      err = ESP_ERR_INVALID_RESPONSE;
+    if (context_transport.failed && scan) scan->document_complete = false;
     if (result) result->bytes = stream.bytes();
   }
   if (result) {
     result->stage = context_transport.stage;
     result->socket_error = context_transport.socket_error;
+    result->paused = context_transport.send.paused();
+    result->admission_error = context_transport.send.refusal();
   }
   esp_http_client_close(client);
   esp_http_client_cleanup(client);

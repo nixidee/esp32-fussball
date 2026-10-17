@@ -29,6 +29,7 @@ bool applyCompetitionsJson(ArduinoJson::JsonObjectConst input,
                            settings::Competitions& competitions,
                            settings::Violation* violation = nullptr);
 // Bounds, list maxima, text maxima and defaults; 'limits' are the maxima of
-// the display profile.
-void schemaJson(ArduinoJson::JsonObject out, const settings::Limits& limits);
+// the display profile. The service supplies its hardware backlight capability.
+void schemaJson(ArduinoJson::JsonObject out, const settings::Limits& limits,
+                bool backlight);
 }  // namespace web

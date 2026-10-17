@@ -3,28 +3,20 @@
 //
 // Header (8 bytes): format version (u16), payload length (u16), CRC32 (u32)
 // over the first four header bytes and the payload.
-// Payload, in Field order (append only):
-//   wifi_ssid      u8 length + 32 bytes     wifi_password  u8 length + 64 bytes
-//   ap_password    u8 length + 63 bytes     hostname       u8 length + 63 bytes
-//   external_antenna u8 (0/1)   debug_status_log u8 (0/1)
-//   debug_status_interval_s u16
-//   time_zone      u8 length + 32 bytes     ntp_server     u8 length + 63 bytes
-// Unused bytes after a text are written as zero and ignored when read.
-// It continues with the secrets, the screen styles, the scalar values, the
-// slides (u8 count, then one u8 each), pin_own_match (u8 0/1),
-// conference_mode (u8), whole_matchday (u8 0/1) and input_roles (one u8 per
-// input slot, hw::kMaxInputs slots), then per provider its limit (daily,
-// window requests, window seconds: u16 each) and one u32 interval per data
-// type (format 9: fixtures, table, live, live table, events), then the
-// global limit (3 u16), then the later tail (the styles of the screens after
-// the listed ones, the table step time u16, the matchday mode u8). Records of
-// formats 1 to 8 are not read (OQ-253, OQ-257).
-//
-// Competition record (own NVS key, own format version): next_id (u8) and the
-// competitions (u8 count; per entry the id u8, the active flag u8, the
-// source (provider u8, competition, season, team), the two display names
-// and the screen bits u8). Format 1 (with a fallback source per entry and
-// fixture pairs) is not read (OQ-253).
+// General settings format 11: core network/time fields in Field order,
+// then the three application secrets, six flags (ESPN, Demo, night, permanent
+// AP badge, badge position, browser diagnostics), four u8 values (language,
+// day/night brightness, rotation), five u16 values (scroll reset/repeat,
+// night start/end, badge duration), input roles and provider/global plans.
+// Then an optional trailing Overview screenshot flag (2026-10-17). A shorter
+// format-11 record keeps its initial default; earlier fields never move.
+// Text is length u8 + fixed capacity bytes; unused bytes are zero on write.
+// The independent screen-policy record owns all screen selection/appearance,
+// image lists, visit/page timing and match buffers. Formats 1..10 reset during
+// development; decoding never rewrites persistent state.
+// Competition format 4: next_id u8, next_incarnation u32, count u8; each entry
+// has id u8, incarnation u32, active u8, source, competition/team display
+// names. Formats 1..3 reset; no legacy screen mask remains.
 
 #pragma once
 
@@ -47,16 +39,10 @@ inline constexpr std::size_t kSourceBytes =
 inline constexpr std::size_t kCompetitionBytes =
     1 + kSourceBytes + kTextBytes<decltype(Competition::competition_name)> +
     kTextBytes<decltype(Competition::team_name)>;
-inline constexpr std::size_t kScreenBytes = 16;  // 2 flags, 3 colours, 2 u8
-// Screens whose styles follow the secrets; the styles of
-// later screens (the matchday screen) and the table step time form the
-// later tail after the global limit (missing trailing fields keep their
-// initial values).
-inline constexpr std::size_t kListedScreens = 4;
-inline constexpr std::size_t kScalarBytes = 7 + 9 + 18;  // flags, u8, u16
+inline constexpr std::size_t kScalarBytes = 6 + 4 + 5 * 2;
 inline constexpr std::size_t kLimitBytes = 3 * 2;
 inline constexpr std::size_t kPlanBytes = kLimitBytes + 4 * cfg::kDataTypeCount;
-// Longest payload: the slide list full.
+// Complete fixed-size general settings payload.
 inline constexpr std::size_t kMaxPayloadBytes =
     kTextBytes<decltype(Model::wifi_ssid)> +
     kTextBytes<decltype(Model::wifi_password)> +
@@ -66,19 +52,15 @@ inline constexpr std::size_t kMaxPayloadBytes =
     kTextBytes<decltype(Model::ntp_server)> +
     kTextBytes<decltype(Model::admin_password)> +
     kTextBytes<decltype(Model::api_football_key)> +
-    kTextBytes<decltype(Model::football_data_key)> +
-    cfg::kScreenCount * kScreenBytes + kScalarBytes +
-    (1 + decltype(Model::slides)::kCapacity) + 1 +  // Konferenz pin flag
-    2 + hw::kMaxInputs +  // mode, whole matchday, input roles
-    cfg::kProviderCount * kPlanBytes + kLimitBytes +  // request plans
-    2 + 1;  // later tail: table step time, matchday mode (styles above)
-// Longest record encode() produces (slide list full); a model with fewer
-// slides produces a shorter record.
+    kTextBytes<decltype(Model::football_data_key)> + kScalarBytes +
+    hw::kMaxInputs + cfg::kProviderCount * kPlanBytes + kLimitBytes + 1;
+// Complete record produced by encode().
 inline constexpr std::size_t kMaxRecordBytes = kHeaderBytes + kMaxPayloadBytes;
 static_assert(kMaxRecordBytes <= cfg::kSettingsMaxRecordBytes);
 // Longest competition record (list full).
 inline constexpr std::size_t kMaxCompetitionRecordBytes =
-    kHeaderBytes + 1 + (1 + cfg::kCompetitionMax * (kCompetitionBytes + 2));
+    kHeaderBytes + 1 + 4 +
+    (1 + cfg::kCompetitionMax * (kCompetitionBytes + 1 + 4));
 static_assert(kMaxCompetitionRecordBytes <= cfg::kCompetitionsMaxRecordBytes);
 
 enum class DecodeResult : uint8_t {
@@ -113,8 +95,6 @@ void seal(std::span<uint8_t> record,
 // On entry 'model' holds the initial values. Fields missing from a shorter
 // record keep them; trailing fields of a longer record are ignored. An older
 // format version gives kOutdatedVersion, a newer one kUnknownVersion.
-// A stored visible_matches / table_window above the display's maximum
-// ('limits') is clamped to it; values outside the general range stay invalid.
 // On any result other than kOk 'model' is unchanged; for kInvalidValue *invalid
 // (if given) names the field.
 DecodeResult decode(std::span<const uint8_t> record, Model& model,

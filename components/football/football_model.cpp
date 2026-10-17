@@ -114,6 +114,7 @@ const char* phaseName(Phase phase) {
     case Phase::kPostponed: return "postponed";
     case Phase::kCancelled: return "cancelled";
     case Phase::kAbandoned: return "abandoned";
+    case Phase::kSuspended: return "suspended";
   }
   return "unknown";
 }
@@ -188,9 +189,8 @@ Phase statusPhase(const char* s) {
   if (!strcmp(s, "FT") || !strcmp(s, "AET") || !strcmp(s, "PEN") ||
       !strcmp(s, "FINISHED"))
     return Phase::kFinished;
-  if (!strcmp(s, "PST") || !strcmp(s, "POSTPONED") || !strcmp(s, "SUSP") ||
-      !strcmp(s, "SUSPENDED"))
-    return Phase::kPostponed;
+  if (!strcmp(s, "SUSP") || !strcmp(s, "SUSPENDED")) return Phase::kSuspended;
+  if (!strcmp(s, "PST") || !strcmp(s, "POSTPONED")) return Phase::kPostponed;
   if (!strcmp(s, "CANC") || !strcmp(s, "CANCELLED")) return Phase::kCancelled;
   if (!strcmp(s, "ABD") || !strcmp(s, "AWD") || !strcmp(s, "ABANDONED") ||
       !strcmp(s, "AWARDED"))

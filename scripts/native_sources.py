@@ -16,8 +16,9 @@ for component in pure_components:
         str(component_root),
     )
 
-# Header-only session table of the Web component; its other sources need IDF.
-env.Append(CPPPATH=[str(project_root / "components" / "web" / "include")])
+# Session table and pure JSON codecs of the Web component; the service needs IDF.
+web_root = project_root / "components" / "web"
+env.Append(CPPPATH=[str(web_root / "include"), str(web_root)])
 
 # Pure coordinator in the core service; the remaining core files require IDF.
 core_root = project_root / "components" / "core"
@@ -37,12 +38,19 @@ env.Append(CPPPATH=[str(football_root / "include")])
 libdeps = Path(env.subst("$PROJECT_LIBDEPS_DIR")) / env.subst("$PIOENV")
 env.Append(CPPPATH=[str(libdeps / "ArduinoJson" / "src")])
 env.BuildSources(
+    str(Path(env.subst("$BUILD_DIR")) / "pure" / "web"),
+    str(web_root),
+    src_filter="+<screen_json.cpp> +<settings_json.cpp>",
+)
+env.BuildSources(
     str(Path(env.subst("$BUILD_DIR")) / "pure" / "football"),
     str(football_root),
     src_filter=(
         "+<football_model.cpp> +<budget_ledger.cpp> +<match_store.cpp> +<store_mappers.cpp>"
         " +<request_scheduler.cpp> +<provider_plan.cpp> +<store_views.cpp>"
-        " +<football_files.cpp> +<matchday.cpp>"
+        " +<football_files.cpp> +<matchday.cpp> +<screen_selection.cpp>"
+        " +<schedule_coverage.cpp> +<provider_json.cpp> +<provider_coverage.cpp>"
+        " +<demo_scenarios.cpp>"
     ),
 )
 
@@ -53,7 +61,10 @@ env.Append(CPPPATH=[str(ui_root / "include")])
 env.BuildSources(
     str(Path(env.subst("$BUILD_DIR")) / "pure" / "ui"),
     str(ui_root),
-    src_filter="+<input_policy.cpp> +<cause_text.cpp> +<navigation_policy.cpp>",
+    src_filter=(
+        "+<input_policy.cpp> +<cause_text.cpp> +<navigation_policy.cpp>"
+        " +<screen_sequence.cpp>"
+    ),
 )
 
 # Pure Wi-Fi connection policy; the network service needs IDF.

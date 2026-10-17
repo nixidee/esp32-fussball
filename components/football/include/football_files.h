@@ -3,10 +3,10 @@
 //
 // A competition file holds what one competition's requests built up, so a
 // reboot shows it without a request: its matches with their teams and
-// round labels, its table, the own matches' full names and events, its
+// round labels, its table, detailed matches' full names and events, its
 // notices, what its source resolved (season, round, match days) and when
 // each kept data type last completed (UTC). Layout: header, teams, round
-// labels, matches (an own match is followed by its names and events),
+// labels, matches (a detailed match is followed by its names and events),
 // table rows, CRC-32 of everything before it. Structures are stored as
 // they are in RAM, so a file is only valid for the build layout it names
 // (kLayout); any change to a stored structure or enum needs a new
@@ -67,7 +67,7 @@ std::size_t encode(const MatchStore& store, const Saved& saved, Write write,
 bool check(Read read, void* context, Saved& out);
 // Loads a checked file (read again from its start) into 'store': teams,
 // labels and matches through the store's own functions, the table, the
-// own matches' events and the notices. False on a read error or a file
+// detailed matches' events and the notices. False on a read error or a file
 // that differs from the checked one; what was loaded stays.
 bool load(Read read, void* context, MatchStore& store, const Clock& clock);
 

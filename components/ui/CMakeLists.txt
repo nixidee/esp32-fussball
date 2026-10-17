@@ -9,6 +9,7 @@ idf_component_register(
     "football_presenter.cpp"
     "status_presenter.cpp"
     "navigation_policy.cpp"
+    "screen_sequence.cpp"
     "input_policy.cpp"
     "fonts/ui_font_text_12.c"
     "fonts/ui_font_text_14.c"

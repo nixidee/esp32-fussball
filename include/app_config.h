@@ -7,8 +7,11 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+
+#include "screen_types.h"
 
 namespace cfg {
 
@@ -159,27 +162,21 @@ enum class TimeTest : uint8_t {
 inline constexpr TimeTest kTimeTest = TimeTest::kNone;
 
 // ---- Settings record -------------------------------------------------------
-// Format 9: the lists are stored as a count followed by that many entries, so
-// the record length varies; the competitions have their own record (OQ-200,
-// OQ-209); the request limits are a plan per provider (daily cap, window
-// limit, interval per data type; OQ-216, OQ-225) plus one global limit
-// (OQ-226); format 9 drops the core-data interval (OQ-248, OQ-257). A shorter
-// record keeps the initial values of its missing trailing fields. Records of
-// formats 1 to 8 are not read (OQ-253, OQ-257): the device starts with the
-// initial values (origin "outdated"); the old record stays in NVS until the
-// next save, so an OTA rollback can still read it.
-inline constexpr uint16_t kSettingsFormatVersion = 9;
+// Format 11 contains only general settings; screen rules and appearance
+// belong to the independent screen-policy record. Current general records
+// have fixed length; omitted trailing fields keep defaults. Formats1..10
+// start fresh during development, without rewriting the old blob at boot.
+inline constexpr uint16_t kSettingsFormatVersion = 11;
 // Longest stored record that is read (newer firmware may have appended
 // fields); a longer one counts as damaged.
 inline constexpr std::size_t kSettingsMaxRecordBytes = 2048;
 // NVS namespace and key, at most 15 characters each.
 inline constexpr char kSettingsNvsNamespace[] = "settings";
 inline constexpr char kSettingsNvsKey[] = "record";
-// Competition record (OQ-200): same namespace, own key and format. Format 2
-// has one source per competition (OQ-247); format 1 (fallback source and
-// fixture pairs) is not read (OQ-253).
+// Competition format4: one source and service-owned incarnation per entry,
+// without legacy screen masks. Formats1..3 start fresh during development.
+inline constexpr uint16_t kCompetitionsFormatVersion = 4;
 inline constexpr char kCompetitionsNvsKey[] = "competitions";
-inline constexpr uint16_t kCompetitionsFormatVersion = 2;
 // Longest competition record that is read (newer firmware may append).
 inline constexpr std::size_t kCompetitionsMaxRecordBytes = 4096;
 
@@ -257,8 +254,6 @@ enum class Provider : uint8_t {
   kEspn,
   kFootballData
 };
-// Screens in settings order (the stored styles; kMatchday came last, OQ-193).
-enum class Screen : uint8_t { kLiveSingle, kLiveMulti, kTable, kCrest, kMatchday };
 // Konferenz page order (OQ-136): every page in turn in kickoff order, or a
 // single page ranked by activity.
 enum class ConferenceMode : uint8_t { kAllPages, kOnePage };
@@ -286,42 +281,22 @@ constexpr InputRole inputRoleDefault(std::size_t index, std::size_t inputs) {
   return index == 2 ? InputRole::kDown : InputRole::kUp;
 }
 inline constexpr Provider kProviderDefault = Provider::kOpenLigaDb;
-inline constexpr Screen kIdleScreenDefault = Screen::kTable,
-                        kMatchdayScreenDefault = Screen::kLiveMulti,
-                        kOwnMatchScreenDefault = Screen::kLiveSingle;
 // A new competition is active.
-inline constexpr bool kEntryActiveDefault = true,
-                      kScreenEnabledDefault = true, kBackgroundsDefault = true,
+inline constexpr bool kEntryActiveDefault = true, kBackgroundsDefault = true,
                       kEspnOptInDefault = false, kDemoDefault = false,
                       kNightEnabledDefault = true,
                       kIpBadgeApPermanentDefault = true,
                       kIpBadgeBottomDefault = false,
                       kBrowserDebugDefault = false,
+                      kOverviewScreenshotDefault = false,
                       // Konferenz keeps the own match in a fixed row (OQ-123).
-                      kPinOwnMatchDefault = true,
-                      // Own match shown for its whole matchday (OQ-139).
-                      kWholeMatchdayDefault = false;
+    kPinOwnMatchDefault = true;
 inline constexpr uint8_t kLanguageDefault = 0, kRotationDefault = 0;
-inline constexpr std::size_t kScreenCount = 5;
-// Order of the screens on the display (Next/Previous) and in the Web UI.
-inline constexpr Screen kScreenOrder[kScreenCount] = {
-    Screen::kLiveSingle, Screen::kLiveMulti, Screen::kMatchday, Screen::kTable,
-    Screen::kCrest};
 // List maxima of the settings model (target capacities; ordered lists without
 // empty entries). A competition is a league or cup, optionally with an own
 // club (OQ-194, OQ-195).
 inline constexpr std::size_t kCompetitionMax = 8;
 inline constexpr std::size_t kSlideMax = 5;
-// Screens a competition is used for (OQ-192), one bit each in
-// Competition::screens; a new competition is used for all of them.
-enum class CompetitionScreen : uint8_t {
-  kOwnMatch,
-  kConference,
-  kMatchday,
-  kTable,
-};
-inline constexpr std::size_t kCompetitionScreenCount = 4;
-inline constexpr uint8_t kCompetitionScreensDefault = 0x0f;
 inline constexpr std::size_t kImageLibraryMax = 10;
 // Text capacities (bytes) of the settings model; validation, the stored
 // record and the schema derive from these.
@@ -354,7 +329,11 @@ inline constexpr std::size_t kStoreTableRows = 224;
 // table keeps the stored one and shows the notice.
 inline constexpr std::size_t kStoreTableStageRows = 64;
 inline constexpr std::size_t kStoreOwnMatches = 8;
-inline constexpr std::size_t kStoreEvents = 48;
+inline constexpr std::size_t kStoreDetailMatches =
+    kStoreOwnMatches + kCompetitionMax;
+inline constexpr std::size_t kStoreOwnEvents = 48;
+inline constexpr std::size_t kStoreOtherEvents = 48;
+inline constexpr std::size_t kStoreEvents = kStoreOwnEvents + kStoreOtherEvents;
 inline constexpr std::size_t kStoreRoundLabels = 24;
 // Matches of one competition whose kickoffs are less than this apart form
 // one matchday (OQ-201, OQ-224).
@@ -420,6 +399,15 @@ inline constexpr uint32_t kIntervalMinS = 10, kIntervalMaxS = 604800;
 // run starts this long after the last resolution (OQ-259; before OQ-248 the
 // daily core-data run did it).
 inline constexpr uint32_t kSeasonRecheckS = 86400;
+// Compact schedule evidence: at most one new device-wide discovery per UTC
+// day. Evidence expires at the same daily boundary in elapsed seconds; a
+// smaller normal fetch never refreshes a wider proved interval.
+inline constexpr uint32_t kCoverageMaxAgeS = 86400;
+inline constexpr std::size_t kCoverageMaxSeasons = 2;
+inline constexpr uint32_t kCoverageRequestsPerRun = 16;
+inline constexpr uint32_t kCoverageRunsPerUtcDay = 1;
+inline constexpr char kCoverageFile[] = "schedule.bin";
+inline constexpr char kCoverageGuardNvsKey[] = "schedule";
 // Defaults of the per-provider request limits (OQ-225), provider order
 // OpenLigaDB, API-Football, ESPN, football-data.org: the limits the
 // providers document (checked 2026-10-13): OpenLigaDB 60 requests per minute
@@ -447,8 +435,6 @@ inline constexpr uint16_t kUnknownMatchEndMinutes = 240;
 inline constexpr uint16_t kExpectedMatchMinutes = 110;
 // Live data is requested from this long before kickoff (OQ-220).
 inline constexpr uint16_t kLiveLeadMinutes = 30;
-// Automatic Konferenz page change (OQ-81).
-inline constexpr uint16_t kConferencePageMs = 8000;
 // Shown data counts as stale while a match of its competition is in its
 // live window and the competition's last successful match request is older
 // than this, or while its last request failed.
@@ -472,7 +458,6 @@ inline constexpr uint8_t kTableWindowDefault = 5;
 inline constexpr uint16_t kSlideshowDefaultS = 15;
 // Automatic table step (OQ-196, OQ-197): the next page of a table without an
 // own club, or the next competition's table.
-inline constexpr uint16_t kTablePageDefaultS = 8;
 inline constexpr uint16_t kNightStartDefaultMinutes = 23 * 60;
 inline constexpr uint16_t kNightEndDefaultMinutes = 7 * 60;
 inline constexpr uint16_t kIpBadgeDefaultS = 60;
@@ -539,11 +524,33 @@ struct Range {
   constexpr bool contains(uint16_t n) const { return n >= min && n <= max; }
 };
 inline constexpr Range kBrightnessRange{0, 100}, kRotationRange{0, 3};
-inline constexpr Range kVisibleMatchesRange{1, 5}, kTableWindowRange{1, 9};
+inline constexpr Range kVisibleMatchesRange{2, 5}, kTableWindowRange{1, 9};
 inline constexpr Range kReturnTimeRange{0, 4000}, kScrollRepeatRange{100, 2000};
 inline constexpr Range kSlideshowRange{3, 3600}, kDayMinutesRange{0, 1439};
 inline constexpr Range kMatchWindowRange{0, 180};
-inline constexpr Range kTablePageRange{3, 600};
+// Shared screen policy: the single owner of display selection and timing.
+inline constexpr Range kScreenVisitRange{15, 43200},
+    kScreenBreakDaysRange{1, 366};
+inline constexpr uint16_t kScreenBreakDaysDefault = 21;
+inline constexpr bool kScreenFrameDefault = false,
+                      kScreenFrameCrestDefault = true,
+                      kScreenBreakDefault = false, kScreenDotsDefault = true,
+                      kScreenSportsEnabledDefault = true,
+                      kScreenImagesEnabledDefault = false;
+inline constexpr std::array<uint16_t, screen::kTypeCount> kScreenVisitDefaultS{
+    30, 30, 60, 15, 30, 60};
+inline constexpr std::array<screen::Type, screen::kTypeCount>
+    kScreenOrderDefault{screen::Type::kCrest,      screen::Type::kSlideshow,
+                        screen::Type::kLiveSingle, screen::Type::kMatchday,
+                        screen::Type::kLiveMulti,  screen::Type::kTable};
+// Phase order: Own, Other games, Matchday, Idle, optional Break.
+inline constexpr screen::Type kScreenAutomaticDefault[] = {
+    screen::Type::kLiveSingle, screen::Type::kLiveMulti,
+    screen::Type::kMatchday, screen::Type::kTable, screen::Type::kTable};
+inline constexpr uint16_t kScreenMinimumPageS = 5;
+inline constexpr std::size_t kScreenPolicyMaxBytes = 1280;
+inline constexpr uint16_t kScreenPolicyFormatVersion = 1;
+inline constexpr char kScreenPolicyNvsKey[] = "screen_policy";
 // Request limits (0 = none): requests per UTC day, requests per window and
 // the window length in seconds. A window limit needs both values or none.
 inline constexpr Range kDailyRequestsRange{0, 65535},

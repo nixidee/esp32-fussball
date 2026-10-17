@@ -8,6 +8,16 @@
 > Current ownership and resource costs are described here; decision history
 > remains in [DECISIONS.md](DECISIONS.md).
 
+The owner has confirmed a [screen-system redesign](UI.md#planned-screen-system-redesign)
+as the next product direction, recorded in [ADR-042](DECISIONS.md#adr-042--situation-based-screen-sequences--accepted-direction-2026-10-17).
+It replaces the single-default resolver and overlapping competition/page-cycle
+selection with one coherent situation/sequence/navigation model. The current
+layer diagram and ownership below describe the implemented candidate, not that
+future design. A separate bounded screen-policy snapshot/record/API within
+the existing settings service is now selected; network/providers receive only
+derived demand. Exact schema/migration and measured resource budgets still
+precede dependent implementation. This grants no new dependency or reserve waiver.
+
 ## Goals
 - Show football data for one club on small displays (first: 240×240 round).
 - Scale to other boards, displays (360/466 px, rectangular), touch and
@@ -110,8 +120,12 @@
   still to be measured.
 - Parser strings are copied into the store's fixed records before the
   element is released. Every request carries the provider-data generation of the
-  settings and the network epoch; obsolete results cannot publish. Missing and estimated values retain
-  explicit provenance.
+  settings and the network epoch; obsolete results cannot publish. Its first
+  send also checks the matching settings generation, under the existing settings
+  writer, so a policy or request-limit edit cannot admit a stale unsent request.
+  This includes setup queries; they bypass only the frame pause. After admission,
+  policy-only changes retain caches and permit the started response to finish.
+  Missing and estimated values retain explicit provenance.
 - The HTTP worker performs strict settings mutations and bounded streaming
   uploads. Scan/selection/refresh requests signal their owning service.
   The static debug worker permits one fixed in-flight message. Heavy admission
@@ -121,8 +135,10 @@
   generation output belongs to that same locked snapshot; model publication
   advances the generation before unlocking and posts the notification after
   unlocking. The competition
-  store uses that same settings mutex; readers copy one entry (153 B) or the whole store
-  (1,226 B) into storage they own. NVS saves/reset use a second mutex and execute in the
+  store uses that same settings mutex; readers copy one entry (160 B) or the whole store
+  (1,292 B) into storage they own. A dedicated 964-byte screen-policy snapshot
+  uses the same locks and a separate 912-byte record. Its REST handler owns one
+  temporary candidate and releases the input document before encoding. NVS saves/reset use a second mutex and execute in the
   caller task. They post coalesced `kSettingsChanged` notifications.
 - State notifications and semantic input actions use the existing bounded
   event bus. UI's controller action queue also has four fixed entries and
@@ -458,7 +474,7 @@ build. Future workloads need their own peak heap, fragmentation, stack and
 latency acceptance. `cfg::kHealthTest` is `kNone` in normal builds; diagnostic
 workers, hooks and the one-shot marker are absent from the normal ELF.
 The candidate adds a separate controlled WebSocket status producer with no
-console hook or retained history; see [WEB_UI.md](WEB_UI.md#live-debug).
+console hook or retained history; see [WEB_UI.md](WEB_UI.md#system-and-diagnostics).
 Its inactive/active, slow-client and concurrent-load budgets remain unaccepted.
 
 ## Display fault handling (implemented, device fault tests pending)
@@ -597,7 +613,7 @@ shape the image design:
   (temporary file, then rename), otherwise a replacement during a redraw fails.
 This is integration evidence only, not the supported-maximum envelope.
 
-### Current compiled resource ledger — 2026-10-16 (one source per competition, no fixture pairs, no settings migration, no core-data request, one job outcome protocol; compact match store, request scheduler and plans in the firmware, competition files and short names, Matchday screen and per-competition screen switches, one matchday module with current/next selection, status per competition with error codes and status pill, store envelope of 224 matches and rows with a 64-row table stage, 48 events and the store-full notice E19; settings format 9 with competition store and request plans, image roles, font set 12/14/18/48, display design renderer, start screen, automatic season)
+### Historical working-start resource ledger — 2026-10-16 (one source per competition, no fixture pairs, no settings migration, no core-data request, one job outcome protocol; compact match store, request scheduler and plans in the firmware, competition files and short names, Matchday screen and per-competition screen switches, one matchday module with current/next selection, status per competition with error codes and status pill, store envelope of 224 matches and rows with a 64-row table stage, 48 events and the store-full notice E19; settings format 9 with competition store and request plans, image roles, font set 12/14/18/48, display design renderer, start screen, automatic season)
 
 | Item | C6 candidate | Growth over the accepted core image |
 |---|---|---|
@@ -607,13 +623,14 @@ This is integration evidence only, not the supported-maximum envelope.
 | Linked DIRAM, official IDF size report | not re-measured (266,066 B at the 2026-10-10 image) | — |
 | Match store | 26,712 B (BSS) | Included above; replaced three snapshots of 27,200 B (81,600 B) |
 | Short-name table | 48 entries of 32 B (BSS) | Included above |
-| Football files on LittleFS | about 3 KB (one block) per competition, short names up to 1,552 B | Budget 48 KiB for all football files |
+| Football files on LittleFS | about 3 KB (one block) per competition, short names up to 1,548 B | Budget 48 KiB for all football files |
 | Settings model / longest encoded record | 832 / 806 B | Format 9 (variable length, ceiling 2,048 B); formats 1 to 8 are not read (reported as outdated, initial values apply, the old record stays until the next save) |
 | Competition store / longest encoded record | 1,226 / 1,234 B | Own NVS record, format 2 (ceiling 4,096 B); 8 entries of 153 B, one source each; format 1 is not read (outdated) |
 | UI view model / draw list / text store | 1,880 / 2,016 / 1,280 B | Static owned view; 72 draw items of 28 B; view and draw list are initialised data (also stored in flash) |
 | Parser live allocation cap | 24,576 B including custom headers | Libc metadata additional |
 | JPEG validation workspace | 4,096 B static | Included above |
 | Screenshot copy strip | 9,600 B temporary internal heap plus allocator metadata | One admitted capture; released after success/cancellation |
+| Prepared screen-policy model / codec | 964 B per future snapshot / 912 B encoded | First prepared-helper checkpoint only: no service owner then; linked deltas0 B. Superseded by the dated integration checkpoint below |
 | Embedded Web UI | 71,204 B gzip | Included in flash; screenshot adds 2,755 B |
 | Stock JPEG files / filesystem image | 7,862 / 458,752 B | Logical files / gross partition |
 
@@ -627,8 +644,9 @@ Runtime initialization of large snapshot defaults, shared stock aliases/font
 roles and unused C6 SDK speed/protocol features reduced the first complete
 build's 94.3% occupancy to 81.8% at the settings-format-3 build.
 
-The image fits the OTA slot and is 53,119 B above the 85% reserve line
-(1,559,757 B) using the PlatformIO report; the line may be exceeded during
+The current binary fits the OTA slot and is 96,532 B above the integer floor
+of its 85% reserve line (1,559,756 B). The PlatformIO flash report is 95,772 B
+above that floor; binary and report are separate metrics. The line may be exceeded during
 the display redesign, and the savings are decided at alpha from a size map. Settings format 3 added 3,706 B flash
 and 620 B static RAM over the preceding build; the later Web UI rewrite, API
 and provider changes grew flash to 84.6%, and settings format 4 with the
@@ -939,3 +957,97 @@ test/                        existing native suites; new acceptance is pending
 scripts/                     configuration guards, native selection, heap patch,
                              formatting, asset/font/web builders, release guard
 ```
+
+
+### Earlier screen-system integration checkpoint — 2026-10-17
+
+Current C6 build: static158,200 B, linked flash1,695,166 B, binary1,695,920 B;
+versus the working-start baseline: +7,228/+39,638/+39,632 B. Webgzip83,324 B
+(+12,120 B) is included in flash. No dependency, partition or cap changed.
+The existing 85%-OTA-slot reserve target is still missed: binary exceeds its
+1,559,756-byte floor by136,164 B; passing a build does not waive that gate.
+
+The latest bounded block adds172 B linked flash,176 B binary and0 B static
+RAM against the preceding snapshot. No new allocation, payload or file size.
+Array-free request-window merging is independent of kickoff order (unknown
+kickoff uses first confirmed live observation). Its bounded worst case is
+103,936 row visits per scheduler decision at224matches/8slots; target elapsed
+time and stack high-water remain runtime checks. Estimated additional own
+stack along this block's active paths is<=96 B; no new scratch buffer.
+
+The policy service owns one964-byte snapshot; the second UI snapshot and
+coverage ownership remain pending. Provider eligibility is derived under the
+existing short settings lock into <=56 B, including manual-only data demand;
+route order and eligibility bits must be read from the same generation. Pure
+classification/sequence/coverage modules add no active globals or heap today.
+The new shared stream parser adds no own heap or retained body; compiler
+accounting bounds the additional own call chain conservatively at512 B, while
+recursive walk drops from176 to48 B per level. These are compiler frames,
+not device stack high-water. Image-reference cleanup allocates one candidate
+and record at a time:1,638 B for the old model or1,876 B for policy, before
+allocator management and existing NVS-internal costs. Input DOM is freed first.
+The earlier settings-block heap estimate was revised to about5.6 KiB maximum-
+path delta; the binding8-KiB overall allowance and runtime-reserve gates remain.
+
+The subsequent coherent worker-snapshot step copies model/routes/both versions
+under one settings lock and can derive the small eligibility subset in the same
+order. C6 flash1,694,994/static158,200/bin1,695,744B; baseline
++39,466/+7,228/+39,456B. Step growth874B flash,0B static,864B binary;
+85%-slot reserve miss135,988B. No new global/heap/file or controller activation.
+
+### Data/controller integration checkpoint — 2026-10-17
+
+The current source uses the common classifier/sequence in the actual controller.
+A coherent settings Model+Policy snapshot carries both versions; effective
+competitions are borrowed under the repository mutex, with no extra retained
+competition list. UI adds Policy964B and small generation/IP/state fields.
+The provider owns derived eligibility and exact ordinary targets; its complete-
+response staging retains1192B metadata (+1188B static) and2016B event heap.
+The event payload is delayed until the first body callback after the816B
+pre-send fence has released. Demo binding adds16B static; no duplicate Policy
+or competition store. Old settings masks/defaults/page clocks are retired: two
+704B Model snapshots replace832B copies; Competitions1260B replaces1292B. No additional task or request queue.
+Coverage owns one compact evidence array, an816B file plus replacement and a
+48B authoritative NVS guard. The file/NVS source fingerprints and conservative
+first-send proof fence prevent reboot from restoring contradicted evidence.
+
+An intermediate C6 integration build passed: linked flash1,721,980B, static
+RAM160,684B; change from the preceding checkpoint+26,814/+2,484B. Subsequent
+audit corrections and metadata/legacy cleanup require a final combined build;
+these numbers are not the final source measurement. Runtime heap/usable stack,
+OTA reserve and physical display acceptance remain open. No partition/dependency
+change, upload or full test suite accompanies this continuation.
+
+The next C6 intermediate build passed19.947s: flash1,714,920B/static160,260B;
+baseline+59,392/+9,288B. The retained staging and final Demo/balancing changes
+postdate it, so it remains intermediate. General record700B, competition
+max1262B, policy912B. Shared match-page capacity minimum2 and bounded balancing
+add no retained state/heap/files; exact target delta awaits the combined build.
+
+A same-body C6 allocation-accounting counterexample disproves treating small
+public ESPN samples as a universal parser delta:600 secondary competition
+objects increase DOM peak8371→18031B (+9660B), each below the unchanged24576B
+cap. Policy DOM11976B versus old general6431B adds5545B. Concurrent allocation
+acceptance therefore remains gated on the shared-operation admission decision.
+These are source/allocator calculations, not target free-heap/fragmentation
+measurements; no higher memory envelope is silently assumed.
+
+The final combined C6 source build passed11.134s: flash1,719,344B/static161,452B/
+binary1,720,096B, embedded gzip75,656B. Versus baseline:+63,816/+10,480/+63,808B;
+remaining incremental margins1,808B static and28,344B flash. Binary slot free
+114,912B;85%-reserve miss160,340B. This is compilation/size evidence.
+
+The owner-approved serialization now covers policy HTTP before allocations,
+ordinary response allocation through complete/detail release, and discovery
+before allocation through persistence/deletion. It reuses HeavyGuard without a
+second token/queue. Distinct logical own-heap paths are API5,545B (conservative
+moving-realloc6,536B), event2,016B and discovery532+fence816B. Conditional
+source-ABI overhead total7,543B is not a verified C6 ROM TLSF bound. Device
+free/largest heap, fragmentation, usable stack, TLS/JPEG/soak and flash reserves
+remain separate acceptance.
+
+The subsequent explicit-event-target test reconciliation changes only host
+fixtures and checks. All original expectations remain,70scoped cases pass and
+isolated missing/expired-final-fetch faults are detected. Production source
+hashes remain identical to the final C6 checkpoint above; firmware RAM/heap/
+stack/flash/NVS/LittleFS delta is0B. No new device or runtime acceptance follows.

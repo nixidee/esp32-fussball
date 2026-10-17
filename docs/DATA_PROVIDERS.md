@@ -15,6 +15,22 @@ All checks were made on **2026-10-13** with public requests from a desktop
 machine unless stated otherwise. Provider plans, coverage, identifiers and
 limits change; recheck before relying on a value.
 
+
+The [planned screen-system redesign](UI.md#planned-screen-system-redesign)
+requires the same available information for ordinary and own Single screens,
+known schedule coverage for a configurable long-break gap, and trustworthy
+period/added-time/shootout provenance. These capabilities are not implemented
+merely by selecting a new screen. OpenLigaDB's checked Match schema lacks a
+live period/minute and a complete missed-attempt list; an estimated clock must
+remain visibly estimated. ESPN complete attempts were found in historical
+summary shootout arrays, not just scored-goal lists; live completeness and
+request frequency still require proof. API-Football/football-data detail and
+coverage remain provider-dependent. Never infer a miss from an absent goal or
+claim live support from historical replies. Current adapters/limits below are
+unchanged. [OpenLigaDB schema](https://api.openligadb.de/swagger/v1/swagger.json),
+[football-data live duration](https://docs.football-data.org/general/v4/overtime.html).
+
+
 ## 1. Priority
 
 ESPN and OpenLigaDB are the primary providers and the focus of current
@@ -510,3 +526,62 @@ the free plan, league ids and `coverage`, events in `fixtures?id=` and
 **football-data.org** (needs a key): delay of the free plan, `minute` and
 `injuryTime` in the free plan, response sizes, the anonymous daily limit,
 `shortName` and `tla` in real responses, the real `stage` values.
+
+
+## Public response recheck — 2026-10-17
+
+Current public responses were replayed through the exact production streaming
+kernel, filters, mappers and canonical store on the host. This is separate from
+actual device transport, target heap and complete request planning.
+
+| Response | Body bytes | Host parser peak bytes | Result |
+|---|---:|---:|---|
+| OpenLigaDB Bundesliga current | 7,834 | 6,412 | 9 matches |
+| OpenLigaDB Bundesliga whole2026 season | 299,845 | 6,623 before rejection | Exceeds262,144 cap; incomplete, no coverage proof |
+| OpenLigaDB cup round | 77,813 | 15,432 | 32 matches |
+| ESPN Bundesliga finished scoreboard | 11,822 | 7,303 | Full ordinary-match names |
+| ESPN Bundesliga summary | 388,143 | 5,082 | 8 stored ordinary events, own=false |
+| ESPN Bundesliga scheduled scoreboard | 71,642 | 6,764 | 6 scheduled matches |
+| ESPN cup scoreboard | 126,772 | 11,986 | 11 matches; calendar shape differs, no proof |
+| ESPN empty scoreboard | 2,052 | 86 | Successful empty list, no invented fixture |
+| ESPN Australia live scoreboard | 50,834 | 7,340 | Reported second half, canonical Live/minute90 |
+| ESPN Australia live summary | 399,133 | 5,103 | Auckland/Melbourne City full names and7 ordinary events |
+
+Sources: [OpenLigaDB season](https://api.openligadb.de/getmatchdata/bl1/2026),
+[current round](https://api.openligadb.de/getmatchdata/bl1),
+[cup](https://api.openligadb.de/getmatchdata/dfb/2026/1),
+[ESPN scoreboard](https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard),
+[scheduled date](https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard?dates=20261017),
+[finished summary](https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/summary?event=401884770),
+[cup date](https://site.api.espn.com/apis/site/v2/sports/soccer/ger.dfb_pokal/scoreboard?dates=20260822),
+[empty date](https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard?dates=20261015),
+[live date](https://site.api.espn.com/apis/site/v2/sports/soccer/aus.1/scoreboard?dates=20261017),
+[live summary](https://site.api.espn.com/apis/site/v2/sports/soccer/aus.1/summary?event=401892161).
+These mutable endpoints may now return different content. Host peaks stayed
+within the unchanged24,576-byte allocator cap, with no residual allocations;
+they are not C6 measurements. The summary cap remains524,288 bytes. New metadata
+uses no separate retained JSON document. ESPN calendar dates are day markers;
+its core calendar alone does not prove a whitelist or true neighboring kickoffs.
+Keyed-provider real responses, suspension/no-kickoff live replies and automatic
+coverage acquisition remain unverified. Parser success alone never proves that
+an endpoint returned every fixture of the required interval.
+
+### Coverage-binding replay and limitations — 2026-10-17
+
+Later replays use the active raw metadata observer and exact production filter.
+The OpenLigaDB relegation2025 body is3321B and contains two actual May21–25
+kickoffs; only that interval is Complete. Its successful empty/full-season
+endpoint does not establish arbitrary surrounding dates. The299845B league
+season remains over262144B and cannot prove a gap. ESPN league/live/empty
+calendar day whitelists validate metadata but do not establish adjacent UTC
+fixture intervals; cup calendar shape also remains unproved. These spans remain
+Partial. The host cup parser peak at this later filter/observer checkpoint is
+12258B; it is not a target TLS/heap measurement. Real keyed-provider responses,
+justified suspension and missing-kickoff bodies remain unverified.
+
+Production coverage binds stable competition/incarnation/source/season identities,
+invalidates contradictory ordinary rows, and fences persisted Complete evidence
+before a sent match request. Discovery shares actual request limits and the
+persist-before-send sixteen-credit daily guard, independent of filesystem loss.
+Public replies prove the documented source limitations; controlled proof/recovery
+fixtures and the synthetic Demo do not make incomplete providers complete.

@@ -76,7 +76,10 @@ enum class Phase : uint8_t {
   kFinished,
   kPostponed,
   kCancelled,
-  kAbandoned
+  kAbandoned,
+  // An ongoing match is interrupted. This is distinct from a postponed
+  // fixture: its previously justified live window may remain active.
+  kSuspended
 };
 enum class EventType : uint8_t {
   kGoal,
@@ -124,8 +127,7 @@ const char* phaseName(Phase phase);
 int64_t parseUtc(const char* text);
 // Phase of an API-Football short status or a football-data.org v4 match
 // status (all eleven values of its lookup table); kUnknown otherwise.
-// Suspended maps to postponed and awarded to abandoned, like API-Football's
-// SUSP and AWD.
+// Suspended remains distinct from postponed; awarded maps to abandoned.
 Phase statusPhase(const char* status);
 uint32_t fingerprint(std::string_view value);
 }  // namespace football

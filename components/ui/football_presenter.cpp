@@ -35,6 +35,9 @@ void Presenter::ownHighlight(const football::MatchStore& store,
   const auto& e = store.eventAt(list.index[list.count - 1 - event_step]);
   char minute[12];
   value(minute, sizeof(minute), e.minute);
+  if (e.minute != football::kNoValue && e.added != football::kNoValue &&
+      e.added != 0)
+    snprintf(minute, sizeof(minute), "%u+%u", e.minute, e.added);
   const char* label =
       (e.flags & football::kEventShootout)
           ? translated("Elfmeterschießen", "Shootout")
@@ -74,10 +77,18 @@ void Presenter::bindOwnMatch(const football::MatchStore& store,
   view.layout = Layout::kOwnMatch;
   auto& own = view.own;
   roundCaption(store, match, false);
-  prefix<40>(own.home,
-             football::view::teamName(store, match, true, short_names));
-  prefix<40>(own.away,
-             football::view::teamName(store, match, false, short_names));
+  const auto name = [&](bool home) {
+    const auto team = home ? match.home : match.away;
+    if (short_names && team < cfg::kStoreTeams) {
+      const auto& identity = store.teamAt(team);
+      if (const auto* custom =
+              short_names->find(identity.provider, identity.id))
+        return custom;
+    }
+    return football::view::fullName(store, match, home, short_names);
+  };
+  prefix<40>(own.home, name(true));
+  prefix<40>(own.away, name(false));
   football::view::ownSides(store, match, shown, own.own_home, own.own_away);
   const bool before = !started(match);
   const int64_t kickoff = match.kickoff;  // 0 = unknown
@@ -132,6 +143,9 @@ void Presenter::bindOwnMatch(const football::MatchStore& store,
   else if (match.phase == Phase::kPenalties)
     snprintf(own.pill, sizeof(own.pill), "%s",
              translated("Elfmeterschießen", "Shootout"));
+  else if (match.phase == Phase::kSuspended)
+    snprintf(own.pill, sizeof(own.pill), "%s",
+             translated("Unterbrochen", "Suspended"));
   else if (minute)
     snprintf(own.pill, sizeof(own.pill), "%s%d'",
              (match.estimated & football::kEstimatedMinute) ? "~" : "",
@@ -195,16 +209,10 @@ void Presenter::bindConference(const football::MatchStore& store,
                                const football::view::Shown& shown,
                                const football::view::List& members,
                                const BindContext& context) {
-  const auto now = context.now;
-  football::ConferenceRequest request;
-  request.mode = model.conference_mode;
-  request.pin_own = model.pin_own_match;
-  request.manual = nav.paged;
-  request.per_page = model.visible_matches;
-  request.page = nav.paged
-                     ? static_cast<unsigned>(nav.conference_page)
-                     : static_cast<unsigned>(now / cfg::kConferencePageMs);
-  const auto page = football::view::conferencePage(store, members, request);
+  const auto mode = nav.paged    ? sequence::PageMode::kManualHeld
+                    : nav.manual ? sequence::PageMode::kManualAutomatic
+                                 : sequence::PageMode::kAutomatic;
+  const auto page = conferencePage(*navigation_data, nav.entry, mode, nav.page);
   if (page.row_count == 0) {
     char next[48]{};
     int64_t kickoff = INT64_MAX;
@@ -232,7 +240,7 @@ void Presenter::bindConference(const football::MatchStore& store,
   view.layout = Layout::kConference;
   view.page = page.page;
   view.pages = page.pages;
-  view.slots = page.pages > 1 ? model.visible_matches : page.row_count;
+  view.slots = page.pages > 1 ? policy.visible_matches : page.row_count;
   if (page.pages > 1)
     snprintf(view.caption, sizeof(view.caption), "%s \xC2\xB7 %u/%u",
              translated("Konferenz", "Conference"), page.page + 1u,
@@ -323,42 +331,21 @@ void Presenter::bindTable(const football::MatchStore& store,
   view.rim.total = static_cast<uint8_t>(table_rows);
 }
 
-void Presenter::bindTables(const football::MatchStore& store,
-                           const football::view::Shown&, int64_t now,
-                           int64_t utc) {
-  const auto selection = tableSelection(nav, model, *navigation_data, now);
-  presentation.on_screen = selection.competition;
-  if (selection.fault)
-    faultCard(selection.competition, now, utc);
-  else
-    bindTable(store, selection);
-}
-
 void Presenter::bindMatchday(const football::MatchStore& store,
                              const football::view::Shown& shown,
                              const BindContext& context) {
-  auto facts = *navigation_data;
-  facts.local_offset = context.valid && context.utc > 0
-                           ? timekeeping::localOffset(context.utc)
-                           : 0;
-  const auto selection = matchdaySelection(nav, model, facts, context.now);
-  if (!selection.available) {
-    cardText(translated("Spieltag", "Matchday"),
-             translated("Keine Spiele", "No matches"), nullptr, Tone::kNeutral);
-    return;
-  }
-  presentation.on_screen = selection.competition;
-  if (selection.fault) {
-    faultCard(selection.competition, context.now, context.utc);
-    return;
-  }
-  const auto list = football::view::matchday(
-      store, shown, selection.competition, selection.span);
-  const int per_page = std::max<int>(1, model.visible_matches);
+  const auto mode = nav.paged    ? sequence::PageMode::kManualHeld
+                    : nav.manual ? sequence::PageMode::kManualAutomatic
+                                 : sequence::PageMode::kAutomatic;
+  const auto selection =
+      matchdaySelection(*navigation_data, nav.entry, mode, nav.page);
+  if (!selection.available) return;
+  const auto list = roundMembers(*navigation_data, selection.round);
+  const int per_page = std::max<int>(1, policy.visible_matches);
   roundCaption(store, store.match(list.index[0]), true);
   view.layout = Layout::kConference;
   view.page = static_cast<uint8_t>(selection.page);
-  view.pages = static_cast<uint8_t>(std::min(selection.pages, 255));
+  view.pages = static_cast<uint8_t>(std::min<uint16_t>(selection.pages, 255));
   const int from = selection.page * per_page;
   const int rows = std::min<int>(
       {per_page, list.count - from, static_cast<int>(view.matches.size())});
@@ -374,88 +361,56 @@ void Presenter::bindMatchday(const football::MatchStore& store,
   view.rim.total = static_cast<uint8_t>(std::min<int>(list.count, 255));
 }
 
+void Presenter::setStyle(screen::Type type) {
+  const auto& value = policy.appearance[screen::index(type)];
+  view.style = {value.background, value.colour,     value.text,
+                value.accent,     value.text_scale, value.image};
+}
+
 uint32_t Presenter::bind(const BindContext& context) {
   const auto& data = *published;
-  // Rebuilt in place: `view = {}` would add a ~1.9 KB temporary to the
-  // main task stack.
   new (&view) ViewModel();
   presentation.no_badge = false;
   presentation.card_network = false;
   presentation.card_fault = 0;
-  presentation.on_screen = 0;
-  int faults = 0;
-  const uint8_t first_fault = firstFault(faults);
-  const auto utc = context.utc;
-  const bool valid = context.valid;
-  // Each competition counts only on the screens it is switched on for
-  // (OQ-192). Konferenz members; the demo shows every match in kickoff
-  // order.
-  const auto conference = data.shown.only(cfg::CompetitionScreen::kConference);
-  football::view::List members;
-  if (model.demo) {
-    members = football::view::conferenceAll(data.store, conference);
-  } else if (valid) {
-    members = football::view::conferenceMembers(
-        data.store, conference, utc,
-        {model.window_before, model.window_after, model.whole_matchday});
-  }
-  // Every active competition opens the Konferenz (OQ-146).
-  const bool window = members.count > 0;
-  // Own match: the first in its window, else the nearest kickoff.
-  bool own_window = false;
-  const auto own_shown = data.shown.only(cfg::CompetitionScreen::kOwnMatch);
-  const int own_match = football::view::ownForScreen(
-      data.store, own_shown, valid ? utc : 0, model.window_before,
-      model.window_after, model.demo, own_window);
-  const bool chosen =
-      input_count && nav.manual &&
-      model.screens[static_cast<unsigned>(nav.selected)].enabled;
-  auto navigation = resolve(model, {data.configured, window, own_window,
-                                    nav.manual, input_count, nav.selected});
-  nav.default_screen = navigation.default_screen;
-  nav.selected = navigation.selected;
-  const Reason reason = chosen             ? Reason::kManual
-                        : !data.configured ? Reason::kSetup
-                        : own_window       ? Reason::kOwnMatch
-                        : window           ? Reason::kMatchday
-                                           : Reason::kIdle;
+  presentation.on_screen = nav.entry.competition;
+  const auto now = context.now, utc = context.utc;
+  const auto output = sequence::view(nav, navigation_data->input(), now);
+  const auto type = output.empty ? screen::Type::kCrest : output.entry.type;
+  view.screen = type;
+  setStyle(type);
+  const auto phase = navigation_data->selected.phase;
+  const Reason reason =
+      output.frame                                    ? Reason::kFrame
+      : output.manual                                 ? Reason::kManual
+      : !data.configured                              ? Reason::kSetup
+      : phase == settings::screen_policy::Phase::kOwn ? Reason::kOwnMatch
+      : phase == settings::screen_policy::Phase::kOtherGames
+          ? Reason::kOtherGames
+      : phase == settings::screen_policy::Phase::kMatchday ? Reason::kMatchday
+      : phase == settings::screen_policy::Phase::kBreak    ? Reason::kBreak
+                                                           : Reason::kIdle;
   presentation.screen_status =
-      static_cast<uint32_t>(nav.selected) | static_cast<uint32_t>(reason) << 8;
-  view.screen = nav.selected;
-  view.style = model.screens[static_cast<unsigned>(nav.selected)];
-  const auto now = context.now;
+      static_cast<uint32_t>(type) | static_cast<uint32_t>(reason) << 8;
+  int faults = 0;
+  firstFault(faults);
   if (presentation.starting) {
     const auto wifi = context.net->state;
     bool active = false;
-    settings::Competition entry;
-    for (std::size_t i = 0; !active && settings::competitionAt(i, entry); ++i)
-      active = entry.active;
-    // A failed step shows its state card instead (docs/UI.md "State cards").
+    for (const auto& entry : navigation_data->data.competitions.entries)
+      active |= entry.active;
     presentation.starting =
-        active && !model.demo && !context.ap && data.fetched_ms == 0 &&
-        faults == 0 && !networkFault(context) &&
+        active && !policy.frame && !model.demo && !context.ap &&
+        data.fetched_ms == 0 && faults == 0 && !networkFault(context) &&
         wifi != network::State::kBackoff &&
         wifi != network::State::kBackoffAuth &&
         wifi != network::State::kWaitSsid && wifi != network::State::kApOnly;
     if (presentation.starting) {
-      bindStart(!context.connected ? 0 : !valid ? 1 : 2);
+      bindStart(!context.connected ? 0 : !context.valid ? 1 : 2);
       return 0;
     }
   }
-  const bool data_screen = nav.selected != cfg::Screen::kCrest;
-  // Spieltag and Tabelle show a failing competition as its notice card in
-  // their cycle (OQ-278).
-  bool cycle_cards = false;
-  if (nav.selected == cfg::Screen::kMatchday ||
-      nav.selected == cfg::Screen::kTable) {
-    const auto cycle = data.shown.only(nav.selected == cfg::Screen::kMatchday
-                                           ? cfg::CompetitionScreen::kMatchday
-                                           : cfg::CompetitionScreen::kTable);
-    for (std::size_t i = 0; !cycle_cards && i < cycle.count(); ++i)
-      cycle_cards = faulted(cycle.at(i).competition);
-  }
-  if (!data.configured && context.ap) {
-    // First setup: how to reach the setup page.
+  if (!policy.frame && !data.configured && context.ap) {
     const auto& net = *context.net;
     char ssid[48];
     snprintf(ssid, sizeof(ssid), "\xC2\xBB %s", net.ap_ssid);
@@ -474,18 +429,30 @@ uint32_t Presenter::bind(const BindContext& context) {
       snprintf(view.card.title, sizeof(view.card.title),
                translated("%s gestört", "%s failed"),
                networkPhase(net.failure_step));
-      snprintf(view.card.hints[0], sizeof(view.card.hints[0]), "%s \xC2\xB7 %s",
+      snprintf(view.card.hints[0], sizeof(view.card.hints[0]), "%s · %s",
                translated("IP im Browser öffnen", "Open IP in browser"),
                network::initStepCode(net.failure_step));
     }
-  } else if (data.fetched_ms == 0 && !model.demo && networkFault(context)) {
+  } else if (!policy.frame && !model.demo && data.fetched_ms == 0 &&
+             networkFault(context)) {
     networkFaultCard(context);
-  } else if (data_screen && data.fetched_ms == 0 && !model.demo &&
-             !(context.connected && valid && cycle_cards)) {
-    // Data never loaded: say why instead of an empty screen.
-    presentation.card_network = !context.connected || !valid;
-    if (!context.connected) {
-      // Why, from the connection state (docs/UI.md "State cards").
+  } else if (output.empty) {
+    cardText(translated("Keine automatischen Inhalte", "No automatic content"),
+             translated("Anzeige im Web prüfen", "Check Display in Web UI"),
+             policy.frame ? translated("Bilder oder Wappen wählen",
+                                       "Select images or crest")
+                          : translated("Inhalte und Automatik prüfen",
+                                       "Check content and automatic rules"),
+             Tone::kNeutral);
+  } else if (screen::sporting(type) &&
+             content(nav.entry,
+                     nav.paged ? sequence::PageMode::kManualHeld
+                               : sequence::PageMode::kAutomatic,
+                     nav.page, navigation_data)
+                     .kind == sequence::ContentKind::kError) {
+    if (faulted(nav.entry.competition))
+      faultCard(nav.entry.competition, now, utc);
+    else if (!context.connected && !model.demo) {
       const auto why = network::offlineReason(context.net->state);
       cardText(translated("Kein WLAN", "No WiFi"),
                why == network::Reason::kNotFound
@@ -499,36 +466,44 @@ uint32_t Presenter::bind(const BindContext& context) {
                    ? nullptr
                    : translated("Neuer Versuch läuft", "Retrying"),
                Tone::kWarn);
-      if (context.ap && why != network::Reason::kSetup)
-        prefix<sizeof(view.card.hints[0]) - 1>(
-            view.card.hints[view.card.hint_count++],
-            translated("Setup-Netz aktiv", "Setup network on"));
-    } else if (!valid)
+      presentation.card_network = true;
+    } else if (!context.valid)
       cardText(translated("Warte auf Uhrzeit", "Waiting for time"),
                translated("Zeitserver wird gefragt", "Asking the time server"),
                nullptr, Tone::kWarn);
-    else if (faults == 0)
+    else
       cardText(translated("Keine Daten", "No data"),
-               translated("Lade Daten", "Loading data"), nullptr,
+               translated("Lade Daten", "Loading data"),
+               translated("Im Web Anbieter prüfen", "Check provider in Web UI"),
                Tone::kNeutral);
-    else
-      // After a failed attempt: which competition, why, the next attempt.
-      faultCard(first_fault, now, utc, translated("Keine Daten", "No data"));
-  } else if (nav.selected == cfg::Screen::kLiveSingle) {
-    if (own_match >= 0)
-      bindOwnMatch(data.store, data.store.match(own_match), own_shown, context);
-    else
-      cardText(translated("Eigenes Spiel", "Your match"),
-               translated("Kein Spiel", "No match"), nullptr, Tone::kNeutral);
-  } else if (nav.selected == cfg::Screen::kLiveMulti) {
-    bindConference(data.store, conference, members, context);
-  } else if (nav.selected == cfg::Screen::kMatchday) {
-    bindMatchday(data.store, data.shown.only(cfg::CompetitionScreen::kMatchday),
-                 context);
-  } else if (nav.selected == cfg::Screen::kTable) {
-    bindTables(data.store, data.shown.only(cfg::CompetitionScreen::kTable), now,
-               valid ? utc : 0);
+  } else if (type == screen::Type::kLiveSingle) {
+    const auto* c =
+        navigation_data->data.competitions.find(nav.entry.competition);
+    const auto chosen =
+        c ? football::selection::single(navigation_data->selection,
+                                        navigation_data->selected, *c)
+          : football::selection::Single{};
+    const auto* match =
+        football::selection::find(navigation_data->selection, chosen.match);
+    if (match) bindOwnMatch(data.store, *match, data.shown, context);
+  } else if (type == screen::Type::kLiveMulti) {
+    const auto members =
+        conferenceMembers(*navigation_data, nav.entry.competition);
+    bindConference(data.store, data.shown, members, context);
+  } else if (type == screen::Type::kMatchday) {
+    bindMatchday(data.store, data.shown, context);
+  } else if (type == screen::Type::kTable) {
+    const auto chosen =
+        tableSelection(*navigation_data, nav.entry,
+                       nav.paged ? sequence::PageMode::kManualHeld
+                                 : sequence::PageMode::kAutomatic,
+                       nav.page);
+    bindTable(data.store, chosen);
   }
+  view.page = static_cast<uint8_t>(std::min<uint16_t>(output.page, 255));
+  view.pages = policy.appearance[screen::index(type)].dots
+                   ? static_cast<uint8_t>(std::min<uint16_t>(output.pages, 255))
+                   : 0;
   return bindStatus(data, context);
 }
 }  // namespace ui

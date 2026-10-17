@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <utility>
 
 #include "civil_time.h"
+#include "screen_policy.h"
 
 namespace settings {
 
@@ -31,6 +33,21 @@ bool isDnsLabel(std::string_view label) {
   return !label.empty() && label.size() <= 63 && label.front() != '-' &&
          label.back() != '-' &&
          std::all_of(label.begin(), label.end(), isHostnameChar);
+}
+
+void includeImage(ImageMask& result, uint8_t id) {
+  if (id >= 1 && id <= cfg::kImageLibraryMax) result |= ImageMask{1} << id;
+}
+
+bool missingImage(uint8_t id, ImageMask present) {
+  return id != cfg::kStockImageId &&
+         (id > cfg::kImageLibraryMax || ((present >> id) & 1) == 0);
+}
+
+bool clearMissingImage(uint8_t& id, ImageMask present) {
+  if (!missingImage(id, present)) return false;
+  id = cfg::kStockImageId;
+  return true;
 }
 
 bool isPassphrase(std::string_view value) {
@@ -128,7 +145,8 @@ bool sameProviderData(const Competitions& a, const Competitions& b) noexcept {
   for (std::size_t i = 0; i < a.entries.size(); ++i) {
     const auto& x = a.entries[i];
     const auto& y = b.entries[i];
-    if (x.id != y.id || x.active != y.active || !(x.primary == y.primary))
+    if (x.id != y.id || x.incarnation != y.incarnation ||
+        x.active != y.active || !(x.primary == y.primary))
       return false;
   }
   return true;
@@ -152,16 +170,68 @@ void assignIds(Competitions& competitions) noexcept {
   }
 }
 
+bool assignIncarnations(Competitions& candidate, const Competitions& current,
+                        Violation* violation) noexcept {
+  if (candidate.entries.count > cfg::kCompetitionMax) {
+    if (violation != nullptr)
+      violation->set(FieldPath().key("competitions"), Reason::kTooMany);
+    return false;
+  }
+  // Mark new entries before assigning ids: a deleted id may be immediately
+  // reused by an id=0 entry, which must never inherit the old incarnation.
+  std::array<bool, cfg::kCompetitionMax> fresh{};
+  for (std::size_t i = 0; i < candidate.entries.size(); ++i) {
+    const auto& entry = candidate.entries[i];
+    fresh[i] = entry.id == 0 || current.find(entry.id) == nullptr;
+  }
+  candidate.next_id = current.next_id;
+  candidate.next_incarnation = current.next_incarnation;
+  assignIds(candidate);
+  for (std::size_t i = 0; i < candidate.entries.size(); ++i) {
+    auto& entry = candidate.entries[i];
+    if (!fresh[i]) {
+      entry.incarnation = current.find(entry.id)->incarnation;
+      continue;
+    }
+    if (candidate.next_incarnation == 0 ||
+        candidate.next_incarnation == std::numeric_limits<uint32_t>::max()) {
+      if (violation != nullptr)
+        violation->set(
+            FieldPath().key("competitions").index(i).key("incarnation"),
+            Reason::kRange);
+      return false;
+    }
+    entry.incarnation = candidate.next_incarnation++;
+  }
+  return true;
+}
+
+bool reserveIncarnationFloor(Competitions& competitions, uint32_t highwater,
+                             bool provisional) noexcept {
+  if (highwater == 0) return true;
+  constexpr uint64_t maximum = std::numeric_limits<uint32_t>::max();
+  const uint64_t next = std::max<uint64_t>(competitions.next_incarnation,
+                                           uint64_t{highwater} + 1);
+  const uint64_t count = provisional ? competitions.entries.size() : 0;
+  if (next > maximum || count > maximum - next) {
+    competitions.next_incarnation = static_cast<uint32_t>(maximum);
+    // Existing stored entries remain safe; only fresh/provisional identities
+    // need an unreserved value. Never wrap to the fallback value 1.
+    return !provisional || competitions.entries.empty();
+  }
+  uint32_t allocated = static_cast<uint32_t>(next);
+  if (provisional)
+    for (auto& entry : competitions.entries) entry.incarnation = allocated++;
+  competitions.next_incarnation = allocated;
+  return true;
+}
+
 bool providerUsable(cfg::Provider provider, const Model& model) noexcept {
   switch (provider) {
-    case cfg::Provider::kEspn:
-      return model.espn_opt_in;
-    case cfg::Provider::kApiFootball:
-      return !model.api_football_key.empty();
-    case cfg::Provider::kFootballData:
-      return !model.football_data_key.empty();
-    default:
-      return true;
+    case cfg::Provider::kEspn: return model.espn_opt_in;
+    case cfg::Provider::kApiFootball: return !model.api_football_key.empty();
+    case cfg::Provider::kFootballData: return !model.football_data_key.empty();
+    default: return true;
   }
 }
 
@@ -237,8 +307,6 @@ bool checkSources(Checker& check, const Competitions& competitions) {
     for (unsigned j = 0; j < i; ++j)
       if (competitions.entries[j].id == entry.id)
         return check.fail(at.with("id"), Reason::kDuplicate);
-    if (entry.screens >> cfg::kCompetitionScreenCount)
-      return check.fail(at.with("screens"), Reason::kRange);
     const auto primary = at.with("primary");
     if (entry.primary.competition.empty())
       return check.fail(FieldPath(primary).with("competition"),
@@ -252,55 +320,24 @@ bool checkSources(Checker& check, const Competitions& competitions) {
   return true;
 }
 
-bool checkImages(Checker& check, const Model& model) {
-  for (unsigned i = 0; i < model.slides.size(); ++i)
-    if (model.slides[i] > cfg::kImageLibraryMax)
-      return check.fail(FieldPath().with("slides").index(i), Reason::kRange);
-  bool enabled = false;
-  for (unsigned i = 0; i < model.screens.size(); ++i) {
-    const auto& style = model.screens[i];
-    FieldPath at;
-    at.key("screens").index(i);
-    enabled |= style.enabled;
-    if (style.colour > 0xffffff)
-      return check.fail(at.with("colour"), Reason::kRange);
-    if (style.text > 0xffffff)
-      return check.fail(at.with("text"), Reason::kRange);
-    if (style.accent > 0xffffff)
-      return check.fail(at.with("accent"), Reason::kRange);
-    if (!cfg::kTextScaleRange.contains(style.text_scale))
-      return check.fail(at.with("text_scale"), Reason::kRange);
-    if (style.image > cfg::kImageLibraryMax)
-      return check.fail(at.with("image"), Reason::kRange);
-  }
-  // The crest screen shows the crest, never a background image.
-  if (model.screens[static_cast<unsigned>(cfg::Screen::kCrest)].image !=
-      cfg::kStockImageId)
-    return check.fail(FieldPath().key("screens").index(
-                          static_cast<unsigned>(cfg::Screen::kCrest))
-                          .key("image"),
-                      Reason::kInvalid);
-  if (!enabled) return check.fail(FieldPath().with("screens"), Reason::kNoneEnabled);
-  return true;
-}
-
-// Every slot holds a known role; exactly one of the profile's inputs carries
-// the mandatory one-key set (OQ-141). A target without inputs has no rule.
 bool checkInputs(Checker& check, const Model& model, std::size_t inputs) {
   const auto at = FieldPath().with("input_roles");
   unsigned mandatory = 0;
   for (unsigned i = 0; i < model.input_roles.size(); ++i) {
     if (model.input_roles[i] > cfg::kInputRoleLast)
       return check.fail(at.withIndex(i), Reason::kRange);
-    if (i < inputs) mandatory += model.input_roles[i] == cfg::InputRole::kMandatory;
+    if (i < inputs)
+      mandatory += model.input_roles[i] == cfg::InputRole::kMandatory;
   }
   if (inputs > 0 && mandatory != 1)
-    return check.fail(at, mandatory == 0 ? Reason::kRequired : Reason::kConflict);
+    return check.fail(at,
+                      mandatory == 0 ? Reason::kRequired : Reason::kConflict);
   return true;
 }
 
 // A window limit needs both values or none (OQ-225).
-bool checkLimit(Checker& check, const FieldPath& at, const RequestLimit& limit) {
+bool checkLimit(Checker& check, const FieldPath& at,
+                const RequestLimit& limit) {
   if (!cfg::kDailyRequestsRange.contains(limit.daily))
     return check.fail(at.with("daily_requests"), Reason::kRange);
   if (!cfg::kWindowRequestsRange.contains(limit.window_requests))
@@ -308,9 +345,9 @@ bool checkLimit(Checker& check, const FieldPath& at, const RequestLimit& limit) 
   if (!cfg::kWindowRange.contains(limit.window_s))
     return check.fail(at.with("window_s"), Reason::kRange);
   if ((limit.window_requests == 0) != (limit.window_s == 0))
-    return check.fail(at.with(limit.window_s == 0 ? "window_s"
-                                                  : "window_requests"),
-                      Reason::kRequired);
+    return check.fail(
+        at.with(limit.window_s == 0 ? "window_s" : "window_requests"),
+        Reason::kRequired);
   return true;
 }
 
@@ -323,9 +360,10 @@ bool checkRequestPlans(Checker& check, const Model& model) {
     for (unsigned t = 0; t < plan.interval_s.size(); ++t)
       if (plan.interval_s[t] < cfg::kIntervalMinS ||
           plan.interval_s[t] > cfg::kIntervalMaxS)
-        return check.fail(at.with("intervals").with(dataTypeName(
-                              static_cast<cfg::DataType>(t))),
-                          Reason::kRange);
+        return check.fail(
+            at.with("intervals")
+                .with(dataTypeName(static_cast<cfg::DataType>(t))),
+            Reason::kRange);
   }
   return checkLimit(check, FieldPath().with("global_limit"),
                     model.global_limit);
@@ -344,7 +382,6 @@ const char* reasonName(Reason reason) noexcept {
     case Reason::kRequired: return "required";
     case Reason::kDuplicate: return "duplicate";
     case Reason::kConflict: return "conflict";
-    case Reason::kNoneEnabled: return "none_enabled";
   }
   return "invalid";
 }
@@ -359,73 +396,39 @@ bool validate(const Model& model, Field* invalid, Violation* violation,
     return check.fail(FieldPath().with(name), Reason::kInvalid);
   };
   // Any SSID byte sequence up to its capacity is valid.
-  bool ok =
-      core(Field::kWifiPassword, "wifi_password",
-           isValidWifiPassword(model.wifi_password.view())) &&
-      core(Field::kApPassword, "ap_password",
-           isValidApPassword(model.ap_password.view())) &&
-      core(Field::kHostname, "hostname", isValidHostname(model.hostname.view())) &&
-      core(Field::kDebugStatusIntervalS, "debug_status_interval_s",
-           isValidStatusInterval(model.debug_status_interval_s)) &&
-      core(Field::kTimeZone, "time_zone", isValidTimeZone(model.time_zone.view())) &&
-      core(Field::kNtpServer, "ntp_server",
-           isValidNtpServer(model.ntp_server.view()));
+  bool ok = core(Field::kWifiPassword, "wifi_password",
+                 isValidWifiPassword(model.wifi_password.view())) &&
+            core(Field::kApPassword, "ap_password",
+                 isValidApPassword(model.ap_password.view())) &&
+            core(Field::kHostname, "hostname",
+                 isValidHostname(model.hostname.view())) &&
+            core(Field::kDebugStatusIntervalS, "debug_status_interval_s",
+                 isValidStatusInterval(model.debug_status_interval_s)) &&
+            core(Field::kTimeZone, "time_zone",
+                 isValidTimeZone(model.time_zone.view())) &&
+            core(Field::kNtpServer, "ntp_server",
+                 isValidNtpServer(model.ntp_server.view()));
   if (ok) {
-    const cfg::Range visible{
-        cfg::kVisibleMatchesRange.min,
-        std::min<uint16_t>(cfg::kVisibleMatchesRange.max,
-                           limits.visible_matches_max)};
-    const cfg::Range window{
-        cfg::kTableWindowRange.min,
-        std::min<uint16_t>(cfg::kTableWindowRange.max,
-                           limits.table_window_max)};
-    const cfg::Range screens{0, static_cast<uint16_t>(cfg::kScreenCount - 1)};
-    // While other matches run the own club does not play (OQ-122).
-    const cfg::Range matchday{static_cast<uint16_t>(cfg::Screen::kLiveMulti),
-                              screens.max};
-    ok =
-        check.invalid("admin_password", model.admin_password.view().find(
-                                            '\0') == std::string_view::npos) &&
-        check.invalid("api_football_key",
-                      isHeaderValue(model.api_football_key.view())) &&
-        check.invalid("football_data_key",
-                      isHeaderValue(model.football_data_key.view())) &&
-        check.range("language", {0, 1}, model.language) &&
-        check.range("rotation", cfg::kRotationRange, model.rotation) &&
-        check.range("brightness", cfg::kBrightnessRange, model.brightness) &&
-        check.range("night_brightness", cfg::kBrightnessRange,
-                    model.night_brightness) &&
-        check.range("visible_matches", visible, model.visible_matches) &&
-        check.range("table_window", window, model.table_window) &&
-        check.range("manual_return_s", cfg::kReturnTimeRange,
-                    model.manual_return_s) &&
-        check.range("scroll_reset_s", cfg::kReturnTimeRange,
-                    model.scroll_reset_s) &&
-        check.range("scroll_repeat_ms", cfg::kScrollRepeatRange,
-                    model.scroll_repeat_ms) &&
-        check.range("slideshow_s", cfg::kSlideshowRange, model.slideshow_s) &&
-        check.range("table_page_s", cfg::kTablePageRange, model.table_page_s) &&
-        check.range("night_start", cfg::kDayMinutesRange, model.night_start) &&
-        check.range("night_end", cfg::kDayMinutesRange, model.night_end) &&
-        check.range("ip_badge_s", cfg::kReturnTimeRange, model.ip_badge_s) &&
-        check.range("window_before", cfg::kMatchWindowRange,
-                    model.window_before) &&
-        check.range("window_after", cfg::kMatchWindowRange,
-                    model.window_after) &&
-        check.range("idle_screen", screens,
-                    static_cast<unsigned>(model.idle_screen)) &&
-        check.range("matchday_screen", matchday,
-                    static_cast<unsigned>(model.matchday_screen)) &&
-        check.range("own_match_screen", screens,
-                    static_cast<unsigned>(model.own_match_screen)) &&
-        check.range("conference_mode",
-                    {0, static_cast<uint16_t>(cfg::ConferenceMode::kOnePage)},
-                    static_cast<unsigned>(model.conference_mode)) &&
-        check.range("matchday_mode",
-                    {0, static_cast<uint16_t>(cfg::MatchdayMode::kNext)},
-                    static_cast<unsigned>(model.matchday_mode)) &&
-        checkInputs(check, model, limits.inputs) &&
-        checkRequestPlans(check, model) && checkImages(check, model);
+    ok = check.invalid("admin_password", model.admin_password.view().find(
+                                             '\0') == std::string_view::npos) &&
+         check.invalid("api_football_key",
+                       isHeaderValue(model.api_football_key.view())) &&
+         check.invalid("football_data_key",
+                       isHeaderValue(model.football_data_key.view())) &&
+         check.range("language", {0, 1}, model.language) &&
+         check.range("rotation", cfg::kRotationRange, model.rotation) &&
+         check.range("brightness", cfg::kBrightnessRange, model.brightness) &&
+         check.range("night_brightness", cfg::kBrightnessRange,
+                     model.night_brightness) &&
+         check.range("scroll_reset_s", cfg::kReturnTimeRange,
+                     model.scroll_reset_s) &&
+         check.range("scroll_repeat_ms", cfg::kScrollRepeatRange,
+                     model.scroll_repeat_ms) &&
+         check.range("night_start", cfg::kDayMinutesRange, model.night_start) &&
+         check.range("night_end", cfg::kDayMinutesRange, model.night_end) &&
+         check.range("ip_badge_s", cfg::kReturnTimeRange, model.ip_badge_s) &&
+         checkInputs(check, model, limits.inputs) &&
+         checkRequestPlans(check, model);
   }
   if (ok) return true;
   if (invalid != nullptr) *invalid = bad;
@@ -434,37 +437,41 @@ bool validate(const Model& model, Field* invalid, Violation* violation,
 
 bool validate(const Competitions& competitions, Violation* violation) noexcept {
   Checker check(violation);
-  return checkSources(check, competitions);
+  if (!checkSources(check, competitions)) return false;
+  if (competitions.next_incarnation == 0)
+    return check.fail(FieldPath().key("next_incarnation"), Reason::kRange);
+  for (unsigned i = 0; i < competitions.entries.size(); ++i) {
+    const auto value = competitions.entries[i].incarnation;
+    const auto at = FieldPath().key("competitions").index(i).key("incarnation");
+    if (value == 0 || value >= competitions.next_incarnation)
+      return check.fail(at, Reason::kRange);
+    for (unsigned previous = 0; previous < i; ++previous)
+      if (competitions.entries[previous].incarnation == value)
+        return check.fail(at, Reason::kDuplicate);
+  }
+  return true;
 }
 
-ImageMask referencedImages(const Model& model) noexcept {
+ImageMask referencedImages(const screen_policy::Policy& policy) noexcept {
   ImageMask result = 0;
-  const auto include = [&](uint8_t id) {
-    if (id >= 1 && id <= cfg::kImageLibraryMax) result |= ImageMask{1} << id;
-  };
-  for (const auto& style : model.screens) include(style.image);
-  for (const uint8_t id : model.slides) include(id);
+  for (const auto& style : policy.appearance) includeImage(result, style.image);
+  for (unsigned i = 0; i < policy.slide_count; ++i)
+    includeImage(result, policy.slides[i]);
   return result;
 }
 
-bool dropMissingImages(Model& model, ImageMask present) noexcept {
-  const auto missing = [present](uint8_t id) {
-    return id != cfg::kStockImageId &&
-           (id > cfg::kImageLibraryMax || ((present >> id) & 1) == 0);
-  };
+bool dropMissingImages(screen_policy::Policy& policy,
+                       ImageMask present) noexcept {
   bool changed = false;
-  const auto replace = [&](uint8_t& id) {
-    if (!missing(id)) return;
-    id = cfg::kStockImageId;
-    changed = true;
-  };
-  for (auto& style : model.screens) replace(style.image);
-  // Slide 0 is the crest, never a missing image.
-  decltype(model.slides) kept;
-  for (const uint8_t id : model.slides)
-    if (!missing(id)) kept.push(id);
-  if (kept.size() != model.slides.size()) {
-    model.slides = kept;
+  for (auto& style : policy.appearance)
+    changed |= clearMissingImage(style.image, present);
+  uint8_t kept = 0;
+  for (unsigned i = 0; i < policy.slide_count; ++i)
+    if (!missingImage(policy.slides[i], present))
+      policy.slides[kept++] = policy.slides[i];
+  if (kept != policy.slide_count) {
+    std::fill(policy.slides.begin() + kept, policy.slides.end(), 0);
+    policy.slide_count = kept;
     changed = true;
   }
   return changed;
@@ -473,11 +480,6 @@ bool dropMissingImages(Model& model, ImageMask present) noexcept {
 Model initialValues(const Presets& presets, FieldMask* rejected,
                     const Limits& limits) noexcept {
   Model model;
-  // A default above the display's capacity would never validate.
-  model.visible_matches =
-      std::min<uint8_t>(model.visible_matches, limits.visible_matches_max);
-  model.table_window =
-      std::min<uint8_t>(model.table_window, limits.table_window_max);
   model.input_roles = inputRolesDefault(limits.inputs);
   model.hostname.assign(cfg::kHostnameDefault);
   model.external_antenna = cfg::kExternalAntennaDefault;
@@ -554,6 +556,7 @@ void initialCompetitions(const Presets& presets, Competitions& competitions,
   if (!entry.primary.competition.empty()) {
     competitions.entries.push(entry);
     assignIds(competitions);
+    competitions.entries[0].incarnation = competitions.next_incarnation++;
     if (!validate(competitions)) {
       competitions.clear();
       skipped |= fieldBit(Field::kApplication);

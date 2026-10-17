@@ -35,6 +35,7 @@
 #include "ota_service.h"
 #include "provider_client.h"
 #include "request_budget.h"
+#include "screen_json.h"
 #include "session_table.h"
 #include "settings_json.h"
 #include "settings_store.h"
@@ -200,6 +201,8 @@ inline constexpr Fault kScreenshotUnavailable{
 // The Web UI waits for the running job and then sends again.
 inline constexpr Fault kSelectionBusy{"409 Conflict", "busy", "selection busy"};
 inline constexpr Fault kChanged{"409 Conflict", "changed", "selection changed"};
+inline constexpr Fault kSettingsChanged{"409 Conflict", "settings_changed",
+                                        "settings changed; reload the draft"};
 inline constexpr Fault kUnknownRoute{"404 Not Found", "unknown_route",
                                      "unknown route"};
 inline constexpr Fault kMethod{"405 Method Not Allowed", "method",
@@ -559,11 +562,65 @@ esp_err_t getSettings(httpd_req_t* req) {
   settingsJson(d.doc.to<JsonObject>(), settings::current());
   return json(req, d.doc);
 }
+settings::screen_policy::Limits screenLimits() {
+  const auto& limits = settings::limits();
+  return {limits.visible_matches_max, limits.table_window_max};
+}
+esp_err_t getScreenPolicy(httpd_req_t* req) {
+  Request request(req);
+  // Share the existing provider/storage token before receiving or allocating
+  // the complete policy DOM. A busy response is retryable without a save.
+  network::HeavyGuard guard;
+  if (!guard) return error(req, fault::kBusy);
+  auto policy = std::unique_ptr<settings::screen_policy::Policy>(
+      new (std::nothrow) settings::screen_policy::Policy);
+  if (!policy) return failed(req, ESP_ERR_NO_MEM);
+  uint32_t generation;
+  settings::screenPolicy(*policy, &generation);
+  Doc d;
+  screenPolicyJson(d.doc.to<JsonObject>(), *policy, generation);
+  return json(req, d.doc);
+}
+esp_err_t putScreenPolicy(httpd_req_t* req) {
+  Request request(req);
+  // Share the existing provider/storage token before receiving or allocating
+  // the complete policy DOM. A busy response is retryable without a save.
+  network::HeavyGuard guard;
+  if (!guard) return error(req, fault::kBusy);
+  Doc d;
+  if (const auto* f = admit(req, d.doc, nullptr, true)) return error(req, *f);
+  auto policy = std::unique_ptr<settings::screen_policy::Policy>(
+      new (std::nothrow) settings::screen_policy::Policy);
+  if (!policy) return failed(req, ESP_ERR_NO_MEM);
+  uint32_t generation;
+  settings::Violation why;
+  if (!applyScreenPolicyJson(d.doc.as<JsonObjectConst>(), *policy, generation,
+                             &why, screenLimits()))
+    return rejected(req, why);
+  // The candidate owns its values. Release the input DOM before encoding the
+  // record; the request body has already been released by receive().
+  d.doc.clear();
+  settings::screen_policy::Error validation;
+  const auto err =
+      settings::saveScreenPolicy(*policy, &validation, &generation);
+  if (err == ESP_ERR_INVALID_ARG) {
+    screenPolicyViolation(validation, why);
+    return rejected(req, why);
+  }
+  if (err == ESP_ERR_INVALID_STATE && settings::generation() != generation)
+    return error(req, fault::kSettingsChanged);
+  if (err != ESP_OK) return failed(req, err);
+  // The caller reads a fresh policy/token after the acknowledgement. A token
+  // read separately here could belong to a later concurrent settings save.
+  return ok(req, d.doc);
+}
 esp_err_t getSchema(httpd_req_t* req) {
   Request request(req);
   Doc d;
   auto out = d.doc.to<JsonObject>();
-  schemaJson(out, settings::limits());
+  schemaJson(out, settings::limits(),
+             hw::kTarget.wiring.backlight != hw::kNoPin);
+  screenPolicySchemaJson(out["screen_policy"].to<JsonObject>(), screenLimits());
   out["width"] = hw::kDisplay.width;
   out["height"] = hw::kDisplay.height;
   out["round"] = hw::kDisplay.shape == hw::DisplayShape::kRound;
@@ -580,7 +637,10 @@ esp_err_t getStatus(httpd_req_t* req) {
   Doc d;
   auto out = d.doc.to<JsonObject>();
   const auto net = network::status();
-  const auto data = football::status();
+  time_t utc = 0;
+  timekeeping::utcNow(utc);
+  football::Status data{};
+  const auto overview = football::overview(utc, &data);
   files::Usage usage{};
   files::usage(usage);
   const auto* description = esp_app_get_description();
@@ -658,6 +718,9 @@ esp_err_t getStatus(httpd_req_t* req) {
   out["settings_source"] = settings::originName(settings::origin());
   out["competitions_source"] =
       settings::originName(settings::competitionsOrigin());
+  out["screen_policy_source"] =
+      settings::originName(settings::screenPolicyOrigin());
+  out["football_paused"] = settings::footballPaused();
   out["provider_started"] = data.started;
   out["provider_busy"] = data.busy;
   out["last_update_ms"] = data.fetched_ms;
@@ -666,20 +729,22 @@ esp_err_t getStatus(httpd_req_t* req) {
   out["next_request_reason"] = football::cadenceName(data.cadence);
   auto counts = out["requests"].to<JsonArray>();
   for (auto count : data.requests) counts.add(count);
-  // What the display shows and why (OQ-91). 'screen' is the index of the
-  // screen in the settings' 'screens' array.
+  // Stable screen type identity; sequence order is independently editable.
+
   const auto shown = ui::status();
   out["screen"] = static_cast<uint8_t>(shown.screen);
   out["screen_reason"] = ui::reasonName(shown.reason);
   out["screen_starting"] = shown.starting;
+  out["screen_manual"] = shown.manual;
+  out["screen_frame"] = shown.frame;
+  out["screen_phase"] = shown.phase;
+  out["screen_automatic_entries"] = shown.automatic_entries;
   // The club's current or next match and the state of each competition.
-  time_t utc = 0;
-  timekeeping::utcNow(utc);
-  const auto overview = football::overview(utc);
+  out["demo"] = overview.demo;
   auto own = out["own_match"].to<JsonObject>();
   own["present"] = overview.own.present;
   if (overview.own.present) {
-    own["competition"] = settings::competitionId(overview.own.route);
+    own["competition"] = overview.own.competition;
     own["phase"] = football::phaseName(overview.own.phase);
     if (overview.own.kickoff) own["kickoff"] = overview.own.kickoff;
     if (overview.own.home_goals >= 0) own["home_goals"] = overview.own.home_goals;
@@ -691,10 +756,15 @@ esp_err_t getStatus(httpd_req_t* req) {
   // One row per competition in list order, with its id.
   auto routes = out["competitions"].to<JsonArray>();
   for (std::size_t i = 0; i < cfg::kCompetitionMax; ++i) {
-    const uint8_t id = settings::competitionId(i);
+    const uint8_t id = overview.routes[i].id;
     if (id == 0) break;
     auto row = routes.add<JsonObject>();
     row["id"] = id;
+    if (overview.demo && i < overview.demo_bindings.size()) {
+      const auto& binding = overview.demo_bindings[i];
+      row["incarnation"] = binding.incarnation;
+      row["bound"] = binding.saved;
+    }
     row["matches"] = overview.routes[i].matches;
     row["provider"] = football::providerName(overview.routes[i].provider);
     // Why the competition has no current data (OQ-280): the stable key for
@@ -1171,16 +1241,14 @@ esp_err_t repairImages(httpd_req_t* req) {
   if (const auto* f = admit(req, d.doc, nullptr, true)) return error(req, *f);
   if (!sameText(d.doc["confirm"].as<JsonString>(), "repair"))
     return invalid(req, Reason::kInvalid, "confirmation required", "confirm");
+  // Release the admitted request DOM before either record candidate/encoder.
+  d.doc.clear();
   network::HeavyGuard guard;
   if (!guard) return error(req, fault::kBusy);
   const auto formatted = images::format();
   if (formatted != ESP_OK) return failed(req, formatted);
   football::filesLost();
-  auto model = settings::current();
-  esp_err_t saved = ESP_OK;
-  if (settings::dropMissingImages(model, images::present()))
-    saved = settings::save(model);
-  d.doc.clear();
+  const auto saved = settings::dropMissingImages(images::present());
   d.doc["storage_formatted"] = true;
   if (saved != ESP_OK) {
     ESP_LOGW("web", "image storage formatted; reference save failed: %s",
@@ -1292,6 +1360,12 @@ esp_err_t postDisplay(httpd_req_t* req) {
     action = ui::Action::kNext;
   else if (sameText(name, "ip"))
     action = ui::Action::kShowIp;
+  else if (sameText(name, "auto_next")) {
+    if (!football::demoStatus().enabled)
+      return error(req, "409 Conflict", "demo_disabled",
+                   "enable and save demo mode before advancing automation");
+    action = ui::Action::kAutomaticNext;
+  }
   else
     return invalid(req, Reason::kInvalid, "display action rejected", "action");
   const auto err =
@@ -1300,6 +1374,68 @@ esp_err_t postDisplay(httpd_req_t* req) {
   // All queue slots for UI actions are taken: the display is busy.
   if (err == ESP_ERR_TIMEOUT) return error(req, fault::kBusy);
   return err == ESP_OK ? ok(req, d.doc) : failed(req, err);
+}
+
+void demoJson(JsonObject out) {
+  const auto status = football::demoStatus();
+  out["enabled"] = status.enabled;
+  out["pending"] = status.pending;
+  out["scenario"] = static_cast<uint8_t>(status.scenario);
+  out["step"] = status.step;
+  out["revision"] = status.revision;
+  out["utc"] = status.clock.utc;
+  auto bindings = out["bindings"].to<JsonArray>();
+  for (uint8_t i = 0; i < status.bindings.size(); ++i) {
+    const auto& binding = status.bindings[i];
+    auto row = bindings.add<JsonObject>();
+    row["dataset"] = i;
+    row["competition"] = binding.competition;
+    row["incarnation"] = binding.incarnation;
+    row["saved"] = binding.saved;
+  }
+  auto scenarios = out["scenarios"].to<JsonArray>();
+  for (uint8_t i = 0; i < football::demo::kScenarioCount; ++i) {
+    const auto scenario = static_cast<football::demo::Scenario>(i);
+    auto row = scenarios.add<JsonObject>();
+    row["id"] = i;
+    row["key"] = football::demo::key(scenario);
+    row["title"] = football::demo::title(scenario);
+    auto steps = row["steps"].to<JsonArray>();
+    for (uint8_t step = 0; step < football::demo::steps(scenario); ++step)
+      steps.add(football::demo::stepTitle(scenario, step));
+  }
+}
+esp_err_t getDemo(httpd_req_t* req) {
+  Request request(req);
+  Doc d;
+  demoJson(d.doc.to<JsonObject>());
+  return json(req, d.doc);
+}
+esp_err_t postDemo(httpd_req_t* req) {
+  Request request(req);
+  Doc d;
+  if (const auto* f = admit(req, d.doc, nullptr, true)) return error(req, *f);
+  for (const auto field : d.doc.as<JsonObjectConst>())
+    if (!sameText(field.key(), "scenario") && !sameText(field.key(), "step"))
+      return invalid(req, Reason::kUnknownKey, "unknown demo field",
+                     field.key().c_str());
+  Reason why;
+  if (!smallInt(d.doc["scenario"], football::demo::kScenarioCount - 1, why))
+    return invalid(req, why, "demo scenario required", "scenario");
+  const auto scenario =
+      static_cast<football::demo::Scenario>(d.doc["scenario"].as<uint8_t>());
+  if (!smallInt(d.doc["step"], football::demo::steps(scenario) - 1, why))
+    return invalid(req, why, "demo step required", "step");
+  const auto err =
+      football::demoScenario(scenario, d.doc["step"].as<uint8_t>());
+  if (err == ESP_ERR_TIMEOUT) return error(req, fault::kBusy);
+  if (err == ESP_ERR_INVALID_STATE)
+    return error(req, "409 Conflict", "demo_disabled",
+                 "enable and save demo mode before selecting a scenario");
+  if (err != ESP_OK) return failed(req, err);
+  d.doc.clear();
+  d.doc["accepted"] = true;
+  return json(req, d.doc);
 }
 
 // ---- Images ----------------------------------------------------------------
@@ -1312,9 +1448,13 @@ esp_err_t deleteImage(httpd_req_t* req) {
   if (!smallInt(d.doc["id"], cfg::kImageLibraryMax, why) ||
       d.doc["id"].as<uint8_t>() < 1)
     return invalid(req, why, "image id required", "id");
+  const auto id = d.doc["id"].as<uint8_t>();
+  // The bounded cleanup candidate/record must not overlap an input DOM
+  // inflated by unrelated request fields.
+  d.doc.clear();
   network::HeavyGuard guard;
   if (!guard) return error(req, fault::kBusy);
-  const auto err = images::remove(d.doc["id"].as<uint8_t>());
+  const auto err = images::remove(id);
   return err == ESP_OK ? ok(req, d.doc) : failed(req, err);
 }
 // {"role":"crest"|"background","action":"reset"} deletes the replacement, so
@@ -1716,6 +1856,8 @@ constexpr Route kRoutes[] = {
     {"/api/v1/status", HTTP_GET, getStatus, nullptr},
     {"/api/v1/schema", HTTP_GET, getSchema, nullptr},
     {"/api/v1/settings", HTTP_GET, getSettings, nullptr},
+    {"/api/v1/screen-settings", HTTP_GET, getScreenPolicy, nullptr},
+    {"/api/v1/demo", HTTP_GET, getDemo, nullptr},
     {"/api/v1/competitions", HTTP_GET, getCompetitions, nullptr},
     {"/api/v1/wifi", HTTP_GET, getWifi, nullptr},
     {"/api/v1/selection", HTTP_GET, getSelection, nullptr},
@@ -1727,6 +1869,7 @@ constexpr Route kRoutes[] = {
     {"/api/v1/logout", HTTP_POST, logout, nullptr},
     {"/api/v1/settings", HTTP_POST, putSettings, nullptr},
     {"/api/v1/settings", HTTP_PUT, putSettings, nullptr},
+    {"/api/v1/screen-settings", HTTP_PUT, putScreenPolicy, nullptr},
     {"/api/v1/competitions", HTTP_POST, putCompetitions, nullptr},
     {"/api/v1/competitions", HTTP_PUT, putCompetitions, nullptr},
     {"/api/v1/export", HTTP_POST, exportSettings, nullptr},
@@ -1736,6 +1879,7 @@ constexpr Route kRoutes[] = {
     {"/api/v1/teams", HTTP_POST, postTeam, nullptr},
     {"/api/v1/teams", HTTP_PUT, putTeams, nullptr},
     {"/api/v1/display", HTTP_POST, postDisplay, nullptr},
+    {"/api/v1/demo", HTTP_POST, postDemo, nullptr},
     {"/api/v1/screenshot", HTTP_POST, postScreenshot, nullptr},
     {"/api/v1/images/delete", HTTP_POST, deleteImage, nullptr},
     {"/api/v1/images/repair", HTTP_POST, repairImages, nullptr},

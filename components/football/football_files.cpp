@@ -9,8 +9,9 @@ namespace {
 constexpr uint32_t kMagic = 0x31434246;       // "FBC1"
 constexpr uint32_t kNamesMagic = 0x314e4246;  // "FBN1"
 // 2: one source per competition (OQ-247); 3: no core data, season time
-// (OQ-248, OQ-259).
-constexpr uint16_t kVersion = 3;
+// (OQ-248, OQ-259); 4: common own/ordinary details, first-live observation
+// and a canonical suspended phase. Earlier caches are refetched.
+constexpr uint16_t kVersion = 4;
 // The short-name file has its own version and layout (OQ-260): a change of
 // the competition files keeps the owner's short names.
 constexpr uint16_t kNamesVersion = 1;
@@ -24,8 +25,8 @@ struct Header {
   uint8_t teams, labels, matches, rows;
   SavedSource source;
 };
-// Follows an own match: its full names and event count; the events follow.
-struct OwnBlock {
+// Follows a detailed match: its full names/count, then its events.
+struct DetailBlock {
   Text<cfg::kNameBytes> home, away;
   uint8_t events;
 };
@@ -46,9 +47,9 @@ constexpr uint32_t mix(uint32_t h, std::size_t value) {
 constexpr uint32_t kLayout = [] {
   uint32_t h = 2166136261u;
   for (const std::size_t v :
-       {sizeof(Header), sizeof(OwnBlock), sizeof(StoredTeam), sizeof(Text<31>),
-        sizeof(StoredMatch), sizeof(StoredEvent), sizeof(StoredRow),
-        sizeof(SavedSource), cfg::kMatchEvents})
+       {sizeof(Header), sizeof(DetailBlock), sizeof(StoredTeam),
+        sizeof(Text<31>), sizeof(StoredMatch), sizeof(StoredEvent),
+        sizeof(StoredRow), sizeof(SavedSource), cfg::kMatchEvents})
     h = mix(h, v);
   return h;
 }();
@@ -108,7 +109,7 @@ bool validMatch(const StoredMatch& m, const Header& h) {
          index(m.home, h.teams) && index(m.away, h.teams) &&
          index(m.label, h.labels) &&
          static_cast<uint8_t>(m.phase) <=
-             static_cast<uint8_t>(Phase::kAbandoned);
+             static_cast<uint8_t>(Phase::kSuspended);
 }
 bool validEvent(const StoredEvent& e) {
   return static_cast<uint8_t>(e.type) <= static_cast<uint8_t>(EventType::kVar) &&
@@ -152,8 +153,8 @@ bool parse(In& in, Saved& out, MatchStore* store, const Clock& clock) {
   for (uint8_t i = 0; i < h.matches; ++i) {
     StoredMatch m;
     if (!in.get(&m, sizeof(m)) || !validMatch(m, h)) return false;
-    OwnBlock own;
-    const bool block = m.own != kNoIndex;
+    DetailBlock own;
+    const bool block = m.detail != kNoIndex;
     if (block) {
       if (!in.get(&own, sizeof(own)) || !terminated(own.home) ||
           !terminated(own.away) || own.events > cfg::kMatchEvents)
@@ -165,17 +166,20 @@ bool parse(In& in, Saved& out, MatchStore* store, const Clock& clock) {
       m.home = team(m.home);
       m.away = team(m.away);
       m.label = m.label == kNoIndex ? kNoIndex : labels[m.label];
-      m.own = kNoIndex;
+      m.detail = kNoIndex;
       m.score_changed = 0;
       stored = block ? store->upsert(m, clock, own.home.data, own.away.data)
                      : store->upsert(m, clock);
+      if (stored != nullptr && block)
+        stored = store->ensureDetail(m.competition, m.provider, m.id, clock,
+                                     own.home.data, own.away.data);
     }
     for (uint8_t k = 0; block && k < own.events; ++k) {
       StoredEvent e;
       if (!in.get(&e, sizeof(e)) || !validEvent(e)) return false;
       if (stored != nullptr) store->restoreEvent(*stored, e);
     }
-    if (stored != nullptr && stored->own != kNoIndex) stored->flags |= cut;
+    if (stored != nullptr && store->hasDetail(*stored)) stored->flags |= cut;
   }
   if (store != nullptr && h.rows > 0) store->beginTable(h.competition);
   bool rows_ok = true;
@@ -279,13 +283,12 @@ std::size_t encode(const MatchStore& store, const Saved& saved, Write write,
     m.away = team(m.away);
     m.label = m.label < cfg::kStoreRoundLabels ? label_map[m.label] : kNoIndex;
     m.score_changed = 0;
-    const bool block = stored.own < cfg::kStoreOwnMatches &&
-                       store.ownAt(stored.own).match == stored.id;
-    m.own = block ? 0 : kNoIndex;
+    const bool block = store.hasDetail(stored);
+    m.detail = block ? 0 : kNoIndex;
     out.put(&m, sizeof(m));
     if (!block) continue;
-    const auto& own = store.ownAt(stored.own);
-    OwnBlock b;
+    const auto& own = store.detailAt(stored.detail);
+    DetailBlock b;
     std::memset(static_cast<void*>(&b), 0, sizeof(b));
     b.home = own.home_name;
     b.away = own.away_name;

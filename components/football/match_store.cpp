@@ -11,7 +11,7 @@ namespace {
 
 // Marks an event added since beginEvents() until endEvents().
 constexpr uint8_t kPendingSlot = kNoIndex - 1;
-static_assert(cfg::kStoreOwnMatches < kPendingSlot);
+static_assert(cfg::kStoreDetailMatches < kPendingSlot);
 
 // Distance of a kickoff from 'utc'; an unknown kickoff counts as farthest.
 uint64_t distance(const StoredMatch& m, int64_t utc) {
@@ -23,6 +23,17 @@ uint64_t distance(const StoredMatch& m, int64_t utc) {
 // Sort key: kickoff, unknown kickoffs last.
 uint32_t sortKey(const StoredMatch& m) {
   return m.kickoff == 0 ? UINT32_MAX : m.kickoff;
+}
+
+std::size_t eventBegin(uint8_t slot) {
+  return slot < cfg::kStoreOwnMatches ? 0 : cfg::kStoreOwnEvents;
+}
+std::size_t eventEnd(uint8_t slot) {
+  return slot < cfg::kStoreOwnMatches ? cfg::kStoreOwnEvents
+                                      : cfg::kStoreEvents;
+}
+bool sameDetailBank(uint8_t a, uint8_t b) {
+  return (a < cfg::kStoreOwnMatches) == (b < cfg::kStoreOwnMatches);
 }
 
 // A match first seen finished gets 'clock.utc' as estimated final whistle,
@@ -43,6 +54,19 @@ void markFinished(StoredMatch& m, bool seen_running, const Clock& clock) {
 bool running(Phase p) {
   return p == Phase::kLive || p == Phase::kHalfTime ||
          p == Phase::kExtraTime || p == Phase::kPenalties;
+}
+
+int32_t civilDay(int64_t utc, const DateContext& dates) {
+  const int32_t offset = dates.offset_at ? dates.offset_at(utc, dates.context)
+                                         : dates.fallback_offset_s;
+  const int64_t local = utc + offset;
+  return static_cast<int32_t>(local >= 0 ? local / 86400
+                                         : (local - 86399) / 86400);
+}
+
+bool resultHeld(const StoredMatch& m, int64_t utc, const DateContext& dates) {
+  return m.phase == Phase::kFinished && m.finished_at != 0 && utc > 0 &&
+         civilDay(utc, dates) < civilDay(m.finished_at, dates) + 2;
 }
 
 void estimate(StoredMatch& m, int64_t utc) {
@@ -71,7 +95,7 @@ void estimate(StoredMatch& m, int64_t utc) {
 
 MatchStore::MatchStore() = default;
 
-// Rebuilt in place: a temporary store would need 22 KB of stack.
+// Rebuilt in place: never put a temporary complete store on the stack.
 void MatchStore::clear() {
   this->~MatchStore();
   new (this) MatchStore();
@@ -132,14 +156,14 @@ const StoredMatch* MatchStore::find(uint8_t competition,
 }
 
 void MatchStore::freeSlot(uint8_t slot) {
-  if (slot >= own_.size()) return;
+  if (slot >= details_.size()) return;
   for (auto& e : events_)
     if (e.slot == slot) e = {};
-  own_[slot] = {};
+  details_[slot] = {};
 }
 
 void MatchStore::removeMatch(std::size_t i) {
-  freeSlot(matches_[i].own);
+  freeSlot(matches_[i].detail);
   for (std::size_t j = i + 1; j < match_count_; ++j)
     matches_[j - 1] = matches_[j];
   matches_[--match_count_] = {};
@@ -151,34 +175,71 @@ std::size_t MatchStore::sortedPosition(const StoredMatch& m) const {
   return at;
 }
 
-uint8_t MatchStore::ownSlot(const StoredMatch& m, int64_t utc) {
-  for (std::size_t i = 0; i < own_.size(); ++i)
-    if (own_[i].match == 0) return static_cast<uint8_t>(i);
-  // Full: take the slot of the own match farthest from now when 'm' is
-  // nearer; a slot whose match is gone is free.
+uint8_t MatchStore::detailSlot(const StoredMatch& m, int64_t utc,
+                               bool requested) {
+  const std::size_t first = m.isOwn() ? 0 : cfg::kStoreOwnMatches;
+  const std::size_t end = m.isOwn() ? cfg::kStoreOwnMatches : details_.size();
+  // An ordinary Single has one explicit target per competition. Replacing
+  // that target must not displace another competition's requested Single.
   int victim = -1, victim_row = -1;
   uint64_t farthest = 0;
-  for (std::size_t i = 0; i < own_.size(); ++i) {
+  bool same_competition = false;
+  int free = -1;
+  for (std::size_t i = first; i < end; ++i) {
     int row = -1;
     for (std::size_t j = 0; j < match_count_ && row < 0; ++j)
-      if (matches_[j].own == i) row = static_cast<int>(j);
+      if (matches_[j].detail == i) row = static_cast<int>(j);
     if (row < 0) {
       freeSlot(static_cast<uint8_t>(i));
-      return static_cast<uint8_t>(i);
+      if (free < 0) free = static_cast<int>(i);
+      continue;
     }
     const auto d = distance(matches_[row], utc);
-    if (victim < 0 || d > farthest) {
+    const bool same =
+        requested && !m.isOwn() && matches_[row].competition == m.competition;
+    if (victim < 0 || (same && !same_competition) ||
+        (same == same_competition && d > farthest)) {
       victim = static_cast<int>(i);
       victim_row = row;
       farthest = d;
+      same_competition = same;
     }
   }
-  if (utc == 0 || distance(m, utc) >= farthest) return kNoIndex;
+  if (!same_competition && free >= 0) return static_cast<uint8_t>(free);
+  if (victim < 0 || (!requested && (utc == 0 || distance(m, utc) >= farthest)))
+    return kNoIndex;
   auto& row = matches_[victim_row];
-  row.own = kNoIndex;
+  row.detail = kNoIndex;
   row.flags &= ~(kMatchEventsTruncated | kMatchEventsPoolCut);
   freeSlot(static_cast<uint8_t>(victim));
   return static_cast<uint8_t>(victim);
+}
+
+bool MatchStore::hasDetail(const StoredMatch& m) const {
+  return m.detail < details_.size() &&
+         (m.detail < cfg::kStoreOwnMatches) == m.isOwn() &&
+         details_[m.detail].match == m.id &&
+         details_[m.detail].competition == m.competition;
+}
+
+StoredMatch* MatchStore::ensureDetail(uint8_t competition,
+                                      cfg::Provider provider, uint32_t id,
+                                      const Clock& clock,
+                                      std::string_view home_name,
+                                      std::string_view away_name) {
+  const int at = matchIndex(competition, provider, id);
+  if (at < 0) return nullptr;
+  auto& m = matches_[at];
+  if (!hasDetail(m)) {
+    m.detail = detailSlot(m, clock.utc, !m.isOwn());
+    if (m.detail == kNoIndex) return nullptr;
+  }
+  auto& detail = details_[m.detail];
+  detail.match = m.id;
+  detail.competition = m.competition;
+  if (!home_name.empty()) detail.home_name.assign(home_name);
+  if (!away_name.empty()) detail.away_name.assign(away_name);
+  return &m;
 }
 
 StoredMatch* MatchStore::upsert(const StoredMatch& incoming,
@@ -187,7 +248,7 @@ StoredMatch* MatchStore::upsert(const StoredMatch& incoming,
                                 std::string_view away_name) {
   if (incoming.id == 0) return nullptr;
   StoredMatch m = incoming;
-  m.own = kNoIndex;
+  m.detail = kNoIndex;
   m.flags &= ~(kMatchEventsTruncated | kMatchEventsPoolCut);
   uint8_t slot = kNoIndex;
   bool seen_running = false;
@@ -198,7 +259,17 @@ StoredMatch* MatchStore::upsert(const StoredMatch& incoming,
     if (m.principal.valid() && prior.principal.valid() &&
         !(m.principal == prior.principal))
       m.score_changed = clock.mono_s ? clock.mono_s : 1;
-    seen_running = running(prior.phase);
+    seen_running = running(prior.phase) || (prior.phase == Phase::kSuspended &&
+                                            prior.first_live_observed_utc != 0);
+    if (running(m.phase) || m.phase == Phase::kSuspended) {
+      if (prior.first_live_observed_utc != 0)
+        m.first_live_observed_utc = prior.first_live_observed_utc;
+      if (m.phase == Phase::kSuspended && m.minute == kNoValue) {
+        m.minute = prior.minute;
+        m.estimated = (m.estimated & ~kEstimatedMinute) |
+                      (prior.estimated & kEstimatedMinute);
+      }
+    }
     // The final whistle belongs to a finished match only: a provider that
     // reports the match running again (a correction or a restart) drops it.
     if (m.phase == Phase::kFinished && m.finished_at == 0 &&
@@ -207,11 +278,18 @@ StoredMatch* MatchStore::upsert(const StoredMatch& incoming,
       m.estimated = (m.estimated & ~kEstimatedFinish) |
                     (prior.estimated & kEstimatedFinish);
     }
-    slot = prior.own;
+    slot = prior.detail;
     m.flags |= prior.flags & (kMatchEventsTruncated | kMatchEventsPoolCut);
-    prior.own = kNoIndex;  // the slot moves with the match
+    prior.detail = kNoIndex;  // the slot moves with the match
     removeMatch(static_cast<std::size_t>(at));
   }
+  if (running(m.phase) && !(m.estimated & kEstimatedPhase) &&
+      m.first_live_observed_utc == 0 && clock.utc > 0 &&
+      clock.utc <= UINT32_MAX)
+    m.first_live_observed_utc = static_cast<uint32_t>(clock.utc);
+  if (m.phase == Phase::kScheduled || m.phase == Phase::kPostponed ||
+      m.phase == Phase::kCancelled || m.phase == Phase::kAbandoned)
+    m.first_live_observed_utc = 0;
   markFinished(m, seen_running, clock);
   if (match_count_ == matches_.size()) {
     // Full: remove the other club's match farthest from now.
@@ -234,20 +312,21 @@ StoredMatch* MatchStore::upsert(const StoredMatch& incoming,
     note(matches_[victim].competition, kNoticeMatches);
     removeMatch(static_cast<std::size_t>(victim));
   }
-  if (m.isOwn()) {
-    if (slot == kNoIndex) slot = ownSlot(m, clock.utc);
-    if (slot != kNoIndex) {
-      auto& own = own_[slot];
-      own.match = m.id;
-      own.competition = m.competition;
-      if (!home_name.empty()) own.home_name.assign(home_name);
-      if (!away_name.empty()) own.away_name.assign(away_name);
-    }
-  } else if (slot != kNoIndex) {
+  // Ownership changes cannot move an ordinary target into the protected own
+  // bank or leave a former own target there.
+  if (slot != kNoIndex && (slot < cfg::kStoreOwnMatches) != m.isOwn()) {
     freeSlot(slot);
     slot = kNoIndex;
   }
-  m.own = slot;
+  if (m.isOwn() && slot == kNoIndex) slot = detailSlot(m, clock.utc, false);
+  if (slot != kNoIndex) {
+    auto& detail = details_[slot];
+    detail.match = m.id;
+    detail.competition = m.competition;
+    if (!home_name.empty()) detail.home_name.assign(home_name);
+    if (!away_name.empty()) detail.away_name.assign(away_name);
+  }
+  m.detail = slot;
   if (slot == kNoIndex)
     m.flags &= ~(kMatchEventsTruncated | kMatchEventsPoolCut);
   const std::size_t pos = sortedPosition(m);
@@ -269,7 +348,7 @@ StoredMatch* MatchStore::place(StoredMatch m, std::size_t from) {
 }
 
 void MatchStore::expire(uint8_t competition, int64_t utc,
-                        int32_t local_offset_s) {
+                        int32_t local_offset_s, const DateContext* dates) {
   // Passed matchdays are always the earliest ones: find the last kickoff of
   // the latest passed matchday, then remove everything up to it.
   uint32_t cutoff = 0;
@@ -281,9 +360,12 @@ void MatchStore::expire(uint8_t competition, int64_t utc,
        from = span.end)
     cutoff = span.last;
   if (cutoff == 0) return;
+  const DateContext fallback{nullptr, nullptr, local_offset_s};
+  const auto& calendar = dates ? *dates : fallback;
   for (std::size_t i = match_count_; i-- > 0;) {
     const auto& m = matches_[i];
-    if (m.competition == competition && m.kickoff != 0 && m.kickoff <= cutoff)
+    if (m.competition == competition && m.kickoff != 0 && m.kickoff <= cutoff &&
+        !resultHeld(m, utc, calendar))
       removeMatch(i);
   }
 }
@@ -387,9 +469,8 @@ bool MatchStore::commitTable(bool complete) {
 bool MatchStore::beginEvents(const StoredMatch& match, bool detail,
                              int64_t utc) {
   pending_slot_ = kNoIndex;
-  if (match.own >= own_.size() || own_[match.own].match != match.id)
-    return false;
-  pending_slot_ = match.own;
+  if (!hasDetail(match)) return false;
+  pending_slot_ = match.detail;
   pending_utc_ = utc;
   pending_count_ = 0;
   pending_cut_ = false;
@@ -417,12 +498,14 @@ void MatchStore::addEvent(const StoredEvent& incoming) {
   // The previous entry of the same event is updated in place, so an update
   // needs pool room only for new events.
   int at = -1;
-  for (std::size_t i = 0; i < events_.size() && at < 0; ++i)
+  for (std::size_t i = eventBegin(pending_slot_);
+       i < eventEnd(pending_slot_) && at < 0; ++i)
     if (events_[i].slot == pending_slot_ &&
         events_[i].identity == event.identity &&
         (events_[i].flags & kEventDetail) == (event.flags & kEventDetail))
       at = static_cast<int>(i);
-  for (std::size_t i = 0; i < events_.size() && at < 0; ++i)
+  for (std::size_t i = eventBegin(pending_slot_);
+       i < eventEnd(pending_slot_) && at < 0; ++i)
     if (events_[i].slot == kNoIndex) at = static_cast<int>(i);
   if (at < 0) at = takeEvent();
   if (at >= 0) {
@@ -432,33 +515,34 @@ void MatchStore::addEvent(const StoredEvent& incoming) {
     return;
   }
   pending_cut_ = pending_pool_ = true;
-  note(own_[pending_slot_].competition, kNoticeEvents);
+  note(details_[pending_slot_].competition, kNoticeEvents);
 }
 
 int MatchStore::takeEvent() {
   if (pending_utc_ == 0) return -1;
   const StoredMatch* mine = nullptr;
   for (std::size_t j = 0; j < match_count_ && mine == nullptr; ++j)
-    if (matches_[j].own == pending_slot_) mine = &matches_[j];
+    if (matches_[j].detail == pending_slot_) mine = &matches_[j];
   if (mine == nullptr) return -1;
-  // The own match farthest from now that holds an event.
+  // The farthest match holding an event in this same protected bank.
   int victim = -1;
   StoredMatch* victim_row = nullptr;
   uint64_t farthest = 0;
   for (std::size_t j = 0; j < match_count_; ++j) {
     auto& m = matches_[j];
-    if (m.own >= own_.size() || m.own == pending_slot_ ||
-        own_[m.own].event_count == 0)
+    if (m.detail >= details_.size() || m.detail == pending_slot_ ||
+        !sameDetailBank(m.detail, pending_slot_) ||
+        details_[m.detail].event_count == 0)
       continue;
     const auto d = distance(m, pending_utc_);
     if (victim < 0 || d > farthest) {
-      victim = m.own;
+      victim = m.detail;
       victim_row = &m;
       farthest = d;
     }
   }
   if (victim < 0 || distance(*mine, pending_utc_) >= farthest) return -1;
-  auto& own = own_[victim];
+  auto& own = details_[victim];
   const uint8_t taken = own.events[0];
   for (std::size_t n = 1; n < own.event_count; ++n)
     own.events[n - 1] = own.events[n];
@@ -471,34 +555,36 @@ int MatchStore::takeEvent() {
 
 bool MatchStore::restoreEvent(const StoredMatch& match,
                               const StoredEvent& event) {
-  if (match.own >= own_.size() || own_[match.own].match != match.id)
-    return false;
-  auto& own = own_[match.own];
+  if (!hasDetail(match)) return false;
+  auto& own = details_[match.detail];
   if (own.event_count >= own.events.size()) return false;
-  for (std::size_t i = 0; i < events_.size(); ++i) {
+  for (std::size_t i = eventBegin(match.detail); i < eventEnd(match.detail);
+       ++i) {
     if (events_[i].slot != kNoIndex) continue;
     events_[i] = event;
-    events_[i].slot = match.own;
+    events_[i].slot = match.detail;
     own.events[own.event_count++] = static_cast<uint8_t>(i);
     return true;
   }
-  if (auto* row = ownRow(match.own)) row->flags |= kMatchEventsPoolCut;
+  if (auto* row = detailRow(match.detail)) row->flags |= kMatchEventsPoolCut;
   note(own.competition, kNoticeEvents);
   return false;
 }
 
-StoredMatch* MatchStore::ownRow(uint8_t slot) {
+StoredMatch* MatchStore::detailRow(uint8_t slot) {
   for (std::size_t i = 0; i < match_count_; ++i)
-    if (matches_[i].own == slot) return &matches_[i];
+    if (matches_[i].detail == slot) return &matches_[i];
   return nullptr;
 }
 
 void MatchStore::settleEvents(uint8_t competition) {
   for (std::size_t i = 0; i < match_count_; ++i) {
     const auto& m = matches_[i];
-    if (m.competition == competition && m.own < own_.size() &&
-        (m.flags & kMatchEventsPoolCut))
+    if (m.competition == competition && m.detail < details_.size() &&
+        (m.flags & (kMatchEventsPoolCut | kMatchEventsTruncated))) {
+      flag(competition, kNoticeEvents, true);
       return;
+    }
   }
   flag(competition, kNoticeEvents, false);
 }
@@ -507,8 +593,8 @@ void MatchStore::endEvents(bool complete) {
   if (pending_slot_ == kNoIndex) return;
   const uint8_t s = pending_slot_;
   pending_slot_ = kNoIndex;
-  auto& own = own_[s];
-  StoredMatch* row = ownRow(s);
+  auto& own = details_[s];
+  StoredMatch* row = detailRow(s);
   if (!complete) {
     // Broken off: the previous list (updated in place where seen again)
     // followed by the new events; the oldest go when it overflows.
@@ -531,6 +617,7 @@ void MatchStore::endEvents(bool complete) {
     if (row != nullptr && (drop > 0 || pending_cut_))
       row->flags |= kMatchEventsTruncated;
     if (row != nullptr && pending_pool_) row->flags |= kMatchEventsPoolCut;
+    if (row != nullptr) settleEvents(row->competition);
     return;
   }
   const bool whole =

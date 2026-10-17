@@ -66,6 +66,14 @@ Inputs inputs(int64_t dt, uint8_t types, cfg::Provider provider = kOlg) {
   return in;
 }
 
+// The provider planner supplies an explicit selected Single identity. Do not
+// infer event demand from an owned flag in the scheduler's fixture builder.
+Inputs selectedInputs(int64_t dt, uint8_t types, uint32_t event_match) {
+  auto in = inputs(dt, types);
+  in.competitions[0].event_match = event_match;
+  return in;
+}
+
 // A match of competition kId kicking off 'kickoff_dt' after kBase.
 void addMatch(uint32_t id, int64_t kickoff_dt, bool own = false,
               Phase phase = Phase::kScheduled) {
@@ -281,29 +289,40 @@ void test_live_job_runs_only_in_the_live_window() {
 
 void test_final_fetch_for_events_and_live_table() {
   addMatch(1, 3600, true);
-  const uint8_t types = bit(cfg::DataType::kEvents) |
-                        bit(cfg::DataType::kLiveTable);
+  const uint8_t types =
+      bit(cfg::DataType::kEvents) | bit(cfg::DataType::kLiveTable);
   const int64_t end = 3600 + kExpected;
   // Both ran inside the window.
-  Decision a = step(inputs(end - 100, types));
-  Decision b = step(inputs(end - 90, types));
+  Decision a = step(selectedInputs(end - 100, types, 1));
+  Decision b = step(selectedInputs(end - 90, types, 1));
   TEST_ASSERT_TRUE(a.run && b.run);
   TEST_ASSERT_TRUE(a.job.type != b.job.type);
   // Once each after the end, within its interval.
-  a = step(inputs(end + 5, types));
-  b = step(inputs(end + 7, types));
+  a = step(selectedInputs(end + 5, types, 1));
+  b = step(selectedInputs(end + 7, types, 1));
   TEST_ASSERT_TRUE(a.run && b.run);
   TEST_ASSERT_TRUE(a.job.type != b.job.type);
-  assertWaits(step(inputs(end + 20, types)), Wait::kIdle, 0);
+  assertWaits(step(selectedInputs(end + 20, types, 1)), Wait::kIdle, 0);
 }
 
 void test_no_final_fetch_after_its_interval() {
   addMatch(1, 3600, true);
   const uint8_t types = bit(cfg::DataType::kEvents);
   const int64_t end = 3600 + kExpected;
-  assertRuns(step(inputs(end - 100, types)), cfg::DataType::kEvents);
+  assertRuns(step(selectedInputs(end - 100, types, 1)), cfg::DataType::kEvents);
   // Events interval is 30 s: 31 s after the end it is too late.
-  assertWaits(step(inputs(end + 31, types)), Wait::kIdle, 0);
+  assertWaits(step(selectedInputs(end + 31, types, 1)), Wait::kIdle, 0);
+}
+
+void test_events_without_selected_identity_never_infer_an_owned_match() {
+  for (const bool own : {false, true}) {
+    store.clear();
+    scheduler.reset();
+    addMatch(1, -60, own, Phase::kLive);
+    const auto in = inputs(0, bit(cfg::DataType::kEvents));
+    TEST_ASSERT_EQUAL_UINT32(0, in.competitions[0].event_match);
+    assertWaits(step(in), Wait::kIdle, 0);
+  }
 }
 
 void test_window_that_ended_before_boot_gets_no_final_fetch() {
@@ -530,6 +549,7 @@ int main() {
   RUN_TEST(test_live_job_runs_only_in_the_live_window);
   RUN_TEST(test_final_fetch_for_events_and_live_table);
   RUN_TEST(test_no_final_fetch_after_its_interval);
+  RUN_TEST(test_events_without_selected_identity_never_infer_an_owned_match);
   RUN_TEST(test_window_that_ended_before_boot_gets_no_final_fetch);
   RUN_TEST(test_window_that_ended_just_before_boot_gets_its_final_fetch);
   RUN_TEST(test_table_and_live_table_share_their_start);

@@ -1,9 +1,25 @@
 # Configuration
 
-Implementation state: 0.1.0-dev, 2026-10-15 (settings format 9, competition record format 2). All planned settings groups are
+Implementation state: 0.1.0-dev, 2026-10-17 (settings format 11, competition record format 4, screen-policy record format 1). The current settings groups are
 connected to the device services and offline Web UI. The current C6 build
 compiles; new fields, persistence interruptions and runtime controls still
 require acceptance. Historical core-service tests do not certify this extension.
+
+The [planned screen-system redesign](UI.md#planned-screen-system-redesign)
+replaces situation-to-single-screen defaults with configurable timed sequences,
+separates crest from slideshow, adds competition-specific rules and a picture
+frame mode, and replaces the whole-matchday own-game switch. Those are confirmed
+behaviors being integrated. The existing settings service now owns a dedicated
+complete screen-policy snapshot and record, avoiding rule copies in network and
+provider settings. The active controller uses this policy. Replaced display fields have been removed from the general record and API.
+The screen policy is their single owner.
+
+The service loads/saves the policy, REST/Web exposes it, and the controller
+uses its own coherent snapshot. Its five-phase/six-type
+snapshot is 964 B on C6 and its explicit version-1 record is 912 B. During this development
+redesign settings may restart from defaults/presets; compatibility migration is
+reconsidered after alpha/beta. Existing image files need not be deleted. No
+agent inspection of the secrets file is required for firmware presets.
 
 ## Three sources, one place each
 
@@ -14,7 +30,17 @@ require acceptance. Historical core-service tests do not certify this extension.
 | Personal bootstrap presets | `include/secrets.h` | no |
 | Runtime configuration | NVS namespace `settings`, key `record` | device only |
 | Competitions | NVS namespace `settings`, key `competitions` | device only |
+| Screen policy | NVS namespace `settings`, key `screen_policy` | device only |
 | Owner's team short names | LittleFS `short_names.bin` | device only, in the export |
+
+The owner requested a maintained club-name catalogue beside app_config.h and
+the secrets file in include/. Proposed source: include/team_names.json, covering
+Bundesliga,2.Bundesliga,3.Liga and German Regionalligen, with German/English/
+short names and optional provider IDs. The selected JSON shape uses direct
+de/en/short fields per club, with provider IDs grouped under ids;
+the file and new mapping/import format are not implemented. Missing catalogue
+values must retain usable provider fallbacks. This must extend the existing
+names mechanism, with a separately bounded device memory/storage design.
 
 The template `include/secrets.h.example` is tracked. A stored record overrides
 bootstrap presets; omitted appended fields use their initial preset/default.
@@ -36,7 +62,7 @@ provider whose key or ESPN opt-in changed, or all data after a change of
 demo mode. Reset additionally forces data invalidation even if the initial
 provider values already match; if they change, both invalidations advance
 the counter. These counters are version markers, not save counts.
-Display names, the screens a competition is used for and every display,
+Display names, screen-policy rules and every display,
 network or time setting keep the shown data and request nothing. A changed
 match window, request limit or interval applies with the next scheduling
 decision: a job whose due time under the new value has passed runs then, the
@@ -92,41 +118,42 @@ are rejected before a whole-model save.
 | Admin password | empty | up to 64 bytes, no embedded NUL; empty still uses mutation sessions |
 | API-Football / football-data keys | empty | up to 96 / 64 printable non-space ASCII bytes |
 | Competitions | empty list; a preset competition (with or without club) creates one entry | ordered list of up to eight entries, each active or paused, each with a stable id 1–255 assigned by the device; the order is the display order: Matchday and Table show the competitions one after another in this order |
-| Screens per competition | all four | the competition appears on Own match, Konferenz, Matchday and Table (`screens` switches, JSON `own_match`, `conference`, `matchday`, `table`) |
+| Competition screen rules | inherited per phase | enable, automatic participation and visit time live in the dedicated policy; each override field can independently inherit |
 | Competition source | OpenLigaDB | one source per competition: provider, competition ID and club ID up to 32 bytes of any text without control characters and without a space at either end (requests percent-encode them); season empty (current season) or up to 16 decimal digits for OpenLigaDB, four digits for other providers |
 | Display names | empty | competition and club name stored when picked from a provider list, up to 32 bytes, no control characters |
 | ESPN / demo / browser diagnostics | off | explicit switches |
-| Screens / backgrounds | all enabled / on | five styles; at least one screen enabled |
+| Sporting types / image types / backgrounds | enabled / disabled / on | six separate type styles; an empty automatic sequence is allowed |
 | Background / text / accent | `#101820` / `#ffffff` / `#49cba0` | RGB colours per screen |
 | Text scale | 100% | 70–130%, selects bounded compiled font roles |
-| Defaults outside / matchday / own game | Table / Conference / Own match | enabled available screen (any of the five); while other matches run, Own match is not selectable (the own club is not playing then) |
-| Conference mode | All pages | All pages (every member in kick-off order, pages change every 8 s) or One page (running matches by latest goal, goalless ones by kick-off, then finished, then not started) |
+| Common sequence / automatic default per phase | Crest, Images, Single, Matchday, Conference, Table / Own: Single, Other: Conference, Matchday: Matchday, Idle and Break: Table | enable and automatic flags are independent per phase; shared sporting rules may be overridden per competition |
+| Conference mode | All pages | All pages uses complete chronological members; One page ranks current activity; explicit manual paging always reaches all members |
 | Pin own match in the conference | on | on: the own match is the first row of every conference page while it is shown; off: a normal row in the accent colour |
 | Matchday shown | Current matchday | Current matchday (the running or next matchday; a finished one stays until the end of the following local day) or Next matchday (moves on at midnight after the last kickoff; a competition without a stored upcoming matchday is skipped by the automatic cycle); one setting for all competitions |
-| Show own match for the whole matchday | off | on: from kick-off the own match stays in the conference while matches of the same matchday (same round of the same competition, otherwise same date) are shown there |
 | Input assignment | input 1 Mandatory, input 2 Up, input 3 Down (two inputs: Mandatory, Scroll) | per profile input Off, Mandatory, Up, Down or Scroll; exactly one of the device's inputs is Mandatory; eight stored slots, slots beyond the profile's inputs are ignored |
-| Manual return / scroll-direction reset | 60 / 20 seconds | 0–4000; 0 disables the corresponding timeout; the direction reset matters only while an input is assigned Scroll |
+| Manual return / scroll-direction reset | 60 / 20 seconds | 0–4000; manual return lives in the policy; 0 disables the corresponding timeout; direction reset applies to Scroll inputs |
 | Scroll repetition | 250 ms | 100–2000 ms |
-| Visible conference / table rows | 5 / 5 (240 px round: 4 / 5) | 1–5 / 1–9 (240 px round: 1–4 / 1–7); the conference value is also the number of matches per Matchday page; the display profile sets the upper limits, the schema reports them, the API rejects more, stored values above them are clamped when loaded; all stored table rows remain reachable |
-| Table step | 8 seconds | 3–600 seconds; time until the Table screen shows the next page of a table without an own club, or (with an own club, or after the last page) the next competition's table |
-| Slideshow | 15 seconds, no slides | 3–3600 seconds; up to five slides in play order, each the crest or a library image |
+| Conference and Matchday rows / table rows | 5 / 5, clamped to profile (240 px round: 4 / 5) | shared match-page maximum 2–5 (240 round 2–4); table 1–9 (240 round 1–7). Actual content can be smaller. Pin counts toward capacity; page balancing preserves page count |
+| Sporting visit time | Single/Conference/Matchday 30 s, Table 60 s | 15–43,200 s; divided across pages, effective total at least 5 s per page; no independent page clocks |
+| Images / Crest | Images visit 60 s, Crest visit 15 s; images initially disabled | image time 15 s (3–3,600); up to five library images, crest separate; enabled Images visit must be an exact multiple of image time |
 | Image library | empty | up to ten uploaded JPEGs (ids 1–10); screen backgrounds and slides refer to them. Selected missing files keep their ids reserved for explicit restoration; new uploads skip saved references and the current browser's draft references. Id 0 is the stock image of the role (crest or background): its replacement when one exists, else the factory image. The crest is not a setting; it is always the crest role. Replacements count towards the shared 320 KB image budget but not towards the ten library ids |
 | Brightness / night brightness | 100% / 10% | 0–100%; hardware dimming requires a backlight pin |
 | Rotation | 0 | 0–3 quarter turns |
 | Language | German | German or English |
 | Night mode / window | on / 23:00–07:00 | local civil time; equal endpoints mean empty; requires valid clock |
 | IP badge | 60 seconds, top | 0–4000 seconds, 0 permanent; setup AP permanent by default |
-| Match window before / after | 30 / 30 minutes | 0–180 minutes; display selection only (Own match and Konferenz), independent of the request scheduler's live window |
+| Own and other display windows | each before/after 30 min | four independent 0–180-minute policy values; no whole-matchday own-retention switch |
 | Daily request cap per provider | 0 / 100 / 0 / 0 requests | 0–65535 per provider; 0 = no daily cap (no counter, no storage write); a cap counts every attempted request through durable reservations and resets at 00:00 UTC |
 | Window limit per provider | 60 per 60 s / off / off / 10 per 60 s | requests 0–65535 per window of 0–43200 seconds; both values 0 or both set; 0 = no window limit |
 | Interval per data type and provider | fixtures 8 h, table 4 h, live 60 s, live table 10 min, events 10 min | 10 s – 7 days each; how often the provider is asked for that data type |
 | Global limit over all providers | off (0 / 0 per 0 s) | daily cap and window limit as above, counted over every provider |
 | Console status | on, 30 seconds | existing stored interval limits; browser stream is separate |
 
-Screen indices are Own match 0, Conference 1, Table 2, Crest/slideshow 3,
-Matchday 4 (the stored order). The display order (Next/Previous, Web UI) is
-Own match, Conference, Matchday, Table, Crest/slideshow; the schema reports
-it as `screen_order`.
+Stable type identities are Single0, Conference1, Table2, Crest3, Matchday4,
+Images5. These identities are independent of the editable sequence order. The
+schema exposes the six policy type names and bounds; old `screens`, screen
+masks/defaults, `table_page_s` and slideshow fields in general settings are
+rejected. Appearance, pinning, row counts and timing belong to screen policy.
+
 Provider indices are OpenLigaDB 0, API-Football 1, ESPN 2, football-data 3.
 Each provider has a request plan (JSON `providers`, a list in that provider
 order): `daily_requests`, `window_requests`, `window_s` and `intervals`
@@ -203,8 +230,8 @@ poll. Waiting for exclusive-operation admission is nonblocking and does not
 hold that admission during the delay. None is a user setting.
 
 Lists never contain empty entries: an entry exists or the list is shorter.
-The crest screen shows the crest or its slides and has no background image,
-so its `image` stays 0. Missing/damaged referenced files retain their desired
+Crest displays its dedicated role; Images uses the policy library list. Neither
+requires a sporting background image. Missing/damaged referenced files retain their desired
 id and slideshow position and use the appropriate role/factory fallback.
 Explicit manual deletion clears only that id; confirmed repair/reset retains
 its own destructive semantics. Image errors never automatically save settings.
@@ -220,81 +247,45 @@ C6 requests one temporary 9,600 B internal RGB565 strip plus allocator
 metadata, released after success or cancellation. See [API.md](API.md) for
 the wire protocol and [WEB_UI.md](WEB_UI.md) for access and download behavior.
 
-Current format is **9**, with explicit little-endian encoding, not a structure
-memory dump. The record has a variable length: the slide list stores only its
-entries. The longest possible record (five slides, every text at capacity)
-is **806 bytes**, pinned by a host test; a record without slides is 801 bytes.
-The reader accepts at most 2048 bytes (`kSettingsMaxRecordBytes`). Header:
-16-bit format, 16-bit payload length and IEEE CRC32 over the first four bytes
-plus payload. The competitions are not part of this record; they have their
-own record (below).
-
-The original payload offsets through byte 334 are preserved in every format.
-Text fields are one length byte followed by their capacity.
+Current general format is **11**, explicitly little-endian, not a structure
+memory dump. Its complete fixed record is **700 bytes**. Text occupies a length
+byte plus fixed capacity. The reader remains bounded to2048B.
 
 | Offset | Size | Field |
 |---|---|---|
-| 0 | 8 | header |
-| 8 | 33 | length-prefixed WiFi SSID |
-| 41 | 65 | station password |
-| 106 | 64 | AP password |
-| 170 | 64 | hostname |
-| 234 | 1 | antenna |
-| 235 | 1 | console status |
-| 236 | 2 | console interval |
-| 238 | 33 | time-zone label |
-| 271 | 64 | NTP server |
-| 335 | 227 | admin password (65), API-Football key (97), football-data key (65) |
-| 562 | 64 | four screen styles, 16 bytes each (two switches, three colours, text scale, image) |
-| 626 | 34 | seven switches, nine one-byte values (language, brightness, rotation, counts, screen defaults), nine 16-bit timing values |
-| 660 | 1 + n | slides: count (0–5), then one byte each (0 = crest, else library id) |
-| next | 1 | pin own match in the conference (0/1) |
-| next | 1 | conference mode (0 All pages, 1 One page) |
-| next | 1 | show own match for the whole matchday (0/1) |
-| next | 8 | input roles, one byte per input slot (0 Off, 1 Mandatory, 2 Up, 3 Down, 4 Scroll) |
-| next | 4 × 26 | request plan per provider: daily cap, window requests, window seconds (16 bits each), then the five intervals in seconds (32 bits each: fixtures, table, live, live table, events) |
-| next | 6 | global limit: daily cap, window requests, window seconds (16 bits each) |
-| next | 16 | Matchday screen style (same layout as the four styles at 562) |
-| next | 2 | table step in seconds (16 bits) |
-| next | 1 | matchday mode (0 Current matchday, 1 Next matchday) |
+| 0 | 8 | format u16, payload length u16, CRC32 over header first4B and payload |
+| 8 | 227 | WiFi SSID, station/AP passwords, hostname, each length-prefixed |
+| 234 | 4 | antenna, console flag, console interval u16 |
+| 238 | 97 | timezone label and NTP server |
+| 335 | 227 | admin/API-Football/football-data secrets |
+| 562 | 20 | six flags, language/day/night brightness/rotation, five u16 input/night/badge times |
+| 582 | 8 | input roles |
+| 590 | 104 | four request plans: three u16 limits plus five u32 intervals each |
+| 694 | 6 | global three u16 request limits |
 
-The competition record (key `competitions`, its own format **2**, same
-header) holds:
+Competition format **4** uses the same8B header, then next-id u8,
+next-incarnation u32 and count u8. Each entry is156B: id1, incarnation4,
+active1, source84, competition name33 and club name33. Maximum eight entries
+produce **1262B**, empty14B. The reader remains bounded to4096B. There is no
+screen mask. Policy bindings use both id and incarnation.
 
-| Size | Field |
-|---|---|
-| 1 | next id to assign (1–255, wraps; a free id is searched) |
-| 1 + 153 n | competitions: count (0–8); each id (1 byte), active switch (1 byte), source (84 bytes: provider, competition, season, club), competition name (33), club name (33), screens (1 byte, one bit per screen) |
+Older general formats1–10 and competition formats1–3 select initial values
+and report `outdated`; development settings may reset. Unknown future formats,
+length/CRC corruption or invalid values are rejected. Decoding never rewrites
+persistent state. Images stay separate. A missing field-boundary tail may keep
+initial values; a partial field fails. Records remain stored until an explicit
+save/reset. An unreadable competition identity history blocks unsafe saves.
 
-Each competition has exactly one source. The longest competition record is
-**1234 bytes**, an empty one 10 bytes; the reader accepts at most 4096 bytes
-(`kCompetitionsMaxRecordBytes`), so a longer record of format 1 is still read
-far enough to be recognised as outdated rather than damaged. A damaged or
-rejected competition record selects the initial competitions (the preset
-competition, if any) and is overwritten by the next competitions save; status
-reports it as `competitions_source`.
-
-A missing tail at a list or field boundary retains initial values; a stored
-count of zero replaces a preset or initial list by an empty one. Ending inside
-a field fails; a count above the list capacity rejects the record; an unknown
-same-format tail is ignored within the reader limit.
-
-Older formats are not read. A settings record of formats 1 to 8, or a
-competition record of format 1 (which held a fallback source per competition
-and fixture pairs), is reported as `outdated`: the device starts with the
-initial values (and the preset competition, if any), and the Web UI asks to
-set it up again. When the settings record is outdated and no competition
-record exists (formats 2 to 7 carried the competitions inside the settings
-record), the competitions are reported as `outdated` too. The old record
-stays in NVS until the next save of its store overwrites it. Format version
-0 and versions above the current one are reported as `damaged` (unknown
-version). The old firmware cannot read a newer record and uses initial
-values after a manual USB downgrade; no reverse migration or automatic
-downgrade write is performed.
-
-A stored matchday default of Own match (allowed by earlier firmware) is read
-as Conference; everything else in the record is kept. A backup file with that
-value is converted the same way by the Web UI before import.
+The screen-policy record is independently versioned and CRC-protected. It has
+an eight-byte header and 904-byte payload (912 bytes total). A successful save
+publishes one complete policy and advances only the UI/settings generation,
+so it does not cancel an admitted provider response. Saving a stale generation
+is rejected. Competition overrides bind both id and incarnation: edit/reorder
+keeps them; deletion and id reuse cannot transfer them to another entry.
+Unmatched bindings are pruned in RAM, without an automatic write to a third
+record. A fallback preset does not establish a stored identity: save the
+competition record before persisting bound overrides. Trial boot derives these
+values in RAM and does not migrate or rewrite the older records.
 
 A whole record is written and committed before RAM settings change. NVS
 provides atomic blob replacement; interruption acceptance remains a separate
@@ -384,50 +375,35 @@ yet, in whole blocks, plus the image reserve (`kImageReserveBytes`, 40 KiB).
 Future images are counted as one block-rounded total, not per file, so an
 image upload near the quota can still find a few blocks fewer than its own
 check expects. An 18-team league with an own match takes one block
-(about 3 KB); a full short-name table 1,552 bytes. Routine OTA keeps the
+(about 3 KB); a full short-name table 1,548 bytes including its 12-byte header. Routine OTA keeps the
 files; the first boot of an update writes none.
 
 ## Resources and acceptance
 
-Compiler sizes (host compiler; the same method gave the documented 1968 bytes
-for the format-7 model): Model **832 bytes**, competition store
-(`Competitions`) **1226 bytes**; longest encoded records 806 and 1234 bytes.
-Format 8 moved the competitions and pairs (about 1.2 KB) out of the model and
-added the plans (126 bytes of record). Competition record format 2 (one
-source per competition, no fixture pairs) halved the competition store
-(2459 → 1226 bytes, record 2467 → 1234 bytes). Format 9 removed the
-core-data interval (4 bytes per provider: model 844 → 828 bytes, record
-821 → 805 bytes). The matchday mode (one byte at the end of the record,
-same format) made them 832 and 806 bytes; the model grows by 4 bytes through
-alignment.
-The stored model, the stored competitions and network's applied copy of the
-model are fixed RAM. Every `settings::current()` copy puts about 0.8 KB on the
-caller's stack; readers of the competitions copy one entry (about 240 bytes)
-or allocate the whole store on the heap (the REST handlers). Booting decodes
-into a temporary model and a temporary competition store on the stack (832
-and 1226 bytes, one after the other).
-Save allocates the longest record size (806 bytes, plus 1234 bytes for the
-competition record) temporarily; load allocates the stored size, at most
-2048 and 4096 bytes. These costs are additional to NVS page/index heap. The
-two blobs use roughly 27 and 40 NVS entries (estimate: 32 bytes per entry plus
-an index), about twice that for the record being replaced; these are layout
-estimates, not measured full-storage acceptance. The partition remains 20 KB.
-Settings JSON: format 8 replaces `"daily_requests":[…]` and
-`"request_spacing_s":[…]` (60 bytes with the defaults) by `"providers":[…]`
-(628 bytes with the defaults, at most 722; format 9 without the `core`
-interval: 576 and 666) and `"global_limit":{…}` (69, at most 81 bytes),
-all computed, and no longer carries the competitions and
-pairs; the total of a full model was not measured again. The competitions JSON
-of a full store stays within the 8,192-byte API body limit: it is smaller than
-the 5,388 bytes (every text at capacity) and 7,446 bytes (every text character
-escaped) computed for competition record format 1, which also carried a
-fallback source per competition and the fixture pairs; it was not recomputed. The
-schema repeats the settings in its defaults and adds `"inputs":3,` (11
-bytes), the number of inputs of the device.
+Current C6 compiler ABI: Model704B (formerly832), Competitions1260B
+(formerly1292), Policy964B. General and competition records are700B and at most
+1262B; the policy record is912B. Settings owns one policy snapshot and UI owns
+one coherent snapshot; effective competition routes are borrowed while the
+repository mutex is held. There is no UI competition-store copy.
+
+General save allocates700B, competition save up to1262B, policy save912B, plus
+NVS internals. REST input DOM is released before encoding policy. NVS replacement
+space, power interruption, fragmentation and the20KiB partition remain device
+acceptance; payload sizes do not prove these reserves. Reset/migration behavior
+is separate from preserving existing image files.
+
+The strict complete policy request is at most8121B, within8192B HTTP input.
+The JSON allocator cap stays24576B. Policy GET/PUT and the full provider response/completion lifecycle now share
+the existing heavy-operation token; discovery also acquires it before allocating
+state. Busy requests leave the draft/save unchanged and can be retried.
+Canonical API logical growth is5545B (6536B with conservative moving-realloc
+accounting), disjoint from2016B event staging or532B discovery plus816B fence.
+Actual ROM allocator overhead, fragmentation and runtime reserves remain device
+acceptance, not certified by host pointer sizes or one fixture.
 
 The earlier 238-byte layout passed C6 store selectors on 2026-10-09 and
 30 reset-button interruptions; supply removal remains untested. The host
-tests (`pio test -e native -f test_settings`) cover the format-9 layout and
+tests (`pio test -e native -f test_settings`) cover the current layout and
 the competition record layout, the rejection of older formats as outdated,
 id assignment, the request plans, the input-role rules, the longest records,
 list limits and the image reference cleanup. They do not certify device
@@ -435,3 +411,16 @@ behaviour: the outdated report after an update from a device with an older
 record, full/corrupt storage, real power loss, resets and OTA
 rollback still require tests on the device. Current store selectors remain
 available in `app_config.h`, normally `kNone`.
+
+
+## Image-reference cleanup across records
+
+An explicit library deletion cleans only that image id from both the general
+record and the screen policy before deleting the file. Repair cleans every
+missing library reference after formatting. Disabled styles still reserve their
+desired images; selected slide duplicates are removed completely and surviving
+order is preserved. Each successfully written record is published immediately
+and advances the UI generation. The existing writer remains held until explicit
+unlink completes, so a concurrent save cannot reintroduce the reference in
+between. The two NVS records and filesystem operation are not one transaction;
+partial completion is reported and the browser keeps unconfirmed edits.

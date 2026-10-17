@@ -1,8 +1,10 @@
 #include "provider_plan.h"
 
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <ctime>
+#include <new>
 
 #include "football_model.h"
 #include "matchday.h"
@@ -38,8 +40,7 @@ uint32_t hash(uint32_t h, std::string_view text) {
   return h;
 }
 uint32_t sourceKey(uint8_t id, const settings::Source& s) {
-  const char head[2] = {static_cast<char>(id),
-                        static_cast<char>(s.provider)};
+  const char head[2] = {static_cast<char>(id), static_cast<char>(s.provider)};
   uint32_t h = hash(2166136261u, {head, 2});
   h = hash(h, s.competition.view());
   h = hash(hash(h, "/"), s.season.view());
@@ -96,9 +97,8 @@ void costs(const settings::Source& s, const SourceState& state, bool known,
            int64_t utc, std::array<uint8_t, cfg::kDataTypeCount>& cost) {
   const bool season = !s.season.empty() || (known && !state.season.empty());
   for (std::size_t t = 0; t < cfg::kDataTypeCount; ++t)
-    cost[t] = needsSeason(s.provider, static_cast<DataType>(t)) && !season
-                  ? 2
-                  : 1;
+    cost[t] =
+        needsSeason(s.provider, static_cast<DataType>(t)) && !season ? 2 : 1;
   // The fixtures run resolves a due season again first (OQ-259, begin()).
   if (s.provider == Provider::kApiFootball && s.season.empty() && known &&
       seasonStale(state, utc))
@@ -108,52 +108,22 @@ void costs(const settings::Source& s, const SourceState& state, bool known,
     cost[index(DataType::kLive)] = 2;  // change date, round when changed
   } else if (s.provider == Provider::kEspn) {
     // Match days, then one scoreboard per day (a week before the first).
-    cost[index(DataType::kFixtures)] =
-        static_cast<uint8_t>(1 + (known && state.day_count ? state.day_count
-                                                           : 7));
+    cost[index(DataType::kFixtures)] = static_cast<uint8_t>(
+        1 + (known && state.day_count ? state.day_count : 7));
   }
 }
 uint8_t bit(DataType type) { return static_cast<uint8_t>(1u << index(type)); }
 
-// Data types the enabled screens of 'entry' need (OQ-192). The fixtures
-// also give the live windows the live table follows.
-uint8_t screenTypes(const settings::Competition& entry) {
-  using Screen = cfg::CompetitionScreen;
-  const bool club = !entry.primary.team.empty();
-  const bool matches = (club && entry.uses(Screen::kOwnMatch)) ||
-                       entry.uses(Screen::kConference) ||
-                       entry.uses(Screen::kMatchday);
-  const bool table = entry.uses(Screen::kTable);
-  uint8_t types = 0;
-  if (matches || table) types |= bit(DataType::kFixtures);
-  if (matches) types |= bit(DataType::kLive);
-  if (table) types |= bit(DataType::kTable) | bit(DataType::kLiveTable);
-  return types;
+// A preview has no summary yet. A confirmed/estimated running row, justified
+// suspension or a retained result can supply the same available detail data.
+bool eventReady(const StoredMatch& m) {
+  return running(m.phase) || m.phase == Phase::kFinished ||
+         (m.phase == Phase::kSuspended && m.first_live_observed_utc != 0);
 }
 
-// The match an own-match events run asks for: the latest own match of the
-// source whose live window has opened at 'utc', once it has kicked off
-// (also after its window ended: the final request); null otherwise.
-const StoredMatch* eventsMatch(const MatchStore& store, uint8_t competition,
-                               Provider provider, int64_t utc) {
-  const StoredMatch* latest = nullptr;
-  uint32_t latest_start = 0;
-  for (std::size_t i = 0; i < store.matchCount(); ++i) {
-    const auto& m = store.match(i);
-    uint32_t start = 0, end = 0;
-    if (m.competition != competition || m.provider != provider ||
-        !m.isOwn() || !schedule::liveWindow(m, start, end) || start > utc ||
-        (latest != nullptr && start < latest_start))
-      continue;
-    latest = &m;
-    latest_start = start;
-  }
-  if (latest == nullptr) return nullptr;
-  const Phase phase = latest->phase;
-  return running(phase) || phase == Phase::kFinished ||
-                 phase == Phase::kAbandoned
-             ? latest
-             : nullptr;
+uint64_t distance(uint32_t kickoff, int64_t utc) {
+  if (kickoff == 0 || utc <= 0) return UINT64_MAX;
+  return static_cast<uint64_t>(kickoff > utc ? kickoff - utc : utc - kickoff);
 }
 
 SourceState::Mark* findMark(SourceState& state, uint32_t round) {
@@ -181,8 +151,8 @@ void encode(std::string_view in, char* out, std::size_t size) {
   out[at] = '\0';
 }
 
-std::size_t matchdayDays(const uint32_t* days, std::size_t count,
-                         int64_t utc, uint32_t* out, std::size_t capacity) {
+std::size_t matchdayDays(const uint32_t* days, std::size_t count, int64_t utc,
+                         uint32_t* out, std::size_t capacity) {
   // Last day of the matchday starting at 'first'.
   auto last = [&](std::size_t first) {
     while (first + 1 < count && !matchday::starts(days[first], days[first + 1]))
@@ -209,10 +179,33 @@ uint32_t changeHash(std::string_view text) {
   return h == 0 ? 1 : h;
 }
 
+void Planner::context(const settings::Competitions& competitions,
+                      const settings::screen_policy::Eligibility& eligibility,
+                      DateContext dates, bool break_proven) {
+  competitions_ = &competitions;
+  eligibility_ = &eligibility;
+  dates_ = dates;
+  break_proven_ = break_proven;
+}
+
+void ResponseDetails::clear() {
+  events.reset();
+  seen_count = 0;
+  receiving = -1;
+  ambiguous = false;
+  for (auto& candidate : candidates) {
+    candidate.match = {};
+    candidate.kickoff = 0;
+    candidate.count = 0;
+    candidate.truncated = false;
+  }
+}
+
 void Planner::reset() {
   states_ = {};
   current_ = nullptr;
   store_ = nullptr;
+  response_details_.clear();
 }
 
 void Planner::forget(uint8_t slot) {
@@ -250,7 +243,8 @@ void Planner::restore(uint8_t slot, const settings::Competition& entry,
 
 void Planner::wanted(uint8_t slot, const settings::Competition* entry,
                      const MatchStore& store, const Clock& clock,
-                     schedule::Wanted& out) const {
+                     schedule::Wanted& out,
+                     const selection::Selection* current_selection) const {
   out = {};
   if (entry == nullptr || !entry->active || entry->id == 0 ||
       entry->primary.competition.empty() || slot >= cfg::kCompetitionMax)
@@ -259,14 +253,39 @@ void Planner::wanted(uint8_t slot, const settings::Competition* entry,
   const auto& state = states_[slot];
   out.id = entry->id;
   out.provider = s.provider;
-  out.types = screenTypes(*entry);
-  // ESPN substitutions come only with the match summary (OQ-207).
-  if (s.provider == Provider::kEspn && !s.team.empty() &&
-      entry->uses(cfg::CompetitionScreen::kOwnMatch)) {
-    out.types |= bit(DataType::kEvents);
-    // Before kickoff the summary has nothing to ask for (begin()).
-    if (eventsMatch(store, entry->id, s.provider, clock.utc) == nullptr)
-      out.held |= bit(DataType::kEvents);
+  // Fixtures and their live updates classify phases even when a sporting
+  // screen is disabled. Manual-only entries demand the same usable data.
+  out.types = bit(DataType::kFixtures) | bit(DataType::kLive);
+  if (eligibility_ != nullptr && competitions_ != nullptr) {
+    if (eligibility_->frame) {
+      out = {};
+      return;
+    }
+    const selection::Input input{eligibility_->selection,
+                                 *competitions_,
+                                 store,
+                                 clock,
+                                 dates_,
+                                 break_proven_};
+    const auto selected = current_selection != nullptr
+                              ? *current_selection
+                              : selection::select(input);
+    if (selected.phase == selection::ScreenPhase::kOwn &&
+        selected.focus.competition == entry->id)
+      out.priority_match = selected.focus.id;
+    if (eligibility_->allows(selected.phase, screen::Type::kTable, slot))
+      out.types |= bit(DataType::kTable) | bit(DataType::kLiveTable);
+    if (s.provider == Provider::kEspn &&
+        eligibility_->allows(selected.phase, screen::Type::kLiveSingle, slot)) {
+      const auto single = selection::single(input, selected, *entry);
+      if (const auto* m = selection::find(input, single.match)) {
+        out.types |= bit(DataType::kEvents);
+        out.event_match = m->id;
+        out.event_priority = selected.phase == selection::ScreenPhase::kOwn &&
+                             single.match == selected.focus;
+        if (!eventReady(*m)) out.held |= bit(DataType::kEvents);
+      }
+    }
   }
   costs(s, state, state.key == sourceKey(entry->id, s), clock.utc, out.cost);
 }
@@ -276,6 +295,14 @@ bool Planner::request(const schedule::Job& job,
                       const Clock& clock, Request& out) {
   current_ = nullptr;
   if (job.slot >= cfg::kCompetitionMax) return false;
+  if (job.type == DataType::kEvents && eligibility_ != nullptr &&
+      competitions_ != nullptr) {
+    schedule::Wanted current;
+    wanted(job.slot, &entry, store, clock, current);
+    if (current.event_match != job.event_match ||
+        (current.held & bit(DataType::kEvents)))
+      return false;
+  }
   const auto& s = entry.primary;
   if (s.competition.empty()) return false;
   auto& state = states_[job.slot];
@@ -288,6 +315,7 @@ bool Planner::request(const schedule::Job& job,
   store_ = &store;
   source_ = s;
   type_ = job.type;
+  event_match_ = job.event_match;
   map_ = {};
   map_.competition = entry.id;
   map_.provider = s.provider;
@@ -310,11 +338,6 @@ bool Planner::begin(MatchStore& store, const Clock& clock, Request& out) {
     // completes (OQ-311).
     if (type_ == DataType::kFixtures)
       store.beginRun(map_.competition, kNoticeFixtures);
-    if (type_ == DataType::kEvents) {
-      const auto* m = eventsMatch(store, map_.competition, source_.provider,
-                                  clock.utc);
-      event_match_ = m != nullptr ? m->id : 0;
-    }
   }
   out = {};
   if (!build(&out)) {
@@ -328,11 +351,24 @@ bool Planner::begin(MatchStore& store, const Clock& clock, Request& out) {
   found_season_ = {};
   scan_count_ = scan_blocks_ = 0;
   scan_done_ = false;
+  response_details_.clear();
+  map_.observe_names = nullptr;
+  map_.observe_events = nullptr;
+  if (sink_ == Sink::kMatches && eligibility_ != nullptr &&
+      competitions_ != nullptr) {
+    // Allocate only after the first body row arrives. The settings first-send
+    // fence has then been released, so its heap cannot overlap this payload.
+    map_.observe_names = observeNames;
+    map_.names_context = this;
+    map_.observe_events = observeEvent;
+    map_.events_context = this;
+  }
   if (sink_ == Sink::kTable) store.beginTable(map_.competition);
   if (sink_ == Sink::kEvents) {
-    // The match's own slot takes the events; without one nothing to ask.
+    // Exact selected target; ownership and special priority are separate.
     const auto* m = eventsRow();
-    if (m == nullptr || !store.beginEvents(*m, true, map_.clock.utc)) {
+    if (m == nullptr || !eventReady(*m) || !store.hasDetail(*m) ||
+        !store.beginEvents(*m, true, map_.clock.utc)) {
       state.progress[index(type_)] = {};
       current_ = nullptr;
       return false;
@@ -361,8 +397,8 @@ bool Planner::build(Request* out) {
   char league[kCompetitionUrl], season[kSeasonUrl], team[kTeamUrl];
   encode(s.competition.view(), league, sizeof(league));
   encode(s.team.view(), team, sizeof(team));
-  const auto season_text = s.season.empty() ? state.season.view()
-                                            : s.season.view();
+  const auto season_text =
+      s.season.empty() ? state.season.view() : s.season.view();
   encode(season_text, season, sizeof(season));
 
   if (progress.step == 0) {
@@ -412,8 +448,8 @@ bool Planner::build(Request* out) {
           // The club's fixtures within the horizon, also catch-up fixtures
           // outside the two rounds; other competitions' rows are skipped.
           const unsigned weeks = (cfg::kFixtureHorizonDays + 6) / 7;
-          format(out, "%sgetmatchesbyteamid/%s/%u/%u", kOpenLigaDb, team,
-                 weeks, weeks);
+          format(out, "%sgetmatchesbyteamid/%s/%u/%u", kOpenLigaDb, team, weeks,
+                 weeks);
           set(out, Sink::kMatches, "");
           filter_ = true;
           season_number_ = static_cast<int>(decimalId(season_text));
@@ -423,8 +459,9 @@ bool Planner::build(Request* out) {
         return false;
       case DataType::kLive: {
         if (progress.at >= state.live_count) return false;
-        const uint32_t round =
-            state.live[progress.at] != 0 ? state.live[progress.at] : state.round;
+        const uint32_t round = state.live[progress.at] != 0
+                                   ? state.live[progress.at]
+                                   : state.round;
         if (round == 0) {
           // The current round is unknown: its matches give it.
           format(out, "%sgetmatchdata/%s", kOpenLigaDb, league);
@@ -434,8 +471,9 @@ bool Planner::build(Request* out) {
           season_number_ = static_cast<int>(decimalId(s.season.view()));
           return true;
         }
-        format(out, progress.step == 1 ? "%sgetlastchangedate/%s/%s/%lu"
-                                       : "%sgetmatchdata/%s/%s/%lu",
+        format(out,
+               progress.step == 1 ? "%sgetlastchangedate/%s/%s/%lu"
+                                  : "%sgetmatchdata/%s/%s/%lu",
                kOpenLigaDb, league, season, static_cast<unsigned long>(round));
         if (progress.step == 1)
           set(out, Sink::kChange, nullptr);
@@ -443,8 +481,7 @@ bool Planner::build(Request* out) {
           set(out, Sink::kMatches, "");
         return true;
       }
-      case DataType::kEvents:
-        return false;
+      case DataType::kEvents: return false;
     }
     return false;
   }
@@ -525,8 +562,7 @@ bool Planner::build(Request* out) {
                kApiFootball, league, season, from, to);
         set(out, Sink::kMatches, "response");
         return true;
-      case DataType::kEvents:
-        return false;
+      case DataType::kEvents: return false;
     }
     return false;
   }
@@ -544,8 +580,7 @@ bool Planner::build(Request* out) {
              league, from, to, then, season);
       set(out, Sink::kMatches, "matches");
       return true;
-    case DataType::kEvents:
-      return false;
+    case DataType::kEvents: return false;
   }
   return false;
 }
@@ -588,12 +623,10 @@ bool Planner::consume(JsonVariantConst element, void* planner) {
 }
 
 void Planner::addDay(uint32_t day) {
-  if (scan_done_ || (scan_count_ > 0 && day <= scan_[scan_count_ - 1]))
-    return;
+  if (scan_done_ || (scan_count_ > 0 && day <= scan_[scan_count_ - 1])) return;
   if (scan_count_ > 0 && matchday::starts(scan_[scan_count_ - 1], day)) {
     // The matchday before 'day' is complete.
-    if (static_cast<int64_t>(scan_[scan_count_ - 1]) + kDayS <=
-        map_.clock.utc)
+    if (static_cast<int64_t>(scan_[scan_count_ - 1]) + kDayS <= map_.clock.utc)
       scan_count_ = 0;  // it has ended
     else if (++scan_blocks_ == 2) {
       scan_done_ = true;
@@ -601,6 +634,14 @@ void Planner::addDay(uint32_t day) {
     }
   }
   if (scan_count_ < scan_.size()) scan_[scan_count_++] = day;
+}
+
+bool Planner::acceptsMatch(JsonVariantConst row) const {
+  if (sink_ != Sink::kMatches) return false;
+  if (map_.provider != Provider::kOpenLigaDb || !filter_) return true;
+  const char* shortcut = row["leagueShortcut"] | "";
+  return sameLeague(shortcut, source_.competition.view()) &&
+         (season_number_ == 0 || (row["leagueSeason"] | 0) == season_number_);
 }
 
 bool Planner::consumeElement(JsonVariantConst row) {
@@ -617,19 +658,11 @@ bool Planner::consumeElement(JsonVariantConst row) {
             found_season_.assign(text);
           }
         }
-        if (filter_) {
-          const char* shortcut = row["leagueShortcut"] | "";
-          if (!sameLeague(shortcut, source_.competition.view()) ||
-              (season_number_ != 0 &&
-               (row["leagueSeason"] | 0) != season_number_))
-            return true;
-        }
       }
+      if (!acceptsMatch(row)) return true;
       storeMatch(row, *store_, map_);  // a row without id is skipped
       return true;
-    case Sink::kTable:
-      storeTableRow(row, *store_, map_);
-      return true;
+    case Sink::kTable: storeTableRow(row, *store_, map_); return true;
     case Sink::kChange:
       if (!row.is<const char*>()) return false;
       found_change_ = changeHash(row.as<const char*>());
@@ -655,10 +688,158 @@ bool Planner::consumeElement(JsonVariantConst row) {
   return true;
 }
 
+void Planner::observeNames(const StoredMatch& match, std::string_view home,
+                           std::string_view away, void* context) {
+  auto& planner = *static_cast<Planner*>(context);
+  auto& response = planner.response_details_;
+  response.receiving = -1;
+  if (response.ambiguous) return;
+  if (!response.events) {
+    response.events.reset(new (std::nothrow) ResponseDetails::EventBuffer{});
+    if (!response.events) {
+      // Scores retain their bounded path; a failed detail allocation stays
+      // visible and is not retried for every row in the same response.
+      response.ambiguous = true;
+      planner.store_->flag(match.competition, kNoticeEvents, true);
+      return;
+    }
+  }
+  // A provider row repeated with another state can revive an earlier discarded
+  // candidate. Such input cannot prove a bounded first-response detail commit.
+  if (std::find(response.seen.begin(),
+                response.seen.begin() + response.seen_count,
+                match.id) != response.seen.begin() + response.seen_count) {
+    response.ambiguous = true;
+    return;
+  }
+  if (response.seen_count == response.seen.size()) {
+    response.ambiguous = true;
+    return;
+  }
+  response.seen[response.seen_count++] = match.id;
+  if (match.isOwn() || response.ambiguous ||
+      planner.store_->find(match.competition, match.provider, match.id) ==
+          nullptr)
+    return;
+  const auto* competition = planner.competitions_->find(match.competition);
+  if (competition == nullptr) return;
+  const selection::Input input{planner.eligibility_->selection,
+                               *planner.competitions_, *planner.store_,
+                               planner.map_.clock, planner.dates_};
+  const auto window = selection::window(input, *competition, match);
+  if (!window.active) return;
+  const std::size_t which = window.reported_running ? 0 : 1;
+  auto& candidate = response.candidates[which];
+  // The closest row survives canonical store pressure longest in this class.
+  // Retain a later equal-distance row, matching the store's farthest victim.
+  if (candidate.match.valid()) {
+    const auto incoming_distance =
+        distance(match.kickoff, planner.map_.clock.utc);
+    const auto previous_distance =
+        distance(candidate.kickoff, planner.map_.clock.utc);
+    if (incoming_distance > previous_distance ||
+        (incoming_distance == previous_distance &&
+         match.kickoff < candidate.kickoff))
+      return;
+  }
+  // Reuse the retained metadata in place; no full metadata stack temporary.
+  candidate.count = 0;
+  candidate.truncated = false;
+  candidate.match = {match.id, match.competition, match.provider};
+  candidate.kickoff = match.kickoff;
+  candidate.home.assign(home);
+  candidate.away.assign(away);
+  response.receiving = static_cast<int8_t>(which);
+}
+
+void Planner::observeEvent(const StoredEvent& event, void* context) {
+  auto& planner = *static_cast<Planner*>(context);
+  if (!planner.response_details_.events) return;
+  auto& response = planner.response_details_;
+  if (response.ambiguous || response.receiving < 0) return;
+  auto& candidate = response.candidates[response.receiving];
+  auto& events = response.events->candidates[response.receiving];
+  if (candidate.count == events.size()) {
+    std::move(events.begin() + 1, events.end(), events.begin());
+    --candidate.count;
+    candidate.truncated = true;
+  }
+  events[candidate.count++] = event;
+}
+
+void Planner::finishDetails(bool ok, const Clock& clock) {
+  if (sink_ != Sink::kMatches || eligibility_ == nullptr ||
+      competitions_ == nullptr)
+    return;
+  if (!ok) {
+    response_details_.clear();
+    return;
+  }
+  const auto* competition = competitions_->find(map_.competition);
+  if (competition == nullptr) {
+    response_details_.clear();
+    return;
+  }
+  std::size_t slot = 0;
+  for (; slot < competitions_->entries.size(); ++slot)
+    if (competitions_->entries[slot].id == competition->id) break;
+  const selection::Input input{eligibility_->selection,
+                               *competitions_,
+                               *store_,
+                               clock,
+                               dates_,
+                               break_proven_};
+  const auto selected = selection::select(input);
+  if (eligibility_->frame ||
+      !eligibility_->allows(selected.phase, screen::Type::kLiveSingle, slot)) {
+    response_details_.clear();
+    return;
+  }
+  const auto single = selection::single(input, selected, *competition);
+  const auto* match = selection::find(input, single.match);
+  if (match == nullptr || match->isOwn()) {
+    response_details_.clear();
+    return;
+  }
+  const ResponseDetails::Candidate* chosen = nullptr;
+  uint8_t chosen_index = 0;
+  if (response_details_.events && !response_details_.ambiguous)
+    for (uint8_t i = 0; i < response_details_.candidates.size(); ++i)
+      if (response_details_.candidates[i].match == single.match) {
+        chosen = &response_details_.candidates[i];
+        chosen_index = i;
+      }
+  if (chosen != nullptr) {
+    auto* target =
+        store_->ensureDetail(match->competition, match->provider, match->id,
+                             clock, chosen->home.data, chosen->away.data);
+    if (target != nullptr && store_->beginEvents(*target, false, clock.utc)) {
+      for (uint8_t i = 0; i < chosen->count; ++i)
+        store_->addEvent(response_details_.events->candidates[chosen_index][i]);
+      store_->endEvents(true);
+      if (chosen->truncated) {
+        target->flags |= kMatchEventsTruncated;
+        store_->flag(target->competition, kNoticeEvents, true);
+      }
+    } else {
+      store_->flag(match->competition, kNoticeEvents, true);
+    }
+  } else if (!store_->hasDetail(*match) || response_details_.ambiguous) {
+    // Keep the existing loss indication until a complete event replacement.
+    // Allocation happens only for the final selected identity, never per row.
+    if (auto* target = store_->ensureDetail(match->competition, match->provider,
+                                            match->id, clock))
+      target->flags |= kMatchEventsTruncated | kMatchEventsPoolCut;
+    store_->flag(match->competition, kNoticeEvents, true);
+  }
+  response_details_.clear();
+}
+
 Step Planner::finish(bool ok, const Clock& clock) {
   if (current_ == nullptr) return Step::kDone;
   if (sink_ == Sink::kTable) store_->commitTable(ok);
   if (sink_ == Sink::kEvents) store_->endEvents(ok);
+  finishDetails(ok, clock);
   return advance(ok, clock);
 }
 
@@ -672,6 +853,7 @@ void Planner::release() {
   if (current_ == nullptr) return;
   if (sink_ == Sink::kTable) store_->commitTable(false);
   if (sink_ == Sink::kEvents) store_->endEvents(false);
+  response_details_.clear();
   current_ = nullptr;
 }
 
@@ -767,9 +949,9 @@ Step Planner::advance(bool ok, const Clock& clock) {
     }
   } else if (p == Provider::kEspn && type_ == DataType::kFixtures) {
     if (progress.step == 1) {
-      state.day_count = static_cast<uint8_t>(matchdayDays(
-          scan_.data(), scan_count_, clock.utc, state.days.data(),
-          state.days.size()));
+      state.day_count = static_cast<uint8_t>(
+          matchdayDays(scan_.data(), scan_count_, clock.utc, state.days.data(),
+                       state.days.size()));
       progress = {2, 0};
     } else {
       ++progress.at;

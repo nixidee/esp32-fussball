@@ -1,11 +1,9 @@
 #include "store_views.h"
 
 #include <algorithm>
-#include <climits>
 #include <cstdlib>
 
 #include "football_files.h"
-#include "request_scheduler.h"
 
 namespace football::view {
 namespace {
@@ -22,19 +20,6 @@ void stableSort(Index* first, unsigned count, Less less) {
   }
 }
 
-// Konferenz membership of 'm' in a block of shown matches with the same
-// kickoff: 'end' is the block's latest end, 'next' the start of the next
-// block (INT64_MAX if none).
-bool member(const StoredMatch& m, int64_t utc, int64_t end, int64_t next,
-            const ConferenceRules& rules) {
-  if (utc < int64_t{m.kickoff} - rules.before * 60) return false;
-  if (utc < std::min(end, next)) return true;
-  // An overrun: still running when the next block started.
-  const bool overran =
-      m.finished_at ? int64_t{m.finished_at} > next : running(m.phase);
-  return utc >= next && overran && utc < matchEnd(m, rules.after);
-}
-
 bool goals(const StoredMatch& m) {
   return m.principal.valid() && m.principal.home + m.principal.away > 0;
 }
@@ -49,18 +34,49 @@ int64_t distance(const StoredMatch& m, int64_t utc) {
   return std::llabs(utc - int64_t{m.kickoff});
 }
 
-bool ownSlot(const MatchStore& store, const StoredMatch& m) {
-  return m.isOwn() && m.own < cfg::kStoreOwnMatches &&
-         store.ownAt(m.own).match == m.id &&
-         store.ownAt(m.own).competition == m.competition;
+bool detailSlot(const MatchStore& store, const StoredMatch& m) {
+  return store.hasDetail(m);
 }
+
+int conferencePin(const MatchStore& store, const List& list, bool enabled) {
+  if (enabled)
+    for (unsigned i = 0; i < list.count; ++i)
+      if (store.match(list.index[i]).isOwn()) return list.index[i];
+  return -1;
+}
+
+// Preserve the original page count and kickoff order. Fill a sparse final
+// page from the back: at most one row per donor for three or more pages,
+// or two from the first of two pages. Never make the final page larger than
+// its predecessor. A repeated pin is outside this unique-match partition.
+struct ConferenceSplit {
+  unsigned pages = 0, slots = 0, moved = 0;
+  ConferenceSplit(unsigned count, unsigned capacity) : slots(capacity) {
+    if (!count || !slots) return;
+    pages = (count + slots - 1) / slots;
+    const unsigned last = count - (pages - 1) * slots;
+    if (pages == 2)
+      moved = std::min(2u, (slots - last) / 2);
+    else if (pages > 2 && last < slots)
+      moved = std::min(pages - 1, slots - last - 1);
+  }
+  unsigned first(unsigned page) const {
+    if (pages == 2) return page ? slots - moved : 0;
+    const unsigned donors_begin = pages - 1 - moved;
+    return page * slots - (page > donors_begin ? page - donors_begin : 0);
+  }
+  unsigned size(unsigned page, unsigned count) const {
+    const unsigned begin = first(page);
+    return page + 1 < pages ? first(page + 1) - begin : count - begin;
+  }
+};
 
 }  // namespace
 
 void Shown::add(const settings::Competition& entry) {
   if (!entry.active || entry.id == 0) return;
   add(Source{entry.id, entry.primary.provider,
-             decimalId(entry.primary.team.view()), entry.screens});
+             decimalId(entry.primary.team.view())});
 }
 
 void Shown::add(const Source& source) {
@@ -76,122 +92,14 @@ const Source* Shown::source(uint8_t competition) const {
   return nullptr;
 }
 
-Shown Shown::only(cfg::CompetitionScreen screen) const {
-  Shown out;
-  for (uint8_t i = 0; i < count_; ++i)
-    if (sources_[i].uses(screen)) out.sources_[out.count_++] = sources_[i];
-  return out;
-}
-
 bool Shown::shows(const StoredMatch& match) const {
   const auto* s = source(match.competition);
   return s != nullptr && s->provider == match.provider;
 }
 
-bool scheduled(const StoredMatch& m) {
-  return m.kickoff != 0 && m.phase != Phase::kPostponed &&
-         m.phase != Phase::kCancelled && m.phase != Phase::kAbandoned;
-}
-
 bool started(Phase phase) {
   return running(phase) || phase == Phase::kFinished ||
          phase == Phase::kAbandoned;
-}
-
-int64_t matchEnd(const StoredMatch& m, uint16_t after) {
-  uint32_t start = 0, end = 0;
-  if (!schedule::liveWindow(m, start, end)) return 0;
-  const int64_t latest =
-      int64_t{m.kickoff} + int64_t{cfg::kUnknownMatchEndMinutes} * 60;
-  return std::min<int64_t>(end, latest) + after * 60;
-}
-
-bool matchWindow(const StoredMatch& m, int64_t utc, uint16_t before,
-                 uint16_t after) {
-  if (!scheduled(m)) return false;
-  return utc >= int64_t{m.kickoff} - before * 60 && utc < matchEnd(m, after);
-}
-
-bool sameRound(const StoredMatch& a, const StoredMatch& b) {
-  if (a.competition != b.competition || a.provider != b.provider) return false;
-  if (a.round != 0 && b.round != 0) return a.round == b.round;
-  if (a.label != kNoIndex && b.label != kNoIndex) return a.label == b.label;
-  return a.kickoff != 0 && b.kickoff != 0 &&
-         a.kickoff / 86400 == b.kickoff / 86400;
-}
-
-List conferenceMembers(const MatchStore& store, const Shown& shown,
-                       int64_t utc, const ConferenceRules& rules) {
-  List list;
-  std::array<bool, cfg::kStoreMatches> in{};
-  const std::size_t n = store.matchCount();
-  const auto counts = [&](std::size_t i) {
-    return shown.shows(store.match(i)) && scheduled(store.match(i));
-  };
-  // One pass over the kickoff blocks: the store is sorted by kickoff
-  // (unknown kickoffs last, never scheduled), so a block is a run of equal
-  // kickoffs and the next block starts at the next counted match after it.
-  std::size_t next = 0;  // first counted match after the current block
-  for (std::size_t begin = 0, end = 0; begin < n; begin = end) {
-    const uint32_t kickoff = store.match(begin).kickoff;
-    int64_t block_end = 0;
-    for (end = begin; end < n && store.match(end).kickoff == kickoff; ++end)
-      if (counts(end))
-        block_end =
-            std::max(block_end, matchEnd(store.match(end), rules.after));
-    if (kickoff == 0 || block_end == 0) continue;
-    next = std::max(next, end);
-    while (next < n && !counts(next)) ++next;
-    const int64_t next_start =
-        next < n ? int64_t{store.match(next).kickoff} - rules.before * 60
-                 : INT64_MAX;
-    for (std::size_t i = begin; i < end; ++i)
-      in[i] = counts(i) &&
-              member(store.match(i), utc, block_end, next_start, rules);
-  }
-  if (rules.whole_matchday) {
-    for (std::size_t i = 0; i < n; ++i) {
-      const auto& own = store.match(i);
-      if (in[i] || !own.isOwn() || !shown.shows(own) || !scheduled(own) ||
-          utc < int64_t{own.kickoff})
-        continue;
-      for (std::size_t j = 0; j < n && !in[i]; ++j)
-        in[i] = j != i && in[j] && !store.match(j).isOwn() &&
-                sameRound(own, store.match(j));
-    }
-  }
-  // The store is sorted by kickoff (unknown kickoffs last).
-  for (std::size_t i = 0; i < n; ++i)
-    if (in[i]) list.index[list.count++] = static_cast<uint8_t>(i);
-  return list;
-}
-
-List conferenceAll(const MatchStore& store, const Shown& shown) {
-  List list;
-  for (std::size_t i = 0; i < store.matchCount(); ++i)
-    if (shown.shows(store.match(i)))
-      list.index[list.count++] = static_cast<uint8_t>(i);
-  return list;
-}
-
-matchday::Reach matchdays(const MatchStore& store, const Shown& shown,
-                          uint8_t competition, cfg::MatchdayMode mode,
-                          int64_t utc, int32_t local_offset_s) {
-  return matchday::reach(
-      store, competition, [&](const StoredMatch& m) { return shown.shows(m); },
-      mode, utc, local_offset_s);
-}
-
-List matchday(const MatchStore& store, const Shown& shown, uint8_t competition,
-              const matchday::Span& span) {
-  List list;
-  for (std::size_t i = span.begin; i < span.end && i < store.matchCount();
-       ++i) {
-    const auto& m = store.match(i);
-    if (m.competition == competition && m.kickoff != 0 && shown.shows(m))
-      list.index[list.count++] = static_cast<uint8_t>(i);
-  }
-  return list;
 }
 
 ConferencePage conferencePage(const MatchStore& store, const List& list,
@@ -200,16 +108,13 @@ ConferencePage conferencePage(const MatchStore& store, const List& list,
   const unsigned per_page =
       std::min<unsigned>(request.per_page, kConferenceRowsMax);
   if (list.count == 0 || per_page == 0) return page;
-  int pinned = -1;
-  if (request.pin_own)
-    for (unsigned i = 0; i < list.count && pinned < 0; ++i)
-      if (store.match(list.index[i]).isOwn()) pinned = list.index[i];
+  const int pinned = conferencePin(store, list, request.pin_own);
   std::array<uint8_t, cfg::kStoreMatches> others{};
   unsigned count = 0;
   for (unsigned i = 0; i < list.count; ++i)
     if (list.index[i] != pinned) others[count++] = list.index[i];
   const unsigned slots = per_page - (pinned >= 0 ? 1 : 0);
-  unsigned first = 0;
+  unsigned first = 0, rows = slots;
   page.pages = 1;
   if (request.mode == cfg::ConferenceMode::kOnePage && !request.manual) {
     stableSort(others.data(), count, [&](uint8_t a, uint8_t b) {
@@ -220,36 +125,41 @@ ConferencePage conferencePage(const MatchStore& store, const List& list,
       return rx == 0 && x.score_changed > y.score_changed;
     });
   } else if (slots > 0 && count > 0) {
-    const unsigned pages = (count + slots - 1) / slots;
-    page.pages = static_cast<uint8_t>(std::min(pages, 255u));
+    const ConferenceSplit split(count, slots);
+    page.pages = static_cast<uint8_t>(std::min(split.pages, 255u));
     page.page = static_cast<uint8_t>(
         request.manual ? std::min<unsigned>(request.page, page.pages - 1u)
                        : request.page % page.pages);
-    first = page.page * slots;
+    first = split.first(page.page);
+    rows = split.size(page.page, count);
   }
   if (pinned >= 0) page.rows[page.row_count++] = static_cast<uint8_t>(pinned);
-  for (unsigned i = first; i < count && page.row_count < per_page; ++i)
+  for (unsigned i = first; i < count && i - first < rows; ++i)
     page.rows[page.row_count++] = others[i];
   return page;
 }
 
-int ownForScreen(const MatchStore& store, const Shown& shown, int64_t utc,
-                 uint16_t before, uint16_t after, bool demo, bool& in_window) {
-  int best = -1;
-  in_window = false;
-  for (std::size_t i = 0; i < store.matchCount(); ++i) {
-    const auto& m = store.match(i);
-    if (!m.isOwn() || !shown.shows(m)) continue;
-    const bool active = demo || matchWindow(m, utc, before, after);
-    const auto* chosen = best < 0 ? nullptr : &store.match(best);
-    if (chosen == nullptr || (active && !in_window) ||
-        (!in_window && m.kickoff != 0 && chosen->kickoff != 0 &&
-         distance(m, utc) < distance(*chosen, utc))) {
-      best = static_cast<int>(i);
-      in_window |= active;
+int conferencePageOf(const MatchStore& store, const List& list,
+                     const ConferenceRequest& request, uint8_t store_index) {
+  const unsigned per_page =
+      std::min<unsigned>(request.per_page, kConferenceRowsMax);
+  if (!list.count || !per_page) return -1;
+  const int pinned = conferencePin(store, list, request.pin_own);
+  if (pinned == store_index) return 0;
+  const unsigned count = list.count - (pinned >= 0);
+  const ConferenceSplit split(count, per_page - (pinned >= 0));
+  unsigned ordinal = 0;
+  for (unsigned i = 0; i < list.count; ++i) {
+    if (list.index[i] == pinned) continue;
+    if (list.index[i] == store_index) {
+      for (unsigned page = 0; page < split.pages; ++page)
+        if (ordinal < split.first(page) + split.size(page, count))
+          return static_cast<int>(page);
+      return -1;
     }
+    ++ordinal;
   }
-  return best;
+  return -1;
 }
 
 int ownForOverview(const MatchStore& store, const Shown& shown, int64_t utc) {
@@ -311,8 +221,8 @@ const char* teamName(const MatchStore& store, const StoredMatch& match,
   if (team < cfg::kStoreTeams && store.teamAt(team).id != 0 &&
       !store.teamAt(team).short_name.empty())
     return store.teamAt(team).short_name.data;
-  if (ownSlot(store, match)) {
-    const auto& own = store.ownAt(match.own);
+  if (detailSlot(store, match)) {
+    const auto& own = store.detailAt(match.detail);
     return home ? own.home_name.data : own.away_name.data;
   }
   return "";
@@ -320,8 +230,8 @@ const char* teamName(const MatchStore& store, const StoredMatch& match,
 
 const char* fullName(const MatchStore& store, const StoredMatch& match,
                      bool home, const persist::ShortNames* names) {
-  if (ownSlot(store, match)) {
-    const auto& own = store.ownAt(match.own);
+  if (detailSlot(store, match)) {
+    const auto& own = store.detailAt(match.detail);
     const auto& name = home ? own.home_name : own.away_name;
     if (!name.empty()) return name.data;
   }
@@ -331,7 +241,8 @@ const char* fullName(const MatchStore& store, const StoredMatch& match,
 const char* rowName(const MatchStore& store, const StoredRow& row,
                     const persist::ShortNames* names) {
   if (const char* name = replaced(store, row.team, names)) return name;
-  if (row.team < cfg::kStoreTeams) return store.teamAt(row.team).short_name.data;
+  if (row.team < cfg::kStoreTeams)
+    return store.teamAt(row.team).short_name.data;
   return "";
 }
 
@@ -349,8 +260,8 @@ Table table(const MatchStore& store, uint8_t competition) {
 
 Events events(const MatchStore& store, const StoredMatch& match) {
   Events out;
-  if (!ownSlot(store, match)) return out;
-  const auto& own = store.ownAt(match.own);
+  if (!detailSlot(store, match)) return out;
+  const auto& own = store.detailAt(match.detail);
   // Sort key per kept event: shootout, minute (inherited when unknown),
   // added minute.
   std::array<uint32_t, cfg::kMatchEvents> key{};
@@ -360,9 +271,8 @@ Events events(const MatchStore& store, const StoredMatch& match) {
     const auto& e = store.eventAt(at);
     if (e.minute != kNoValue) minute = e.minute;
     if (e.flags & kEventRemoved) continue;
-    const uint8_t added = e.minute != kNoValue && e.added != kNoValue
-                              ? e.added
-                              : 0;
+    const uint8_t added =
+        e.minute != kNoValue && e.added != kNoValue ? e.added : 0;
     key[out.count] = (e.flags & kEventShootout ? 1u << 16 : 0u) |
                      uint32_t{minute} << 8 | added;
     out.index[out.count++] = at;
@@ -374,36 +284,6 @@ Events events(const MatchStore& store, const StoredMatch& match) {
   const auto unsorted = out.index;
   for (uint8_t i = 0; i < out.count; ++i) out.index[i] = unsorted[order[i]];
   return out;
-}
-
-void demo(MatchStore& store, uint8_t competition) {
-  store.clear();
-  // Clock 0: no kickoff and no recent score change (no goal flash).
-  const Clock clock{};
-  StoredMatch m;
-  m.id = 1;
-  m.competition = competition;
-  m.home = store.team(competition, cfg::Provider::kOpenLigaDb, 10, "Bayern");
-  m.away = store.team(competition, cfg::Provider::kOpenLigaDb, 11, "Essen");
-  m.phase = Phase::kLive;
-  m.minute = 67;
-  m.principal = {2, 1};
-  m.flags = kMatchOwn;
-  store.upsert(m, clock, "FC Bayern München", "Rot-Weiss Essen");
-  static constexpr const char* kClubs[] = {"Demo United", "Demo City",
-                                           "FC Bayern München",
-                                           "Demo Athletic", "Rot-Weiss Essen"};
-  store.beginTable(competition);
-  for (uint8_t i = 0; i < 5; ++i) {
-    StoredRow r;
-    r.team = store.team(competition, cfg::Provider::kOpenLigaDb, i + 1u,
-                        kClubs[i]);
-    r.position = i + 1;
-    r.points = static_cast<int16_t>(30 - i * 3);
-    r.flags = i == 2 ? kRowOwn : 0;
-    store.appendRow(r);
-  }
-  store.commitTable(true);
 }
 
 }  // namespace football::view

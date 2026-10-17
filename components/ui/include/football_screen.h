@@ -52,7 +52,7 @@ struct Card {
   uint8_t line_count = 0, hint_count = 0;
 };
 struct ViewModel {
-  cfg::Screen screen = cfg::Screen::kCrest;
+  screen::Type screen = screen::Type::kCrest;
   settings::ScreenStyle style;
   Layout layout = Layout::kImage;
   // Own match: competition · round; Konferenz: title with page; table:

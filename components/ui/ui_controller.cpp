@@ -26,15 +26,21 @@ namespace ui {
 namespace {
 geometry::SafeArea area(0, 0, hw::DisplayShape::kRect, 0);
 settings::Model model;
+settings::screen_policy::Policy policy;
 ViewModel view;
 NavigationState nav;
 PresentationState presentation;
-int64_t render_at = 0, boot_at = 0;
+int64_t render_at = 0, boot_at = 0, frame_ip_at = 0, scroll_at = 0;
 bool good = false, dim_colours = false;
 std::size_t input_count = 0;
-uint32_t generation = 0, image_revision = 0, network_epoch = 0;
+uint32_t generation = 0, data_generation = 0, image_revision = 0,
+         network_epoch = 0;
 hw::DisplayProfile profile{};
-std::atomic<uint32_t> screen_state{1u << 16};
+std::atomic<uint32_t> screen_state{
+    1u << 16 |
+    static_cast<uint32_t>(settings::screen_policy::Phase::kIdle) << 19};
+static_assert(settings::screen_policy::kPhaseCount <= 8 &&
+              2 + screen::kSportTypeCount * cfg::kCompetitionMax < 64);
 std::array<InputPolicy, hw::kMaxInputs> buttons{};
 StaticQueue_t action_buffer;
 events::Payload action_storage[cfg::kEventUiActionSlots];
@@ -47,68 +53,118 @@ images::Status imageSource(uint8_t id, cfg::StockImage stock) {
   return images::select(id, stock, view.image, sizeof(view.image));
 }
 NavigationData factsOf(const football::Published& data,
-                       const BindContext& context,
-                       uint8_t (&faults)[cfg::kCompetitionMax]) {
-  std::size_t count = 0;
-  for (const auto& competition : data.competitions)
-    if (competition.active && competition.id &&
-        competition.cause != football::Cause::kNone)
-      faults[count++] = competition.id;
+                       const BindContext& context) {
+  uint8_t failed = 0;
+  for (std::size_t i = 0; i < data.routes.entries.size(); ++i) {
+    const auto* state =
+        football::findState(data.competitions, data.routes.entries[i].id);
+    if (state && state->cause != football::Cause::kNone) failed |= 1u << i;
+  }
   return {data.store,
           data.shown,
-          faults,
-          count,
-          context.valid ? context.utc : 0,
-          0,
-          data.configured};
+          data.routes,
+          model.demo
+              ? data.clock
+              : football::Clock{context.valid ? context.utc : 0,
+                                static_cast<uint32_t>(context.now / 1000)},
+          {[](int64_t at, void*) { return timekeeping::localOffset(at); },
+           nullptr, 0},
+          data.loaded_matches,
+          data.loaded_tables,
+          failed,
+          data.configured,
+          data.break_proven};
 }
 void bind(const football::Published& data, void* raw) {
   auto& context = *static_cast<BindContext*>(raw);
-  uint8_t faults[cfg::kCompetitionMax];
-  const auto facts = factsOf(data, context, faults);
-  Presenter presenter(model, view, nav, presentation, input_count, &data,
-                      &facts);
+  if (data.generation != data_generation ||
+      generation != settings::generation())
+    return;
+  if (model.demo) {
+    context.utc = data.clock.utc;
+    context.valid = data.clock.utc > 0;
+  }
+  const auto facts = factsOf(data, context);
+  NavigationContext navigation(policy, facts);
+  const auto before = nav.entry;
+  const auto page_before = nav.page;
+  sequence::synchronize(nav, navigation.input(), context.now);
+  Presenter presenter(model, view, policy, nav, presentation, input_count,
+                      &data, &navigation);
   context.status_state = presenter.bind(context);
+  context.bound = true;
+  const auto automatic_entries = model.demo && !nav.frame
+                                     ? sequence::count(navigation.input(), false)
+                                     : 0;
   screen_state.store(presentation.screen_status |
-                         static_cast<uint32_t>(presentation.starting) << 16,
+                         static_cast<uint32_t>(presentation.starting) << 16 |
+                         static_cast<uint32_t>(nav.manual) << 17 |
+                         static_cast<uint32_t>(nav.frame) << 18 |
+                         static_cast<uint32_t>(nav.phase) << 19 |
+                         static_cast<uint32_t>(automatic_entries) << 22,
                      std::memory_order_relaxed);
+  if (model.demo && (before != nav.entry || page_before != nav.page))
+    ESP_LOGI("screen", "demo phase %u type %u competition %u page %u/%u %s%s",
+             static_cast<unsigned>(nav.phase),
+             static_cast<unsigned>(nav.entry.type), nav.entry.competition,
+             nav.page + 1, nav.pages, nav.manual ? "manual" : "automatic",
+             nav.frame ? " frame" : "");
 }
 struct ActionContext {
   Action action;
   int64_t now;
   uint32_t generation;
   bool synchronize_only;
+  bool applied = false;
 };
 void navigate(const football::Published& data, void* raw) {
-  const auto& action = *static_cast<ActionContext*>(raw);
+  auto& action = *static_cast<ActionContext*>(raw);
   // A save can complete while this callback waits for the repository lock.
   // Reject an old command before any navigation, start-screen or timer effect.
   if (action.generation != settings::generation()) return;
   time_t utc = 0;
   const bool valid = timekeeping::utcNow(utc);
   const BindContext context{utc, action.now, valid, false, false, nullptr};
-  uint8_t faults[cfg::kCompetitionMax];
-  auto facts = factsOf(data, context, faults);
-  if (!action.synchronize_only && nav.selected == cfg::Screen::kMatchday &&
-      valid)
-    facts.local_offset = timekeeping::localOffset(utc);
+  if (data.generation != data_generation) return;
+  const auto facts = factsOf(data, context);
+  NavigationContext navigation(policy, facts);
   if (action.generation != settings::generation()) return;
-  if (action.synchronize_only)
-    synchronize(nav, model, facts, input_count);
-  else {
-    applyAction(nav, action.action, model, facts, action.now);
-    presentation.starting = false;
-    if (action.action == Action::kShowIp) boot_at = action.now;
+  if (action.action == Action::kAutomaticNext && !model.demo) {
+    // Even a forged/previously queued command cannot affect ordinary output.
+    action.applied = true;
+    return;
   }
+  if (action.synchronize_only)
+    sequence::reset(nav, navigation.input(), action.now);
+  else {
+    sequence::applyAction(nav, navigation.input(), action.action, action.now);
+    if (model.demo)
+      ESP_LOGI("screen", "demo action %u phase %u type %u competition %u "
+                         "page %u/%u %s%s",
+               static_cast<unsigned>(action.action),
+               static_cast<unsigned>(nav.phase),
+               static_cast<unsigned>(nav.entry.type), nav.entry.competition,
+               nav.page + 1, nav.pages, nav.manual ? "manual" : "automatic",
+               nav.frame ? " frame" : "");
+    presentation.starting = false;
+    if (action.action == Action::kShowIp) boot_at = frame_ip_at = action.now;
+    if (action.action == Action::kToggleDirection ||
+        action.action == Action::kUp || action.action == Action::kDown)
+      scroll_at = action.now;
+  }
+  action.applied = true;
 }
-void action(Action input, int64_t now) {
+bool action(Action input, int64_t now) {
   ActionContext context{input, now, generation, false};
   football::read(navigate, &context);
+  return context.applied;
 }
 void reloadSettings(int64_t now) {
-  model = settings::current(&generation);
+  settings::uiSettings(model, policy, generation, data_generation);
   for (auto& button : buttons) button.cancel();
-  automatic(nav, now, AutomaticReason::kSettings);
+  nav.initialized = false;
+  scroll_at = now;
+  nav.scroll_down = true;
   ActionContext context{Action::kNone, now, generation, true};
   football::read(navigate, &context);
 }
@@ -126,7 +182,7 @@ bool draw(uint32_t lock_timeout_ms) {
   area = geometry::SafeArea::forDisplay(rotated, cfg::kContentMarginDivisor);
   good = render(view, area);
   display::unlock();
-  return true;
+  return good;
 }
 }  // namespace
 esp_err_t init(const hw::DisplayProfile& display, std::size_t inputs,
@@ -135,7 +191,7 @@ esp_err_t init(const hw::DisplayProfile& display, std::size_t inputs,
   area = geometry::SafeArea::forDisplay(display, cfg::kContentMarginDivisor);
   profile = display;
   input_count = std::min(inputs, buttons.size());
-  boot_at = timekeeping::monotonicMs();
+  boot_at = frame_ip_at = timekeeping::monotonicMs();
   if (!area.isValid()) return ESP_ERR_INVALID_ARG;
   actions = xQueueCreateStatic(
       cfg::kEventUiActionSlots, sizeof(events::Payload),
@@ -175,21 +231,21 @@ void poll() {
     // A newer command may already be queued while our model is still old.
     // Keep it in the FIFO until the next poll adopts the newer snapshot.
     if (generation != settings::generation()) return;
+    if (actionGeneration(pending) == generation) {
+      const auto input = actionFromPayload(pending);
+      // A newly saved provider/source snapshot may not have reached the
+      // repository yet. Keep this fresh command at the FIFO head until the
+      // matching publication exists; old-generation commands are discarded.
+      if (input != Action::kNone && !action(input, now)) return;
+    }
     if (xQueueReceive(actions, &pending, 0) != pdPASS) break;
-    if (actionGeneration(pending) != generation) continue;
-    const auto input = actionFromPayload(pending);
-    if (input != Action::kNone) action(input, now);
   }
   // Also catch a save during reload or the final navigation callback.
   if (generation != settings::generation()) return;
   if (now - render_at < cfg::kUiRefreshMs) return;
   render_at = now;
-  if (nav.manual && model.manual_return_s > 0 &&
-      now - nav.input_at >= model.manual_return_s * 1000) {
-    automatic(nav, now, AutomaticReason::kTimeout);
-  }
   if (model.scroll_reset_s > 0 &&
-      now - nav.scroll_at >= model.scroll_reset_s * 1000)
+      now - scroll_at >= model.scroll_reset_s * 1000LL)
     nav.scroll_down = true;
   time_t utc = 0;
   const auto net = network::status();
@@ -197,6 +253,7 @@ void poll() {
                       net.ap, &net};
   context.utc = utc;
   football::read(bind, &context);
+  if (!context.bound || generation != settings::generation()) return;
   std::tm local{};
   view.night = model.night_enabled && timekeeping::localNow(local) &&
                timekeeping::contains(
@@ -209,34 +266,26 @@ void poll() {
   images::Status selected_image{};
   if (presentation.starting) {
     images::clearSelection();
-  } else if (nav.selected == cfg::Screen::kCrest) {
-    uint8_t id = cfg::kStockImageId;
-    if (!model.slides.empty()) {
-      const auto count = model.slides.size();
-      const unsigned index = (now / (model.slideshow_s * 1000)) % count;
-      id = model.slides[index];
-      if (count > 1 && view.layout == Layout::kImage) {
-        view.page = static_cast<uint8_t>(index);
-        view.pages = static_cast<uint8_t>(count);
-      }
-    }
-    selected_image = imageSource(id, cfg::kStockCrest);
-  } else if (model.backgrounds && view.style.background) {
+  } else if (nav.entry.valid() && !screen::sporting(nav.entry.type)) {
+    selected_image = imageSource(nav.image_id, cfg::kStockCrest);
+  } else if (policy.backgrounds && view.style.background) {
     selected_image = imageSource(view.style.image, cfg::kStockBackground);
   } else
     images::clearSelection();
   view.image_revision = selected_image.attempt;
   if (!presentation.starting)
-    Presenter(model, view, nav, presentation, input_count)
+    Presenter(model, view, policy, nav, presentation, input_count)
         .finishStatus(context.status_state, now, selected_image);
   if (net.epoch != network_epoch) {
     network_epoch = net.epoch;
-    if (net.connected) boot_at = now;
+    if (net.connected && !policy.frame) boot_at = now;
   }
   view.badge_bottom = model.ip_badge_bottom;
   if (!presentation.no_badge &&
-      ((net.ap && model.ip_badge_ap_permanent) || model.ip_badge_s == 0 ||
-       now - boot_at < model.ip_badge_s * 1000)) {
+      ((net.ap && model.ip_badge_ap_permanent && !policy.frame) ||
+       model.ip_badge_s == 0 ||
+       now - (policy.frame ? frame_ip_at : boot_at) <
+           model.ip_badge_s * 1000)) {
     if (net.ap) {
       snprintf(view.badge[0], sizeof(view.badge[0]), "%s", net.ap_ssid);
       snprintf(view.badge[1], sizeof(view.badge[1]), "%s", net.ap_ip);
@@ -246,21 +295,37 @@ void poll() {
       view.badge_lines = 1;
     }
   }
-  draw(cfg::kStatusLockTimeoutMs);
+  const uint32_t revision = nav.revision;
+  const bool image_missing = !screen::sporting(nav.entry.type) &&
+                             selected_image.active &&
+                             selected_image.actual == images::FileSource::kNone;
+  if (draw(cfg::kStatusLockTimeoutMs) && !presentation.starting &&
+      generation == settings::generation()) {
+    if (image_missing) {
+      // An image-error card is useful output, but earns no image time and
+      // cannot consume the ordinary slideshow's continuation cursor.
+      nav.presented = false;
+      nav.observed_at = timekeeping::monotonicMs();
+    } else
+      sequence::presented(nav, revision, timekeeping::monotonicMs());
+  }
 }
 bool showStartScreen(const hw::DisplayProfile& display, bool backlight) {
   dim_colours = !backlight;
   profile = display;
-  model = settings::current();
+  settings::uiSettings(model, policy, generation, data_generation);
   new (&view) ViewModel();
-  Presenter(model, view, nav, presentation, input_count).bindStart(0);
+  Presenter(model, view, policy, nav, presentation, input_count).bindStart(0);
   return draw(cfg::kBootScreenLockTimeoutMs) && good;
 }
 bool healthy() { return good; }
 Status status() {
   const uint32_t word = screen_state.load(std::memory_order_relaxed);
-  return {static_cast<cfg::Screen>(word & 0xff),
-          static_cast<Reason>(word >> 8 & 0xff), (word & (1u << 16)) != 0};
+  return {static_cast<screen::Type>(word & 0xff),
+          static_cast<Reason>(word >> 8 & 0xff), (word & (1u << 16)) != 0,
+          (word & (1u << 17)) != 0, (word & (1u << 18)) != 0,
+          static_cast<uint8_t>(word >> 19 & 7),
+          static_cast<uint8_t>(word >> 22 & 63)};
 }
 const char* reasonName(Reason reason) {
   switch (reason) {
@@ -269,6 +334,9 @@ const char* reasonName(Reason reason) {
     case Reason::kOwnMatch: return "own_match";
     case Reason::kMatchday: return "matchday";
     case Reason::kIdle: return "idle";
+    case Reason::kOtherGames: return "other_games";
+    case Reason::kBreak: return "break";
+    case Reason::kFrame: return "frame";
   }
   return "idle";
 }

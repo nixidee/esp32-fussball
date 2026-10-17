@@ -116,7 +116,8 @@ bool isOwn(const MapContext& c, const TeamRef& home, const TeamRef& away) {
 int value(uint8_t v) { return v == kNoValue ? -1 : v; }
 
 // Revision and, unless the provider gives one, identity, then adds it.
-void add(MatchStore& store, StoredEvent& e) {
+void add(MatchStore& store, StoredEvent& e,
+         const MapContext* context = nullptr) {
   const int type = static_cast<int>(e.type);
   const int actor = static_cast<int>(e.actor);
   const int shootout = (e.flags & kEventShootout) ? 1 : 0;
@@ -134,6 +135,8 @@ void add(MatchStore& store, StoredEvent& e) {
     e.identity = fingerprint(identity);
   }
   store.addEvent(e);
+  if (context != nullptr && context->observe_events != nullptr)
+    context->observe_events(e, context->events_context);
 }
 
 bool scoring(EventType type) {
@@ -148,15 +151,24 @@ Side opposite(Side s) {
 }
 
 // Stores a mapped match. With 'events' (the row carries them) opens the
-// event list of the own match (beginEvents()); false when none is open.
+// event list when that match has a detail slot; false when none is open.
 bool put(StoredMatch& m, MatchStore& store, const MapContext& c,
          const char* home_name, const char* away_name, bool events) {
-  StoredMatch* target = store.upsert(m, c.clock, home_name, away_name);
-  return events && target != nullptr && target->isOwn() &&
+  // Ordinary response details commit only after the final selector recheck.
+  const bool stage = !m.isOwn() && c.observe_events != nullptr;
+  StoredMatch* target =
+      store.upsert(m, c.clock, stage ? "" : home_name, stage ? "" : away_name);
+  // Observe every mapped row, including a row rejected by store capacity, so
+  // its event stream can never be attributed to the previous accepted row.
+  if (c.observe_names != nullptr)
+    c.observe_names(target != nullptr ? *target : m, home_name, away_name,
+                    c.names_context);
+  return events && target != nullptr && !stage &&
          store.beginEvents(*target, false, c.clock.utc);
 }
 
-void openLigaGoals(JsonVariantConst row, MatchStore& store) {
+void openLigaGoals(JsonVariantConst row, MatchStore& store, const MapContext& c,
+                   bool opened) {
   // The beneficiary only when consecutive totals identify the increment.
   int home = 0, away = 0;
   for (JsonVariantConst goal : row["goals"].as<JsonArrayConst>()) {
@@ -178,9 +190,9 @@ void openLigaGoals(JsonVariantConst row, MatchStore& store) {
       home = e.after.home;
       away = e.after.away;
     }
-    add(store, e);
+    add(store, e, &c);
   }
-  store.endEvents(true);
+  if (opened) store.endEvents(true);
 }
 
 bool openLigaMatch(JsonVariantConst row, MatchStore& store,
@@ -227,7 +239,9 @@ bool openLigaMatch(JsonVariantConst row, MatchStore& store,
     m.phase = Phase::kFinished;
   else
     estimate(m, c.clock.utc);
-  if (put(m, store, c, home.name, away.name, true)) openLigaGoals(row, store);
+  const bool opened = put(m, store, c, home.name, away.name, true);
+  if (opened || c.observe_events != nullptr)
+    openLigaGoals(row, store, c, opened);
   return true;
 }
 
@@ -243,7 +257,9 @@ void espnMatch(JsonVariantConst row, StoredMatch& m, MatchStore& store,
             : !strcmp(state, "in")  ? Phase::kLive
             : !strcmp(state, "pre") ? Phase::kScheduled
                                     : Phase::kUnknown;
-  if (strstr(status, "POSTPONED") || strstr(status, "SUSPENDED"))
+  if (strstr(status, "SUSPENDED"))
+    m.phase = Phase::kSuspended;
+  else if (strstr(status, "POSTPONED"))
     m.phase = Phase::kPostponed;
   else if (strstr(status, "CANCELED") || strstr(status, "CANCELLED"))
     m.phase = Phase::kCancelled;
@@ -255,12 +271,13 @@ void espnMatch(JsonVariantConst row, StoredMatch& m, MatchStore& store,
     m.phase = Phase::kPenalties;
   else if (!strcmp(state, "in") && strstr(status, "EXTRA"))
     m.phase = Phase::kExtraTime;
-  for (JsonVariantConst side : competition["competitors"].as<JsonArrayConst>()) {
+  for (JsonVariantConst side :
+       competition["competitors"].as<JsonArrayConst>()) {
     const char* where = text(side["homeAway"]);
     const bool is_home = !strcmp(where, "home");
     if (!is_home && strcmp(where, "away")) continue;
-    (is_home ? home : away) = team(side["team"], store, c, "id", "displayName",
-                                   "shortDisplayName");
+    (is_home ? home : away) =
+        team(side["team"], store, c, "id", "displayName", "shortDisplayName");
     if (m.phase != Phase::kScheduled)
       (is_home ? m.principal.home : m.principal.away) =
           small(side["score"].is<JsonObjectConst>() ? side["score"]["value"]
@@ -269,7 +286,7 @@ void espnMatch(JsonVariantConst row, StoredMatch& m, MatchStore& store,
     (is_home ? m.shootout.home : m.shootout.away) =
         small(side["shootoutScore"], 99);
   }
-  if (running(m.phase))
+  if (running(m.phase) || m.phase == Phase::kSuspended)
     m.minute = clockMinute(text(competition["status"]["displayClock"]));
 }
 
@@ -367,13 +384,13 @@ bool espnEvent(JsonVariantConst row, StoredEvent& e) {
 // One ESPN scoreboard detail of 'match' between MatchStore::beginEvents()
 // and endEvents(). Event types the display does not show are skipped.
 void espnDetail(JsonVariantConst row, MatchStore& store,
-                const StoredMatch& match) {
+                const StoredMatch& match, const MapContext& c) {
   StoredEvent e;
   if (!espnEvent(row, e)) return;
   e.actor = side(store, match, numericId(row["team"]["id"]));
   if (scoring(e.type))
     e.beneficiary = e.type == EventType::kOwnGoal ? opposite(e.actor) : e.actor;
-  add(store, e);
+  add(store, e, &c);
 }
 
 bool tableRow(JsonVariantConst row, MatchStore& store, const MapContext& c) {
@@ -473,12 +490,14 @@ bool storeMatch(JsonVariantConst row, MatchStore& store, const MapContext& c) {
   m.away = away.index;
   if (isOwn(c, home, away)) m.flags |= kMatchOwn;
   if (m.phase == Phase::kUnknown) estimate(m, c.clock.utc);
-  if (put(m, store, c, home.name, away.name,
-          c.provider == cfg::Provider::kEspn)) {
+  const bool opened = put(m, store, c, home.name, away.name,
+                          c.provider == cfg::Provider::kEspn);
+  if (c.provider == cfg::Provider::kEspn &&
+      (opened || c.observe_events != nullptr)) {
     for (JsonVariantConst detail :
          row["competitions"][0]["details"].as<JsonArrayConst>())
-      espnDetail(detail, store, m);
-    store.endEvents(true);
+      espnDetail(detail, store, m, c);
+    if (opened) store.endEvents(true);
   }
   return true;
 }
@@ -503,7 +522,8 @@ bool storeTableRow(JsonVariantConst row, MatchStore& store,
                    const MapContext& c) {
   if (c.provider == cfg::Provider::kApiFootball &&
       row["league"].is<JsonObjectConst>()) {
-    for (JsonVariantConst group : row["league"]["standings"].as<JsonArrayConst>())
+    for (JsonVariantConst group :
+         row["league"]["standings"].as<JsonArrayConst>())
       for (JsonVariantConst item : group.as<JsonArrayConst>())
         if (!tableRow(item, store, c)) return false;
     return true;

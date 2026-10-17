@@ -5,6 +5,8 @@ idf_component_register(
   SRCS
     "settings_model.cpp"
     "settings_record.cpp"
+    "screen_policy.cpp"
+    "screen_record.cpp"
   INCLUDE_DIRS
     "include"
     "../../include"

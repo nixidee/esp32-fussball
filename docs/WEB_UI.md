@@ -5,15 +5,24 @@ German and English text. It uses no framework, CDN, web font or browser build
 step. Firmware and page are updated together. Current C6 source/build evidence
 and pending device acceptance are recorded separately below.
 
+The dedicated screen-policy options are available in the current source. They
+share the existing draft/save flow with general settings and competitions.
+The active controller now uses the same policy and common sequence. The
+frame request-admission gate applies before the first HTTP write.
+The [screen-system contract](UI.md#planned-screen-system-redesign) distinguishes
+this staged implementation from final device behavior and layout acceptance.
+The overview contains frame mode; Display contains phase rules, common order,
+appearance and library-image sequence. Image files remain managed under Images.
+
 ## Six pages
 
 | Page | Content |
 |---|---|
-| Overview | Current screen/reason, own match or kickoff, global data age, next provider round and its reason, source/match count/data time/cause, action and error code per competition, warnings and refresh/next/IP actions |
-| Competitions | Compact ordered list of active/paused entries with a Details expander (season, screen switches, move/edit/short names/remove), add/edit wizard, provider competition/club lists |
-| Display | Situation defaults, five screen styles, background/image references, ordered slideshow (the crest is one possible slide), brightness/night/rotation, badges and expert scroll controls |
+| Overview | Frame mode, current screen/reason, own match or kickoff, global data age, next provider round and its reason, source/match count/data time/cause, action and error code per competition, warnings and refresh/next/IP actions |
+| Competitions | Compact ordered list of active/paused entries with a Details expander (season, own special treatment, move/edit/short names/remove), add/edit wizard, provider competition/club lists |
+| Display | Five phase tabs, six types, shared rules and retained per-competition overrides, common type order, visit/image times, separate crest and library images, appearance, brightness/night/rotation, badges and input roles |
 | Images | Revisioned thumbnails, usage, quota, upload/replace editor, confirmed real deletion, and the crest and standard background (replace, copy from the library, restore the factory image) |
-| Settings | WiFi scan and credentials, hostname/antenna, provider keys/opt-in and request limits (daily cap, window limit) per provider, time/language/access and expert diagnostics |
+| Settings | WiFi scan and credentials, hostname/antenna, provider keys/opt-in and request limits (daily cap, window limit) per provider, time/language/access, expert Demo scenario/step controls and diagnostics |
 | System | Firmware/update, backup/import, restart, separate image-storage repair, delete user images, factory reset and live diagnostics |
 
 The page starts with session discovery. Without an admin password it obtains
@@ -38,42 +47,43 @@ IP directly. Normal status polling clears recovered errors and preserves
 unsaved form edits. Local-service readiness is listed with the device
 measurements, separately from the WiFi address.
 
-The overview shows the current screen as a schematic SVG disc that follows the
-display renderer: the same text roles and font steps for the display size and
-text size, the safe-area width of every text band (round or rectangular,
-device resolution and rotation), shortening with "…", the score, minute and
-date pills, highlighted rows, page or slide dots, the IP chip at the top or
-bottom, and the rim (match minute, scroll position, start steps or a coloured
-state ring). Colours, text size and the background or slide image are the
-saved values. Text widths are estimated from average glyph widths, so a name
-may be shortened slightly earlier or later than on the device.
-
-The overview binds the device status the way the display does: the start
-screen with its three steps until the first data, the setup card, the
-no-WiFi, waiting-for-time and no-data cards, the notice card of a failing
-competition in the Matchday and Table cycles, the "Demo" line, the status
-pill (no WiFi, waiting for time, the time of the last data when stale, the
-error code of a failing competition or the number of failing ones) and the
-IP chip with its configured duration. The preview uses the actual display startup flag so recovery does not
-invent a return to the initial three-step card. Local-service pills show
-the short code before the action, keeping the code visible when space is
-tight; full phase/cause text is in the warning. The device shows the status pill only
-for 5 seconds after each change; the preview shows it for as long as the
-state lasts and says so below the disc. The own match uses the device's
-real data (teams, score, minute or kickoff date and countdown, phase). Values
-the status API does not report — the matchday number, the event line,
-conference and matchday rows, table rows and the setup network name — are drawn as example
-values, and the caption names them as such. Times are shown in the browser's
-time zone. The preview is explicitly a schematic, not a screenshot; it does
-not show approximate-value markers or night dimming. Below it, one sentence
-explains why this screen is shown (own match, matchday, idle with the next
-own kickoff, manual choice with its return time, setup). While the first
-provider request has not published data the overview says that data is
-loading.
+The overview reports the current screen and its reason and offers the existing
+real-device screenshot download. It does not generate a simulated display for
+the new screen policy. Ground layouts and rings are chosen from owner-flashed
+device drafts; a future preview must consume the device's actual draw list.
+Status polling preserves unsaved controls and shows actionable network/image
+errors separately from the overall connection state.
 
 Theme follows the browser by default; a manual light/dark choice is stored only
 in the browser. Form/navigation text follows the draft language choice. Status
 polling updates its own nodes and does not replace unsaved form input.
+
+## Runtime Demo controls
+
+Under Settings → Demo and logs, enable Demo and save first. Load the scenario
+catalogue, select a scenario/step, or move to the previous/next step. Controls
+wait for the worker publication, show busy/pending state and report an
+unconfirmed step with an actionable retry message. They do not change or save
+the global draft. Seven scenarios cover own/ordinary/conference games, cup
+shootout, sporting rounds, break proof and confirmed empty data.
+
+The first two saved competitions supply order and per-competition display
+rules, including special own treatment and overrides. The panel shows each
+runtime association; missing saved associations use common rules. Overview
+status uses published canonical ids and labels simulated datasets separately.
+Demo controls do not write real competition files, save synthetic provider
+sources or set system time. Provider identities/names/events come from recorded
+public replies, while timings, transitions and tables are simulated. This
+supports repeatable device checks without replacing real-provider evidence.
+
+Each selected Demo step fixes its simulated data and match time until another
+step is applied. Display visits still use the saved durations and normal
+manual/automatic rules. A manually held Table can therefore remain across
+steps within the same phase; a zero manual-return time keeps it held.
+"Nächster Bildschirm" enters manual navigation. It does not advance the
+automatic sequence or the simulated match. A Demo-only automatic-sequence
+advance is selected as a follow-up, not yet implemented. Normal timings remain;
+shorter visits, clock acceleration and new stored Demo settings are excluded.
 
 ## One global draft and save
 
@@ -89,16 +99,27 @@ A control that cannot be used is disabled with a visible reason next to it
 incomplete wizard step), so a greyed-out button is never left unexplained.
 
 A listed competition always needs a competition id, including when paused; the
-club is optional (without a club the competition shows conference and table,
-but no own match). Each competition has exactly one source; to follow the
-same league at two providers, add it twice. At least one screen remains
-enabled.
+club is optional. Each competition has exactly one source; to follow the
+same league at two providers, add it twice. Screen-policy enable and automatic
+flags are independent; an empty automatic selection is allowed and must not
+silently reactivate a disabled entry.
 
 Passwords/keys have explicit keep/change/remove modes. Empty change input means
 keep; only Remove sends an empty value. Unsaved summaries never reveal secret
 contents. Secret inputs use new-password autocomplete. Editing is locked while
 saving so input made during a login/network wait cannot be marked as saved.
 Normal saves preserve the session unless the admin password changes.
+Screen-policy read/save can report busy while a provider/storage operation owns
+the shared memory token. The failed part remains in the draft; retry after the
+operation ends. A busy error never marks an unconfirmed write as saved.
+
+Known feedback defect, reproduced2026-10-17: after an acknowledged successful
+write, a busy follow-up read can still display the generic save error. With all
+changes acknowledged the Save bar disappears, even though the message suggests
+retrying the save. This must be distinguished from a rejected write, which
+retains the draft. The planned correction preserves write/conflict checks and
+separates confirmation, readback warning and failed-save error; it is not yet
+implemented. Current toasts have neutral and red-error states only.
 
 Network-affecting changes include WiFi credentials, setup password, antenna
 and hostname. The page explains reconnection and shows the new hostname/IP
@@ -108,12 +129,11 @@ access: a changed .local hostname is reached by navigation/the displayed link.
 ## Competitions
 
 Lists contain real entries without holes: at most eight competitions and
-five slides. The order of the list is the order in which
-the Matchday and Table screens show the competitions. The details of an entry
-hold its four screen switches (Own match, Konferenz, Matchday, Table; a new
-or imported entry has all on, an imported entry keeps the default for each
-switch it does not name); Own match is disabled without a club. The closed
-entry lists the screens it appears on.
+five library slides. Competition order sets own-match priority and order within
+each sporting type. Entry details expose own special handling separately from
+active state; phase/type eligibility and overrides live in Display. Without a
+club there is no own focus or static club Single. The current display controller
+uses the same effective screen policy exposed by the Display page.
 The competitions are saved through their own endpoint
 (`/api/v1/competitions`) as part of the global save; the device assigns each
 new competition its id, so moving a competition keeps its id and its kept
@@ -212,49 +232,46 @@ competition without fetched data shows a hint to fetch first. The names
 are part of the settings export; an import replaces all of them (a backup
 without names keeps them). A settings reset deletes them.
 
+Known editor defect: saving one row, or rejecting an overlong row, rebuilds the
+dialog and loses other typed edits. Batch editing with retained drafts is
+requested. Editable/localized full names and approximate lookup tables are also
+requested but do not exist yet; short-name overrides do not translate full names.
+The requested catalogue covers Bundesliga,2.Bundesliga,3.Liga and German
+Regionalligen. Each future editor row should expose German/English/short-name
+inputs, exact-match prefill and a catalogue dropdown. User mappings should
+export/import in the catalogue's format. A readable JSON source beside
+app_config.h in include/ is proposed. The selected shape uses direct de/en/short
+fields per club and provider IDs under ids. Exact fallback/import behavior,
+resource costs and integration remain design work, not current API support.
+
 ## Display page
 
-Situation defaults (outside matchdays, matchday, own match) list only enabled
-screens. A stored choice whose screen has since been switched off stays
-visible as "(off)", together with the note which screen the display uses
-instead. Own match is not offered for the matchday situation, because the own
-club does not play then; an imported backup with that value is changed to
-Conference before validation.
+Five phase tabs expose six screen types with independent enable/automatic
+flags and visit durations. Sporting rules inherit shared values unless a
+competition explicitly overrides the field. One common type order applies;
+competition order supplies the order within each sporting type. Empty automatic
+selections stay empty. The page describes effective total/page times rather
+than offering an independent table-page clock.
 
-The five screen cards follow the device's screen order (Own match,
-Konferenz, Matchday, Table, Crest and slideshow; `screen_order` of the
-schema). Each card has an enable switch, a live schematic preview
-with example values that follows every draft change (colours, text size,
-background, crest and slides), a background-image choice and a colour group.
-The global background switch sits above the cards; while it is off, the
-per-screen choices keep their values and say so. The conference card holds
-the switch that pins the own match in the conference: when it is on, the own
-match stands in the first row of every conference page; when it is off, it
-takes its normal place in the order. "Matches visible at once" sits on the
-conference card and also sets the matches per page of the Matchday screen;
-it stays editable while either screen is on. The Matchday card holds
-"Matchday shown" (current matchday, or the next matchday once the current
-one is over) with its help text. The table card holds the table
-rows and the table step (how long a table page or, with an own club, a
-competition stays before the next one). Display, provider-budget and diagnostics settings whose
-meaning is not obvious have a help text, including the device-specific
-conditions (for example a provider's daily cap, 0 for no cap, and its reset
-at 00:00 UTC, or the scroll reset that only applies to devices with exactly two
-buttons).
+Timing/sports options include the shared minimum-two maximum visible matches
+for Conference/Matchday, balanced pinned pages, table rows, conference mode,
+shown matchday and manual return. Appearance options hold colours, backgrounds,
+text scale and subpage dots. Help explains each non-obvious option. Complete
+settings/phase-option reorganization remains planned after device layout work.
 
-The display page only selects images; it has no upload. Every screen except
-the crest screen has a background switch (off) and a choice between the standard
-background and a library image. The "Wappen und Diashow" section lists the
-slides in play order; each slide is the crest or a library image, added from
-the library list. The crest itself and the standard background are replaced
-or restored on the image page. All choices are saved with the global save
-like any other draft change.
+Crest and library Images are separate screen types. The image sequence holds
+only library ids; frame mode can additionally include the crest. Display selects
+images but does not upload them. Replace/reset the protected crest/background
+on Images. All policy choices share the global draft/save flow. The current
+Overview reports screen/reason as text; it does not render a simulated LCD.
+See [screen-policy integration](#screen-policy-integration--2026-10-17).
 
 ## Image editor and storage
 
 Uploaded JPEGs form a library of ids 1–10; id 0 means the stock image of the
 role (crest or background). Backgrounds and slides can reuse one image
-without spending quota twice. A slideshow id 0 means the crest. The crest is
+without spending quota twice. The library sequence excludes id0; crest is a
+separate type and an optional frame image. The crest is
 not a display setting: it is always the crest role's image, the replacement
 when one exists, else the factory crest. The gallery shows thumbnails using
 per-image revisions and describes every current use. A referenced missing
@@ -277,9 +294,9 @@ Replace can still restore the intended id directly.
 The image page shows two fixed tiles beside the library: "Standard-Wappen"
 (crest) and "Standard-Hintergrund" (standard background). Each shows the
 stored role file (replacement or factory), its state ("eingebaut" for the factory image or
-"Ersetzt" with the replacement's size) and where it appears (slides with id
-0, or the crest screen when the slideshow is empty; screens with a
-background but no library image). They cannot be deleted. Three actions:
+"Ersetzt" with the replacement's size) and where it appears (the crest type/
+optional frame image, or screens using the standard background). They cannot
+be deleted. Three actions:
 "Ersetzen" opens the image editor and uploads the result as the role's
 replacement; "Aus Bibliothek übernehmen" copies a chosen library image on the
 device (the library image stays, the copy counts towards the quota and is
@@ -288,12 +305,17 @@ replacement after a confirmation (disabled while the factory image is shown).
 Replacements count towards the shared library quota but not towards the ten
 library entries.
 
-The editor decodes a local or stored image, preserves the old image on decode
+The editor decodes a selected local source image, preserves the old image on decode
 failure, and crops at device resolution. It supports drag, numeric zoom, fit/
 fill, mouse wheel, two-finger zoom, base colour, opacity and sample text. The
 round mask follows the profile. Sample text is not stored. JPEG encoding tries
 bounded quality levels before upload and reports the actual quality and bytes.
 Upload has its own progress indicator and locks the intended source/target.
+Dragging changes both X/Y offsets; explicit position inputs are requested.
+Opening an existing image currently does not load its stored JPEG for editing;
+it asks for a source file. Gallery/slide masks are still always round, which
+does not match rectangular profiles. The reported mask/image offset on the
+round C6 remains under investigation and has not been attributed to that defect.
 
 Library quota and temporary filesystem reserve are separate checks. Replacing
 an image subtracts its old size from the library quota, but the old file still
@@ -464,10 +486,72 @@ behaviour, phone gestures, provider lists, actual uploads, recovery, sessions
 and live WebSocket operation remain owner/device acceptance after USB upload.
 No OTA/reset/storage-format action has been executed on owner data.
 
-The overview and display-page previews follow the redesigned display layout;
-whether a preview matches the physical display is part of the device
-acceptance. On a display without adjustable backlight (C6 with GC9A01) the
+Overview currently reports screen/reason as text. Physical layout acceptance
+uses device screenshots; a future graphical preview must use the actual device
+draw list. On a display without adjustable backlight (C6 with GC9A01) the
 night mode turns the background almost black, shows images at 20 % opacity
 and dims all colours according to the night brightness; the day brightness is
 stored but only takes effect with an adjustable backlight. See UI.md and
 NETWORK.md and API.md for the display and server contracts.
+
+
+## Screen-policy integration — 2026-10-17
+
+Five phase tabs show six compact type rows. A sporting row has shared enable,
+automatic and visit settings; its competition expander can override each field
+independently. “Shared” inherits immediately, explicit No remains No, and
+collapsing an override preserves its stored values. A manual-only entry retains
+its visit time while the field is hidden. Image visits must be whole multiples
+of the separate image time; invalid values are explained instead of rounded.
+
+The browser uses one saved model and draft. General settings, competitions and
+screen policy are separate bounded requests. Each successful part is acknowledged
+before proceeding; a later failure leaves only unconfirmed edits pending. The
+policy token and comparison of fresh competition/policy content prevent silent
+overwrite by another client. New/imported competition bindings use the identities
+returned by the service. Backup includes the complete policy; import validates
+before writing and uses the same partial-acknowledgement/retry flow. Browser-only
+binding keys never enter an API request or backup.
+
+Image deletion/recovery may monotonically remove the explicitly affected image
+references. Other policy or competition changes cause a visible conflict instead
+of being silently merged. Confirmed file deletion and already saved reference
+cleanup are reconciled separately after partial failures.
+
+Targeted production-JavaScript checks: 27/27, existing screenshot checks: 22/22.
+Local synthetic-API browser checks covered desktop 1440×1000 and phone390×844,
+phase controls/inheritance/explicit No, shared saving, frame toggle, partial
+save failure/retry, image reference/deletion and export. Neither width had
+horizontal page overflow. This is browser evidence, not device/NVS acceptance;
+full wizard/import/editor flows and final control/Demo behavior remain open.
+The unchanged older UI suite reaches 25 passing cases before an obsolete
+five-style/fixed-table-time expectation; it was not altered to conceal this.
+
+## Current control/Demo verification — 2026-10-17
+
+Twelve production-script scenarios use the actual current C6 schema and
+settings/competition/policy codecs plus the canonical Demo catalogue, with a
+synthetic local service. They cover shared validation, false/inherited overrides,
+draft/save acknowledgements, busy retries, competition identity reorder,
+backup/import shape, Demo steps and exact/stale/unbound status labels. A browser
+at1440×1000 and390×844 checked scenario/step application, displayed bindings,
+expert section persistence, rejection of minimum1 and restoration to4. Neither
+viewport had horizontal overflow or console errors. These checks do not run
+device HTTP/NVS/provider scheduling or image decoding; complete wizard/import/
+image-editor browser acceptance remains separate. The existing screenshot flow
+and owner-flashed device checks remain the display evidence boundary.
+
+## Owner feedback follow-up — 2026-10-17
+
+The current Overview exposes screenshot download without an opt-in diagnostics
+switch. The planned Debug tab keeps screenshot always available near the top,
+with Demo just below and no duplicated screenshot inside Demo. One default-off
+preference additionally shows screenshot on Overview; it does not gate Demo or
+the browser log stream. A Demo-only automatic-sequence advance with normal
+timings is requested before the full redesign.
+Their settings/API are not yet implemented. The current Overview screenshot
+button also lacks the progress text shown by the System button; both use the
+same guarded capture operation. The reported Table-only Demo and round-image
+mask offset still need state-specific device evidence, rather than an assumed
+cause. Targeted script reproductions confirm the save-feedback and short-name
+draft-loss defects; fixes and complete physical acceptance remain outstanding.

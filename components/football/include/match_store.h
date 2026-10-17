@@ -1,7 +1,9 @@
 // Compact football data store (OQ-227): the matches of every competition,
-// all league tables, a team directory and the events of the own club's
-// matches. Rows hold numeric provider ids and one-byte directory indices
-// instead of names; full team names are kept only for own matches. Which
+// all league tables, a team directory and bounded match details. Own-club
+// details retain eight protected slots and 48 events; explicitly requested
+// ordinary Singles have another eight slots and 48 events in the same pools.
+// Rows hold numeric provider ids and one-byte directory indices instead of
+// names; full team names are kept in detail slots. Which
 // matchdays are stored is up to the fetches; expire() drops past matchdays.
 // Plain fixed storage: no heap, no locking (the owner serialises access).
 // Pure, so the native tests compile it.
@@ -18,7 +20,7 @@
 
 namespace football {
 
-// Unknown index (team, round label, own-match slot) and unknown value
+// Unknown index (team, round label, detail slot) and unknown value
 // (goals, minute, table count).
 inline constexpr uint8_t kNoIndex = 0xff;
 inline constexpr uint8_t kNoValue = 0xff;
@@ -34,8 +36,8 @@ struct Goals {
 // Bits of StoredMatch::flags.
 inline constexpr uint8_t kMatchOwn = 0x01;
 inline constexpr uint8_t kMatchEventsTruncated = 0x02;
-// Events of the own match were lost to the full event pool (kNoticeEvents
-// stays until no own match of the competition carries it, OQ-311).
+// Events were lost to this match's protected event bank (kNoticeEvents
+// stays until no detail match of the competition carries it, OQ-311).
 inline constexpr uint8_t kMatchEventsPoolCut = 0x04;
 // Bits of StoredMatch::estimated: the value was derived by the device, not
 // reported by the provider.
@@ -48,6 +50,9 @@ struct StoredMatch {
   uint32_t kickoff = 0;        // UTC seconds, 0 = unknown
   uint32_t finished_at = 0;    // UTC seconds of the final whistle, 0 = unknown
   uint32_t score_changed = 0;  // monotonic seconds of the last change, 0 = none
+  // First confirmed provider-running observation of this live episode.
+  // UTC, so an unknown-kickoff live bound survives a reboot; never a kickoff.
+  uint32_t first_live_observed_utc = 0;
   uint8_t competition = 0;     // stable competition id (1-255)
   cfg::Provider provider = cfg::Provider::kOpenLigaDb;
   uint8_t home = kNoIndex, away = kNoIndex;  // team directory
@@ -57,7 +62,10 @@ struct StoredMatch {
   uint8_t minute = kNoValue;
   Goals principal, halftime, regulation, extra_time, shootout;
   uint8_t flags = 0, estimated = 0;
-  uint8_t own = kNoIndex;      // own-match slot
+  union {
+    uint8_t detail = kNoIndex;  // common detail slot, independent of ownership
+    uint8_t own;                // transitional source alias; no separate state
+  };
   bool isOwn() const { return (flags & kMatchOwn) != 0; }
 };
 
@@ -91,7 +99,7 @@ inline constexpr uint8_t kEventDetail = 0x08;
 
 struct StoredEvent {
   uint32_t identity = 0, revision = 0;
-  uint8_t slot = kNoIndex;  // own-match slot holding it, kNoIndex = free
+  uint8_t slot = kNoIndex;  // detail slot holding it, kNoIndex = free
   EventType type = EventType::kGoal;
   uint8_t minute = kNoValue, added = kNoValue;
   Side actor = Side::kUnknown, beneficiary = Side::kUnknown;
@@ -103,20 +111,22 @@ struct StoredEvent {
   Text<32> player_in;  // substitution: the player coming on
 };
 
-// An own-club match: full team names and its events in order.
-struct OwnMatch {
+// Full team names and bounded events, shared by own and ordinary matches.
+struct MatchDetails {
   uint32_t match = 0;  // match id, 0 = free slot
   uint8_t competition = 0;
   uint8_t event_count = 0;
   std::array<uint8_t, cfg::kMatchEvents> events{};  // event pool indices
   Text<cfg::kNameBytes> home_name, away_name;
 };
+// Transitional source alias for callers not yet switched to common details.
+using OwnMatch = MatchDetails;
 
 // Bits of the per-competition notices: data the store could not hold
 // (cause E19 store_full, OQ-310). Each kind is cleared when it is next
 // stored completely (OQ-311): matches and their teams by a complete
 // fixtures run (beginRun()/settleRun(), a live run only adds), the table and
-// its teams by a replaced table, events when no own match of the
+// its teams by a replaced table, events when no detail match of the
 // competition carries kMatchEventsPoolCut.
 inline constexpr uint8_t kNoticeMatches = 0x01;     // a match did not fit
 inline constexpr uint8_t kNoticeTable = 0x02;       // a table did not fit
@@ -133,10 +143,28 @@ struct Clock {
   uint32_t mono_s = 0;
 };
 
+// Local civil dates in the currently applied timezone. The callback resolves
+// the offset separately at each instant, including historical DST changes.
+// A fixed fallback keeps pure callers and the previous expire() interface
+// usable until their timezone adapter is supplied. No state is retained.
+struct DateContext {
+  using OffsetAt = int32_t (*)(int64_t utc, void* context);
+  OffsetAt offset_at = nullptr;
+  void* context = nullptr;
+  int32_t fallback_offset_s = 0;
+};
+// Local civil date as days since 1970-01-01, using the offset at this
+// particular instant. Shared by result retention and phase date clusters.
+int32_t civilDay(int64_t utc, const DateContext& dates);
+// A finished result stays through the local day following its finish day.
+// Unknown finish or invalid current UTC does not establish a result hold.
+bool resultHeld(const StoredMatch& match, int64_t utc,
+                const DateContext& dates);
+
 class MatchStore {
  public:
   // Out of line on purpose: an implicit constexpr constructor would place a
-  // static store in initialised data, copied from flash at boot (22 KB).
+  // static store in initialised data, copied from flash at boot.
   MatchStore();
   void clear();
 
@@ -154,20 +182,34 @@ class MatchStore {
   // when both scores are known and differ) and the final-whistle time. A
   // match first seen finished gets 'clock.utc' as estimated final whistle,
   // or the expected end when it was never seen running. An own match gets
-  // an own-match slot with the full names; a full slot table gives the
+  // a protected detail slot with the full names; a full own bank gives the
   // slot of the own match farthest from now when this one is nearer. A
   // full store makes room by removing the other club's match farthest from
   // now when this one is own or nearer; nullptr (kNoticeMatches) when it
-  // does not fit. The list stays sorted by kickoff.
+  // does not fit. An ordinary match retains an explicitly requested detail
+  // slot; it does not allocate one automatically. The list stays sorted by
+  // kickoff.
   StoredMatch* upsert(const StoredMatch& incoming, const Clock& clock,
                       std::string_view home_name = {},
                       std::string_view away_name = {});
+  // Ensures details for this explicit target, without changing its own flag.
+  // Own targets use their protected nearest-match bank. Ordinary targets use
+  // only their separate bank, preferring an older target of the same
+  // competition before its farthest target. Ordinary upsert() never allocates
+  // details by itself; it refreshes a slot previously requested here.
+  StoredMatch* ensureDetail(uint8_t competition, cfg::Provider provider,
+                            uint32_t id, const Clock& clock,
+                            std::string_view home_name = {},
+                            std::string_view away_name = {});
   // Removes the matchdays of 'competition' that have passed
   // (matchday::passed(): kept until the end of the local day after its last
   // kickoff, OQ-202).
   // 'local_offset_s' is the local UTC offset at 'utc'. Matches without a
   // kickoff stay.
-  void expire(uint8_t competition, int64_t utc, int32_t local_offset_s);
+  // A still-held finished result is protected even when its kickoff-based
+  // matchday has passed. 'dates' supplies the offset at its finish instant.
+  void expire(uint8_t competition, int64_t utc, int32_t local_offset_s,
+              const DateContext* dates = nullptr);
   // Re-estimates phase and minute of every match without a provider phase.
   void estimateAll(int64_t utc);
   // Removes every match, table row and notice of 'competition'.
@@ -189,7 +231,7 @@ class MatchStore {
   bool commitTable(bool complete);
   std::size_t stagedRows() const { return staged_rows_; }
 
-  // Replaces the events of own match 'match' in three steps: begin, add in
+  // Replaces the events of detail match 'match' in three steps: begin, add in
   // order, end. When neither the previous nor the new list was cut, a
   // previous event whose identity is missing from the new list stays as a
   // removal marker (revision + 1) after the new ones. More than
@@ -200,8 +242,8 @@ class MatchStore {
   // and the list events each replace only their own events, the other
   // origin's stay ahead of the new list; when the slot is full detail
   // events give way first. A full pool gives this match the oldest event of
-  // the own match farthest from 'utc' when this one is nearer (OQ-292, the
-  // rule of the own-match slots); that match is marked truncated and its
+  // the match farthest from 'utc' in the same own/ordinary bank when this
+  // one is nearer (OQ-292); that match is marked truncated and its
   // competition notes kNoticeEvents. 'utc' 0 = unknown, nothing is taken.
   // Events lost to the full pool mark the match kMatchEventsPoolCut until
   // its next complete list keeps every event (endEvents(true)).
@@ -210,7 +252,7 @@ class MatchStore {
                    int64_t utc = 0);
   void addEvent(const StoredEvent& event);
   void endEvents(bool complete = true);
-  // Appends a saved event (competition file) to the list of own match
+  // Appends a saved event (competition file) to the list of detail match
   // 'match' as it was stored, flags included; false if 'match' has no
   // slot, its list is full or the pool is (kNoticeEvents).
   bool restoreEvent(const StoredMatch& match, const StoredEvent& event);
@@ -223,7 +265,9 @@ class MatchStore {
   const Text<31>& labelAt(uint8_t i) const { return labels_[i]; }
   std::size_t rowCount() const { return row_count_; }
   const StoredRow& row(std::size_t i) const { return rows_[i]; }
-  const OwnMatch& ownAt(uint8_t i) const { return own_[i]; }
+  bool hasDetail(const StoredMatch& match) const;
+  const MatchDetails& detailAt(uint8_t i) const { return details_[i]; }
+  const OwnMatch& ownAt(uint8_t i) const { return detailAt(i); }
   const StoredEvent& eventAt(uint8_t i) const { return events_[i]; }
   uint8_t notices(uint8_t competition) const;
   // True when a match of 'competition' kicked off more than
@@ -246,12 +290,12 @@ class MatchStore {
                  uint32_t id) const;
   void removeMatch(std::size_t i);
   void freeSlot(uint8_t slot);
-  uint8_t ownSlot(const StoredMatch& match, int64_t utc);
+  uint8_t detailSlot(const StoredMatch& match, int64_t utc, bool requested);
   void note(uint8_t competition, uint8_t bits);
   std::size_t sortedPosition(const StoredMatch& match) const;
   void dropRows(uint8_t competition);
   int takeEvent();
-  StoredMatch* ownRow(uint8_t slot);
+  StoredMatch* detailRow(uint8_t slot);
   void settleEvents(uint8_t competition);
   StoredMatch* place(StoredMatch m, std::size_t from);
 
@@ -259,7 +303,7 @@ class MatchStore {
   std::array<StoredTeam, cfg::kStoreTeams> teams_{};
   std::array<StoredRow, cfg::kStoreTableRows> rows_{};
   std::array<StoredRow, cfg::kStoreTableStageRows> stage_{};
-  std::array<OwnMatch, cfg::kStoreOwnMatches> own_{};
+  std::array<MatchDetails, cfg::kStoreDetailMatches> details_{};
   std::array<StoredEvent, cfg::kStoreEvents> events_{};
   std::array<Text<31>, cfg::kStoreRoundLabels> labels_{};
   struct Notice {
@@ -281,7 +325,8 @@ class MatchStore {
 };
 
 // Store indices are one byte (views, file headers and event lists).
-static_assert(cfg::kStoreTeams < kNoIndex && cfg::kStoreOwnMatches < kNoIndex &&
+static_assert(cfg::kStoreTeams < kNoIndex &&
+              cfg::kStoreDetailMatches < kNoIndex &&
               cfg::kStoreEvents < kNoIndex &&
               cfg::kStoreRoundLabels < kNoIndex &&
               cfg::kStoreMatches < kNoIndex && cfg::kStoreTableRows < kNoIndex);

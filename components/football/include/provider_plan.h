@@ -23,24 +23,22 @@
 //                          have none, an absent list is an empty table)
 //               live       the scoreboard of each match day with a match in
 //                          its live window; goals and cards come with it
-//               events     the match summary of the own match (its
-//                          substitutions, OQ-207): the latest own match
-//                          whose live window has opened, once it has
-//                          kicked off; body cap kProviderSummaryBodyBytes
+//               events     the exact policy-eligible Single's match summary
+//                          (substitutions), for own and ordinary matches;
+//                          preview requests wait for kickoff; body cap
+//                          kProviderSummaryBodyBytes
 //   API-Football, football-data.org: generic test sources (OQ-205):
 //   fixtures within kFixtureHorizonDays, standings, today's fixtures.
 //   API-Football first resolves the current season (/leagues) when it is
 //   unknown; a fixtures run kSeasonRecheckS after the last resolution
 //   resolves it again (OQ-259).
-// Other providers make no own-match events request: OpenLigaDB delivers
+// Other providers make no separate events request: OpenLigaDB delivers
 // goals with the live data, API-Football events are removed (OQ-206).
 //
-// Data types per competition by its screen switches (OQ-192): fixtures
-// while it is shown on a screen with match or table data (own
-// match only with a club); live for Konferenz, matchday and the own match
-// (with a club); table and live table for the table screen; own-match
-// events for the own match with an ESPN source and a club. Each competition
-// has one source (OQ-247).
+// Every active competition retains fixtures/live as phase-classification
+// prerequisites. Current-phase enabled Table and Single entries add table/live
+// table and exact ESPN summary demand respectively; manual-only is enabled too.
+// Picture-frame mode pauses automatic demand. Each competition has one source.
 
 #pragma once
 
@@ -49,11 +47,13 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string_view>
 
 #include "app_config.h"
 #include "match_store.h"
 #include "request_scheduler.h"
+#include "screen_selection.h"
 #include "settings_model.h"
 #include "store_mappers.h"
 
@@ -118,7 +118,7 @@ struct SourceState {
   uint32_t key = 0;  // hash of the competition id and its source settings
   settings::Bytes<cfg::kSeasonMaxBytes> season;  // resolved current season
   uint32_t season_utc = 0;  // UTC second of its resolution, 0 = unknown
-  uint8_t round = 0;  // OpenLigaDB current round, 0 = unknown
+  uint8_t round = 0;        // OpenLigaDB current round, 0 = unknown
   // OpenLigaDB change date per checked round, with the time of the last
   // full request of that round.
   struct Mark {
@@ -154,8 +154,40 @@ struct Resolved {
   uint8_t day_count = 0;
 };
 
+// One complete response retains the closest candidate in each selection class.
+// The final selector alone commits it; the protected own bank is unchanged.
+struct ResponseDetails {
+  struct Candidate {
+    selection::MatchKey match;
+    uint32_t kickoff = 0;
+    Text<cfg::kNameBytes> home, away;
+    uint8_t count = 0;
+    bool truncated = false;
+  };
+  // Only the event payload is transient heap memory. Candidate identity, names
+  // and duplicate detection belong to the existing worker-owned planner, so a
+  // simultaneous bounded settings request stays inside the shared heap limit.
+  struct EventBuffer {
+    std::array<std::array<StoredEvent, cfg::kMatchEvents>, 2> candidates{};
+  };
+  std::array<Candidate, 2> candidates{};
+  std::array<uint32_t, cfg::kStoreMatches> seen{};
+  uint16_t seen_count = 0;
+  int8_t receiving = -1;
+  bool ambiguous = false;
+  std::unique_ptr<EventBuffer> events;
+  // Reset only live metadata; do not create a full metadata stack temporary.
+  void clear();
+};
+static_assert(sizeof(ResponseDetails::EventBuffer) <= 2016);
+static_assert(sizeof(ResponseDetails) <= 1216);
+
 class Planner {
  public:
+  // Borrowed coherent worker snapshot; never a full retained policy copy.
+  void context(const settings::Competitions& competitions,
+               const settings::screen_policy::Eligibility& eligibility,
+               DateContext dates = {}, bool break_proven = false);
   void reset();
   // The source state of slot 'slot' starts afresh (its data was dropped).
   void forget(uint8_t slot);
@@ -167,18 +199,22 @@ class Planner {
   void restore(uint8_t slot, const settings::Competition& entry,
                const Resolved& resolved);
   // Scheduler inputs of slot 'slot' (entry null, inactive or without
-  // competition: unused) at 'clock': the own-match events are held until
-  // their match has kicked off; an API-Football fixtures run whose season
+  // competition: unused) at 'clock': exact Single summaries are held until
+  // their match has started; an API-Football fixtures run whose season
   // is due for resolution costs its /leagues request too (OQ-264).
   void wanted(uint8_t slot, const settings::Competition* entry,
               const MatchStore& store, const Clock& clock,
-              schedule::Wanted& out) const;
+              schedule::Wanted& out,
+              const selection::Selection* selected = nullptr) const;
   // The next request of 'job' for competition 'entry' (its slot and id);
   // prepares the streaming into 'store' (a table request begins the
   // staging). False when the run has nothing (more) to request: the run is
   // complete without a request.
   bool request(const schedule::Job& job, const settings::Competition& entry,
                MatchStore& store, const Clock& clock, Request& out);
+  // Shared source/season filter for match rows before any external observer.
+  // Club fixture endpoints may legitimately contain other competitions.
+  bool acceptsMatch(ArduinoJson::JsonVariantConst element) const;
   // fetchJson consumer for the prepared request; 'planner' is this.
   static bool consume(ArduinoJson::JsonVariantConst element, void* planner);
   // Ends the prepared request; 'ok' = the response was complete. A failure
@@ -214,6 +250,15 @@ class Planner {
   // The stored row of the events run's match (event_match_), null if gone.
   const StoredMatch* eventsRow() const;
   void addDay(uint32_t day);
+  static void observeNames(const StoredMatch&, std::string_view,
+                           std::string_view, void*);
+  static void observeEvent(const StoredEvent&, void*);
+  void finishDetails(bool ok, const Clock& clock);
+  const settings::Competitions* competitions_ = nullptr;
+  const settings::screen_policy::Eligibility* eligibility_ = nullptr;
+  DateContext dates_;
+  bool break_proven_ = false;
+  ResponseDetails response_details_;
 
   std::array<SourceState, cfg::kCompetitionMax> states_{};
   // The prepared request: its source, data type and consume context.
@@ -223,10 +268,10 @@ class Planner {
   cfg::DataType type_ = cfg::DataType::kFixtures;
   MapContext map_;
   Sink sink_ = Sink::kMatches;
-  uint32_t event_match_ = 0;  // the own match of an events run
-  bool discover_ = false;  // OpenLigaDB rows: note season and round
-  bool filter_ = false;    // OpenLigaDB rows: only this league and season
-  int season_number_ = 0;  // filter season, 0 = any
+  uint32_t event_match_ = 0;  // exact selected match of an events run
+  bool discover_ = false;     // OpenLigaDB rows: note season and round
+  bool filter_ = false;       // OpenLigaDB rows: only this league and season
+  int season_number_ = 0;     // filter season, 0 = any
   int found_round_ = 0;
   uint32_t found_change_ = 0;
   settings::Bytes<cfg::kSeasonMaxBytes> found_season_;
@@ -248,8 +293,8 @@ void encode(std::string_view in, char* out, std::size_t size);
 // last provider day has not ended at 'utc' (results of a held matchday are
 // final and stay stored, so it is not fetched again, OQ-272). At most
 // 'capacity' days. Returns the number written.
-std::size_t matchdayDays(const uint32_t* days, std::size_t count,
-                         int64_t utc, uint32_t* out, std::size_t capacity);
+std::size_t matchdayDays(const uint32_t* days, std::size_t count, int64_t utc,
+                         uint32_t* out, std::size_t capacity);
 
 // FNV-1a hash of a change date text (0 is never returned).
 uint32_t changeHash(std::string_view text);

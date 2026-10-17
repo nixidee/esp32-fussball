@@ -95,7 +95,7 @@ void test_entry_shows_its_source_rows() {
   TEST_ASSERT_EQUAL_UINT(0, none.count());
 }
 
-void test_own_match_choice_for_screen_and_overview() {
+void test_own_match_choice_for_overview() {
   store.clear();
   const int64_t now = kSaturday + 12 * kHour;
   add(kLeague, 1, 5, now - 3 * 24 * kHour, Phase::kFinished, true)
@@ -103,14 +103,7 @@ void test_own_match_choice_for_screen_and_overview() {
   add(kCup, 2, 1, now + 4 * 24 * kHour, Phase::kScheduled, true);
   add(kLeague, 3, 6, now + 20 * kMin, Phase::kScheduled, true);
   const auto shown = shownAll();
-  bool window = false;
-  int i = view::ownForScreen(store, shown, now, 30, 30, false, window);
-  TEST_ASSERT_EQUAL_UINT32(3, store.match(i).id);
-  TEST_ASSERT_TRUE(window);
-  i = view::ownForScreen(store, shown, now, 10, 30, false, window);
-  TEST_ASSERT_EQUAL_UINT32(3, store.match(i).id);  // closest kickoff
-  TEST_ASSERT_FALSE(window);
-  i = view::ownForOverview(store, shown, now);
+  int i = view::ownForOverview(store, shown, now);
   TEST_ASSERT_EQUAL_UINT32(3, store.match(i).id);
   // A running own match wins the overview over a closer one.
   add(kCup, 4, 1, now - 2 * kHour, Phase::kExtraTime, true);
@@ -198,167 +191,109 @@ void test_events_in_match_order_without_hidden_ones() {
   TEST_ASSERT_EQUAL_UINT(0, view::events(store, *other).count);
 }
 
-// OQ-192: a competition shows only on its enabled screens; only() keeps the
-// sources of one screen.
-void test_screen_switches_filter_the_sources() {
+view::List conference(unsigned count, bool own = false) {
   store.clear();
-  auto league = entry(kLeague, kOlg);
-  league.screens = 1u << static_cast<unsigned>(cfg::CompetitionScreen::kTable);
-  auto cup = entry(kCup, kOlg);
-  view::Shown shown;
-  shown.add(league);
-  shown.add(cup);
-  TEST_ASSERT_EQUAL_UINT(2, shown.count());
-  TEST_ASSERT_EQUAL_HEX8(league.screens, shown.source(kLeague)->screens);
-  const auto table = shown.only(cfg::CompetitionScreen::kTable);
-  TEST_ASSERT_EQUAL_UINT(2, table.count());
-  const auto konferenz = shown.only(cfg::CompetitionScreen::kConference);
-  TEST_ASSERT_EQUAL_UINT(1, konferenz.count());
-  TEST_ASSERT_NULL(konferenz.source(kLeague));
-  TEST_ASSERT_NOT_NULL(konferenz.source(kCup));
-
-  // Konferenz blocks are formed from the filtered sources only.
-  const int64_t kickoff = kSaturday + 13 * kHour + 30 * kMin;
-  add(kLeague, 1, 7, kickoff, Phase::kLive);
-  add(kCup, 2, 1, kickoff + 2 * kHour, Phase::kScheduled);
-  const auto members = view::conferenceMembers(
-      store, konferenz, kickoff + 10 * kMin, {30, 15, false});
-  TEST_ASSERT_EQUAL_UINT(0, members.count);
-  const auto later = view::conferenceMembers(
-      store, konferenz, kickoff + 2 * kHour, {30, 15, false});
-  TEST_ASSERT_EQUAL_UINT(1, later.count);
+  for (unsigned i = 0; i < count; ++i)
+    TEST_ASSERT_NOT_NULL(add(kLeague, i + 1, 1, kSaturday + i * kMin,
+                             Phase::kLive, own && i == count / 2));
+  view::List list;
+  for (unsigned i = 0; i < store.matchCount(); ++i)
+    list.index[list.count++] = static_cast<uint8_t>(i);
+  return list;
 }
 
-// OQ-193/OQ-201: the matchday screen lists the first stored matchday (gap
-// rule) of the shown provider; matches without kickoff and other
-// providers' rows are left out.
-void test_matchday_is_the_first_block_of_the_shown_provider() {
-  store.clear();
-  const int64_t friday = kFriday + 18 * kHour + 30 * kMin;
-  add(kLeague, 1, 8, friday, Phase::kFinished);
-  add(kLeague, 2, 8, kSaturday + 13 * kHour, Phase::kLive);
-  add(kLeague, 3, 8, kSaturday + 24 * kHour + 15 * kHour, Phase::kScheduled);
-  add(kLeague, 4, 0, kSaturday + 24 * kHour, Phase::kScheduled, false, kEspn);
-  // Next matchday: more than 48 h after the last kickoff.
-  add(kLeague, 5, 9, kSaturday + 7 * 24 * kHour, Phase::kScheduled);
-  add(kLeague, 6, 9, 0, Phase::kScheduled);  // no kickoff
-  add(kCup, 7, 1, kSaturday + 13 * kHour, Phase::kScheduled);
-  const auto shown = shownAll();
-  // During the matchday: the selected ("current") matchday is the first.
-  const auto first = [&](uint8_t competition) {
-    const auto reach =
-        view::matchdays(store, shown, competition, cfg::MatchdayMode::kCurrent,
-                        kSaturday + 14 * kHour, 0);
-    return reach.count > 0 ? view::matchday(store, shown, competition,
-                                            reach.span[reach.selected])
-                           : view::List{};
+void test_conference_owner_page_distributions_preserve_count_and_order() {
+  struct Example {
+    uint8_t count, capacity, pages;
+    std::array<uint8_t, 4> rows;
   };
-  const auto list = first(kLeague);
-  TEST_ASSERT_EQUAL_UINT(3, list.count);
-  TEST_ASSERT_EQUAL_UINT32(1, store.match(list.index[0]).id);
-  TEST_ASSERT_EQUAL_UINT32(2, store.match(list.index[1]).id);
-  TEST_ASSERT_EQUAL_UINT32(3, store.match(list.index[2]).id);
-  TEST_ASSERT_EQUAL_UINT(1, first(kCup).count);
-  TEST_ASSERT_EQUAL_UINT(0, first(9).count);
-}
-
-// OQ-244/267/268/269/271/275: which matchday the screen selects and which
-// ones the buttons can reach, at local midnight (CEST), for both modes. A
-// passed matchday that a fetch stores again is never selected or listed.
-void test_matchday_selection_at_local_midnight() {
-  store.clear();
-  constexpr int32_t kCest = 7200;
-  constexpr int64_t kDay = 24 * kHour;
-  const int64_t md8 = kFriday + 18 * kHour + 30 * kMin;  // Fri 16 Oct
-  const int64_t md8_last = kFriday + 2 * kDay + 15 * kHour + 30 * kMin;
-  add(kLeague, 81, 8, md8, Phase::kFinished);
-  add(kLeague, 82, 8, md8_last, Phase::kFinished);
-  add(kLeague, 91, 9, md8 + 7 * kDay, Phase::kScheduled);
-  add(kLeague, 101, 10, md8 + 14 * kDay, Phase::kScheduled, true);
-  add(kLeague, 111, 11, md8 + 21 * kDay, Phase::kScheduled, true);
-  // Matchday 7, already passed, stored again by a fetch.
-  add(kLeague, 71, 7, md8 - 6 * kDay, Phase::kFinished);
-  // A cup with one matchday on the same Sunday and nothing after it.
-  add(kCup, 5, 2, md8_last, Phase::kFinished);
-  const auto shown = shownAll();
-  const auto reach = [&](uint8_t c, cfg::MatchdayMode mode, int64_t utc) {
-    return view::matchdays(store, shown, c, mode, utc, kCest);
-  };
-  const auto selectedFirst = [&](const football::matchday::Reach& r) {
-    return r.selected >= 0 ? r.span[r.selected].first : 0u;
-  };
-  constexpr auto kCurrent = cfg::MatchdayMode::kCurrent;
-  constexpr auto kNext = cfg::MatchdayMode::kNext;
-  const int64_t sunday_2359 = kFriday + 2 * kDay + 21 * kHour + 59 * kMin;
-  const int64_t monday_0001 = sunday_2359 + 2 * kMin;
-  const int64_t tuesday_0001 = monday_0001 + kDay;
-
-  // Sunday 23:59 local: both modes show matchday 8; held, selected, next.
-  for (auto mode : {kCurrent, kNext}) {
-    const auto r = reach(kLeague, mode, sunday_2359);
-    TEST_ASSERT_EQUAL_UINT8(2, r.count);
-    TEST_ASSERT_EQUAL_INT8(0, r.selected);
-    TEST_ASSERT_EQUAL_UINT32(md8, r.span[0].first);
-    TEST_ASSERT_EQUAL_UINT32(md8_last, r.span[0].last);
-    TEST_ASSERT_EQUAL_UINT32(md8 + 7 * kDay, r.span[1].first);
+  constexpr Example examples[] = {
+      {16, 5, 4, {4, 4, 4, 4}}, {17, 5, 4, {5, 4, 4, 4}}, {11, 5, 3, {4, 4, 3}},
+      {9, 4, 3, {3, 3, 3}},     {6, 5, 2, {3, 3}},        {5, 4, 2, {3, 2}}};
+  for (const auto& example : examples) {
+    const auto list = conference(example.count);
+    football::ConferenceRequest request;
+    request.per_page = example.capacity;
+    request.pin_own = false;
+    unsigned next = 0;
+    for (unsigned i = 0; i < example.pages; ++i) {
+      request.page = i;
+      const auto page = view::conferencePage(store, list, request);
+      TEST_ASSERT_EQUAL_UINT8(example.pages, page.pages);
+      TEST_ASSERT_EQUAL_UINT8(example.rows[i], page.row_count);
+      for (unsigned row = 0; row < page.row_count; ++row) {
+        TEST_ASSERT_EQUAL_UINT32(++next, store.match(page.rows[row]).id);
+        TEST_ASSERT_EQUAL_INT(
+            i, view::conferencePageOf(store, list, request, page.rows[row]));
+      }
+    }
+    TEST_ASSERT_EQUAL_UINT(example.count, next);
+    request.page = example.pages;
+    TEST_ASSERT_EQUAL_UINT8(0, view::conferencePage(store, list, request).page);
+    request.manual = true;
+    TEST_ASSERT_EQUAL_UINT8(example.pages - 1,
+                            view::conferencePage(store, list, request).page);
   }
-  // Monday 00:01: "current" holds matchday 8 for the day (OQ-268), "next"
-  // moves on (OQ-271); matchday 8 stays reachable by the buttons and only
-  // the one after the selected one is (matchday 11 is not).
-  auto r = reach(kLeague, kCurrent, monday_0001);
-  TEST_ASSERT_EQUAL_UINT32(md8, selectedFirst(r));
-  TEST_ASSERT_EQUAL_UINT8(2, r.count);
-  r = reach(kLeague, kNext, monday_0001);
-  TEST_ASSERT_EQUAL_UINT32(md8 + 7 * kDay, selectedFirst(r));
-  TEST_ASSERT_EQUAL_UINT8(3, r.count);
-  TEST_ASSERT_EQUAL_UINT32(md8, r.span[0].first);
-  TEST_ASSERT_EQUAL_UINT32(md8 + 14 * kDay, r.span[2].first);
-  // Tuesday 00:01: matchday 8 has passed in both modes.
-  for (auto mode : {kCurrent, kNext}) {
-    r = reach(kLeague, mode, tuesday_0001);
-    TEST_ASSERT_EQUAL_UINT32(md8 + 7 * kDay, r.span[0].first);
-    TEST_ASSERT_EQUAL_INT8(0, r.selected);
-  }
-  // The re-stored matchday 7 is never reached; the list of matchday 8 holds
-  // only its own two matches.
-  r = reach(kLeague, kCurrent, sunday_2359);
-  const auto list = view::matchday(store, shown, kLeague, r.span[0]);
-  TEST_ASSERT_EQUAL_UINT(2, list.count);
-  TEST_ASSERT_EQUAL_UINT32(81, store.match(list.index[0]).id);
-  TEST_ASSERT_EQUAL_UINT32(82, store.match(list.index[1]).id);
-  // OQ-275: in "next" mode the cup has no upcoming matchday after Sunday
-  // (skipped by the cycle), but its finished one stays reachable.
-  r = reach(kCup, kNext, monday_0001);
-  TEST_ASSERT_EQUAL_INT8(-1, r.selected);
-  TEST_ASSERT_EQUAL_UINT8(1, r.count);
-  r = reach(kCup, kCurrent, monday_0001);
-  TEST_ASSERT_EQUAL_INT8(0, r.selected);
-  TEST_ASSERT_EQUAL_UINT8(0, reach(kCup, kNext, tuesday_0001).count);
 }
 
-void test_demo_data() {
-  view::demo(store, kLeague);
-  view::Shown shown;
-  shown.add(view::Source{kLeague, kOlg});
-  TEST_ASSERT_EQUAL_UINT(1, view::conferenceAll(store, shown).count);
-  bool window = false;
-  const int own = view::ownForScreen(store, shown, kSaturday, 30, 30, true,
-                                     window);
-  TEST_ASSERT_TRUE(window);
-  const auto& m = store.match(own);
-  TEST_ASSERT_EQUAL(Phase::kLive, m.phase);
-  TEST_ASSERT_EQUAL_UINT(67, m.minute);
-  TEST_ASSERT_EQUAL_UINT(2, m.principal.home);
-  TEST_ASSERT_EQUAL_UINT(1, m.principal.away);
-  TEST_ASSERT_EQUAL_UINT32(0, m.score_changed);
-  TEST_ASSERT_EQUAL_STRING("Bayern", view::teamName(store, m, true));
-  TEST_ASSERT_EQUAL_STRING("Rot-Weiss Essen", view::fullName(store, m, false));
-  const auto t = view::table(store, kLeague);
-  TEST_ASSERT_EQUAL_UINT(5, t.count);
-  TEST_ASSERT_EQUAL(2, t.own);
-  TEST_ASSERT_EQUAL_STRING("FC Bayern München",
-                           store.teamAt(store.row(t.row[2]).team).short_name.data);
-  TEST_ASSERT_EQUAL_INT16(24, store.row(t.row[2]).points);
+void test_conference_pin_is_repeated_without_losing_unique_matches() {
+  struct Example {
+    uint8_t unique, capacity;
+    std::array<uint8_t, 3> visible;
+  };
+  // Capacity includes the pin. The parameterised six-row example partitions
+  // eleven unpinned games as 4+4+3, then repeats the pin as visible 5+5+4.
+  constexpr Example examples[] = {{10, 5, {4, 4, 4}}, {12, 6, {5, 5, 4}}};
+  for (const auto& example : examples) {
+    const auto list = conference(example.unique, true);
+    football::ConferenceRequest request;
+    request.per_page = example.capacity;
+    std::array<bool, cfg::kStoreMatches> seen{};
+    unsigned unique = 0;
+    for (unsigned p = 0; p < 3; ++p) {
+      request.page = p;
+      const auto page = view::conferencePage(store, list, request);
+      TEST_ASSERT_EQUAL_UINT8(3, page.pages);
+      TEST_ASSERT_EQUAL_UINT8(example.visible[p], page.row_count);
+      TEST_ASSERT_TRUE(store.match(page.rows[0]).isOwn());
+      for (unsigned row = 0; row < page.row_count; ++row) {
+        if (row) TEST_ASSERT_FALSE(seen[page.rows[row]]);
+        if (!seen[page.rows[row]]) ++unique;
+        seen[page.rows[row]] = true;
+      }
+    }
+    TEST_ASSERT_EQUAL_UINT(example.unique, unique);
+  }
+}
+
+void test_conference_minimum_two_keeps_pin_and_all_others_reachable() {
+  const auto list = conference(4, true);
+  football::ConferenceRequest request;
+  request.per_page = 2;
+  unsigned others = 0;
+  for (unsigned p = 0; p < 3; ++p) {
+    request.page = p;
+    const auto page = view::conferencePage(store, list, request);
+    TEST_ASSERT_EQUAL_UINT8(3, page.pages);
+    TEST_ASSERT_EQUAL_UINT8(2, page.row_count);
+    TEST_ASSERT_TRUE(store.match(page.rows[0]).isOwn());
+    TEST_ASSERT_FALSE(store.match(page.rows[1]).isOwn());
+    ++others;
+  }
+  TEST_ASSERT_EQUAL_UINT(3, others);
+}
+
+void test_conference_single_actual_fixture_needs_no_extra_row_or_page() {
+  for (bool own : {false, true}) {
+    const auto list = conference(1, own);
+    football::ConferenceRequest request;
+    request.per_page = 2;
+    request.page = 5;
+    const auto page = view::conferencePage(store, list, request);
+    TEST_ASSERT_EQUAL_UINT8(1, page.pages);
+    TEST_ASSERT_EQUAL_UINT8(1, page.row_count);
+    TEST_ASSERT_EQUAL_UINT32(1, store.match(page.rows[0]).id);
+  }
 }
 
 }  // namespace
@@ -369,13 +304,13 @@ void tearDown() {}
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_entry_shows_its_source_rows);
-  RUN_TEST(test_own_match_choice_for_screen_and_overview);
+  RUN_TEST(test_own_match_choice_for_overview);
   RUN_TEST(test_names_short_then_full);
   RUN_TEST(test_table_rows_of_one_competition);
   RUN_TEST(test_events_in_match_order_without_hidden_ones);
-  RUN_TEST(test_screen_switches_filter_the_sources);
-  RUN_TEST(test_matchday_is_the_first_block_of_the_shown_provider);
-  RUN_TEST(test_matchday_selection_at_local_midnight);
-  RUN_TEST(test_demo_data);
+  RUN_TEST(test_conference_owner_page_distributions_preserve_count_and_order);
+  RUN_TEST(test_conference_pin_is_repeated_without_losing_unique_matches);
+  RUN_TEST(test_conference_minimum_two_keeps_pin_and_all_others_reachable);
+  RUN_TEST(test_conference_single_actual_fixture_needs_no_extra_row_or_page);
   return UNITY_END();
 }

@@ -13,7 +13,8 @@ enum class Action : uint8_t {
   kUp,
   kDown,
   kToggleDirection,
-  kShowIp  // from the Web UI only; no input maps to it
+  kShowIp,        // from the Web UI only; no input maps to it
+  kAutomaticNext  // Demo only; no physical input maps to it
 };
 // One UI command carries the full version of the model used to produce it.
 // The existing event bus and controller FIFO both transport this same word.
@@ -26,7 +27,7 @@ constexpr uint32_t actionGeneration(uint64_t payload) {
 }
 constexpr Action actionFromPayload(uint64_t payload) {
   const uint32_t action = static_cast<uint32_t>(payload);
-  return action <= static_cast<uint32_t>(Action::kShowIp)
+  return action <= static_cast<uint32_t>(Action::kAutomaticNext)
              ? static_cast<Action>(action)
              : Action::kNone;
 }

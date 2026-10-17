@@ -6,7 +6,16 @@ described in [DATA_PROVIDERS.md](DATA_PROVIDERS.md). The web server, its
 admission and operation bounds and local-HTTP security are described in
 [NETWORK.md](NETWORK.md); the browser workflow in [WEB_UI.md](WEB_UI.md).
 Implementation: `components/web/web_service.cpp`,
-`components/web/settings_json.cpp`.
+`components/web/settings_json.cpp`, `components/web/screen_json.cpp`.
+
+The [planned screen-system redesign](UI.md#planned-screen-system-redesign)
+requires configuration and status for situations, timed sequences, competition
+scope and picture frame mode, plus the device draw-list preview. A dedicated
+complete screen-policy API is now available in the existing settings service.
+The controller now uses the common policy and sequence; dedicated Web controls
+edit that policy. This does not accept physical layouts, dot placement or final
+rings. Replaced general display fields are rejected; the screen policy owns them. Development
+records start fresh; compatibility migration is reconsidered after alpha/beta.
 
 ## Endpoints
 
@@ -20,11 +29,13 @@ Implementation: `components/web/web_service.cpp`,
 | GET `/api/v1/images`, `/images/file?id=N\|stock=crest\|background[&r=rev]` | Image inventory: library images with per-image revision, and the two roles `crest` and `background` with `replaced`, replacement `bytes` and `revision` (it changes when the role's image changes); the JPEG itself (`stock=` delivers the role's replacement, else its factory image) |
 | POST `/api/v1/session`, `/logout` | Open/close the mutation session |
 | POST or PUT `/api/v1/settings` | Strictly typed settings patch |
+| GET, PUT `/api/v1/screen-settings` | Read or replace the complete dedicated screen policy, guarded by its snapshot generation |
 | POST or PUT `/api/v1/competitions` | Replace the competition list |
 | POST `/api/v1/teams` | Set or remove the owner's short name of one team |
 | PUT `/api/v1/teams` | Replace all of the owner's short names (backup import) |
 | POST `/api/v1/export` | Explicit export of the settings, the competition store and the short names |
 | POST `/api/v1/wifi/scan`, `/data/select`, `/data/refresh` | Start asynchronous scan, provider list or refresh |
+| GET, POST `/api/v1/demo` | Read scenario catalogue, current step/test time and runtime competition bindings; select a scenario/step while saved Demo mode is enabled |
 | POST `/api/v1/display` | Quick display action `{"action":"next"\|"ip"}` (same events as the buttons) |
 | POST `/api/v1/screenshot` | Authenticated forced redraw streamed as raw RGB565 strips; the browser creates the PNG |
 | POST `/api/v1/images/upload`, `/images/delete` | Upload a library image (optional `X-Image-Id` replaces or restores that valid library id; `X-Image-Role: crest\|background` uploads the replacement of that role instead, answer `{"ok":true,"role":…}`) or delete a library image by id |
@@ -49,6 +60,74 @@ reserved. No available id uses the existing capacity error. Explicit
 references. Firmware uploads ignore image headers, as before.
 
 ## Endpoint details
+
+### Screen policy
+
+GET and PUT acquire the existing heavy-operation token before allocating the
+snapshot or receiving/parsing a body. Provider work retains that token through
+response completion and payload cleanup. Busy409 leaves settings unchanged;
+retry the read/save. The Web draft remains available. This serializes temporary
+allocations without another task, queue or higher heap cap.
+
+`GET /screen-settings` returns the complete policy and its matching `generation`
+under the existing settings mutex. `PUT` requires that full representation,
+including the token (zero is valid before the first save). It requires the usual
+origin/session and is read-only during an OTA trial. Unknown fields, omitted
+fields, wrong types and invalid retained overrides are rejected with an
+actionable field path. A stale token returns 409 `settings_changed`; reload and
+reconcile the draft before retrying. Success returns `{"ok":true}`; read again
+to obtain the saved snapshot/token. This save changes the UI/settings generation,
+not the provider-data generation.
+
+Named phases are `own`, `other`, `matchday`, `idle`, `break`; named types are
+`crest`, `images`, `single`, `matchday`, `conference`, `table`. Their names do not
+depend on the editable `order`. Each `phases.<phase>` object has six type rules
+and an `expanded` array of sporting type names. A shared rule is the tuple
+`[enabled, automatic, visit_s]`. Each `competitions[]` item has `id`, service-owned
+`incarnation`, `own_special` and five named phase objects, each with the four
+sporting rule tuples. In an override tuple each `null` independently inherits
+that field. Explicit `false` remains an override. Collapsing expansion retains
+these values. Appearance is stored per type; slides contain library ids only.
+The schema's `screen_policy` describes tuple fields, names and bounds.
+`visible_matches` is shared by Conference and Matchday, minimum2; profile bounds
+set its maximum. A real single fixture still occupies just one row.
+
+Visit time is 15–43,200 seconds; image time is separately 3–3,600 seconds. Enabled
+image visits must be an exact multiple of image time. The four before/after
+buffers are 0–180 minutes; the optional break threshold is 1–366 elapsed days.
+No value is silently rounded. The maximum complete canonical request is 8,121
+bytes, within the unchanged 8,192-byte body limit. The JSON allocator cap remains
+24,576 bytes; target-aware allocation estimates are distinct from host figures.
+
+Bindings are checked against both competition id and incarnation. Save the
+competition record before a policy containing bindings derived from fallback
+presets. A deleted or reused id cannot inherit an unrelated override; a stale
+binding is rejected rather than silently rebound. The common browser draft/save
+and backup flows acknowledge these independent record saves separately. A failed
+later write does not roll back an already confirmed part or mark the remaining
+draft as saved. Image deletion cleans references in both records before unlink;
+the existing settings writer remains held through that unlink. Filesystem repair
+can already have succeeded when a later reference save fails, reported as
+`repair_references` with `storage_formatted:true`.
+
+### Runtime Demo
+
+`GET /demo` returns `enabled`, `pending`, `scenario`, `step`, `revision`, `utc`,
+`bindings` and `scenarios`. Every catalogue entry contains numeric `id`, stable
+`key`, title and ordered step labels. Bindings identify dataset0/1, canonical
+`competition`, `incarnation`, and whether that association came from saved
+competitions. The first two saved entries supply order and screen rules. A
+missing saved association uses common rules and is explicitly labelled.
+
+`POST /demo` accepts exactly `{"scenario":N,"step":N}` with catalogue bounds,
+normal mutation session/origin checks and no OTA trial. First enable and save
+Demo in general settings; otherwise409 `demo_disabled`. A queued command returns
+`{"accepted":true}`; this is not completion. Poll until `pending:false` with the
+requested scenario/step and new publication. Busy commands return409. Store,
+clock, bindings and phase proof publish together. These controls never save
+scenario data, modify provider sources, write real caches or set system time.
+The scenarios exercise canonical selection and rendering; provider authenticity
+and physical acceptance require their separate checks.
 
 ### Screenshot download
 
@@ -189,16 +268,17 @@ competitions) and `short_name_max` (bytes per name). `firmware_id`
 in status is the full 64-character lowercase hexadecimal ELF SHA256 from the
 app descriptor. It distinguishes builds with equal version strings; it is
 not the shortened hash printed by the panic handler.
-The schema lists the screens in display order as `screen_order` (screen
-indices as in [CONFIGURATION.md](CONFIGURATION.md): 0 Own match, 1
-Conference, 2 Table, 3 Crest/slideshow, 4 Matchday) and the keys of a
-competition's `screens` switches as `competition_screens`. Settings carry
-`table_page_s` (table step, bounds in the schema) and `matchday_mode`
-(matchday the Matchday screen shows: 0 current, 1 next). Status `screen` is the
-index of the shown screen, 0–4. `screen_starting` reports whether the last
-display poll still showed its initial three-step startup card. After a
-network initialization fault ends that card, the browser preview uses this
-existing display state rather than restarting it from connection guesses.
+The schema's `screen_policy` names six stable types. Status `screen` is
+Single0, Conference1, Table2, Crest3, Matchday4 or Images5; editable sequence
+order does not change these identities. `screen_reason` includes `other_games`,
+`break` and `frame`. `screen_starting` reports the initial startup card.
+Competition ids/counts in status come from the same published canonical data,
+including Demo routes, rather than a second settings-index lookup. `demo`
+identifies this runtime projection. Demo rows additionally expose `bound` and
+`incarnation`; append saved labels only for exact bound identity. Status and own/
+competition overview come from the same repository read, including inactive rows.
+Old `competition_screens`, general `screens`
+and `table_page_s` are removed.
 Status `requests` contains each provider's request attempts since boot,
 including selection requests. It is not a daily usage or remaining-credit
 counter and must not be compared directly with the configured daily caps.
@@ -258,17 +338,17 @@ record (see [CONFIGURATION.md](CONFIGURATION.md)); the settings JSON does not
 carry them. `GET /competitions` returns
 
 ```json
-{"competitions":[{"id":1,"active":true,
+{"competitions":[{"id":1,"incarnation":1,"active":true,
   "primary":{"provider":0,"competition":"bl1","season":"2025","team":"40"},
-  "competition_name":"1. Bundesliga","team_name":"FC Bayern",
-  "screens":{"own_match":true,"conference":true,"matchday":true,"table":true}}]}
+  "competition_name":"1. Bundesliga","team_name":"FC Bayern"}]}
 ```
 
 `provider` is the index into the schema's `providers` list (0 `openligadb`,
 1 `api-football`, 2 `espn`, 3 `football-data`). Every competition has a stable id from 1 to 255. The device assigns it when
 an entry is created and never changes it while the entry exists; the
-position in the list only sets the display order. `screens` says on which
-screens the competition appears. `primary` is the competition's only source
+position in the list sets the within-type order and own focus priority. The
+separate policy controls screens with id/incarnation bindings. Legacy `screens`
+is rejected. The service owns incarnation allocation. `primary` is the competition's only source
 (provider, competition, season, club; the key keeps its name for
 compatibility). At most `limits.competitions` competitions (8) exist
 (schema).
@@ -481,7 +561,7 @@ a body key (`competition`, `season`, `id`, `role`, `action`, `confirm`) or a hea
 (`X-Image-Id`, `X-Image-Role`). For value errors `code` is the settings reason (`invalid`,
 `range`, `type`, `unknown_key`, `too_long`, `too_many`, `required`,
 `duplicate`, `conflict`, `none_enabled`). Other codes: `origin`
-(403), `session`, `password` (401), `trial`, `busy`, `state`, `changed` (409),
+(403), `session`, `password` (401), `trial`, `busy`, `state`, `changed`, `settings_changed` (409),
 `unknown_route`, `not_found` (404), `method` (405), `body_missing`,
 `body_incomplete`, `json`, `size`, `content`, `invalid` (400),
 `body_too_large` (413), `content_type` (415), `timeout` (408), `memory`,

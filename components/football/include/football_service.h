@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 
+#include "demo_scenarios.h"
 #include "esp_err.h"
 #include "football_files.h"
 #include "football_model.h"
@@ -99,23 +100,38 @@ struct SelectionStatus {
 // about each competition (Web UI overview).
 struct OwnOverview {
   bool present = false;
-  uint8_t route = 0;
+  uint8_t competition = 0;  // canonical identity of the published dataset
   Phase phase = Phase::kUnknown;
   int64_t kickoff = 0;  // UTC seconds, 0 = unknown
   int16_t home_goals = -1, away_goals = -1, minute = -1;  // -1 = unknown
   Text<cfg::kNameBytes> home, away;
 };
 struct RouteInfo {
+  uint8_t id = 0;  // canonical published id; 0 = no dataset in this position
   uint8_t matches = 0;  // matches of the competition in the published data
   cfg::Provider provider = cfg::kProviderDefault;  // source of those matches
 };
 struct Overview {
   OwnOverview own;
   RouteInfo routes[cfg::kCompetitionMax];
+  bool demo = false;
+  demo::Bindings demo_bindings;
 };
 esp_err_t init();
 void refresh();
 Status status();
+struct DemoStatus {
+  bool enabled = false, pending = false;
+  demo::Scenario scenario = demo::Scenario::kOwn;
+  uint8_t step = 0;
+  uint32_t revision = 0;
+  Clock clock;
+  demo::Bindings bindings;
+};
+// Runtime-only device scenario controls. Enabling Demo remains an explicit
+// general setting; these commands never write settings, files or system time.
+DemoStatus demoStatus();
+esp_err_t demoScenario(demo::Scenario scenario, uint8_t step);
 // The published data: the compact store with the sources it shows
 // (store_views.h). 'fetched_ms', 'stale' and 'competitions' as in Status;
 // 'retry_ms' is the monotonic ms of the next retry of a failed competition
@@ -129,6 +145,13 @@ struct Published {
   bool configured, stale;
   int64_t fetched_ms, retry_ms;
   const CompetitionStates& competitions;
+  // Borrowed from the worker while this read holds the repository mutex.
+  // Use only with the UI snapshot's matching data generation. These are the
+  // effective canonical routes, also used by the device Demo.
+  const settings::Competitions& routes;
+  bool break_proven;
+  uint8_t loaded_matches, loaded_tables;  // bits in routes.entries order
+  Clock clock;  // Demo clock when enabled; otherwise ordinary UTC/monotonic
 };
 // Called while holding the short repository read mutex. Callback must copy
 // into its own fixed model, with no I/O, LVGL, allocation or blocking calls.
@@ -136,7 +159,9 @@ using Reader = void (*)(const Published&, void*);
 void read(Reader reader, void* context);
 // Own match (a live one first, else the one closest to 'utc') and the match
 // count per competition of the published data. No provider request.
-Overview overview(int64_t utc);
+// Optional Status is filled in place under the same repository lock as the
+// overview: rows, causes/notices and Demo identity bindings share a revision.
+Overview overview(int64_t utc, Status* status_out = nullptr);
 esp_err_t select(const SelectionRequest& request);
 SelectionStatus selectionStatus();
 bool selectionAt(uint16_t index, uint32_t revision, Selection& out);

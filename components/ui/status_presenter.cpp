@@ -29,9 +29,13 @@ void Presenter::localTime(char* out, std::size_t size, int64_t utc) {
 }
 
 bool Presenter::entryOf(uint8_t id, settings::Competition& entry) {
-  for (std::size_t i = 0; settings::competitionAt(i, entry); ++i)
-    if (entry.id == id) return true;
-  return false;
+  if (navigation_data) {
+    const auto* found = navigation_data->data.competitions.find(id);
+    if (!found) return false;
+    entry = *found;
+    return true;
+  }
+  return settings::competitionById(id, entry);
 }
 
 void Presenter::roundCaption(const football::MatchStore& store,
@@ -132,7 +136,7 @@ void Presenter::faultCard(uint8_t id, int64_t now, int64_t utc,
 }
 
 void Presenter::bindStart(uint8_t step) {
-  view.style = model.screens[static_cast<unsigned>(cfg::Screen::kCrest)];
+  setStyle(screen::Type::kCrest);
   // Read one entry at a time without copying the competition list onto the
   // caller's stack.
   bool active = false, named = false;
@@ -266,9 +270,10 @@ Subject Presenter::statusText(const football::Published& data,
     view.status_tone = Tone::kWarn;
     return {true, 0};
   }
-  const bool cycle_screen = nav.selected == cfg::Screen::kMatchday ||
-                            nav.selected == cfg::Screen::kTable;
-  const auto* state = cycle_screen ? stateOf(presentation.on_screen) : nullptr;
+  const bool competition_card = nav.entry.type == screen::Type::kMatchday ||
+                                nav.entry.type == screen::Type::kTable;
+  const auto* state =
+      competition_card ? stateOf(presentation.on_screen) : nullptr;
   if (state) {
     if (faulted(state->id)) {
       // The HTTP status only on the card and in the Web UI.
@@ -334,6 +339,7 @@ uint32_t Presenter::statusState(const football::Published& data,
 
 uint32_t Presenter::bindStatus(const football::Published& data,
                                const BindContext& context) {
+  if (policy.frame) return 0;
   if (model.demo) {
     snprintf(view.status, sizeof(view.status), "Demo");
     view.status_tone = Tone::kDim;
@@ -410,7 +416,8 @@ void Presenter::finishStatus(uint32_t state, int64_t now,
     state = football::fingerprint(
         {reinterpret_cast<const char*>(bytes), sizeof(bytes)});
     image_card = view.layout == Layout::kImage &&
-                 nav.selected == cfg::Screen::kCrest &&
+                 (nav.entry.type == screen::Type::kCrest ||
+                  nav.entry.type == screen::Type::kSlideshow) &&
                  selected_image.actual == images::FileSource::kNone;
     if (image_card) {
       imageFaultCard(selected_image);

@@ -1,288 +1,204 @@
 #include "navigation_policy.h"
 
 #include <algorithm>
+
 namespace ui {
-NavigationResult resolve(const settings::Model& model, NavigationInput input) {
-  NavigationResult result;
-  // In display order (cfg::kScreenOrder).
-  for (const auto screen : cfg::kScreenOrder)
-    if (model.screens[static_cast<unsigned>(screen)].enabled)
-      result.available[result.count++] = screen;
-  result.default_screen = !input.configured  ? cfg::Screen::kCrest
-                          : input.own_window ? model.own_match_screen
-                          : input.matchday   ? model.matchday_screen
-                                             : model.idle_screen;
-  if (!model.screens[static_cast<unsigned>(result.default_screen)].enabled &&
-      result.count)
-    result.default_screen = result.available[0];
-  result.selected =
-      input.inputs && input.manual ? input.selected : result.default_screen;
-  if (!model.screens[static_cast<unsigned>(result.selected)].enabled)
-    result.selected = result.default_screen;
-  return result;
-}
 namespace {
-bool faulted(const NavigationData& data, uint8_t id) {
-  for (std::size_t i = 0; i < data.fault_count; ++i)
-    if (data.faults[i] == id) return true;
-  return false;
+using Type = screen::Type;
+using Mode = sequence::PageMode;
+using Kind = sequence::ContentKind;
+
+Kind absent(const NavigationContext& context, const sequence::Entry& entry) {
+  const auto& facts = context.data;
+  for (std::size_t i = 0; i < facts.competitions.entries.size(); ++i) {
+    if (facts.competitions.entries[i].id != entry.competition) continue;
+    const auto loaded =
+        entry.type == Type::kTable ? facts.loaded_tables : facts.loaded_matches;
+    return (facts.failed & (1u << i)) || !(loaded & (1u << i)) ? Kind::kError
+                                                               : Kind::kEmpty;
+  }
+  return Kind::kEmpty;
 }
-int position(Cycle& cycle, const uint8_t* ids, int count, int64_t now) {
-  for (int i = 0; i < count; ++i)
-    if (cycle.competition == ids[i]) return i;
-  cycle = {ids[0], 0, now};
-  return 0;
-}
-void next(Cycle& cycle, const uint8_t* ids, int count, int at, int direction,
-          int64_t now) {
-  cycle = {ids[(at + direction + count) % count], 0, now};
+uint16_t pages(unsigned count, unsigned per_page) {
+  return static_cast<uint16_t>(std::max(1u, (count + per_page - 1) / per_page));
 }
 }  // namespace
 
-void automatic(NavigationState& state, int64_t now, AutomaticReason reason) {
-  state.manual = false;
-  state.paged = false;
-  state.table_first = -1;
-  state.matchday_first = 0;
-  state.conference_page = 0;
-  if (reason != AutomaticReason::kTimeout) state.scroll_down = true;
-  if (reason == AutomaticReason::kSettings) {
-    state.table_cycle = {0, 0, now};
-    state.matchday_cycle = {0, 0, now};
-    state.input_at = state.scroll_at = now;
-  }
-  state.selected = state.default_screen;
+sequence::Input NavigationContext::input() {
+  return {policy, data.competitions, selected, content, this};
 }
-void synchronize(NavigationState& state, const settings::Model& model,
-                 const NavigationData& data, std::size_t inputs) {
-  const auto shown = data.shown.only(cfg::CompetitionScreen::kConference);
-  const auto members = model.demo
-                           ? football::view::conferenceAll(data.store, shown)
-                           : football::view::conferenceMembers(
-                                 data.store, shown, data.utc,
-                                 {model.window_before, model.window_after,
-                                  model.whole_matchday});
-  bool own_window = false;
-  football::view::ownForScreen(
-      data.store, data.shown.only(cfg::CompetitionScreen::kOwnMatch), data.utc,
-      model.window_before, model.window_after, model.demo, own_window);
-  const auto result =
-      resolve(model, {data.configured,
-                      (model.demo || data.utc > 0) && members.count > 0,
-                      own_window, state.manual, inputs, state.selected});
-  state.default_screen = result.default_screen;
-  state.selected = result.selected;
+
+football::view::List conferenceMembers(const NavigationContext& context,
+                                       uint8_t competition) {
+  football::view::List out;
+  const auto* c = context.data.competitions.find(competition);
+  if (!c) return out;
+  const auto& store = context.data.store;
+  for (std::size_t i = 0; i < store.matchCount(); ++i) {
+    const auto& match = store.match(i);
+    if (match.competition != competition ||
+        match.provider != c->primary.provider)
+      continue;
+    auto window = football::selection::window(context.selection, *c, match);
+    bool active = window.active;
+    // A kickoff block stays complete while one of its games is in-window.
+    // Own/other buffers and the bounded unknown-kickoff live case use the
+    // same selector as phase classification, never a second timing rule.
+    if (!active && match.kickoff &&
+        match.phase != football::Phase::kPostponed &&
+        match.phase != football::Phase::kCancelled &&
+        match.phase != football::Phase::kAbandoned)
+      for (std::size_t j = 0; !active && j < store.matchCount(); ++j) {
+        const auto& other = store.match(j);
+        if (other.competition == competition &&
+            other.provider == match.provider && other.kickoff == match.kickoff)
+          active =
+              football::selection::window(context.selection, *c, other).active;
+      }
+    if (active) out.index[out.count++] = static_cast<uint8_t>(i);
+  }
+  return out;
 }
-TableSelection tableSelection(NavigationState& state,
-                              const settings::Model& model,
-                              const NavigationData& data, int64_t now,
-                              bool advance, int direction) {
-  const auto shown = data.shown.only(cfg::CompetitionScreen::kTable);
-  uint8_t ids[cfg::kCompetitionMax];
-  int count = 0;
-  for (std::size_t i = 0; i < shown.count(); ++i) {
-    const uint8_t id = shown.at(i).competition;
-    if (football::view::table(data.store, id).count || faulted(data, id))
-      ids[count++] = id;
-  }
-  if (!count) return {shown.count() ? shown.at(0).competition : uint8_t{0}};
-  auto& cycle = state.table_cycle;
-  const auto was = cycle.competition;
-  const int at = position(cycle, ids, count, now);
-  if (was != cycle.competition) state.table_first = -1;
-  auto table = football::view::table(data.store, cycle.competition);
-  const int rows = table.count;
-  const int visible = std::min<int>(model.table_window, rows);
-  const int pages =
-      visible && table.own < 0 ? (rows + visible - 1) / visible : 1;
-  cycle.page = std::min(cycle.page, pages - 1);
-  const int base =
-      table.own >= 0 ? table.own - visible / 2 : cycle.page * visible;
-  const int last = std::max(0, rows - visible);
-  const int first = state.paged && state.table_first >= 0
-                        ? std::clamp(state.table_first, 0, last)
-                        : std::clamp(base, 0, last);
-  if (direction) {
-    if (!rows || first + direction < 0 || first + direction > last) {
-      next(cycle, ids, count, at, direction, now);
-      state.table_first = -1;
-    } else
-      state.table_first = first + direction;
-  } else if (advance && !state.paged &&
-             now - cycle.at >= model.table_page_s * 1000) {
-    if (cycle.page + 1 < pages) {
-      ++cycle.page;
-      cycle.at = now;
-    } else
-      next(cycle, ids, count, at, 1, now);
-    state.table_first = -1;
-  }
-  table = football::view::table(data.store, cycle.competition);
-  const int total = table.count;
-  const int window = std::min<int>(model.table_window, total);
-  const int origin =
-      table.own >= 0 ? table.own - window / 2 : cycle.page * window;
-  const int effective = state.table_first >= 0 && (state.paged || direction)
-                            ? state.table_first
-                            : origin;
-  const int result = std::clamp(effective, 0, std::max(0, total - window));
-  state.table_first = result;
-  return {cycle.competition, result, window, total, total == 0};
+
+football::ConferencePage conferencePage(const NavigationContext& context,
+                                        const sequence::Entry& entry, Mode mode,
+                                        uint16_t page) {
+  const auto members = conferenceMembers(context, entry.competition);
+  football::ConferenceRequest request;
+  request.mode = context.policy.conference_mode;
+  request.pin_own = context.policy.pin_own_match;
+  request.manual = mode == Mode::kManualHeld;
+  request.per_page = context.policy.visible_matches;
+  request.page = page;
+  return football::view::conferencePage(context.data.store, members, request);
 }
-MatchdaySelection matchdaySelection(NavigationState& state,
-                                    const settings::Model& model,
-                                    const NavigationData& data, int64_t now,
-                                    bool advance, int direction) {
-  const auto shown = data.shown.only(cfg::CompetitionScreen::kMatchday);
-  const bool manual = state.paged || direction != 0;
-  const auto reachOf = [&](uint8_t id) {
-    return football::view::matchdays(data.store, shown, id, model.matchday_mode,
-                                     data.utc, data.local_offset);
-  };
-  const auto usable = [&](const football::matchday::Reach& r) {
-    return manual ? r.count > 0 : r.selected >= 0;
-  };
-  if (!manual) state.matchday_first = 0;
-  uint8_t ids[cfg::kCompetitionMax];
-  int count = 0;
-  for (std::size_t i = 0; i < shown.count(); ++i) {
-    const uint8_t id = shown.at(i).competition;
-    if (usable(reachOf(id)) || faulted(data, id)) ids[count++] = id;
-  }
-  if (!count) return {};
-  auto& cycle = state.matchday_cycle;
-  const uint8_t was = cycle.competition;
-  int at = position(cycle, ids, count, now);
-  if (was != cycle.competition) state.matchday_first = 0;
-  auto reach = reachOf(cycle.competition);
-  bool card = !usable(reach);
-  const int per_page = std::max<int>(1, model.visible_matches);
-  int day = 0, pages = 1;
-  const auto load = [&](int k) {
-    day = k;
-    const auto list = football::view::matchday(
-        data.store, shown, cycle.competition, reach.span[day]);
-    pages = std::max(1, (list.count + per_page - 1) / per_page);
-  };
-  if (!card) {
-    int held = reach.selected >= 0 ? reach.selected : reach.count - 1;
-    for (int k = 0; k < reach.count; ++k)
-      if (reach.span[k].first == state.matchday_first) held = k;
-    load(held);
-    cycle.page = std::min(cycle.page, pages - 1);
-  }
-  const auto enter = [&](int k, int sign) {
-    load(k);
-    cycle.page = sign > 0 ? 0 : pages - 1;
-    cycle.at = now;
-  };
-  const auto enterCompetition = [&](int sign) {
-    next(cycle, ids, count, at, sign, now);
-    reach = reachOf(cycle.competition);
-    card = !usable(reach);
-    state.matchday_first = 0;
-    if (!card)
-      enter(reach.selected >= 0 ? reach.selected : reach.count - 1, sign);
-  };
-  if (direction > 0) {
-    if (!card && cycle.page + 1 < pages)
-      cycle = {cycle.competition, cycle.page + 1, now};
-    else if (!card && day + 1 < reach.count)
-      enter(day + 1, 1);
-    else
-      enterCompetition(1);
-  } else if (direction < 0) {
-    if (!card && cycle.page > 0)
-      cycle = {cycle.competition, cycle.page - 1, now};
-    else if (!card && day > 0)
-      enter(day - 1, -1);
-    else
-      enterCompetition(-1);
-  } else if (advance && !state.paged &&
-             now - cycle.at >= cfg::kConferencePageMs) {
-    if (!card && cycle.page + 1 < pages)
-      cycle = {cycle.competition, cycle.page + 1, now};
-    else if (count > 1 || (!card && pages > 1))
-      enterCompetition(1);
-    else
-      cycle.at = now;
-  }
-  if (direction && !card) state.matchday_first = reach.span[day].first;
-  return {cycle.competition,
-          card ? football::matchday::Span{} : reach.span[day],
-          cycle.page,
-          pages,
-          true,
-          card};
+
+TableSelection tableSelection(const NavigationContext& context,
+                              const sequence::Entry& entry, Mode mode,
+                              uint16_t page) {
+  const auto table =
+      football::view::table(context.data.store, entry.competition);
+  const int count = std::min<int>(context.policy.table_window, table.count);
+  const int last = std::max(0, table.count - count);
+  const int first = mode == Mode::kManualHeld ? std::min<int>(page, last)
+                    : table.own >= 0
+                        ? std::clamp(table.own - count / 2, 0, last)
+                        : std::min<int>(page * count, last);
+  return {entry.competition, first, count, table.count,
+          table.count == 0 && absent(context, entry) == Kind::kError};
 }
-void applyAction(NavigationState& state, Action action,
-                 const settings::Model& model, const NavigationData& data,
-                 int64_t now) {
-  state.input_at = now;
-  if (action == Action::kNext || action == Action::kPrevious) {
-    constexpr int count = static_cast<int>(cfg::kScreenCount);
-    int at = 0;
-    for (int i = 0; i < count; ++i)
-      if (cfg::kScreenOrder[i] == state.selected) at = i;
-    const int sign = action == Action::kNext ? 1 : -1;
-    for (int i = 1; i <= count; ++i) {
-      const auto screen = cfg::kScreenOrder[(at + sign * i + count) % count];
-      if (model.screens[static_cast<unsigned>(screen)].enabled) {
-        state.selected = screen;
+
+football::view::List roundMembers(const NavigationContext& context,
+                                  const football::selection::Round& round) {
+  football::view::List out;
+  const auto& store = context.data.store;
+  for (std::size_t i = 0; i < store.matchCount(); ++i)
+    if (football::selection::roundContains(context.selection, round,
+                                           store.match(i)))
+      out.index[out.count++] = static_cast<uint8_t>(i);
+  return out;
+}
+
+MatchdaySelection matchdaySelection(const NavigationContext& context,
+                                    const sequence::Entry& entry, Mode mode,
+                                    uint16_t page) {
+  const auto* c = context.data.competitions.find(entry.competition);
+  if (!c) return {};
+  const auto per_page = std::max<unsigned>(1, context.policy.visible_matches);
+  if (mode != Mode::kManualHeld) {
+    auto round = football::selection::round(context.selection, *c,
+                                            context.policy.matchday_mode);
+    if (!round.valid() && mode == Mode::kManualAutomatic) {
+      const auto reach = football::selection::rounds(
+          context.selection, *c, context.policy.matchday_mode);
+      if (reach.count) round = reach.round[reach.count - 1];
+    }
+    const auto list = roundMembers(context, round);
+    return {round, page, pages(list.count, per_page), list.count != 0};
+  }
+  const auto reach = football::selection::rounds(context.selection, *c,
+                                                 context.policy.matchday_mode);
+  for (unsigned i = 0; i < reach.count; ++i) {
+    const auto list = roundMembers(context, reach.round[i]);
+    const auto count = pages(list.count, per_page);
+    if (page < count) return {reach.round[i], page, count, list.count != 0};
+    page -= count;
+  }
+  return {};
+}
+
+sequence::Content content(const sequence::Entry& entry, Mode mode,
+                          uint16_t visible_page, void* raw) {
+  const auto& context = *static_cast<NavigationContext*>(raw);
+  if (!screen::sporting(entry.type)) return {Kind::kData, 1};
+  const auto* c = context.data.competitions.find(entry.competition);
+  if (!c) return {};
+  unsigned count = 0;
+  uint16_t anchor = 0;
+  if (entry.type == Type::kLiveSingle) {
+    if (context.selected.phase == settings::screen_policy::Phase::kOwn &&
+        context.selected.focus.competition != entry.competition)
+      return {};
+    const auto single =
+        football::selection::single(context.selection, context.selected, *c);
+    count = single.match.valid();
+  } else if (entry.type == Type::kLiveMulti) {
+    const auto page = conferencePage(context, entry, mode, visible_page);
+    count = page.row_count ? page.pages : 0;
+    anchor = visible_page;
+    if (mode == Mode::kManualHeld &&
+        context.policy.conference_mode == cfg::ConferenceMode::kOnePage) {
+      const auto automatic =
+          conferencePage(context, entry, Mode::kAutomatic, visible_page);
+      const auto members = conferenceMembers(context, entry.competition);
+      int pinned = -1;
+      if (context.policy.pin_own_match)
+        for (unsigned i = 0; i < members.count && pinned < 0; ++i)
+          if (context.data.store.match(members.index[i]).isOwn())
+            pinned = members.index[i];
+      football::ConferenceRequest held;
+      held.pin_own = context.policy.pin_own_match;
+      held.per_page = context.policy.visible_matches;
+      for (unsigned row = 0; row < automatic.row_count; ++row) {
+        if (automatic.rows[row] == pinned) continue;
+        const int page = football::view::conferencePageOf(
+            context.data.store, members, held, automatic.rows[row]);
+        if (page < 0) continue;
+        anchor = static_cast<uint16_t>(page);
         break;
       }
     }
-    state.manual = true;
-    state.paged = false;
-    state.table_first = -1;
-    state.matchday_first = 0;
-    state.scroll_down = true;
-  } else if (action == Action::kDefault)
-    automatic(state, now, AutomaticReason::kDefault);
-  else if (action == Action::kToggleDirection) {
-    state.scroll_down = !state.scroll_down;
-    state.scroll_at = now;
-  } else if (action == Action::kUp || action == Action::kDown) {
-    const int direction = action == Action::kDown ? 1 : -1;
-    if (state.selected == cfg::Screen::kLiveMulti) {
-      const auto shown = data.shown.only(cfg::CompetitionScreen::kConference);
-      const auto members =
-          model.demo ? football::view::conferenceAll(data.store, shown)
-                     : football::view::conferenceMembers(
-                           data.store, shown, data.utc,
-                           {model.window_before, model.window_after,
-                            model.whole_matchday});
-      football::ConferenceRequest request;
-      request.mode = model.conference_mode;
-      request.pin_own = model.pin_own_match;
-      request.manual = true;
-      request.per_page = model.visible_matches;
-      request.page = 0;
-      const auto manual_page =
-          football::view::conferencePage(data.store, members, request);
-      const int pages = manual_page.pages;
-      if (!state.paged &&
-          model.conference_mode == cfg::ConferenceMode::kOnePage)
-        state.conference_page = direction > 0 ? 0 : std::max(0, pages - 1);
-      else {
-        request.manual = state.paged;
-        request.page =
-            state.paged ? state.conference_page : now / cfg::kConferencePageMs;
-        const auto current =
-            football::view::conferencePage(data.store, members, request);
-        state.conference_page =
-            pages ? (current.page + direction + pages) % pages : 0;
+  } else if (entry.type == Type::kTable) {
+    const auto table =
+        football::view::table(context.data.store, entry.competition);
+    const unsigned visible =
+        std::min<unsigned>(context.policy.table_window, table.count);
+    if (visible) {
+      count = mode == Mode::kManualHeld ? table.count - visible + 1
+              : table.own >= 0          ? 1
+                                        : pages(table.count, visible);
+      const int last = std::max<int>(0, table.count - visible);
+      anchor = static_cast<uint16_t>(
+          table.own >= 0 ? std::clamp<int>(table.own - visible / 2, 0, last)
+                         : std::min<unsigned>(visible_page * visible, last));
+    }
+  } else if (entry.type == Type::kMatchday) {
+    if (mode == Mode::kManualHeld) {
+      const auto reach = football::selection::rounds(
+          context.selection, *c, context.policy.matchday_mode);
+      for (unsigned i = 0; i < reach.count; ++i) {
+        const auto list = roundMembers(context, reach.round[i]);
+        if (static_cast<int>(i) == reach.selected ||
+            (reach.selected < 0 && i + 1 == reach.count))
+          anchor = static_cast<uint16_t>(count + visible_page);
+        count += pages(list.count, context.policy.visible_matches);
       }
-      state.manual = state.paged = true;
-    } else if (state.selected == cfg::Screen::kTable) {
-      tableSelection(state, model, data, now, false, direction);
-      state.manual = state.paged = true;
-      state.scroll_at = now;
-    } else if (state.selected == cfg::Screen::kMatchday) {
-      matchdaySelection(state, model, data, now, false, direction);
-      state.manual = state.paged = true;
-      state.scroll_at = now;
+    } else {
+      const auto chosen = matchdaySelection(context, entry, mode, visible_page);
+      count = chosen.available ? chosen.pages : 0;
     }
   }
+  return {count ? Kind::kData : absent(context, entry),
+          static_cast<uint16_t>(std::max(1u, count)), anchor};
 }
 }  // namespace ui

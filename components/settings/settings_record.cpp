@@ -177,55 +177,17 @@ void readSecrets(Reader& reader, Model& model) {
   reader.text(Field::kApplication, model.football_data_key);
 }
 
-void readStyle(Reader& reader, ScreenStyle& style) {
-  reader.flag(Field::kApplication, style.enabled);
-  reader.flag(Field::kApplication, style.background);
-  reader.u32(style.colour);
-  reader.u32(style.text);
-  reader.u32(style.accent);
-  reader.u8(style.text_scale);
-  reader.u8(style.image);
-}
-
-// The styles of the first kListedScreens screens, after the secrets.
-void readScreens(Reader& reader, Model& model) {
-  for (std::size_t i = 0; i < kListedScreens; ++i)
-    readStyle(reader, model.screens[i]);
-}
-
-void writeStyle(Writer& writer, const ScreenStyle& style) {
-  writer.flag(style.enabled);
-  writer.flag(style.background);
-  writer.u32(style.colour);
-  writer.u32(style.text);
-  writer.u32(style.accent);
-  writer.u8(style.text_scale);
-  writer.u8(style.image);
-}
-
-// 7 flags, 9 u8 values, 9 u16 values.
+// General application fields. Screen policy has its independent record.
 void readScalars(Reader& reader, Model& model) {
-  reader.flag(Field::kApplication, model.espn_opt_in);
-  reader.flag(Field::kApplication, model.demo);
-  reader.flag(Field::kApplication, model.backgrounds);
-  reader.flag(Field::kApplication, model.night_enabled);
-  reader.flag(Field::kApplication, model.ip_badge_ap_permanent);
-  reader.flag(Field::kApplication, model.ip_badge_bottom);
-  reader.flag(Field::kApplication, model.browser_debug);
+  for (auto* value : {&model.espn_opt_in, &model.demo, &model.night_enabled,
+                      &model.ip_badge_ap_permanent, &model.ip_badge_bottom,
+                      &model.browser_debug})
+    reader.flag(Field::kApplication, *value);
   for (auto* value : {&model.language, &model.brightness,
-                      &model.night_brightness, &model.rotation,
-                      &model.visible_matches, &model.table_window})
+                      &model.night_brightness, &model.rotation})
     reader.u8(*value);
-  for (auto* screen :
-       {&model.idle_screen, &model.matchday_screen, &model.own_match_screen}) {
-    auto value = static_cast<uint8_t>(*screen);
-    reader.u8(value);
-    *screen = static_cast<cfg::Screen>(value);
-  }
-  for (auto* value :
-       {&model.manual_return_s, &model.scroll_reset_s, &model.scroll_repeat_ms,
-        &model.slideshow_s, &model.night_start, &model.night_end,
-        &model.ip_badge_s, &model.window_before, &model.window_after})
+  for (auto* value : {&model.scroll_reset_s, &model.scroll_repeat_ms,
+                      &model.night_start, &model.night_end, &model.ip_badge_s})
     reader.u16(*value);
 }
 
@@ -248,14 +210,6 @@ void readRequestPlans(Reader& reader, Model& model) {
     for (auto& interval : plan.interval_s) reader.u32(interval);
   }
   readLimit(reader, model.global_limit);
-  // Later tail: the styles after the listed screens, the table step time,
-  // the matchday mode (validate() rejects unknown values).
-  for (std::size_t i = kListedScreens; i < cfg::kScreenCount; ++i)
-    readStyle(reader, model.screens[i]);
-  reader.u16(model.table_page_s);
-  uint8_t mode = 0;
-  if (reader.u8(mode))
-    model.matchday_mode = static_cast<cfg::MatchdayMode>(mode);
 }
 
 void writeEntry(Writer& writer, const Competition& entry) {
@@ -273,45 +227,23 @@ void readEntry(Reader& reader, Competition& entry) {
 }
 
 void writeScalars(Writer& writer, const Model& model) {
-  writer.flag(model.espn_opt_in);
-  writer.flag(model.demo);
-  writer.flag(model.backgrounds);
-  writer.flag(model.night_enabled);
-  writer.flag(model.ip_badge_ap_permanent);
-  writer.flag(model.ip_badge_bottom);
-  writer.flag(model.browser_debug);
-  for (uint8_t value :
-       {model.language, model.brightness, model.night_brightness,
-        model.rotation, model.visible_matches, model.table_window,
-        static_cast<uint8_t>(model.idle_screen),
-        static_cast<uint8_t>(model.matchday_screen),
-        static_cast<uint8_t>(model.own_match_screen)})
+  for (const bool value : {model.espn_opt_in, model.demo, model.night_enabled,
+                           model.ip_badge_ap_permanent, model.ip_badge_bottom,
+                           model.browser_debug})
+    writer.flag(value);
+  for (const uint8_t value : {model.language, model.brightness,
+                              model.night_brightness, model.rotation})
     writer.u8(value);
-  for (uint16_t value :
-       {model.manual_return_s, model.scroll_reset_s, model.scroll_repeat_ms,
-        model.slideshow_s, model.night_start, model.night_end, model.ip_badge_s,
-        model.window_before, model.window_after})
+  for (const uint16_t value :
+       {model.scroll_reset_s, model.scroll_repeat_ms, model.night_start,
+        model.night_end, model.ip_badge_s})
     writer.u16(value);
 }
 
-// Konferenz mode, whole-matchday flag and input roles; validate() rejects
-// unknown mode and role values.
-void readFormat5(Reader& reader, Model& model) {
+void readRoles(Reader& reader, Model& model) {
   uint8_t value = 0;
-  if (reader.u8(value))
-    model.conference_mode = static_cast<cfg::ConferenceMode>(value);
-  reader.flag(Field::kApplication, model.whole_matchday);
   for (auto& role : model.input_roles)
     if (reader.u8(value)) role = static_cast<cfg::InputRole>(value);
-}
-
-void readSlides(Reader& reader, Model& model) {
-  uint8_t count = 0;
-  if (!reader.count(model.slides.kCapacity, count)) return;
-  model.slides.clear();
-  for (uint8_t i = 0; i < count; ++i) reader.u8(model.slides.items[i]);
-  model.slides.count = count;
-  reader.endList();
 }
 
 }  // namespace
@@ -358,14 +290,7 @@ std::size_t encode(const Model& model,
   writer.text(model.admin_password);
   writer.text(model.api_football_key);
   writer.text(model.football_data_key);
-  for (std::size_t i = 0; i < kListedScreens; ++i)
-    writeStyle(writer, model.screens[i]);
   writeScalars(writer, model);
-  writer.u8(model.slides.count);
-  for (const uint8_t slide : model.slides) writer.u8(slide);
-  writer.flag(model.pin_own_match);  // format 4
-  writer.u8(static_cast<uint8_t>(model.conference_mode));  // format 5
-  writer.flag(model.whole_matchday);
   for (const auto role : model.input_roles)
     writer.u8(static_cast<uint8_t>(role));
   for (const auto& plan : model.providers) {
@@ -373,10 +298,7 @@ std::size_t encode(const Model& model,
     for (const uint32_t interval : plan.interval_s) writer.u32(interval);
   }
   writeLimit(writer, model.global_limit);
-  for (std::size_t i = kListedScreens; i < cfg::kScreenCount; ++i)
-    writeStyle(writer, model.screens[i]);
-  writer.u16(model.table_page_s);
-  writer.u8(static_cast<uint8_t>(model.matchday_mode));
+  writer.flag(model.overview_screenshot);
   const auto used = static_cast<std::size_t>(writer.position() - out.data());
   seal(out.first(used));
   return used;
@@ -426,25 +348,12 @@ DecodeResult decode(std::span<const uint8_t> record, Model& model,
   Reader reader(record.subspan(kHeaderBytes));
   readCore(reader, candidate);
   readSecrets(reader, candidate);
-  readScreens(reader, candidate);
   readScalars(reader, candidate);
-  readSlides(reader, candidate);
-  reader.flag(Field::kApplication, candidate.pin_own_match);
-  readFormat5(reader, candidate);
+  readRoles(reader, candidate);
   readRequestPlans(reader, candidate);
+  reader.flag(Field::kApplication, candidate.overview_screenshot);
   DecodeResult result = reader.result();
   Field bad = reader.invalidField();
-  // A record from a display with more room: the rows fit this display.
-  if (cfg::kVisibleMatchesRange.contains(candidate.visible_matches))
-    candidate.visible_matches =
-        std::min(candidate.visible_matches, limits.visible_matches_max);
-  if (cfg::kTableWindowRange.contains(candidate.table_window))
-    candidate.table_window =
-        std::min(candidate.table_window, limits.table_window_max);
-  // Earlier firmware allowed the own-match screen while other matches run;
-  // such a record keeps everything else and shows the Konferenz (OQ-122).
-  if (candidate.matchday_screen == cfg::Screen::kLiveSingle)
-    candidate.matchday_screen = cfg::Screen::kLiveMulti;
   if (result == DecodeResult::kOk &&
       !validate(candidate, &bad, nullptr, limits))
     result = DecodeResult::kInvalidValue;
@@ -463,11 +372,12 @@ std::size_t encodeCompetitions(
   std::fill(out.begin(), out.end(), 0);
   Writer writer(out.data() + kHeaderBytes);
   writer.u8(competitions.next_id);
+  writer.u32(competitions.next_incarnation);
   writer.u8(competitions.entries.count);
   for (const auto& entry : competitions.entries) {
     writer.u8(entry.id);
+    writer.u32(entry.incarnation);
     writeEntry(writer, entry);
-    writer.u8(entry.screens);
   }
   const auto used = static_cast<std::size_t>(writer.position() - out.data());
   seal(out.first(used), cfg::kCompetitionsFormatVersion);
@@ -476,8 +386,7 @@ std::size_t encodeCompetitions(
 
 DecodeResult decodeCompetitions(std::span<const uint8_t> record,
                                 Competitions& competitions) noexcept {
-  if (const auto header =
-          checkHeader(record, cfg::kCompetitionsMaxRecordBytes);
+  if (const auto header = checkHeader(record, cfg::kCompetitionsMaxRecordBytes);
       header != DecodeResult::kOk)
     return header;
   if (const auto version =
@@ -487,13 +396,14 @@ DecodeResult decodeCompetitions(std::span<const uint8_t> record,
   Competitions candidate;
   Reader reader(record.subspan(kHeaderBytes));
   reader.u8(candidate.next_id);
+  reader.u32(candidate.next_incarnation);
   uint8_t count = 0;
   if (reader.count(candidate.entries.kCapacity, count)) {
     for (uint8_t i = 0; i < count; ++i) {
       auto& entry = candidate.entries.items[i];
       reader.u8(entry.id);
+      reader.u32(entry.incarnation);
       readEntry(reader, entry);
-      reader.u8(entry.screens);
     }
     candidate.entries.count = count;
     reader.endList();

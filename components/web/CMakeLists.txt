@@ -1,4 +1,4 @@
-idf_component_register(SRCS "web_service.cpp" "settings_json.cpp"
+idf_component_register(SRCS "web_service.cpp" "settings_json.cpp" "screen_json.cpp"
   INCLUDE_DIRS "include" PRIV_INCLUDE_DIRS "../../include" "../.."
   REQUIRES core football images network settings system
   PRIV_REQUIRES esp_http_server esp_app_format esp_hw_support heap lwip freertos ui display)
