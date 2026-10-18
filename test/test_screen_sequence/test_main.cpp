@@ -13,7 +13,9 @@ namespace policy = settings::screen_policy;
 using screen::Type;
 using ui::Action;
 policy::Policy rules;
-settings::Competitions competitions;
+settings::Competitions configured;
+settings::CompetitionRoutes competitions;
+policy::Program program;
 football::selection::Selection selected;
 seq::State state;
 struct Item {
@@ -37,15 +39,19 @@ seq::Content probe(const seq::Entry& entry, seq::PageMode mode,
           static_cast<uint16_t>(item.anchor + visible_page)};
 }
 
-seq::Input input() { return {rules, competitions, selected, probe}; }
+seq::Input input() {
+  policy::program(rules, configured, selected.phase, program);
+  return {rules, program, competitions, selected, probe};
+}
 
 void competition(uint8_t id) {
   settings::Competition c;
   c.id = id;
   c.incarnation = id;
   c.primary.competition.assign("league");
-  TEST_ASSERT_TRUE(competitions.entries.push(c));
-  rules.competitions[id - 1] = {id, id, true};
+  TEST_ASSERT_TRUE(configured.entries.push(c));
+  TEST_ASSERT_TRUE(competitions.entries.push(
+      static_cast<const settings::CompetitionRoute&>(c)));
 }
 
 void enable(Type type, bool automatic = true, uint16_t seconds = 15) {
@@ -696,14 +702,23 @@ void test_demo_next_never_skips_unseen_output_or_revives_empty_auto() {
   TEST_ASSERT_FALSE(state.manual);
 }
 
-void test_demo_next_action_payload_preserves_full_generation_and_rejects_unknown() {
-  constexpr uint32_t version = 0xfedcba98;
-  const auto payload = ui::actionPayload(Action::kAutomaticNext, version);
-  TEST_ASSERT_EQUAL(Action::kAutomaticNext, ui::actionFromPayload(payload));
-  TEST_ASSERT_EQUAL_UINT32(version, ui::actionGeneration(payload));
-  TEST_ASSERT_EQUAL(Action::kNone, ui::actionFromPayload(
-                                    ui::actionPayload(static_cast<Action>(255), version)));
+void settled_image_error_card_progresses_without_consuming_continuation() {
+  competition(1);
+  enable(Type::kSlideshow, true, 15);
+  enable(Type::kTable);
+  rules.per_image_s = 15;
+  rules.slide_count = 1;
+  rules.slides[0] = 2;
+  tick(0, false);
+  TEST_ASSERT_EQUAL(Type::kSlideshow, state.entry.type);
+  const auto cursor = state.next_image;
+  seq::presented(state, state.revision, 100, false);
+  TEST_ASSERT_TRUE(state.presented);
+  TEST_ASSERT_EQUAL_UINT8(cursor, state.next_image);
+  tick(15100, false);
+  TEST_ASSERT_EQUAL(Type::kTable, state.entry.type);
 }
+
 }  // namespace
 
 void setUp() {
@@ -711,6 +726,7 @@ void setUp() {
   for (auto& phase : rules.shared)
     for (auto& rule : phase) rule = {15, false, false};
   competitions.clear();
+  configured.clear();
   selected = {};
   selected.phase = policy::Phase::kIdle;
   state = {};
@@ -762,11 +778,13 @@ int main() {
   RUN_TEST(test_shrink_clamps_removed_page_retains_duration_and_regrowth_waits);
   RUN_TEST(
       test_growth_at_expiry_restarts_visit_with_current_pages_without_another_tick);
-  RUN_TEST(test_demo_next_advances_each_page_then_next_competition_without_manual);
+  RUN_TEST(
+      test_demo_next_advances_each_page_then_next_competition_without_manual);
   RUN_TEST(test_demo_next_resumes_first_auto_before_advancing_from_manual);
   RUN_TEST(test_demo_next_keeps_slideshow_images_and_later_continuation);
-  RUN_TEST(test_demo_next_frame_moves_images_and_manual_return_keeps_frame_image);
+  RUN_TEST(
+      test_demo_next_frame_moves_images_and_manual_return_keeps_frame_image);
   RUN_TEST(test_demo_next_never_skips_unseen_output_or_revives_empty_auto);
-  RUN_TEST(test_demo_next_action_payload_preserves_full_generation_and_rejects_unknown);
+  RUN_TEST(settled_image_error_card_progresses_without_consuming_continuation);
   return UNITY_END();
 }

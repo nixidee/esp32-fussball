@@ -29,9 +29,10 @@ constexpr const char* kTag = "network";
 WifiPolicy policy;
 portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 Status current{};
-settings::Model applied;
+settings::NetworkSettings applied;
 esp_netif_t *sta = nullptr, *ap = nullptr;
 std::atomic<bool> heavy{false};
+std::atomic<bool> http_ready{false};
 // Last station transition since the previous poll(): the later event wins,
 // so "lost, then got an IP" ends connected and the reverse disconnected.
 enum class Station : uint8_t { kNone, kGotIp, kLost };
@@ -83,13 +84,15 @@ constexpr uint32_t kRadioPrerequisites =
     kIpHandler;
 constexpr uint32_t kRequiredResources = kRadioPrerequisites | kRunning |
                                         kDnsTask | kMdns | kDhcpHostname |
-                                        kMdnsHostname | kHttpService;
+                                        kMdnsHostname;
 uint32_t resources = 0;
 esp_err_t init_errors[static_cast<unsigned>(InitStep::kHttpService) + 1]{};
 int64_t init_retry_at = 0;
 bool owns(uint32_t mask) { return (resources & mask) == mask; }
 bool initialized() {
-  return owns(kRequiredResources) && configured_radio && !settings_pending;
+  return owns(kRequiredResources) && configured_radio && !settings_pending &&
+         http_ready.load() == owns(kHttpService) &&
+         init_errors[static_cast<unsigned>(InitStep::kHttpService)] == ESP_OK;
 }
 esp_err_t& initError(InitStep step) {
   return init_errors[static_cast<unsigned>(step)];
@@ -109,7 +112,7 @@ StaticTask_t dns_tcb;
 StackType_t dns_stack[cfg::kDnsStackBytes / sizeof(StackType_t)];
 int dns_fd = -1;
 // Query buffer of the portal DNS task, static instead of on its 2 KB stack.
-uint8_t dns_packet[512];
+uint8_t dns_packet[cfg::kDnsPacketBytes];
 
 bool userScanBusy(UserScanState state) {
   return state == UserScanState::kQueued || state == UserScanState::kRunning;
@@ -189,6 +192,9 @@ void dns(void*) {
   const int fd = dns_fd;
   uint8_t* const packet = dns_packet;
   for (;;) {
+    // recvfrom can stay immediately ready under a packet flood. Give the app
+    // loop a chance even when every packet is rejected before sending.
+    vTaskDelay(cfg::kDnsYieldTicks);
     sockaddr_in source{};
     socklen_t length = sizeof(source);
     int n = recvfrom(fd, packet, sizeof(dns_packet) - 16, 0,
@@ -266,7 +272,7 @@ esp_err_t antenna(bool external) {
 // is acknowledged separately, so retrying mDNS does not replace a good DHCP
 // name.
 esp_err_t applyHostname() {
-  char hostname[64]{};
+  char hostname[decltype(settings::NetworkSettings::hostname)::kCapacity + 1]{};
   memcpy(hostname, applied.hostname.data.data(), applied.hostname.length);
   esp_err_t first = ESP_OK;
   if (owns(kStation) && !owns(kDhcpHostname)) {
@@ -279,6 +285,22 @@ esp_err_t applyHostname() {
     if (first == ESP_OK) first = err;
   }
   return first;
+}
+// Called by the existing initialization owner after mDNS/hostname setup.
+// The owned bit follows the SDK result, so failed removal is retried too.
+esp_err_t applyHttpService() {
+  const bool want = http_ready.load();
+  if (want == owns(kHttpService)) return ESP_OK;
+  const auto err =
+      want ? mdns_service_add(nullptr, "_http", "_tcp", 80, nullptr, 0)
+           : mdns_service_remove("_http", "_tcp");
+  if (err == ESP_OK) {
+    if (want)
+      resources |= kHttpService;
+    else
+      resources &= ~kHttpService;
+  }
+  return err;
 }
 void sntp() {
   if (sntp_on) return;
@@ -294,7 +316,8 @@ void sntp() {
            static_cast<unsigned long>(cfg::kWifiRadioRetryMs / 1000));
 }
 // Driver steps of a radio reconfiguration; 'step' names the failed one.
-esp_err_t configureRadio(const settings::Model& model, const char*& step) {
+esp_err_t configureRadio(const settings::NetworkSettings& model,
+                         const char*& step) {
   esp_err_t err;
   step = "antenna";
   if ((err = antenna(model.external_antenna)) != ESP_OK) return err;
@@ -368,7 +391,7 @@ esp_err_t createInterface(esp_netif_t*& netif, bool station) {
   return err;
 }
 
-void adoptModel(const settings::Model& model) {
+void adoptModel(const settings::NetworkSettings& model) {
   if (model.hostname != applied.hostname) {
     resources &= ~(kDhcpHostname | kMdnsHostname);
     initError(InitStep::kHostname) = ESP_OK;
@@ -383,7 +406,7 @@ void adoptModel(const settings::Model& model) {
   }
 }
 
-esp_err_t applyModel(const settings::Model& model) {
+esp_err_t applyModel(const settings::NetworkSettings& model) {
   const bool radio_changed = !configured_radio ||
                              model.wifi_ssid != applied.wifi_ssid ||
                              model.wifi_password != applied.wifi_password ||
@@ -441,8 +464,8 @@ esp_err_t startDns() {
   }
   // A task-allocation failure leaves this one bound, configured socket owned
   // by the service. There is no worker using it until creation succeeds.
-  if (xTaskCreateStatic(dns, "portal_dns", cfg::kDnsStackBytes, nullptr, 2,
-                        dns_stack, &dns_tcb) == nullptr)
+  if (xTaskCreateStatic(dns, "portal_dns", cfg::kDnsStackBytes, nullptr,
+                        cfg::kDnsTaskPriority, dns_stack, &dns_tcb) == nullptr)
     return ESP_ERR_NO_MEM;
   return ESP_OK;
 }
@@ -479,9 +502,10 @@ void advanceInitialization(bool force_settings = false) {
     if (err == ESP_OK) resources |= owned;
   };
   // Settings can change while an early constructor is still failing. No
-  // second desired Model is retained; retry always consults the current store.
+  // second desired network snapshot is retained; retry always consults the
+  // current store.
   if (settings_pending && !started) {
-    adoptModel(settings::current());
+    adoptModel(settings::networkSettings());
     settings_pending = false;
   }
   run(InitStep::kAntenna, kPins, 0, antennaPins);
@@ -532,7 +556,7 @@ void advanceInitialization(bool force_settings = false) {
   started = owns(kRadioPrerequisites);
   if (started && (settings_pending || !configured_radio) &&
       allowed(InitStep::kRadio)) {
-    const auto err = applyModel(settings::current());
+    const auto err = applyModel(settings::networkSettings());
     result(InitStep::kRadio, err);
     settings_pending = err != ESP_OK;
   }
@@ -540,9 +564,11 @@ void advanceInitialization(bool force_settings = false) {
   run(InitStep::kMdns, kMdns, kLoop | kStation | kAccessPoint, mdns_init);
   if (!owns(kDhcpHostname | kMdnsHostname) && allowed(InitStep::kHostname))
     result(InitStep::kHostname, applyHostname());
-  run(InitStep::kHttpService, kHttpService, kMdns | kMdnsHostname, [] {
-    return mdns_service_add(nullptr, "_http", "_tcp", 80, nullptr, 0);
-  });
+  if (!http_ready.load() && !owns(kHttpService)) {
+    initError(InitStep::kHttpService) = ESP_OK;
+  } else if (owns(kMdns | kMdnsHostname) && allowed(InitStep::kHttpService)) {
+    result(InitStep::kHttpService, applyHttpService());
+  }
   if (failureStep() == InitStep::kNone)
     init_retry_at = 0;
   else if (retry || init_retry_at == 0)
@@ -564,6 +590,7 @@ bool healthy() {
   portEXIT_CRITICAL(&mux);
   return value;
 }
+void setHttpReady(bool ready) { http_ready.store(ready); }
 void applySettings() {
   settings_pending = true;
   advanceInitialization(true);

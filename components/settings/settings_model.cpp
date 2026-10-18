@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "civil_time.h"
+#include "provider_settings.h"
 #include "screen_policy.h"
 
 namespace settings {
@@ -116,6 +117,10 @@ bool isValidIdentifier(std::string_view value) noexcept {
          });
 }
 
+bool isValidTeamId(std::string_view value) noexcept {
+  return value.empty() || values::positiveUint32(value) != 0;
+}
+
 bool isValidSeason(cfg::Provider provider, std::string_view season) noexcept {
   return season.empty() ||
          ((provider == cfg::Provider::kOpenLigaDb || season.size() == 4) &&
@@ -206,33 +211,8 @@ bool assignIncarnations(Competitions& candidate, const Competitions& current,
   return true;
 }
 
-bool reserveIncarnationFloor(Competitions& competitions, uint32_t highwater,
-                             bool provisional) noexcept {
-  if (highwater == 0) return true;
-  constexpr uint64_t maximum = std::numeric_limits<uint32_t>::max();
-  const uint64_t next = std::max<uint64_t>(competitions.next_incarnation,
-                                           uint64_t{highwater} + 1);
-  const uint64_t count = provisional ? competitions.entries.size() : 0;
-  if (next > maximum || count > maximum - next) {
-    competitions.next_incarnation = static_cast<uint32_t>(maximum);
-    // Existing stored entries remain safe; only fresh/provisional identities
-    // need an unreserved value. Never wrap to the fallback value 1.
-    return !provisional || competitions.entries.empty();
-  }
-  uint32_t allocated = static_cast<uint32_t>(next);
-  if (provisional)
-    for (auto& entry : competitions.entries) entry.incarnation = allocated++;
-  competitions.next_incarnation = allocated;
-  return true;
-}
-
 bool providerUsable(cfg::Provider provider, const Model& model) noexcept {
-  switch (provider) {
-    case cfg::Provider::kEspn: return model.espn_opt_in;
-    case cfg::Provider::kApiFootball: return !model.api_football_key.empty();
-    case cfg::Provider::kFootballData: return !model.football_data_key.empty();
-    default: return true;
-  }
+  return detail::providerUsableFields(provider, model);
 }
 
 bool checkProviderAccess(const Model& model, const Competitions& competitions,
@@ -291,8 +271,6 @@ bool checkSource(Checker& check, const FieldPath& at, const Source& source) {
     return check.fail(at.with("provider"), Reason::kRange);
   if (!isValidIdentifier(source.competition.view()))
     return check.fail(at.with("competition"), Reason::kInvalid);
-  if (!isValidIdentifier(source.team.view()))
-    return check.fail(at.with("team"), Reason::kInvalid);
   if (!isValidSeason(source.provider, source.season.view()))
     return check.fail(at.with("season"), Reason::kInvalid);
   return true;
@@ -314,8 +292,15 @@ bool checkSources(Checker& check, const Competitions& competitions) {
     if (!checkSource(check, primary, entry.primary)) return false;
     if (!isDisplayName(entry.competition_name.view()))
       return check.fail(at.with("competition_name"), Reason::kInvalid);
-    if (!isDisplayName(entry.team_name.view()))
-      return check.fail(at.with("team_name"), Reason::kInvalid);
+    if (!isDisplayName(entry.club.name.view()))
+      return check.fail(at.with("club").with("name"), Reason::kInvalid);
+    if (entry.club.group > cfg::kCompetitionMax)
+      return check.fail(at.with("club").with("group"), Reason::kRange);
+    if (entry.club.group && !entry.hasClub())
+      return check.fail(at.with("club").with("team"), Reason::kRequired);
+    screen_policy::Error invalid;
+    if (!screen_policy::validate(entry.display, &invalid, i))
+      return check.fail(at.with("display"), Reason::kInvalid);
   }
   return true;
 }
@@ -551,9 +536,12 @@ void initialCompetitions(const Presets& presets, Competitions& competitions,
   else if (!presets.provider.empty() && presets.provider != "openligadb")
     skipped |= fieldBit(Field::kApplication);
   preset(entry.primary.competition, presets.competition);
-  preset(entry.primary.team, presets.team);
+  entry.club.team = values::positiveUint32(presets.team);
+  if (!presets.team.empty() && !entry.club.team)
+    skipped |= fieldBit(Field::kApplication);
   preset(entry.primary.season, presets.season);
-  if (!entry.primary.competition.empty()) {
+  if (!entry.primary.competition.empty() &&
+      (presets.team.empty() || entry.club.team)) {
     competitions.entries.push(entry);
     assignIds(competitions);
     competitions.entries[0].incarnation = competitions.next_incarnation++;

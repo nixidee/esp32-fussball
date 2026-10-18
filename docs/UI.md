@@ -3,10 +3,12 @@
 The active controller uses one five-phase policy and one common sequence for
 six types: Crest, Images, Single, Matchday, Conference and Table. Settings,
 provider demand and navigation use the same competition identities and order.
-The [complete control contract](#planned-screen-system-redesign) below also
-specifies the later device-layout and ring work, which remains unaccepted.
-Source/host checks and a C6 integration build cover the controller cutover;
-physical input, round-screen layout and runtime reserves still need device checks.
+The current content and layout contracts are described below.
+[Earlier design requirements](#earlier-screen-system-design-requirements) remain
+as historical context. Controller, ring and layout source changes have focused
+host/geometry evidence; the latest integrated build evidence is recorded
+separately. Physical input, round-screen layout and runtime reserves still need
+device checks.
 
 ## Current screens and automatic sequence
 
@@ -69,9 +71,10 @@ permanent setup-IP overlay in frame mode. Night mode, image recovery and setting
 cancellation remain active.
 
 Appearance comes from the screen policy: colours, text scale, background, image
-and dots. Actual dot placement, the Table dot display, score-centred layouts,
-final rings and readable font/layout choices remain device-layout work. Views render
-fixed view models; they do not fetch data, resolve policy or read GPIO.
+and dots. The renderer places bounded page indicators, score-centred content
+and prepared ring progress within the SafeArea. Physical readability remains
+device acceptance. Views render fixed view models; they do not fetch data,
+resolve policy or read GPIO.
 
 ## Layout rules
 
@@ -82,10 +85,13 @@ SafeArea; nothing is placed at a fixed pixel position.
   large above. Each class has font role sizes for caption, body, title and
   score. Caption, body and title select the largest compiled text font at or
   below their scaled role size (caption font as the minimum). The current
-  score uses the fixed nominal 48 px font regardless of text scale; its
-  generated line height is 35 px. Larger score and text choices belong to
-  the planned device-layout trials.
-- **Gap unit** `g` = max(2, s/60); every spacing is a multiple of it. The
+  score starts with the nominal 48 px font (35 px generated line height).
+  Complete content height first reduces text roles/gaps, then the central
+  font only when necessary to keep all content within the SafeArea. Larger
+  compiled fonts remain a separate resource and physical-readability choice.
+- **Gap unit** `g` starts at max(2, s/60); an overfull text layout may halve
+  it with a two-pixel minimum. Dense tables use the actual font line height
+  without extra row padding. The
   rim stroke is max(2, s/80) px.
 - **Fitting**: a text line takes the chord of its band on a round panel (the
   full inset width on a rectangle). A line with a font list uses the first
@@ -94,7 +100,7 @@ SafeArea; nothing is placed at a fixed pixel position.
   reported as failed (UI health), so the overflow is visible in the status.
 - **Content blocks** are centred vertically as a whole; the status line
   ("Demo") sits directly below the block, the caption band directly above.
-  The status pill lies over the content (see "Status pill").
+  Sporting layouts reserve the full padded footer (see "Status pill").
 
 ### Screens in detail
 
@@ -114,23 +120,27 @@ SafeArea; nothing is placed at a fixed pixel position.
   fit). The centre is the score, the kickoff time (dim) or "--:--". The own
   match sits on a dark row, the own club's name in the accent colour; for
   120 seconds after a goal a row is filled with the accent colour. Below
-  the rows: page dots while paging, else the status line. Without members
-  a card "Konferenz / Keine Spiele im Zeitfenster" names the next kickoff.
-- **Table**: a title row ("#", competition name, Pkt/Diff/Sp) and the rows
-  around the own club; the own club's row is filled with the accent
-  colour. Columns are dropped from the right in the order played,
-  difference, points while fewer than ten letters of the name would fit;
-  numeric widths include the actual visible values and headers, including
-  every canonical points/difference value from −10,000 to 10,000;
-  column titles are shown only when the whole title row fits the chord,
-  otherwise only the competition name. Up to five rows use a wider row
-  pitch. A competition without a table shows a card; one whose request
+  the rows: a page-position band while paging, followed by the status/IP band.
+  A confirmed empty Conference is skipped. Missing/unconfirmed or failed fixture
+  data use the common loading/error cards; no whole-store next-match search
+  runs in an unreachable empty-Conference view.
+- **Table**: a separate competition/group caption, all numeric column headers
+  and the rows around the own club; the own club's row is filled with the accent
+  colour. Rank, name, played, difference and points remain present. Numeric
+  widths include the actual visible values and headers, including every
+  canonical points/difference value from −10,000 to 10,000. If necessary,
+  existing smaller fonts fit the complete row; no column is dropped. The
+  common row positions fit their complete round-screen band. Headers align
+  with the columns when their own chord fits, otherwise a complete compact
+  legend keeps the same left-to-right order. The group leads the competition
+  caption so its context survives a narrow band. Up to five
+  rows use a wider row pitch. A competition without a table shows a card; one whose request
   failed without a table shows its notice card (State cards). The rim shows the
   position of the visible rows in the whole table.
 - **Matchday**: the Konferenz layout. Caption "competition · round" of the
   first match (round label or "N. Spieltag", else its date), rows as in the Konferenz
   with result, kickoff time or "--:--"; the own match on a dark row. Below
-  the rows page dots while paging, else the status line; the rim shows the
+  the rows a separate page-position band while paging, then status/IP; the rim shows the
   position of the page in the matchday. A competition whose request failed
   without matches to show gets its notice card in the cycle.
 - **Crest / slideshow**: the image, page dots near the bottom rim while
@@ -205,13 +215,16 @@ demo shows no ordinary status pill; a new image-content fault briefly uses
 the existing pill before the permanent Demo line returns.
 
 Every other status is a status pill: a slightly transparent dark pill
-(background opacity 204 of 255) at the bottom that lies over the content —
-page dots, the last row or a card — for 5 seconds (`kStatusPillS`) after a
+(background opacity 204 of 255) at the bottom for 5 seconds (`kStatusPillS`) after a
 change of the status state. The state is the WiFi connection, local initialization phase/error, valid
-time, stale data and, for each active competition, its cause and whether its
-data are stale, plus the desired image role/id, failure and actual fallback. Changing the screen does not show it again; while it is
-visible it shows what the current screen reports. With a bottom IP chip the
-pill sits directly above the chip. Content by priority:
+time, stale data and, for each active competition, its aggregate cause, capacity
+notices and independent fixture/table/event failures, plus the desired image
+role/id, failure and actual fallback. Changing the screen does not show it again;
+successful-fetch timestamps alone do not restart it. While it is
+visible it shows what the current screen reports. Sporting layouts and cards
+reserve the complete padded status/IP bands. With a bottom IP chip the pill
+sits directly above the chip; Conference/Matchday page positions have their own
+band. Crest/Images retain overlays over the image. Content by priority:
 
 - local initialization failure: code first and short action, for example
   "NET E11 · IP nutzen" or "NET E06 · neuer Versuch" (warning colour).
@@ -219,10 +232,14 @@ pill sits directly above the chip. Content by priority:
   football/image content stays visible; retry time alone does not restart
   the five-second pill;
 - "Kein WLAN", "Warte auf Uhrzeit" (warning colour);
-- on Matchday and Table, the competition on screen: after a failed request
-  its error code without the HTTP status and "Stand HH:MM" of its last
-  successful request ("OLG E10 · Stand 14:05", cause colour); with stale
-  data "Stand HH:MM" (warning colour); nothing else from other competitions;
+- on Matchday and Table, the matching dataset of the competition on screen:
+  after a failed request its error code without the HTTP status and
+  "Stand HH:MM" of that dataset's last successful request
+  ("OLG E10 · Stand 14:05", cause colour); with stale data "Stand HH:MM"
+  (warning colour). Fixtures success does not clear a table failure or replace
+  its timestamp; Fixtures failure does not downgrade a fresh table. Capacity,
+  unmaintained-result and live-age rules come from the canonical dataset owner;
+  unrelated dataset/competition failures are not attached to this view;
 - elsewhere one failing competition as "code · name" ("APF E08 · Premier
   League", cause colour), several as "N Wettbewerbe gestört" (error
   colour, also when some of them only have a data notice); else stale
@@ -238,6 +255,65 @@ continues through the ordinary state/content cards rather than re-entering
 the initial three-step card. The existing packed display status exposes
 this startup flag for the Web preview, without a second state machine. The Web UI preview shows the pill for as long as the
 state lasts and notes that the device shows it only for 5 seconds.
+
+### Current content and completion ownership
+
+The controller compiles the current situation's effective programme from shared
+rules and competition-attached overrides. Manual and automatic navigation use
+the same enabled entries; manual-only sporting entries retain their durations.
+Explicit club groups form priority blocks, independent of names. With “Only one
+own single match” on, the focused own game is the only own-phase Single; off
+allows further eligible own Singles in that order. A games overview with one
+match uses the Single layout; several use Conference. An identical automatic
+focused Single is not repeated by a one-match Conference; manual access remains.
+
+Tables retain provider group boundaries: automatic paging without an own row
+visits each group; a selected own group is centred automatically. Complete manual
+paging spans every row window in every group. The caption identifies the current
+group, and ranks restart with that table. No group is flattened into another.
+
+One prepared page supplies both sequence eligibility/page count and the Presenter
+with the selected match, Conference rows, table rows or sporting round. Its
+lifetime is one canonical-store read. The Presenter composes labels and semantic
+progress; the renderer measures fonts and round-screen geometry. Names use the
+consciously adopted 26/3-byte display envelope. Full provider originals are
+transient editor data; import/adoption previews any reduction before confirmation
+and storage. The renderer tries the complete adopted display label in all
+allowed fonts before using its custom short name. An explicitly empty short
+name keeps the adopted label, with a UTF-8 ellipsis if it cannot fit the band.
+This does not promise rendering the unshortened provider-original string.
+
+Page indicators use at most seven dots. More pages show the exact current/total
+position, including the last page of a512-match projection. Pills reserve their
+padding inside the whole band's round-screen chord. Normal added time never
+creates an extra-time lap: only confirmed extra-time/shootout phase or period
+can do so. Top/bottom markers follow the reported half, and minute text includes
+reported added minutes. The renderer receives progress angles, not football-time
+rules.
+
+Single shows only reported shootout attempts, in provider order, in ten-attempt
+windows rotating with the existing event interval. Home, away and unknown actor
+remain distinct; a score total never creates fictional scored/missed attempts.
+The attempt caption identifies the reported range and incomplete/missing data;
+regular highlights remain available. Long shootouts use the shared retained
+event pool independently of the twelve regular highlight references.
+
+Layout height includes all actual font line heights, the attempt rows and
+complete padded IP/status bands. When the content is too tall, existing smaller
+text fonts and gaps are selected. The central score font is reduced only when
+the remaining complete content still requires it. Two-line setup IP chips,
+long shootouts and larger requested text therefore do not place captions or
+highlights outside the content area. This is a source contract; physical
+readability still requires the screenshots listed below.
+
+Scene selection, LVGL source acceptance, JPEG decode and LCD transfer completion
+are separate. A visit starts only after the matching scene's final SPI stripe
+completes; an image additionally requires the matching successful decode. Failed
+or stale transfers earn no time. A settled image-error card earns a finite visit,
+so automatic navigation continues without consuming the ordinary image
+continuation cursor. Screenshot capture retains the same normal flush ownership.
+These source/host contracts still require screenshots from owner-flashed round
+hardware for layout and actual transfer acceptance.
 
 ### Drawing
 
@@ -313,11 +389,16 @@ The Scroll direction starts down and resets after 20 seconds without a
 direction change; 0 disables that reset. The setting matters only while an
 input has the Scroll role. Every accepted row remains reachable.
 
-Actions carry the full settings version through the event bus and a four-entry
-static controller queue. Old versions have no navigation, start-screen or IP
-timer effect. The 20-ms application poll applies accepted actions in order,
-using the current
-store bounds for each row/page movement; the 500-ms display refresh does not
+Physical input and admitted Web actions carry the full settings generation
+directly into the same four-entry static controller FIFO. Web commands use the
+caller's last-read configuration revision; stale requests are rejected before
+queueing, and a later configuration change also discards already queued old
+commands. Every actual revision change cancels pending/double/held/repeating
+physical gestures independently of navigation changes; held keys must be
+released before another action. Cosmetic changes preserve the manual visit,
+and a same-revision phase projection retains the current gesture. Old versions
+have no navigation, start-screen or IP timer effect. The 20-ms application poll
+applies accepted actions in order, using the current store bounds for each row/page movement; the 500-ms display refresh does not
 delay action consumption. Callbacks do not block or call LVGL. Overflow is
 counted/logged and drops excess input
 rather than accumulating stale actions. Touch screens and encoders remain
@@ -395,14 +476,27 @@ Role sizes (caption/body/title/score) are 12/14/18/48 px for the small
 class (shorter side ≤260), 16/20/26/72 for medium and 20/26/34/96 for large.
 Only 12, 14, 18 and 48 px are compiled, so medium and large currently use
 the largest compiled text font at or below each caption/body/title role;
-the score remains the fixed nominal 48 px font (35 px generated line height).
-Geometry still scales separately. Text scale selects among compiled text
-fonts; it does not rasterize arbitrary font sizes on the device. These are
-current implementation limits, not the planned readability target.
-Large-profile fonts and actual
-names/boundary acceptance are still required. Bitmap payloads
-are 8165/10960/17846/5718 bytes (12/14/18/48); descriptors/maps add flash
-beyond those numbers.
+the score starts with the nominal 48 px font (35 px generated line height).
+The complete content fit may reduce its font after the text roles and gaps
+have been reduced. Geometry scales separately. Text scale selects among
+compiled text fonts; it does not rasterize arbitrary font sizes on the device.
+Larger compiled fonts need their own resource decision. Actual names and
+boundary readability still require physical acceptance.
+The same 4-bit pixels are stored with lossless run-length encoding: bitmap
+payloads are 7224/9285/14036/3396 bytes (12/14/18/48), instead of
+8165/10960/17846/5718. Descriptors/maps and the single decoder add flash.
+The public LVGL font callback writes alpha pixels directly into LVGL's existing
+glyph target. It adds no heap allocation, line buffer or mutable font cache;
+missing/undersized targets and malformed/truncated streams return failure
+without publishing partial output. The native compressed-font decoder stays
+disabled. Actual LVGL comparisons preserve all 691 nonempty original bitmaps,
+all 698 character metrics and the four existing question-mark fallbacks.
+
+Decoding costs CPU: a pixel performs at most three bounded bit reads and one
+alpha-byte write. A host sanitizer replay took about 4.6 times the native plain
+reader's CPU time for 100 complete font sets; this is not C6 timing or a physical
+readability measurement. The isolated C6 callback's own stack frame is 80 B.
+Device rendering latency and runtime stack/heap peaks still require measurement.
 
 ## IP chip
 
@@ -423,38 +517,63 @@ kickoff times and hints, and a track colour (16 %) for the empty rim and
 inactive dots. Fixed semantic colours mark warnings, errors, neutral
 states, the IP chip/own Konferenz row and slideshow dots.
 
-Night mode defaults to 23:00–07:00 local civil time and waits for valid time.
-The existing time service handles midnight and daylight-saving transitions.
-At night the background becomes the night background and images are shown
-at 20 % opacity. A profile with a backlight pin dims with PWM brightness and
-keeps the colours. Without a backlight pin (the current C6) every text,
-pill, rim and dot colour is mixed towards the night background; the night
-brightness setting is applied as an amount of light (colour value =
-level^(1/2.2), so 10 % keeps about 35 % of each colour). S3 dimming/network
-behaviour is untested.
+Night mode is available only on a target with a controllable backlight pin.
+It defaults to 23:00–07:00 local civil time and waits for valid time. The
+existing time service handles midnight and daylight-saving transitions.
+Night mode changes only the PWM backlight brightness; background, text,
+semantic colours and image opacity stay unchanged. The current C6 has no
+backlight pin and offers neither brightness controls nor night mode. The
+PWM setter remembers only the last successfully applied hardware duty.
+Repeated equal duties make no driver writes; initial zero and a new wiring
+owner still receive setup and their first duty. Failed setup/set/update calls
+never publish a successful receipt; the existing fatal SDK-error/restart
+contract remains. The paused S3 profile's PWM behaviour remains untested on
+hardware.
 
 ## Acceptance boundary
 
-System → Diagnose can download the next real LVGL redraw in the display's
+Debug → Bildschirmfoto can download the next real LVGL redraw in the display's
 current reading orientation. This is a separate screenshot function, not
 the schematic Web preview; see [WEB_UI.md](WEB_UI.md). A full-frame device
 buffer and a host LCD renderer are not used. Device acceptance must compare
 the PNG with Own match, Konferenz, Matchday, Table, crest/slideshow, notice
-and startup/setup cards, status/IP overlays and night mode at all rotations.
+and startup/setup cards and status/IP overlays at all rotations. On a target
+with backlight control, compare the physical day/night brightness separately:
+the screenshot contains the same colours and images in both modes.
 
 C6 firmware build and fixed sizes are verified. Visual alignment, real names,
 text scaling, overlay overlap, all input counts, bottom-row reachability,
-JPEG redraw responsiveness, night brightness and the full rendered safe-area
-matrix remain polish/testing. No screenshot is represented as device evidence,
-and the boundary harness has not been implemented/run for these new screens.
+JPEG redraw responsiveness, hardware night brightness and the full rendered safe-area
+matrix remain device acceptance. The bounded geometry fixture executes the
+actual layout/fit functions, actual font-source glyph advances and SafeArea:
+216 cases cover240/466px round geometry,100/130% requested text, one/two-line
+IP at either edge, nine-row signed-value tables, long/missing shootout attempts,
+Conference/Matchday page growth and511-page positions, cards and Crest/Images.
+It records strings/rectangles and checks complete numeric columns, attempt
+symbols, padded containment and text overlap. It draws no pixels and does not
+prove LCD legibility, glyph overhang or transfer behavior.
 
-## Planned screen-system redesign
+Required screenshots include Single before kickoff, live,90+added time,
+confirmed extra time and an18-attempt/missing-attempt shootout; Conference and
+Matchday with four/five rows and large page counts; each table group with
+long/short names, nine rows and signed extreme values; Crest/Images including
+decode failure/retry; setup/loading/empty/provider/network/storage cards. Repeat
+the applicable views with100/130% requested text, one/two-line top/bottom IP,
+temporary status and all rotations. No screenshot is represented as device
+evidence until captured from the owner-flashed target.
 
-Confirmed product direction, 2026-10-17, reviewed against the clean `efae218`
-candidate. This section is the public future-behavior contract. It does not
-describe available firmware settings or authorize implementation. Exact model,
-API, storage, compatibility/migration and resource budgets are the next design
-gate; [ADR-042](DECISIONS.md#adr-042--situation-based-screen-sequences--accepted-direction-2026-10-17)
+## Earlier screen-system design requirements
+
+The following section preserves the earlier design discussion. Its requirements
+remain visible for acceptance, but future-tense descriptions of canonical
+models, name provenance, controller ownership or Web source organization are
+historical planning. The implemented contracts and separate evidence limits
+above describe the current source.
+
+Historical product direction, 2026-10-17, reviewed against the clean `efae218`
+candidate. At that checkpoint these requirements awaited the model/API/storage
+design and implementation. Subsequent approved consolidation implemented the
+current contracts above; this retained text does not reopen that design gate; [ADR-042](DECISIONS.md#adr-042--situation-based-screen-sequences--accepted-direction-2026-10-17)
 records that boundary. Setup/startup and fault handling remain part of the
 complete screen inventory, not extra normal sequence entries.
 
@@ -739,6 +858,17 @@ and feasibility design; no attempt cap or fabricated history is approved here.
 
 ### Device layouts, testability and website
 
+Planned club-name input to the layouts is one selected-language name of at
+most26 UTF-8 bytes and a short code of at most3 bytes per working team. Both
+adopted languages remain durable/editable, not a global display RAM collection.
+Full original preset texts stay in the immutable source, without an additional
+original-user-text archive. Layout design will choose full/short use per
+screen; a possible user selector is not yet selected. Adoption uses UTF-8-safe
+prefix clipping, including provider-fallback labels; complete input is matched
+first and identities are never shortened. Two central target-selected compile
+limits drive storage and Web preview; S3 may use larger values after review.
+Views consume prepared team values without file I/O.
+
 Inventory every affected screen/state and retain its information before
 redesigning. The single-match score must be central and prominent, with the
 other information arranged around it; test short names as well as long names
@@ -761,9 +891,12 @@ with normal timings and no new stored Demo settings. Shortened test visits
 or clock acceleration are excluded. The screenshot remains always available
 near the top of the intended Debug tab, with Demo controls just below where
 practical; one default-off preference additionally shows screenshot on Overview.
-These controls are planned before layout acceptance and complete Web redesign;
-they are not implemented yet. The current Demo uses fixed selected scenario
-steps, the saved eligibility rules and normal visit/manual-return times. A
+These controls are implemented in source before layout acceptance and complete
+Web redesign. The automatic-next command follows each page/image boundary,
+then the next screen/competition. From manual output its first click returns to
+automatic selection; it does not advance scenario time or change saved durations.
+The current Demo uses fixed selected scenario steps, saved eligibility rules
+and normal visit/manual-return times. A
 scenario step does not necessarily change the shown screen. Keep diagnostic
 state sufficient to explain the active phase, manual/frame state and missing
 content before attributing an observed Table-only sequence to a selector fault.
@@ -789,3 +922,16 @@ at 1440×900 except long lists inside their areas; at 375 px phone width there i
 no horizontal scroll and pages stay around two screen heights. Use the device
 draw list for the actual preview and on-demand sequence thumbnails, with one
 layout implementation. Browser and physical-device acceptance remain separate.
+
+
+### Historical interim team-label selection — 2026-10-17
+
+Every existing team text uses the working team's prepared26-byte name field.
+The independent3-byte short code was already prepared and stored; its
+screen placement was still pending at that checkpoint. The current full/short
+fit rule is described above. Views and
+presenters perform no durable name lookup. Available raw match-detail names
+remain the fallback when the working directory cannot hold an identity. The
+name cutover still requires owner screenshots of Single, Conference, Matchday,
+Table, Overview and start/next-match content; host checks do not establish round
+LCD layout acceptance.

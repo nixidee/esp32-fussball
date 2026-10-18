@@ -12,6 +12,7 @@
 #include "conference.h"
 #include "football_model.h"
 #include "match_store.h"
+#include "matchday.h"
 #include "settings_model.h"
 #include "store_views.h"
 
@@ -32,11 +33,11 @@ constexpr int64_t kFriday = 1792108800;  // 2026-10-16 00:00 UTC, a Friday
 constexpr int64_t kSaturday = kFriday + 24 * kHour;
 constexpr uint8_t kLeague = 3, kCup = 5;
 constexpr auto kOlg = cfg::Provider::kOpenLigaDb;
-constexpr auto kEspn = cfg::Provider::kEspn;
 
 MatchStore store;
 
-uint8_t team(uint8_t competition, cfg::Provider provider, uint32_t id) {
+football::TeamIndex team(uint8_t competition, cfg::Provider provider,
+                         uint32_t id) {
   char name[16];
   snprintf(name, sizeof(name), "Team %u", static_cast<unsigned>(id));
   return store.team(competition, provider, id, name);
@@ -55,8 +56,7 @@ StoredMatch* add(uint8_t competition, uint32_t id, uint8_t round,
   m.home = team(competition, provider, own ? 40 : id * 2);
   m.away = team(competition, provider, id * 2 + 1);
   if (own) m.flags = football::kMatchOwn;
-  return store.upsert(m, {kickoff, 0}, own ? "Own Club Full" : "",
-                      own ? "Guest Full" : "");
+  return store.upsert(m, {kickoff, 0});
 }
 
 view::Shown shownAll() {
@@ -66,13 +66,13 @@ view::Shown shownAll() {
   return shown;
 }
 
-settings::Competition entry(uint8_t id, cfg::Provider provider) {
-  settings::Competition e;
+settings::CompetitionRoute entry(uint8_t id, cfg::Provider provider) {
+  settings::CompetitionRoute e;
   e.id = id;
   e.active = true;
   e.primary.provider = provider;
   e.primary.competition.assign("bl1");
-  e.primary.team.assign("40");
+  e.club.team = 40;
   return e;
 }
 
@@ -111,14 +111,18 @@ void test_own_match_choice_for_overview() {
   TEST_ASSERT_EQUAL_UINT32(4, store.match(i).id);
 }
 
-void test_names_short_then_full() {
+void test_names_share_the_single_original_directory() {
   store.clear();
   StoredMatch* m = add(kLeague, 3, 6, kSaturday, Phase::kScheduled, true);
   TEST_ASSERT_EQUAL_STRING("Team 40", view::teamName(store, *m, true));
-  TEST_ASSERT_EQUAL_STRING("Own Club Full", view::fullName(store, *m, true));
-  TEST_ASSERT_EQUAL_STRING("Guest Full", view::fullName(store, *m, false));
+  TEST_ASSERT_EQUAL_STRING("Team 40", view::teamName(store, *m, true));
+  TEST_ASSERT_EQUAL_STRING("Team 7", view::teamName(store, *m, false));
+  store.teamAt(m->home).name.assign("");
+  store.teamAt(m->away).name.assign("");
+  TEST_ASSERT_EQUAL_STRING("", view::teamName(store, *m, true));
+  TEST_ASSERT_EQUAL_STRING("", view::teamName(store, *m, false));
   StoredMatch* other = add(kLeague, 4, 6, kSaturday, Phase::kScheduled);
-  TEST_ASSERT_EQUAL_STRING("Team 8", view::fullName(store, *other, true));
+  TEST_ASSERT_EQUAL_STRING("Team 8", view::teamName(store, *other, true));
 }
 
 void test_table_rows_of_one_competition() {
@@ -147,7 +151,6 @@ StoredEvent event(uint32_t identity, EventType type, uint8_t minute,
                   uint8_t added = football::kNoValue, uint8_t flags = 0) {
   StoredEvent e;
   e.identity = identity;
-  e.revision = 1;
   e.type = type;
   e.minute = minute;
   e.added = added;
@@ -182,10 +185,13 @@ void test_events_in_match_order_without_hidden_ones() {
   store.endEvents();
 
   const auto list = view::events(store, *store.find(kLeague, kOlg, 3));
-  static constexpr uint32_t kOrder[] = {6, 4, 1, 2, 3};
-  TEST_ASSERT_EQUAL_UINT(5, list.count);
+  static constexpr uint32_t kOrder[] = {6, 4, 1, 2};
+  TEST_ASSERT_EQUAL_UINT(4, list.count);
   for (unsigned i = 0; i < list.count; ++i)
     TEST_ASSERT_EQUAL_UINT32(kOrder[i], store.eventAt(list.index[i]).identity);
+  const auto shots = view::shootout(store, *store.find(kLeague, kOlg, 3));
+  TEST_ASSERT_EQUAL_UINT(1, shots.count);
+  TEST_ASSERT_EQUAL_UINT32(3, store.eventAt(shots.index[0]).identity);
   // Not an own match: no events.
   StoredMatch* other = add(kLeague, 4, 6, kSaturday, Phase::kLive);
   TEST_ASSERT_EQUAL_UINT(0, view::events(store, *other).count);
@@ -198,7 +204,7 @@ view::List conference(unsigned count, bool own = false) {
                              Phase::kLive, own && i == count / 2));
   view::List list;
   for (unsigned i = 0; i < store.matchCount(); ++i)
-    list.index[list.count++] = static_cast<uint8_t>(i);
+    list.index[list.count++] = static_cast<football::MatchIndex>(i);
   return list;
 }
 
@@ -301,11 +307,47 @@ void test_conference_single_actual_fixture_needs_no_extra_row_or_page() {
 void setUp() {}
 void tearDown() {}
 
+void test_every_widened_match_index_is_reachable() {
+  store.clear();
+  view::List list;
+  for (unsigned i = 0; i < cfg::kStoreMatches; ++i) {
+    StoredMatch match;
+    match.id = i + 1;
+    match.competition = kLeague;
+    match.kickoff = static_cast<uint32_t>(kSaturday);
+    match.phase = Phase::kLive;
+    if (i + 1 == cfg::kStoreMatches) match.flags = football::kMatchOwn;
+    TEST_ASSERT_NOT_NULL(store.upsert(match, {kSaturday, 1}));
+    list.index[list.count++] = static_cast<football::MatchIndex>(i);
+  }
+  football::ConferenceRequest request;
+  request.mode = cfg::ConferenceMode::kAllPages;
+  request.pin_own = true;
+  request.per_page = 2;
+  const auto first = view::conferencePage(store, list, request);
+  TEST_ASSERT_EQUAL(cfg::kStoreMatches - 1, first.rows[0]);
+  TEST_ASSERT_EQUAL(cfg::kStoreMatches - 1, first.pages);
+  std::array<bool, cfg::kStoreMatches> reached{};
+  for (unsigned page = 0; page < first.pages; ++page) {
+    request.page = page;
+    const auto visible = view::conferencePage(store, list, request);
+    TEST_ASSERT_EQUAL(page, visible.page);
+    for (unsigned row = 0; row < visible.row_count; ++row)
+      reached[visible.rows[row]] = true;
+  }
+  for (bool found : reached) TEST_ASSERT_TRUE(found);
+  football::matchday::Span span;
+  TEST_ASSERT_TRUE(football::matchday::next(
+      store, kLeague, [](const StoredMatch&) { return true; }, 0, span));
+  TEST_ASSERT_EQUAL(cfg::kStoreMatches, span.end);
+}
+
 int main() {
   UNITY_BEGIN();
+  RUN_TEST(test_every_widened_match_index_is_reachable);
   RUN_TEST(test_entry_shows_its_source_rows);
   RUN_TEST(test_own_match_choice_for_overview);
-  RUN_TEST(test_names_short_then_full);
+  RUN_TEST(test_names_share_the_single_original_directory);
   RUN_TEST(test_table_rows_of_one_competition);
   RUN_TEST(test_events_in_match_order_without_hidden_ones);
   RUN_TEST(test_conference_owner_page_distributions_preserve_count_and_order);

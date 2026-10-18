@@ -41,13 +41,13 @@ uint8_t steps(Scenario scenario);
 const char* stepTitle(Scenario scenario, uint8_t step);
 // Replace only the caller's worker route snapshot, in place. Never save these
 // dedicated demo identities or modify the owner's screen policy/settings.
-Bindings configure(settings::Competitions& routes,
+Bindings configure(settings::CompetitionRoutes& routes,
                    Scenario scenario = Scenario::kOwn,
                    bool saved_competitions = true);
 // Rebuild the same canonical store at one deterministic test instant. Mono is
 // the real monotonic second, solely for existing goal-flash/event-age behavior.
 // An invalid selection leaves both store and routes untouched and returns {}.
-Clock apply(MatchStore& store, const settings::Competitions& routes,
+Clock apply(MatchStore& store, const settings::CompetitionRoutes& routes,
             const Bindings& bindings, Scenario scenario, uint8_t step,
             uint32_t realtime_mono_s);
 // This is an explicitly synthetic demo proof, never provider coverage evidence

@@ -1248,8 +1248,9 @@ writing during live play (flash wear for data that change every minute).
 **Cost and boundary:** C6 build flash +12,030 B (1,624,064 B, 88.5 %),
 static RAM +2,128 B (150,960 B). An 18-team league with an own match takes
 2,947 B (one 4 KiB block, host measurement); a full short-name file
-1,552 B in the historical accounting (corrected2026-10-17: 1,548 B, comprising
-a 12-B header and 48×32-B entries; same one-block allocation). The last minutes
+1,552 B: a 12-B header, 48×32-B entries and a 4-B CRC (verified2026-10-17
+against the encoder; the earlier same-day 1,548-B correction omitted the CRC;
+same one-block allocation). The last minutes
 before a power loss can be missing. The device
 evidence (data after a reboot without a request) is open.
 
@@ -1700,7 +1701,7 @@ bolted onto the old default-screen resolver or lose existing information and
 features without an explicit owner decision.
 
 **Decision:** accept the future behavior documented once in
-[UI — planned screen-system redesign](UI.md#planned-screen-system-redesign).
+[UI — planned screen-system redesign](UI.md#earlier-screen-system-design-requirements).
 It includes a global highest-priority situation, timed automatic and filtered
 manual sequences with one shared type order, competition-specific content,
 separate crest/slideshow entries, picture frame mode and the new ring roles.
@@ -1776,3 +1777,138 @@ budget. C6 source/build sizes and logical/physical allocator qualifications are
 in [ARCHITECTURE](ARCHITECTURE.md#datacontroller-integration-checkpoint--2026-10-17).
 Source compilation and targeted checks do not establish device, provider,
 OTA/soak or runtime-reserve acceptance.
+
+## ADR-043 — Club names from a bounded working set · Accepted direction 2026-10-17
+
+**Problem:** full German/English/short-name editing, matching and import/export
+must not introduce a second resident collection of every saved club. The
+existing working-team text storage and short-name owner must be integrated.
+
+**Decision:** prepare one selected-language name and one short per working
+team, initially26/3 UTF-8 bytes on C6. Define both limits once in software
+config, with later target-specific S3 values after resource review. Match full
+input before clipping adopted values at a valid UTF-8 boundary. Saved values
+win; catalogue matching/prefill becomes active only through common Apply.
+Confirmed provider IDs take priority; otherwise require one exact complete
+name/alias. Never infer identity from a short code or clipped prefix. Shared
+club values cover confirmed IDs; existing ID-specific exceptions stay visible.
+Names import replaces the whole collection after a deletion preview, whereas
+batch editing changes only dirty records. Missing selected-language values use
+original provider fallback, without switching to the other maintained language.
+
+The full `include/team_names.json` supplies one immutable firmware asset,
+streamed as importable JSON. USB/OTA and rollback select the matching source;
+no additional LittleFS source copy or complete original-user-text archive.
+User values remain separately durable across restart/power loss/updates.
+Store full stable keys, confirmed IDs, aliases and league metadata, with bounded
+disk lookup. The complete adopted file is capped at16 KiB within the existing
+48-KiB football quota. Validated names may displace optional competition-cache
+files; running RAM data, image quota and reserve remain unchanged. Less offline
+competition data after reboot is an accepted consequence. No immediate provider
+request follows solely from cache removal.
+
+Full storage repair belongs to the existing explicit factory-reset workflow
+and intentionally discards setup/user names before reconfiguration or backup
+import. The firmware preset survives. A standalone repair confirmation must
+not bypass factory-reset consent. No full names backup in RAM/NVS is required.
+Image-only deletion remains separate.
+
+**Implementation boundary:** the immutable firmware source and read-only
+JSON endpoint are implemented. The durable owner now replaces the global
+short-name RAM table. Boot migrates every checked legacy identity to a short-only
+ID exception using a separate candidate and atomic replacement of the same
+`short_names.bin` path; it never guesses a full name from an old code or adopts
+the preset automatically. OTA trial reads legacy values without migration or
+cleanup. Compatibility writes stage exceptions through the same transaction.
+A checked file generation, settings writer gate and publication fence protect
+one coherent language/name projection. Candidate validation and physical
+admission precede minimum optional-cache deletion; failure retains old adopted
+names and reports partial cache effects. Current screens temporarily use the
+prepared name field; the independent short field is stored for later display
+design (owner decision 2026-10-17). Combined full-name editing, exact-match
+prefill and the public mapping import/export schema remain pending. Detailed
+bounds and qualification are in
+[ARCHITECTURE](ARCHITECTURE.md#club-name-integration-planning-audit--2026-10-17),
+[DATA_MODEL](DATA_MODEL.md#49-club-name-source-catalogue) and
+[CONFIGURATION](CONFIGURATION.md).
+
+The initial static calculation is−576 B before new scalar state, with a
+<=128-B state target. Complete own temporary heap<=8 KiB and added stack<=1.5 KiB remain hard
+implementation gates. The original net Flash<=22,898 B allowance is superseded
+by the higher measured planning baseline in the clarification below; the full
+source payload remains12,767 B. The owner clarified that16 KiB names and48 KiB
+shared football storage are the binding product criteria. The old8-/16-KiB
+development difference against a previous cache format is historical and no
+longer an extra release gate. Actual old-plus-candidate space is checked before
+writes; other envelopes, image quota, partitions and reserves are unchanged. No device-fit or OTA
+reserve approval follows. The first implementation checkpoint measures
++15,084 B flash and+4 B static RAM. Pure codec/migration code is compiled but
+linker-discarded until it has production callers, so their full integration
+fit and all physical acceptance gates remain open.
+
+
+**Names cutover resource clarification,2026-10-17:** the owner keeps the strict
+pre-write physical-space guarantee, so staging remains blocked until a proven
+LittleFS metadata allowance exists. The owner accepts the first fully linked
++40,986-B Flash measurement as the new planning baseline; final measurement and
+optimization remain required, without relaxing RAM, filesystem or reserves.
+The deliberately impossible compile-probe guard is not accepted behavior or
+a device-ready names implementation.
+
+## ADR-044 — Whole-product ownership and current-only consolidation · Accepted2026-10-18
+
+**Context.** The owner requested clean, maintainable architecture and data
+models across providers, API/Web, rendering and files, removing duplicated and
+organically accumulated mechanisms without losing real features. The owner
+authorized the complete consolidation and explicitly removed software night
+effects. Earlier implementation choices are historical when they conflict.
+
+**Decision.** General settings, competitions, explicit club groups and screen
+programmes form one revisioned NVS AppConfig. Common Apply validates a complete
+candidate, stages changed adopted names only and commits one exact names
+reference before coherent activation. An uncertain write preserves the old RAM
+snapshot and both names versions and blocks further mutations until recovery.
+Old records/APIs/backups have no migration before alpha; current export/import
+retains all sections and adopted-name metadata. Operational request counters
+and discovery guards remain durable.
+
+All football matches/tables/events/round/coverage data is RAM-only and fetched
+after boot. Adopted DE/EN/short names, all provider bindings, aliases, league
+metadata and exceptions remain in the bounded16-KiB LittleFS collection. Full
+provider originals are explicit temporary editor data; runtime teams retain
+original26/3 fallback. Only visible names resolve after the football lock.
+The former all-team projection, worker fence, legacy short-name migration and
+universal pre-write filesystem-proof fence are retired. Checked file I/O and
+publication preserve active references on actual failure using one shared
+replacement workspace; image quota and partitions stay unchanged.
+
+Source identity excludes club/display preferences. Explicit group membership
+lives once on each competition; highest member priority determines group order
+and focus. Names do not link groups. One common six-type order, five phases,
+field-wise inheritance and competition-attached overrides replace independently
+synchronized policy identities. A compact current programme drives controller,
+presenter and render-only geometry; manual access and all table groups remain.
+
+One strict streaming JSON grammar/writer replaces the independent parsers and
+encoders. Typed provider adapters own URLs/auth/fields/scope, scheduler owns
+actual-send fairness and budgets. Shared byte/UTF8/CRC/hash/calendar mechanics
+replace duplicates. The core catchall is dissolved into its actual owners;
+runtime consumers receive narrow settings projections, with no extra task or
+repository framework. Resource/default budgets have one named cfg owner.
+
+Only actual backlight-pin hardware offers scheduled night brightness. Software
+palette/gamma/image-opacity dimming is removed. OTA validation uses local
+display/main-loop/watchdog health, independently of WiFi/Internet/SNTP/provider
+availability. This supersedes ADR-039's network/startup veto, older cache/
+short-name persistence and split-record assumptions in ADR-032/034/035/043,
+and independent policy identity mechanisms in ADR-042. Their dated evidence
+is retained; it does not reintroduce those mechanisms as current requirements.
+
+**Consequences and evidence boundary.** Changes need matched C6 Flash/static
+RAM/bin/gzip and operation-life-cycle accounting. Moving memory to heap or
+removing an allocation ceiling is not a measured saving. The85% OTA reserve
+goal is reassessed after actual retirement; no feature/security/partition cut
+is implied. Real provider replay and browser checks are distinct from physical
+LCD screenshots, power interruption, heap/stack/fragmentation and OTA rollback
+acceptance. The owner flashes the device; build/host checks cannot certify
+those physical conditions.

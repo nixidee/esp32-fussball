@@ -13,8 +13,14 @@ build compiles and the scheduler, plans, mappers, store and views are
 host-tested. Firmware requests and keyed-provider coverage have not been
 accepted on the device.
 
+`components/names/` owns the immutable club catalogue, adopted-name file codec,
+two referenced file versions, complete collection import/export and visible
+label resolution. Its namespace remains `football::names`; the football
+service never opens, deletes or activates those files. The temporary original
+provider-name query stays with the existing football worker and transport.
 
-The [common screen policy](UI.md#planned-screen-system-redesign) now derives
+
+The [common screen policy](UI.md#current-screens-and-automatic-sequence) now derives
 content demand and phase classification. Every active competition retains fixture
 and live classification data; current-phase enabled entries add Table and exact
 ESPN Single-summary demand, including manual-only access. Special own priority
@@ -26,21 +32,19 @@ generations and serializes admission with publication. Already admitted requests
 finish across policy-only changes. Explicit setup queries bypass frame only,
 retain all request limits, and never authorize a general refresh on frame exit.
 
-Ordinary row names/events are staged through a complete response, then committed
-only for the final selected identity. Two bounded candidates and duplicate-id
-tracking retain1192B metadata (+1188B static versus the response pointer); their
-24 events use2016B transient heap, allocated only at the first body callback
-after the816B durable pre-send fence has released. Duplicate/overflow/allocation/final-target
-mismatch is visibly marked through existing loss notices; no ordinary match is
-relabeled as owned. A timing-boundary selection change can require a later full
-response to fill the newly selected detail target. Existing own-bank capacity and
-provider limitations remain unchanged.
+Ordinary selected-match events use bounded staging and a final selected-identity
+recheck before publication. Team labels live only in the shared team directory;
+there is no duplicate full-name detail record. Duplicate, capacity, allocation
+and target-change failures are explicit. The same shared detail/event mechanism
+has protected own-match and ordinary banks; an ordinary match never becomes
+owned merely because it is selected. A later full response may be needed when
+the selected identity changes during acquisition.
 
 ## 1. Pipeline
 
-1. **Settings** supply the competition list (up to eight entries, own
-   competition record), each with exactly one source (provider, competition,
-   season, club), and the per-provider and global limits ([CONFIGURATION.md](CONFIGURATION.md)).
+1. **Settings** supply the competition list (up to eight entries, one
+   AppConfig competition section), each with exactly one source (provider, competition,
+   season) and a separate selected-club preference, and the per-provider and global limits ([CONFIGURATION.md](CONFIGURATION.md)).
 2. **Request scheduler:** one provider task asks which job runs now — one
    data type of one competition — or when to ask again
    (section 2).
@@ -85,7 +89,8 @@ API-Football / ESPN / football-data.org):
   own ledger record (key `global`) and is checked before a provider's
   counter takes the request.
 - **Daily cap** (0 / 100 / 0 / 0 requests, 0–65535; 0 = no cap): every
-  attempt, including selections, counts before TLS starts. A durable 12-byte
+  attempt, including selections, counts at the first actual HTTP transport write;
+  DNS/TCP/TLS establishment alone consumes no request. A durable 12-byte
   NVS record per provider reserves up to eight requests at once; a restart
   loses unused reserved requests and cannot replenish the day, and moving the
   clock backward cannot reopen a spent day. The day changes at 00:00 UTC. A
@@ -112,11 +117,12 @@ waits in a loop.
   that ended before boot counts with its real end). The table and the live
   table of one competition are the same request: a start of either counts for
   both.
-- **Data types per competition** follow its screen switches: fixtures for
-  any switched-on screen; live data for Konferenz, Matchday or
-  Own match (the latter only with a club); table and live table for Table;
-  own-match events (ESPN source with a club and Own match on). A competition
-  with no screen switched on requests nothing.
+- **Data demand:** every active competition retains Fixtures and Live for
+  phase classification, including manual-only or currently hidden sports.
+  The effective current phase adds Table/LiveTable when enabled and the exact
+  ESPN Single-summary target when applicable. Ownership, ordinary selection
+  and special own-match request priority are separate. Picture-frame mode
+  pauses automatic jobs and continuations without erasing facts.
 - **Live window** of a match: from 30 minutes before kickoff to the final
   whistle when finished, to kickoff + 240 minutes while the provider reports
   it running or an earlier live observation justifies a reported suspension,
@@ -179,75 +185,80 @@ window limits and counted like a job's request. While its provider's
 window limit or pause holds it, the jobs of the other providers run and the
 Web UI shows until when the list waits (section "Selection lists").
 
+Interactive selection/original-name requests share the one existing worker.
+After an actual interactive send, the next runnable automatic job gets an
+attempt before another interactive request. A locally refused automatic attempt
+releases that turn, preventing a busy resource from starving the editor.
+Blocked/budgeted/absent automatic work and frame mode do not stall interactive
+queries. All requests still pass the same send-time budgets and gap. Coverage
+runs behind normal runnable work. Matching query IDs and configuration capture
+protect asynchronous selection; an idle-read lease releases abandoned queries.
+
 ## 3. Request plans
 
-The request plans (`provider_plan.h`) turn one scheduled job into provider
-requests and stream each response element into the match store. A run may
-take several requests; the scheduler keeps the job due until its last one,
-and a failed request ends the run (the next run starts from the beginning).
+The Planner turns one due job into independently admitted requests. After each
+request it returns control to the Scheduler, so another source can run and
+actual window/day/global limits apply to every continuation. A failed request
+ends its run. No request waits for a rate limit while holding heavy admission.
+Provider adapters own URLs, authentication and semantic response scope.
 
-| Provider | Fixtures | Table, live table | Live data |
+| Provider | Fixture acquisition | Table | Live/details |
 |---|---|---|---|
-| OpenLigaDB | `getmatchdata/{league}` (current round and season), `getmatchdata/{league}/{season}/{round + 1}`, with a club `getmatchesbyteamid/{club}/1/1` (only rows of this league and season) | `getbltable/{league}/{season}` | per round with a match in its live window: `getlastchangedate/{league}/{season}/{round}`, then `getmatchdata/…/{round}` only when the date changed or the last full request is one hour old (`kOpenLigaDbFullRefreshS`) |
-| ESPN | `calendar/ondays` (match days of the season), then the scoreboard of every day of the current and the next matchday | `site.web.api` standings; a competition without table (cups) gives an empty table | the scoreboard of each match day with a match in its live window, else the scoreboard without date |
-| API-Football | `fixtures` from today − to today + the fixture horizon | `standings` | `fixtures` of today |
-| football-data.org | `{code}/matches?dateFrom&dateTo` (fixture horizon) | `{code}/standings` | `{code}/matches` of today |
+| OpenLigaDB | Two full-season streams: compact Index, then selected facts. Resolve an unknown season first. | `getbltable/{league}/{season}` | Relevant rounds use change-date checks and conditional full refresh; reported goals are available, minutes are estimated. |
+| API-Football | Resolve current season when needed, then two season streams for Index and selected facts. | `standings` with validated league/season/groups | Current-date fixture data; no unsupported event details are invented. |
+| football-data.org | Two season streams; the first resolves the actual season when current season was requested, and the second uses that same year. | `TOTAL` standings retain each group separately | Current-date fixture data; unavailable details remain unavailable. |
+| ESPN | One calendar, up to16 selected day scoreboards, and two selected-club schedule streams when a club is configured. | Validated standings; complete successful empty cups clear old rows | Relevant day scoreboards and the exact selected Single summary for supported details. |
 
-- **Season:** a run that needs the season and does not know it first asks
-  for it (OpenLigaDB: the current round's rows carry it; API-Football:
-  `leagues?id&current=true`). A configured season is used as is. A response
-  without a season fails the run. API-Football resolves the season again
-  with the first fixtures run 24 hours (`kSeasonRecheckS`) after the last
-  resolution, and when the clock went back before it; without a valid
-  clock the known season is kept. The resolution time is kept with the
-  competition's file, so a restart does not ask again.
-- **Team names** come with the fixtures, table and live responses (name
-  and short name per provider, see the data model); there is no separate
-  team-list request.
-- **Matchdays (ESPN):** match days less than the matchday gap apart form one
-  matchday (`kMatchdayGapHours`, 48 h); the current matchday is the first
-  whose last day has not ended.
-  At most 8 days are kept. While streaming, days of ended matchdays are
-  dropped and the scan stops after the next matchday.
-- **Change dates (OpenLigaDB):** the change date of up to three rounds is
-  kept as a hash with the time of the last full request.
-- **Costs:** the scheduler's daily estimate multiplies the run frequency by
-  the requests of one run (OpenLigaDB fixtures 2, with a club 3; live 2;
-  ESPN fixtures 1 + the kept days, 7 while unknown; one more while the
-  season is unknown; API-Football fixtures 2 for the run that resolves the
-  season again once a day).
-- **Own-match events:** OpenLigaDB and ESPN deliver goals (ESPN also
-  cards) with the live data. Substitutions exist only in the ESPN match
-  summary, so an ESPN source with a club and Own match on also runs the
-  events job: `{slug}/summary?event={id}` for the latest own match whose
-  live window has opened, once it has kicked off; only its `keyEvents`
-  are read (substitutions, stored as detail events). The
-  job's final request after the window ends gives the last events.
-- **Table staging:** a table request fills a staging area; only a complete
-  response replaces the stored table.
-- **OpenLigaDB live without a known round:** the current round's matches
-  (`getmatchdata/{league}`) give the round and are stored.
+Every source retains the union of previous/current/next full round, previous
+own match and next three own matches, plus relevant live/unresolved facts.
+The first stream retains compact round counts/bounds and four own identities;
+it does not insert an entire season into the store. The second stream admits
+only that selected union. Duplicate identities share one match record. Overflow
+is explicit Partial/StoreFull, never hidden eviction or proof of no match.
 
-The planner holds 1,256 bytes of RAM (C6 build, symbol size): per
-competition the season, round, change dates, match days and run positions,
-plus the context of the request in progress.
+For explicit ESPN seasons the calendar URL follows the actual season-reference
+shape `/seasons/Y/types/1/calendar/ondays`; a scoreboard `season` query alone is
+not trusted because observed responses ignore it. Reported cup stages retain
+stage identity, including quarter-finals spread over two weeks. A single
+Regular Season calendar uses explicitly derived48-hour date clusters; these
+are not reported provider rounds. Selected days are bounded to16; the
+request-only calendar accepts up to366 days and reports overflow. The club
+schedule is filtered by source/season/team and proves only those own fixtures,
+never a complete competition round.
+
+Season knowledge, change hashes and traversal positions are RAM-only. A reboot
+reacquires them. API-Football's current-season recheck uses its configured
+24-hour interval and clock-step rules. No competition file stores that state.
+Team fallback names arrive with ordinary fixtures/table/live data; the explicit
+full-original editor query is a separate user action, not a hidden request.
+
+C6 compiler layout: Planner4136 B including its2088-B response-detail metadata;
+SourceState232 B includes Selection132 B per source. One Index3136 B is allocated
+only for the indexing request and released before fact admission. These sizes
+are not device heap/stack reserves. Exact current transport limits are below.
 
 ## 4. Filtering while streaming
 
-- The request plans ask only for what is kept: OpenLigaDB the current and
-  the next round and, with a club, the club's matches one week back and
-  ahead; ESPN the
-  days of the current and the next matchday; API-Football and
-  football-data.org the fixture horizon (7 days) and today.
-- OpenLigaDB club rows of another league or season are dropped.
-- Every element is stored at once; a duplicate match id of the same
-  competition and provider updates the stored match.
-- A full store makes room by the rule of
-  [DATA_MODEL.md](DATA_MODEL.md#46-store-rules) and notes the competition
-  (cause `store_full`, E19, with what is missing).
-- Events are kept only for the own club's matches (12 per match, 48 in
-  all; the live and next own matches win when the pool is full).
-- Discarded bytes still count toward the transport limits (section 8).
+- The typed Reader validates complete JSON grammar even for unknown fields.
+  Relevant source/season/filter/count/parent metadata must agree; a differently
+  shaped or wrong-typed primary list is an error, not an empty success.
+- Positive uint32 identities are exact; decimal fractions cannot round into
+  an ID. A supplied team identity must fit the shared directory before a new
+  fixture is admitted. Capacity failure preserves an old valid pairing and
+  score together, reports StoreFull and never creates a phantom match.
+- Valid incremental fixture facts can update retained identities. Only a
+  complete authoritative response establishes scope, last success and pruning;
+  interrupted or contradictory responses leave retained facts Partial.
+- A table transaction stages up to64 rows and shared group labels. Complete
+  success atomically replaces the old table, including an empty result;
+  missing, invalid, interrupted or capacity-failed results retain the old one.
+- Selected ordinary details are rechecked against the exact current target
+  before commit. Twelve retained highlights and reported shootout attempts
+  have separate reference lists in the same bounded event pool. Truncation or
+  missing attempts is explicit; no attempt sequence is inferred from totals.
+- Discarded fields still count toward body, depth, UTF8 and complete-document
+  limits. There is no full-body DOM, insert-all/prune workaround, runtime undo
+  clone, durable football file or silent store eviction.
 
 ## 5. Mapping rules
 
@@ -256,11 +267,38 @@ missing values stay unavailable; nothing is fabricated.
 
 ### Teams
 
-Short name: OpenLigaDB `shortName`, ESPN `shortDisplayName`, football-data
-`shortName`; API-Football has none. An empty short name is filled with the
-full name. The owner's replacement (section 7, "Kept data") is applied when
-a view reads the name, not when mapping, so the store keeps the provider's
-name.
+Provider full and short strings arrive with fixtures, table and live rows.
+Field selection/fallback happens before UTF8 clipping; a nonempty short whose
+first code point cannot fit3bytes stays empty, rather than changing its source
+after clipping.
+OpenLigaDB supplies `shortName`, ESPN `shortDisplayName`, football-data
+`shortName`; API-Football has no separate short. Provider adapters validate
+complete input and retain compact26/3 fallback values in the volatile directory.
+No football response is persisted and no mapper holds a saved-name table.
+
+The view copies its current IDs and provider fallbacks under the repository
+lock, then releases that lock before resolving adopted fields. A bounded cache
+contains only the current visible adopted name/short values and presence bits.
+Cache misses use the checked names reader under heavy admission, outside LVGL
+and repository locks. An absent override uses fresh provider fallback; present
+empty remains empty. No automatic switch to the other language occurs. The
+immutable catalogue is an editor source and never activates merely because it
+is present. Complete provider originals for editor matching are a separate
+explicit streamed request, not an archive reconstructed from clipped labels.
+
+The explicit original-name query reserves the existing interactive provider
+slot with its source and a correlated query ID. The same worker discovers a
+missing season, observes provider windows and charges actual send attempts;
+the HTTP handler holds no heavy-operation token while it waits. Decoded full
+labels pass through the shared JSON writer and a single 256-byte ring to HTTP.
+There is no second provider task, HTTP client or stored answer. A slow consumer
+applies backpressure within the existing operation deadline, which also bounds
+the transport. HTTP checks disconnects while waiting, including before the
+first response byte. Cancellation stops the producer; the slot remains owned
+until the worker acknowledges it. Only a complete provider response receives
+the closing JSON/HTTP terminator. A partial parse or send failure closes the
+response, so the editor cannot adopt a partial successful collection. The
+returned originals change the draft only after explicit adoption.
 
 ### Phase and minute
 
@@ -271,14 +309,13 @@ name.
   status the phase becomes Unknown and the window expires.
 - **ESPN:** state `pre`/`in`/`post` (+ `completed`) gives Scheduled / Live /
   Finished; status names give HalfTime, ExtraTime, Penalties, Postponed
-  (also SUSPENDED), Cancelled, Abandoned. The minute is the leading number of
+  Cancelled, Abandoned and distinct Suspended. The minute is the leading number of
   `displayClock` while the match runs.
 - **API-Football:** `fixture.status.short` and `elapsed`.
 - **football-data.org:** SCHEDULED and TIMED → Scheduled, IN_PLAY → Live,
   PAUSED → HalfTime, EXTRA_TIME → ExtraTime, PENALTY_SHOOTOUT → Penalties,
-  FINISHED → Finished, SUSPENDED and POSTPONED → Postponed, CANCELLED →
-  Cancelled, AWARDED → Abandoned (SUSPENDED and AWARDED follow API-Football's
-  SUSP and AWD, since the documentation does not describe them). Any other
+  FINISHED → Finished, SUSPENDED → Suspended, POSTPONED → Postponed, CANCELLED →
+  Cancelled and AWARDED → Abandoned. Any other
   value stays Unknown.
 - No numeric status or result id is treated as a semantic constant.
 
@@ -304,7 +341,8 @@ name.
 
 OpenLigaDB `group.groupOrderID` (number) and `groupName` (label);
 football-data `matchday` and `stage`; API-Football `league.round` (label
-only); ESPN none.
+only); ESPN day/stage identity is supplied by its validated calendar; derived date
+groups remain distinct from reported stages.
 
 ### Events
 
@@ -328,9 +366,11 @@ only); ESPN none.
 
 ### Table
 
-All providers map position, played, won, drawn, lost, goals for, goals
-against, difference and points. OpenLigaDB has no position; it is the row
-order (marked estimated). football-data uses only the `TOTAL` table.
+All providers retain only rendered row facts: team identity, position, played,
+goal difference and points. Position from OpenLigaDB row order is marked
+estimated. football-data accepts `TOTAL` tables; separate groups retain separate
+rankings. A complete empty table clears old rows; missing, failed or overflowed
+transactions retain the old complete table and report their actual status.
 
 ### Selection lists
 
@@ -368,17 +408,21 @@ A request that fails ends its job's run; the job is retried with the
 growing backoff of section 2 (60 s doubling up to the larger of its interval
 and 15 minutes), five minutes after "too many requests". What the store holds stays: a failed competition keeps its
 matches, table and events. A request that failed, of any data type,
-marks its competition failed until its next successful request: the data are stale and carry the error, its cause and the next
-scheduled request (`retry_ms`).
+updates only its canonical dataset status (fixtures, table or details). A
+successful request for another dataset cannot erase that failure. Existing
+usable facts stay visible with the matching dataset cause, last-success time
+and capacity/maintenance notice; the service also reports the next request.
 
 ### Changes
 
 - A save that changes a competition's source, removes or pauses it drops
-  its stored data and starts its jobs afresh, and its competition file goes
-  with the next sweep; the other competitions keep data and due times. A
+  its RAM data and starts its jobs afresh; the other competitions keep their
+  data and due times. A
   changed provider key or ESPN opt-in does the same for every competition
   that uses that provider; a changed demo mode clears the whole store and
   every job.
+- A club-only edit on an unchanged source reclassifies the existing matches,
+  table markers and detail priority without clearing facts or requesting again.
 - A save itself requests nothing else: changed limits, intervals or match
   windows apply with the next decision, other settings do not touch the
   jobs.
@@ -393,47 +437,73 @@ scheduled request (`retry_ms`).
   the provider-data generation and does not cancel already-started transport.
   Before the first HTTP send, both generations must still match the worker's
   coherent snapshot. A policy or request-limit save therefore refuses an
-  obsolete unsent request without discarding valid cached data. The setup
+  obsolete unsent request without discarding valid retained RAM data. The setup
   wizard bypasses the frame pause only, so it cannot send using limits saved
   before a concurrent change either. Its current requests remain available
   when frame mode is already active.
 
-### Kept data
+### Durable settings and names; volatile football data
 
-Each active competition's data are kept in a competition file
-([DATA_MODEL.md](DATA_MODEL.md#48-competition-files-and-short-names)), so
-a reboot shows them without a request.
+Settings remain in NVS. Adopted club names and ID exceptions have their own
+bounded LittleFS store. Matches, tables, events, provider season/round
+resolution and schedule-completeness evidence live only in RAM. The worker
+starts with no restored sporting data after each boot, then acquires current
+provider responses through normal readiness, request limits and retries. There
+is no next-game checkpoint, competition cache, schedule file, cache sweep,
+cache eviction or cache-derived scheduler seed.
 
-- **Write:** when the worker is idle (no job due), at most one file per
-  pass: a competition with new data, at most every 10 minutes
-  (`kCompetitionFileGapS`) and not while one of its matches is in its live
-  window. The file is written to a temporary file and renamed, so a failed
-  write keeps the previous file. A write is skipped when all football files
-  together would exceed 48 KiB (`kFootballFilesBytes`, whole 4 KiB blocks
-  counted), during the first boot of a firmware update, or when it would
-  not leave free on the filesystem the part of the image library quota
-  (320 KiB) that images do not use yet, in whole blocks, plus the 40 KiB
-  image reserve: images come first, so near a full image library some
-  competitions are not kept until there is room. Demo data are never
-  written.
-- **Load:** at boot, before the first request, the short names and the
-  files of the active competitions whose sources are unchanged. Loaded data
-  count as old as the file ("Stand" may lie before the boot).
-- **Seed:** with the first valid clock, the fixtures and table
-  requests of a loaded competition are due when their interval since the
-  saved completion has passed; one older than its interval runs at once.
-  Live requests and competitions without a file start as without kept data.
-- **Sweep:** after the boot and after every save, files of removed, paused,
-  changed or never loaded competitions are deleted when the worker is idle.
-- **Short names:** a change from the Web UI is written at once; a full
-  table (48), budget or filesystem rejects it and keeps the previous name.
-  The settings export carries them; an import replaces the whole table
-  and writes the file once (a backup without short names keeps them).
-- **Reset and repair:** a settings reset deletes every competition file and
-  the short names. Repairing the image filesystem formats it; afterwards
-  the worker writes the short names and every competition with data again.
+Names I/O holds the shared heavy-operation token and runs outside the repository
+mutex. The existing names owner checks its committed file before resolving
+labels. Legacy-name conversion, short-only immediate-write APIs and full-team
+projection are removed. One current common Apply adopts the complete collection;
+original provider names are fetched explicitly into the browser draft only.
 
-All football file I/O holds the heavy-operation token (section 8).
+Explicit factory reset removes adopted names; optional filesystem formatting
+also removes images. The names transaction never enumerates or deletes files
+owned by other services. Request counters and discovery run/request credits
+remain independently durable in NVS, so loss of volatile football data does not
+replenish provider request allowances.
+
+The full original source accompanies USB/OTA as read-only application data.
+`GET /api/v1/team-names/preset` takes heavy admission before streaming JSON
+through 128-byte catalogue and 512-byte HTTP buffers. It allocates no global
+JSON tree or LittleFS source copy. Failed/deadline-expired sends abort without
+an appended JSON error or successful final chunk. Rollback uses its running
+app's matching source; user values cannot mutate it.
+
+Normal names lookups reuse the fully checked generation via a fresh 96-byte
+header receipt, then address at most 16 records in a selected key/ID checkpoint
+block. There is no per-refresh full saved-club scan or resident user/legacy
+collection. Provider preparation and language changes touch only the existing
+240 working-team slots. Raw fallback text is available only from retained
+details or current provider input; old clipped labels do not recreate missing
+originals.
+
+Names replacement is a checked transaction:
+
+1. Hold the existing heavy admission and capture names/settings/working-identity
+   revisions. Admit old plus a maximal 16-KiB candidate, explicit LittleFS
+   temporary overhead, unused image quota and reserve before writing.
+2. Stream/normalize the bounded candidate, fully check fields/CRC and close its
+   staging handles. Staging failure preserves the committed names.
+3. Open the checked projection reader before allocating its 6,990-byte packed
+   label/bitmap arena. Prepare full/short labels outside the mutex. Validate
+   revisions and hold the short publication fence; retain the old coherent view
+   on a conflict or preparation error.
+4. Recheck the committed generation and physical reserve. Atomically rename
+   the checked names candidate, publish its prepared labels and applied
+   language/generation together, release resources, then acknowledge the
+   generation/digest. Activation failure preserves the old names. Recover
+   uncertain success read-only.
+
+The complete names file retains its existing 16-KiB ceiling. The former shared
+48-KiB football-file quota and optional-cache deletion mechanism are removed.
+Both adopted languages and stable identity relationships remain durable;
+only the selected name26/short3 pair is resident per working team. The remaining
+editor and full replacement protocol must use the same common Apply boundary,
+streaming codec and generation rules; their end-to-end acceptance is still open.
+Final linked resource fit, allocator/FD overhead and device heap/stack acceptance
+are not established merely by the encoded file sizes or host tests.
 
 ### Publication
 
@@ -447,23 +517,23 @@ successful match request is older than 15 minutes (`kDataStaleS`).
 
 ### Readers
 
-The store (26,712 B) is one static object in BSS. A reader runs under the
+The store is one static BSS object with a C6 compiler layout of 48,976 B
+(512 matches, 256 teams). Final linked integration measurement remains a
+separate gate. A reader runs under the
 repository mutex and copies what it needs into its own fixed model; the
-display presenter owns one static 1,880-byte view model. A full model copy
+display presenter owns one static 2,044-byte view model. A full model copy
 would require separate storage, including stack space if made locally.
 Reader callbacks do not fetch provider data or perform filesystem or LVGL
-work. The presenter can acquire the time-service mutex for local-time
-conversion and the settings mutex for competition lookups while holding
-the repository mutex. These acquisitions wait with `portMAX_DELAY`, so the
-reader is not a nonblocking path. Its total lock hold, including those
-waits under concurrent service work, remains to be measured. Rendering
-runs after the reader returns.
+work. The presenter receives configuration and clock projections from its caller;
+it does not query services or files. Visible adopted names are resolved only
+after the repository callback returns. Repository lock duration still needs
+device measurement. Rendering runs after the reader returns.
 
 ### Views
 
 The screens and the Web UI read the store through `store_views.h`. The views keep no data; they
-return store indices in fixed lists on the caller's stack (226 B for a
-match list, 232 B for a table on the C6).
+return store indices in fixed lists on the caller's stack (1026 B for a
+512-entry match list,236 B for a grouped table on the C6).
 
 - **Shown source:** every active competition shows the matches of its
   source; its club id marks the own matches.
@@ -479,8 +549,9 @@ match list, 232 B for a table on the C6).
   unique ordinary, held result or next preview. Owned flags and special-own
   treatment are independent. Current-phase enabled/manual rules derive provider
   demand; no old screen mask or independent resolver gates content.
-- **Names/events:** selected ordinary and own identities share full names and
-  bounded event banks. Owner custom names take priority. Removal markers stay
+- **Names/events:** every working team supplies one prepared full name and
+  short code. Selected ordinary and own details retain raw fallback names and
+  bounded event banks. Adopted selected-language names take priority. Removal markers stay
   hidden; regular time precedes shootout, then minute/added time/provider order.
   Truncation is visible and another match's successful update cannot clear it.
 - **Table:** automatic pages centre around the selected club where present;
@@ -497,11 +568,17 @@ match list, 232 B for a table on the C6).
   cup, rounds, break, empty), with ordered steps and a separate clock. First two
   saved competition identities supply order and screen rules through a runtime
   projection. Missing saved associations use common rules and are exposed as
-  unbound. Synthetic sources are never saved; no real cache sweep/write or
-  provider HTTP occurs. Exit reloads retained real data. Store/routes/clock/
+  unbound. Synthetic sources are never saved and cause no provider HTTP. Exit
+  starts normal provider acquisition with an empty RAM football store. Store/routes/clock/
   bindings/phase proof publish atomically; command acknowledgement is separate
   from completion. Fixture identities/names/events use recorded public data;
   timings, intermediate states and table values are explicitly simulated.
+  The separate Demo automatic-next display action uses the existing versioned
+  UI command FIFO: it advances the next page/image boundary, then the next
+  visit. From manual output it first returns to automatic selection. It does
+  not change scenario/test time or saved durations; normal timing continues.
+  Controller diagnostics are one separately sampled last-bound atomic word,
+  not an LCD acknowledgement or part of the football publication transaction.
 
 ## 8. Request bounds
 
@@ -510,7 +587,7 @@ match list, 232 B for a table on the C6).
 - One heavy-operation token serializes TLS and parsing with uploads, image
   validation/deletion, complete screen-policy HTTP and OTA. Ordinary jobs keep
   it through detail commit/release; discovery takes it before state allocation
-  and releases after proof persistence/cleanup. A routine LVGL JPEG redraw can still overlap
+  and releases after RAM proof publication/cleanup. A routine LVGL JPEG redraw can still overlap
   TLS inside its fixed pool (device measurement pending).
 - A 30-second monotonic deadline covers DNS, TLS connection and handshake,
   headers, framing and reads; socket waits are at most one second. One DNS
@@ -518,13 +595,17 @@ match list, 232 B for a table on the C6).
   certificate verification and SNI. The deadline is not a rate limit and was
   not sized for large bodies. Whether the 512 KiB match summary arrives within it is
   not yet measured on the device.
-- Bodies: 256 KiB for the scheduled requests and the fixture picker; 512 KiB
-  for the ESPN match summary (its `keyEvents` start about 300 KB in); 1 MiB
-  for the selection lists of the setup wizard and their season resolution.
-- Headers 8 KiB, additional wire/framing allowance 32 KiB, JSON nesting 16,
-  live parser allocations 24 KiB including allocation headers (libc overhead
-  additional). Elements are mapped and released one at a time; discarded
-  fields still count toward byte and depth validation.
+- Bodies:256 KiB for ordinary scheduled responses;1 MiB for streamed complete
+  seasons, own-fixture schedules and selection/season-resolution lists;512 KiB
+  for ESPN match summaries (events can start about300 KiB into the response).
+  A body's transport ceiling is not a heap allocation or a completeness proof.
+- Headers8 KiB, additional wire/framing allowance32 KiB and JSON nesting16.
+  One strict reader maps typed records using one bounded response union for
+  unordered events or table rows. Full-season retention additionally uses one
+  transient compact index, freed after scope selection. No DOM, whole-body
+  buffer or whole-runtime rollback copy exists. Exact current C6 workspace
+  sizes and simultaneous TLS peaks are reported separately; discarded fields
+  still count toward byte/depth/full-document validation.
 - A malformed, excessive or incomplete response fails its job (section 7);
   elements stored before the failure stay, a staged table is dropped and
   event removals are not derived from it.
@@ -541,42 +622,43 @@ cancellation, caps across reset and clock changes and configuration while a
 request runs. Real keys and maximum configured data are required for
 coverage and resource acceptance. SDK scheduling and cryptographic step
 duration need measurement; the deadline is not a measured hard real-time
-bound. None of these suites was run for this candidate.
+bound. These broad provider/network/device gates are separate from the
+targeted current-only names codec and transaction host checks.
 
 
-## Schedule evidence and provider protocol — 2026-10-17
+## Schedule evidence and provider protocol
 
-The HTTP client and host replay use one streaming parser kernel and unchanged
-body/24-KiB allocator limits. Optional anchored metadata and name observers share
-the existing filter/value lifetime; no complete body is retained. A bounded
-syntax guard also validates skipped tokens. Parent array counts and wrapper
-shape prevent metadata from unrelated league objects being combined. Callers
-must stage and validate metadata, then commit only after a complete successful
-response with all required fields, types, uniqueness and parent identity proven.
-An early wizard stop is successful list pagination, never a complete schedule.
+The common strict streaming grammar validates relevant metadata and skipped
+values. Typed provider consumers distinguish absent, wrong-typed, duplicate,
+empty and interrupted data. Only complete successful response framing and
+matching source/season/scope can establish authoritative completeness. Valid
+incremental fixtures remain Partial after failure; failed responses cannot
+prune retained matches or clear a table. Early selection-list pagination is
+never evidence of a complete competition schedule.
 
-The worker owns one compact evidence array independently of the224display
+The worker owns one compact evidence array independently of the512display
 matches. Complete spans require source/season identity, semantic metadata,
 complete framing/counts/pages, freshness and actual neighbouring kickoffs.
 Normal rows are checked before store admission/eviction, using the planner's
 same source filter. Display absence and calendar day markers prove no gap.
 
-`schedule.bin` stores the explicit816B CRC record; its temporary replacement
-also needs physical filesystem headroom. It counts toward the existing48KiB
-football quota and preserves the image reserve. Corrupt file bytes still count
-until replaced or removed. Before any match/discovery first-send, a durable
-conservative version fences that source's existing proof. A reset during an
-unfinished response therefore reloads Unknown. Publication remains conservative
-until the safe replacement succeeds. Optional coverage write failures do not
-starve established competition/short-name persistence.
+Schedule evidence is volatile. During a response the streaming flag prevents
+readers from using proof that may be contradicted by rows still arriving.
+Only complete successful responses can establish usable proof. A reboot starts
+with Unknown evidence and requires new provider acquisition; no schedule file
+is read, written or repaired.
 
-The authoritative48B discovery guard is in the existing budget NVS namespace.
-The file contains a non-authoritative guard snapshot. Formatting/missing files,
-reboot or midnight cannot replenish the16extra requests of an active run.
-Ordered source/incarnation/access fingerprints reject changed routes or access
-after reboot. Changed data settings retire an old run without granting another
-same-day run. At most one new run starts per UTC day and at most two seasons
-are considered; ordinary due/live jobs, setup and provider limits retain priority.
+The current-only 36-byte discovery guard remains in the existing budget NVS
+namespace. It contains two operational counters and an active-run marker;
+the counters' day identifies the run's credit lifetime across UTC midnight.
+The route, season, traversal step and source/access fingerprint remain in RAM.
+A reboot restarts traversal from the first source with the remaining durable
+credits, forfeiting unused reserved credits rather than replenishing the run's
+sixteen-request allowance. Losing RAM evidence does not reset this guard.
+Changed source inputs retire the old run before another source can send,
+forfeiting its remaining credits without granting another same-day run. At most
+one new run starts per UTC day and at most two seasons are considered; ordinary
+due/live jobs, setup and provider limits retain priority.
 
 OpenLigaDB full-season proof is limited to actual outer kickoffs of a complete
 validated response; an oversized season remains Unknown. Keyed date ranges
@@ -600,3 +682,18 @@ currently selected match is rejected by the Planner. The unknown-kickoff case
 also runs after a prior request, so it cannot pass solely through initial-target
 admission. These synthetic boundary checks do not establish real provider
 update speed or device transport acceptance.
+
+
+### Single application-config owner — 2026-10-18
+
+General settings, competitions, screen policy and exact names-version reference
+are one coherent AppConfig. The settings service writes only one current-format
+NVS envelope. There are no independent section setters or
+separate general/competition/policy persistent writes. Apply validates the full
+combination and expected revision, persists/verifies it, then publishes matching
+RAM fields and metadata. Its last-apply ID correlates a later client readback.
+Any uncertain NVS mutation leaves the old RAM config coherent and changes the
+storage origin to `outcome_unknown`, blocking writes until reboot/recovery.
+Changed names are staged and validated before that one NVS commit; its exact
+reference activates the coherent file/configuration combination. Settings-only
+Apply never opens or rewrites names. Both slots survive an uncertain NVS write.

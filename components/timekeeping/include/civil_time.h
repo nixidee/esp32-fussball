@@ -1,6 +1,6 @@
 // Pure helpers of the time service (docs/NETWORK.md "Time"): time-zone label
 // lookup and daily windows in local civil time. The ESP-IDF part (clock,
-// validity, applying the zone) lives in components/core (time_service.h).
+// validity, applying the zone) lives in this owner (time_service.h).
 
 #pragma once
 
@@ -14,6 +14,12 @@ namespace timekeeping {
 // Entry of cfg::kTimeZones with exactly this label (case-sensitive), or
 // nullptr.
 const cfg::TimeZone* findZone(std::string_view label) noexcept;
+
+// Proleptic Gregorian calendar mechanics shared by provider timestamps and
+// local offset calculation. No application-year cutoff. daysFromCivil needs
+// a valid month/day; it returns days from1970-01-01, independently of TZ.
+bool validCivilDate(int year, unsigned month, unsigned day) noexcept;
+int64_t daysFromCivil(int year, unsigned month, unsigned day) noexcept;
 
 inline constexpr uint16_t kMinutesPerDay = 24 * 60;
 

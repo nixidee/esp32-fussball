@@ -12,6 +12,7 @@
 #include <cstring>
 #include <string>
 
+#include "../provider_adapter_support.h"
 #include "../test_match_store/recorded.h"
 #include "app_config.h"
 #include "football_model.h"
@@ -40,7 +41,7 @@ const int64_t kBase = football::parseUtc("2026-10-14T12:00:00Z");
 
 MatchStore store;
 Planner planner;
-settings::Competition entry;
+settings::CompetitionRoute entry;
 
 Clock at(int64_t dt) { return {kBase + dt, static_cast<uint32_t>(kBoot + dt)}; }
 
@@ -50,7 +51,7 @@ void setSource(cfg::Provider provider, const char* competition,
   entry.id = 3;
   entry.primary.provider = provider;
   entry.primary.competition.assign(competition);
-  entry.primary.team.assign(team);
+  entry.club.team = football::decimalId(team);
   entry.primary.season.assign(season);
 }
 
@@ -66,41 +67,16 @@ Job job(cfg::DataType type) {
 Request expect(cfg::DataType type, const char* url, int64_t dt = 0) {
   Request r;
   TEST_ASSERT_TRUE(planner.request(job(type), entry, store, at(dt), r));
-  TEST_ASSERT_EQUAL_STRING(url, r.url);
+  TEST_ASSERT_EQUAL_STRING(url, football::test_support::http(r).url);
   return r;
 }
 
-// The first array under 'key' at any depth (as fetchJson finds it).
-JsonArrayConst find(JsonVariantConst v, const char* key) {
-  if (v.is<ArduinoJson::JsonObjectConst>()) {
-    for (auto pair : v.as<ArduinoJson::JsonObjectConst>()) {
-      if (pair.key() == key && pair.value().is<JsonArrayConst>())
-        return pair.value().as<JsonArrayConst>();
-      const JsonArrayConst inner = find(pair.value(), key);
-      if (!inner.isNull()) return inner;
-    }
-  } else if (v.is<JsonArrayConst>()) {
-    for (JsonVariantConst item : v.as<JsonArrayConst>()) {
-      const JsonArrayConst inner = find(item, key);
-      if (!inner.isNull()) return inner;
-    }
-  }
-  return {};
-}
-
-// Streams 'json' as fetchJson would for 'r': the elements of the top-level
-// array, of the array under key 'r.array', or the whole document.
-bool feed(const Request& r, const char* json) {
-  JsonDocument doc;
-  if (deserializeJson(doc, json)) return false;
-  JsonVariantConst root = doc.as<JsonVariantConst>();
-  if (r.array == nullptr) return Planner::consume(root, &planner);
-  const JsonArrayConst list =
-      r.array[0] == '\0' ? root.as<JsonArrayConst>() : find(root, r.array);
-  if (list.isNull()) return r.optional;
-  for (JsonVariantConst element : list)
-    if (!Planner::consume(element, &planner)) return false;
-  return true;
+// Feed the complete provider document through the actual typed Reader. A
+// syntactically valid document can still fail the planner's source/scope proof.
+bool feed(const Request& request, const char* body) {
+  const auto parsed = football::test_support::feed(planner, request.spec, body);
+  return parsed.status == football::provider::Status::kOk &&
+         planner.responseFailure() == football::provider::Status::kOk;
 }
 
 // One OpenLigaDB match row.
@@ -125,10 +101,58 @@ bool stored(uint32_t id, cfg::Provider provider = cfg::Provider::kOpenLigaDb) {
 }
 
 const char* kDays =
-    R"({"eventDate":{"dates":["2026-10-09T07:00Z","2026-10-10T07:00Z",)"
+    R"({"type":"day","startDate":"2026-07-01T04:00Z",)"
+    R"("endDate":"2027-07-01T03:59Z","season":{"$ref":)"
+    R"("https://sports.core.api.espn.com/v2/sports/soccer/leagues/ger.1/seasons/2026"},)"
+    R"("eventDate":{"dates":["2026-10-09T07:00Z","2026-10-10T07:00Z",)"
     R"("2026-10-11T07:00Z","2026-10-16T07:00Z","2026-10-17T07:00Z",)"
     R"("2026-10-18T07:00Z","2026-10-23T07:00Z","2026-10-24T07:00Z",)"
     R"("2026-10-25T07:00Z","2026-10-30T07:00Z"]}})";
+
+// Recorded event facts plus explicit current response scope. Empty days need
+// the same league/year proof as nonempty days before they can replace data.
+std::string espnDay(bool match) {
+  JsonDocument doc;
+  deserializeJson(doc, match ? kEspnUpcoming : R"({"events":[]})");
+  doc["leagues"][0]["slug"] = "ger.1";
+  doc["leagues"][0]["season"]["year"] = 2026;
+  if (match) doc["events"][0]["season"]["year"] = 2026;
+  std::string bytes;
+  serializeJson(doc, bytes);
+  return bytes;
+}
+
+constexpr const char* kApiSeasonEmpty =
+    R"({"parameters":{"league":"78","season":"2026"},)"
+    R"("paging":{"current":1,"total":1},"results":0,"errors":[],"response":[]})";
+constexpr const char* kOpenLigaSeasonUrl =
+    "https://api.openligadb.de/getmatchdata/bl1/2026";
+constexpr const char* kApiSeasonUrl =
+    "https://v3.football.api-sports.io/fixtures?league=78&season=2026";
+
+// Season discovery is separate. Every known-season refresh first indexes the
+// complete response, then admits exactly the selected rounds/own identities.
+void openLigaSeason(const std::string& body, int64_t dt) {
+  Request request = expect(cfg::DataType::kFixtures, kOpenLigaSeasonUrl, dt);
+  TEST_ASSERT_EQUAL(Sink::kIndex, request.sink);
+  TEST_ASSERT_TRUE(feed(request, body.c_str()));
+  TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(dt)));
+  request = expect(cfg::DataType::kFixtures, kOpenLigaSeasonUrl, dt + 1);
+  TEST_ASSERT_EQUAL(Sink::kMatches, request.sink);
+  TEST_ASSERT_TRUE(feed(request, body.c_str()));
+  TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(dt + 1)));
+}
+
+void emptyApiSeason(int64_t dt) {
+  for (unsigned pass = 0; pass < 2; ++pass) {
+    const Request request =
+        expect(cfg::DataType::kFixtures, kApiSeasonUrl, dt + pass);
+    TEST_ASSERT_EQUAL(pass == 0 ? Sink::kIndex : Sink::kMatches, request.sink);
+    TEST_ASSERT_TRUE(feed(request, kApiSeasonEmpty));
+    TEST_ASSERT_EQUAL(pass == 0 ? Step::kMore : Step::kDone,
+                      planner.finish(true, at(dt + pass)));
+  }
+}
 
 }  // namespace
 
@@ -138,20 +162,44 @@ void setUp() {
 }
 void tearDown() {}
 
-void test_encode_escapes_and_cuts_at_a_whole_escape() {
-  char out[16];
-  football::plan::encode("bl1", out, sizeof(out));
-  TEST_ASSERT_EQUAL_STRING("bl1", out);
-  football::plan::encode("ger.1 ü", out, sizeof(out));
-  TEST_ASSERT_EQUAL_STRING("ger.1%20%C3%BC", out);
-  football::plan::encode("a b", out, 5);
-  TEST_ASSERT_EQUAL_STRING("a%20", out);
-  football::plan::encode("a b", out, 4);
-  TEST_ASSERT_EQUAL_STRING("a", out);
+void test_request_urls_escape_utf8_and_reject_overflow() {
+  football::provider::RequestSpec request;
+  request.source = {cfg::Provider::kOpenLigaDb, "bl1", "2026"};
+  request.operation = football::provider::Operation::kFixtures;
+  football::provider::HttpRequest http;
+  TEST_ASSERT_TRUE(football::provider::buildRequest(request, http));
+  TEST_ASSERT_EQUAL_STRING("https://api.openligadb.de/getmatchdata/bl1/2026",
+                           http.url);
+  request.source.competition = "ger.1 ü";
+  TEST_ASSERT_TRUE(football::provider::buildRequest(request, http));
+  TEST_ASSERT_EQUAL_STRING(
+      "https://api.openligadb.de/getmatchdata/ger.1%20%C3%BC/2026", http.url);
+  request.source.competition = "a b";
+  TEST_ASSERT_TRUE(football::provider::buildRequest(request, http));
+  TEST_ASSERT_EQUAL_STRING("https://api.openligadb.de/getmatchdata/a%20b/2026",
+                           http.url);
+  // Exactly the bounded source length must remain complete after 3x escaping.
+  // Overlong source fields and embedded NUL are rejected, never URL prefixes.
+  const std::string spaces(cfg::kCompetitionIdMaxBytes, ' ');
+  request.source.competition = spaces;
+  TEST_ASSERT_TRUE(football::provider::buildRequest(request, http));
+  TEST_ASSERT_EQUAL_UINT(
+      std::strlen("https://api.openligadb.de/getmatchdata//2026") +
+          3 * spaces.size(),
+      std::strlen(http.url));
+  const std::string overlong(cfg::kCompetitionIdMaxBytes + 1, ' ');
+  request.source.competition = overlong;
+  TEST_ASSERT_FALSE(football::provider::buildRequest(request, http));
+  request.source.competition = std::string_view("a\0b", 3);
+  TEST_ASSERT_FALSE(football::provider::buildRequest(request, http));
+  request.source.competition = "bl1";
+  const std::string season(cfg::kSeasonMaxBytes + 1, '2');
+  request.source.season = season;
+  TEST_ASSERT_FALSE(football::provider::buildRequest(request, http));
 }
 
-void test_matchday_days_current_and_next() {
-  uint32_t days[10], out[8];
+void test_matchday_days_previous_current_and_next() {
+  uint32_t days[10], out[16];
   const char* text[] = {"2026-10-09T07:00Z", "2026-10-10T07:00Z",
                         "2026-10-11T07:00Z", "2026-10-16T07:00Z",
                         "2026-10-17T07:00Z", "2026-10-18T07:00Z",
@@ -159,19 +207,21 @@ void test_matchday_days_current_and_next() {
                         "2026-10-25T07:00Z", "2026-10-30T07:00Z"};
   for (int i = 0; i < 10; ++i)
     days[i] = static_cast<uint32_t>(football::parseUtc(text[i]));
-  // Wednesday after matchday 5: matchdays 6 and 7.
-  TEST_ASSERT_EQUAL(6, football::plan::matchdayDays(days, 10, kBase, out, 8));
-  TEST_ASSERT_EQUAL_UINT32(days[3], out[0]);
-  TEST_ASSERT_EQUAL_UINT32(days[8], out[5]);
+  // Owner requirement: Wednesday retains complete matchdays5,6 and7.
+  TEST_ASSERT_EQUAL(9, football::plan::matchdayDays(days, 10, kBase, out, 16));
+  TEST_ASSERT_EQUAL_UINT32(days[0], out[0]);
+  TEST_ASSERT_EQUAL_UINT32(days[8], out[8]);
   // Sunday of matchday 5 (its last day has not ended): matchdays 5 and 6.
   const int64_t sunday = football::parseUtc("2026-10-11T18:00:00Z");
   TEST_ASSERT_EQUAL(6, football::plan::matchdayDays(days, 10, sunday, out, 8));
   TEST_ASSERT_EQUAL_UINT32(days[0], out[0]);
   // Capacity cuts the next matchday.
   TEST_ASSERT_EQUAL(4, football::plan::matchdayDays(days, 10, sunday, out, 4));
-  // After the last day: none.
+  // After the season: the latest matchday and its predecessor stay available.
   const int64_t later = football::parseUtc("2026-11-01T00:00:00Z");
-  TEST_ASSERT_EQUAL(0, football::plan::matchdayDays(days, 10, later, out, 8));
+  TEST_ASSERT_EQUAL(4, football::plan::matchdayDays(days, 10, later, out, 16));
+  TEST_ASSERT_EQUAL_UINT32(days[6], out[0]);
+  TEST_ASSERT_EQUAL_UINT32(days[9], out[3]);
 }
 
 void test_change_hash() {
@@ -187,7 +237,7 @@ void test_request_costs_and_inactive_source_no_demand() {
   Wanted w;
   planner.wanted(0, &entry, store, at(0), w);
   TEST_ASSERT_EQUAL_UINT8(3, w.id);
-  TEST_ASSERT_EQUAL_UINT8(3, w.cost[0]);  // fixtures with club
+  TEST_ASSERT_EQUAL_UINT8(3, w.cost[0]);  // season resolution + index/admission
   TEST_ASSERT_EQUAL_UINT8(2, w.cost[1]);  // table: season first
   TEST_ASSERT_EQUAL_UINT8(2, w.cost[2]);  // live: change date + round
   setSource(cfg::Provider::kEspn, "ger.1");
@@ -205,70 +255,83 @@ void test_openliga_fixtures_run() {
   setSource(cfg::Provider::kOpenLigaDb, "bl1", "91");
   Request r = expect(cfg::DataType::kFixtures,
                      "https://api.openligadb.de/getmatchdata/bl1");
-  TEST_ASSERT_EQUAL_STRING("", r.array);
+  TEST_ASSERT_EQUAL(football::provider::Operation::kCurrentSeason,
+                    r.spec.operation);
   const std::string round6 =
       "[" + olgRow(1, "2026-10-16T18:30:00Z", 6) + "," +
       olgRow(2, "2026-10-17T13:30:00Z", 6, "bl1", 2026, 7, 80) + "]";
   TEST_ASSERT_TRUE(feed(r, round6.c_str()));
   TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(0)));
-  const auto& state = planner.state(0);
-  TEST_ASSERT_EQUAL_UINT8(6, state.round);
-  TEST_ASSERT_EQUAL_STRING("2026", std::string(state.season.view()).c_str());
+  TEST_ASSERT_EQUAL_UINT8(6, planner.state(0).round);
+  TEST_ASSERT_EQUAL_STRING("2026",
+                           std::string(planner.state(0).season.view()).c_str());
   TEST_ASSERT_TRUE(stored(1) && stored(2));
 
-  r = expect(cfg::DataType::kFixtures,
-             "https://api.openligadb.de/getmatchdata/bl1/2026/7", 2);
-  const std::string round7 = "[" + olgRow(3, "2026-10-23T18:30:00Z", 7) + "]";
-  TEST_ASSERT_TRUE(feed(r, round7.c_str()));
-  TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(2)));
-
-  // The club's fixtures: rows of other competitions and seasons are skipped.
-  r = expect(cfg::DataType::kFixtures,
-             "https://api.openligadb.de/getmatchesbyteamid/91/1/1", 4);
-  const std::string club = "[" + olgRow(4, "2026-10-21T18:30:00Z", 4) + "," +
-                           olgRow(5, "2026-10-28T18:30:00Z", 2, "dfb") + "," +
-                           olgRow(6, "2025-10-28T18:30:00Z", 9, "BL1", 2025) +
-                           "]";
-  TEST_ASSERT_TRUE(feed(r, club.c_str()));
-  TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(4)));
-  TEST_ASSERT_TRUE(stored(3) && stored(4));
-  TEST_ASSERT_FALSE(stored(5));
-  TEST_ASSERT_FALSE(stored(6));
-
-  // The next run starts again with the current round.
-  expect(cfg::DataType::kFixtures, "https://api.openligadb.de/getmatchdata/bl1",
-         6);
+  // Complete season, deliberately out of round order. Ordinary matches retain
+  // previous/current/next; the own previous + three next identities add rows
+  // outside those rounds without retaining the fourth upcoming own match.
+  const std::string season =
+      "[" + olgRow(9, "2026-11-06T18:30:00Z", 9) + "," +
+      olgRow(4, "2026-10-02T18:30:00Z", 4) + "," +
+      olgRow(8, "2026-10-30T18:30:00Z", 8) + "," +
+      olgRow(7, "2026-10-09T18:30:00Z", 5, "bl1", 2026, 7, 80) + "," +
+      olgRow(3, "2026-10-23T18:30:00Z", 7) + "," +
+      round6.substr(1, round6.size() - 2) + "]";
+  r = expect(cfg::DataType::kFixtures, kOpenLigaSeasonUrl, 1);
+  TEST_ASSERT_EQUAL(Sink::kIndex, r.sink);
+  TEST_ASSERT_TRUE(feed(r, season.c_str()));
+  TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(1)));
+  TEST_ASSERT_FALSE(stored(3) || stored(4));  // Index does not admit fixtures.
+  r = expect(cfg::DataType::kFixtures, kOpenLigaSeasonUrl, 2);
+  TEST_ASSERT_EQUAL(Sink::kMatches, r.sink);
+  TEST_ASSERT_TRUE(feed(r, season.c_str()));
+  TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(2)));
+  for (const auto id : {1u, 2u, 3u, 4u, 7u, 8u}) TEST_ASSERT_TRUE(stored(id));
+  TEST_ASSERT_FALSE(stored(9));
+  TEST_ASSERT_EQUAL_UINT(6, store.matchCount());
+  // A later run starts at the full-season index, using the known season.
+  r = expect(cfg::DataType::kFixtures, kOpenLigaSeasonUrl, 6);
+  TEST_ASSERT_EQUAL(Sink::kIndex, r.sink);
 }
 
 void test_openliga_fixtures_without_club_and_explicit_season() {
   setSource(cfg::Provider::kOpenLigaDb, "bl1", "", "2026");
-  Request r = expect(cfg::DataType::kFixtures,
-                     "https://api.openligadb.de/getmatchdata/bl1");
-  const std::string rows = "[" + olgRow(1, "2026-10-16T18:30:00Z", 6) + "," +
-                           olgRow(2, "2025-10-16T18:30:00Z", 6, "bl1", 2025) +
-                           "]";
-  TEST_ASSERT_TRUE(feed(r, rows.c_str()));
-  TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(0)));
+  const std::string rows = "[" + olgRow(1, "2026-10-16T18:30:00Z", 6) + "]";
+  openLigaSeason(rows, 0);
   TEST_ASSERT_TRUE(stored(1));
-  TEST_ASSERT_FALSE(stored(2));
-  r = expect(cfg::DataType::kFixtures,
-             "https://api.openligadb.de/getmatchdata/bl1/2026/7", 2);
-  TEST_ASSERT_TRUE(feed(r, "[]"));
-  TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(2)));
+  // A foreign season/competition cannot establish a complete replacement.
+  // Preserve existing facts and never admit those foreign rows.
+  const std::string mixed =
+      "[" + olgRow(2, "2025-10-16T18:30:00Z", 6, "bl1", 2025) + "," +
+      olgRow(3, "2026-10-16T18:30:00Z", 6, "dfb") + "]";
+  const Request r = expect(cfg::DataType::kFixtures, kOpenLigaSeasonUrl, 4);
+  TEST_ASSERT_FALSE(feed(r, mixed.c_str()));
+  TEST_ASSERT_EQUAL(Step::kDone, planner.finish(false, at(4)));
+  TEST_ASSERT_TRUE(stored(1));
+  TEST_ASSERT_FALSE(stored(2) || stored(3));
 }
 
 void test_failure_ends_the_run() {
   setSource(cfg::Provider::kOpenLigaDb, "bl1", "91");
   Request r = expect(cfg::DataType::kFixtures,
                      "https://api.openligadb.de/getmatchdata/bl1");
-  TEST_ASSERT_TRUE(
-      feed(r, ("[" + olgRow(1, "2026-10-16T18:30:00Z", 6) + "]").c_str()));
+  const std::string rows = "[" + olgRow(1, "2026-10-16T18:30:00Z", 6) + "]";
+  TEST_ASSERT_TRUE(feed(r, rows.c_str()));
   TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(0)));
-  expect(cfg::DataType::kFixtures,
-         "https://api.openligadb.de/getmatchdata/bl1/2026/7", 2);
-  TEST_ASSERT_EQUAL(Step::kDone, planner.finish(false, at(2)));
-  expect(cfg::DataType::kFixtures, "https://api.openligadb.de/getmatchdata/bl1",
-         60);
+  r = expect(cfg::DataType::kFixtures, kOpenLigaSeasonUrl, 2);
+  TEST_ASSERT_TRUE(feed(r, rows.c_str()));
+  TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(2)));
+  r = expect(cfg::DataType::kFixtures, kOpenLigaSeasonUrl, 3);
+  TEST_ASSERT_EQUAL(Sink::kMatches, r.sink);
+  // Busy was not sent: retry the same admission pass, not the season/index.
+  const auto busy = planner.complete(football::plan::Fetch::kBusy, at(3));
+  TEST_ASSERT_EQUAL(football::schedule::Outcome::kDeferred, busy.outcome);
+  r = expect(cfg::DataType::kFixtures, kOpenLigaSeasonUrl, 4);
+  TEST_ASSERT_EQUAL(Sink::kMatches, r.sink);
+  TEST_ASSERT_EQUAL(Step::kDone, planner.finish(false, at(4)));
+  r = expect(cfg::DataType::kFixtures, kOpenLigaSeasonUrl, 60);
+  TEST_ASSERT_EQUAL(Sink::kIndex, r.sink);
+  TEST_ASSERT_TRUE(stored(1));
 }
 
 void test_season_request_without_season_is_invalid() {
@@ -299,14 +362,13 @@ void test_openliga_live_checks_the_change_date_per_round() {
   setSource(cfg::Provider::kOpenLigaDb, "bl1", "", "2026");
   // A match of round 6 kicked off ten minutes ago.
   const int64_t now = football::parseUtc("2026-10-16T18:40:00Z") - kBase;
-  Request r = expect(cfg::DataType::kFixtures,
-                     "https://api.openligadb.de/getmatchdata/bl1", now);
-  TEST_ASSERT_TRUE(
-      feed(r, ("[" + olgRow(1, "2026-10-16T18:30:00Z", 6) + "]").c_str()));
-  planner.finish(true, at(now));
+  const std::string rows = "[" + olgRow(1, "2026-10-16T18:30:00Z", 6) + "]";
+  openLigaSeason(rows, now);
+  Request r;
   r = expect(cfg::DataType::kLive,
              "https://api.openligadb.de/getlastchangedate/bl1/2026/6", now);
-  TEST_ASSERT_NULL(r.array);
+  TEST_ASSERT_EQUAL(football::provider::Operation::kLastChange,
+                    r.spec.operation);
   TEST_ASSERT_TRUE(feed(r, R"("2026-10-16T18:39:00.1")"));
   TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(now)));
   r = expect(cfg::DataType::kLive,
@@ -338,10 +400,7 @@ void test_openliga_live_checks_the_change_date_per_round() {
   // A change date that is no string is an invalid response.
   setUp();
   setSource(cfg::Provider::kOpenLigaDb, "bl1", "", "2026");
-  r = expect(cfg::DataType::kFixtures,
-             "https://api.openligadb.de/getmatchdata/bl1", now);
-  feed(r, ("[" + olgRow(1, "2026-10-16T18:30:00Z", 6) + "]").c_str());
-  planner.finish(true, at(now));
+  openLigaSeason(rows, now);
   r = expect(cfg::DataType::kLive,
              "https://api.openligadb.de/getlastchangedate/bl1/2026/6", now);
   TEST_ASSERT_FALSE(feed(r, "[]"));
@@ -354,12 +413,11 @@ void test_matches_notice_clears_only_after_a_complete_fixtures_run() {
   const int64_t now = football::parseUtc("2026-10-16T18:40:00Z") - kBase;
   const std::string round6 = "[" + olgRow(1, "2026-10-16T18:30:00Z", 6) + "]";
   store.flag(entry.id, football::kNoticeMatches, true);
-  Request r = expect(cfg::DataType::kFixtures,
-                     "https://api.openligadb.de/getmatchdata/bl1", now);
+  Request r = expect(cfg::DataType::kFixtures, kOpenLigaSeasonUrl, now);
   TEST_ASSERT_TRUE(feed(r, round6.c_str()));
   TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(now)));
-  expect(cfg::DataType::kFixtures,
-         "https://api.openligadb.de/getmatchdata/bl1/2026/7", now + 2);
+  TEST_ASSERT_EQUAL_UINT8(football::kNoticeMatches, store.notices(entry.id));
+  expect(cfg::DataType::kFixtures, kOpenLigaSeasonUrl, now + 2);
   TEST_ASSERT_EQUAL(Step::kDone, planner.finish(false, at(now + 2)));
   TEST_ASSERT_EQUAL_UINT8(football::kNoticeMatches, store.notices(entry.id));
   r = expect(cfg::DataType::kLive,
@@ -371,14 +429,13 @@ void test_matches_notice_clears_only_after_a_complete_fixtures_run() {
   TEST_ASSERT_TRUE(feed(r, round6.c_str()));
   TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(now + 6)));
   TEST_ASSERT_EQUAL_UINT8(football::kNoticeMatches, store.notices(entry.id));
-  r = expect(cfg::DataType::kFixtures,
-             "https://api.openligadb.de/getmatchdata/bl1", now + 60);
+  r = expect(cfg::DataType::kFixtures, kOpenLigaSeasonUrl, now + 60);
   TEST_ASSERT_TRUE(feed(r, round6.c_str()));
   TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(now + 60)));
-  r = expect(cfg::DataType::kFixtures,
-             "https://api.openligadb.de/getmatchdata/bl1/2026/7", now + 62);
-  TEST_ASSERT_TRUE(feed(r, "[]"));
-  TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(now + 62)));
+  TEST_ASSERT_EQUAL_UINT8(football::kNoticeMatches, store.notices(entry.id));
+  r = expect(cfg::DataType::kFixtures, kOpenLigaSeasonUrl, now + 61);
+  TEST_ASSERT_TRUE(feed(r, round6.c_str()));
+  TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(now + 61)));
   TEST_ASSERT_EQUAL_UINT8(0, store.notices(entry.id));
 }
 
@@ -387,63 +444,80 @@ void test_espn_fixtures_from_match_days() {
   Request r = expect(cfg::DataType::kFixtures,
                      "https://sports.core.api.espn.com/v2/sports/soccer/"
                      "leagues/ger.1/calendar/ondays");
-  TEST_ASSERT_EQUAL_STRING("dates", r.array);
+  TEST_ASSERT_EQUAL(football::provider::Operation::kCalendarDays,
+                    r.spec.operation);
   TEST_ASSERT_TRUE(Sink::kDays == r.sink);
-  JsonDocument doc;
-  deserializeJson(doc, kDays);
-  for (JsonVariantConst day : doc["eventDate"]["dates"].as<JsonArrayConst>())
-    TEST_ASSERT_TRUE(Planner::consume(day, &planner));
+  TEST_ASSERT_TRUE(feed(r, kDays));
   TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(0)));
-  TEST_ASSERT_EQUAL_UINT8(6, planner.state(0).day_count);
-  const char* expected[] = {"20261016", "20261017", "20261018",
+  TEST_ASSERT_EQUAL_UINT8(9, planner.state(0).fixtures.count);
+  TEST_ASSERT_EQUAL_STRING("2026",
+                           std::string(planner.state(0).season.view()).c_str());
+  const char* expected[] = {"20261009", "20261010", "20261011",
+                            "20261016", "20261017", "20261018",
                             "20261023", "20261024", "20261025"};
-  for (int i = 0; i < 6; ++i) {
+  for (int i = 0; i < 9; ++i) {
     const std::string url =
         std::string(
             "https://site.api.espn.com/apis/site/v2/sports/soccer/"
             "ger.1/scoreboard?dates=") +
-        expected[i];
+        expected[i] + "&season=2026";
     r = expect(cfg::DataType::kFixtures, url.c_str(), 2 + i);
-    TEST_ASSERT_EQUAL_STRING("events", r.array);
-    TEST_ASSERT_TRUE(feed(r, i == 0 ? kEspnUpcoming : R"({"events":[]})"));
-    TEST_ASSERT_EQUAL(i < 5 ? Step::kMore : Step::kDone,
-                      planner.finish(true, at(2 + i)));
+    TEST_ASSERT_EQUAL(football::provider::Operation::kFixtures,
+                      r.spec.operation);
+    // The recorded event belongs to October16, never to another requested day.
+    TEST_ASSERT_TRUE(feed(r, espnDay(i == 3).c_str()));
+    TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(2 + i)));
+  }
+  for (unsigned pass = 0; pass < 2; ++pass) {
+    r = expect(cfg::DataType::kFixtures,
+               "https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/"
+               "teams/598/schedule?season=2026",
+               12 + pass);
+    TEST_ASSERT_EQUAL(pass == 0 ? Sink::kOwnIndex : Sink::kOwnMatches, r.sink);
+    TEST_ASSERT_TRUE(feed(
+        r,
+        R"({"events":[],"requestedSeason":{"year":2026},"team":{"id":"598"}})"));
+    TEST_ASSERT_EQUAL(pass == 0 ? Step::kMore : Step::kDone,
+                      planner.finish(true, at(12 + pass)));
   }
   TEST_ASSERT_TRUE(stored(401884770, cfg::Provider::kEspn));
   Wanted w;
-  planner.wanted(0, &entry, store, at(0), w);
-  TEST_ASSERT_EQUAL_UINT8(7, w.cost[0]);
+  planner.wanted(0, &entry, store, at(14), w);
+  TEST_ASSERT_EQUAL_UINT8(12,
+                          w.cost[0]);  // Calendar +9days + own index/admission.
 }
 
 void test_espn_live_uses_the_match_day() {
   setSource(cfg::Provider::kEspn, "ger.1");
   // Kickoff 2026-10-16 18:30 UTC; ten minutes later.
   const int64_t now = football::parseUtc("2026-10-16T18:40:00Z") - kBase;
-  football::MapContext c{entry.id, cfg::Provider::kEspn, 0, at(now)};
+  football::MapContext c;
+  c.competition = entry.id;
+  c.provider = cfg::Provider::kEspn;
+  c.clock = at(now);
   JsonDocument doc;
   deserializeJson(doc, kEspnUpcoming);
   for (JsonVariantConst e : doc["events"].as<JsonArrayConst>())
     football::storeMatch(e, store, c);
-  // Without stored match days: the scoreboard without date.
+  // Without verified stored match days: the scoreboard without a date.
   Request r = expect(cfg::DataType::kLive,
                      "https://site.api.espn.com/apis/site/v2/sports/soccer/"
                      "ger.1/scoreboard",
                      now);
-  TEST_ASSERT_TRUE(feed(r, kEspnUpcoming));
+  TEST_ASSERT_TRUE(feed(r, espnDay(true).c_str()));
   TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(now)));
-  // With the match days: the day holding the kickoff.
   r = expect(cfg::DataType::kFixtures,
              "https://sports.core.api.espn.com/v2/sports/soccer/leagues/"
              "ger.1/calendar/ondays",
              now);
-  deserializeJson(doc, kDays);
-  for (JsonVariantConst day : doc["eventDate"]["dates"].as<JsonArrayConst>())
-    Planner::consume(day, &planner);
-  planner.finish(true, at(now));
+  TEST_ASSERT_TRUE(feed(r, kDays));
+  TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(now)));
+  // With verified match days: the requested day contains the live kickoff.
   r = expect(cfg::DataType::kLive,
              "https://site.api.espn.com/apis/site/v2/sports/soccer/"
-             "ger.1/scoreboard?dates=20261016",
+             "ger.1/scoreboard?dates=20261016&season=2026",
              now + 2);
+  TEST_ASSERT_TRUE(feed(r, espnDay(true).c_str()));
   TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(now + 2)));
 }
 
@@ -452,8 +526,7 @@ void test_espn_table() {
   Request r = expect(cfg::DataType::kTable,
                      "https://site.web.api.espn.com/apis/v2/sports/soccer/"
                      "ger.1/standings");
-  TEST_ASSERT_EQUAL_STRING("entries", r.array);
-  TEST_ASSERT_TRUE(r.optional);
+  TEST_ASSERT_EQUAL(football::provider::Operation::kTable, r.spec.operation);
   TEST_ASSERT_TRUE(feed(r, kEspnTable));
   TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(0)));
   TEST_ASSERT_EQUAL(18, store.rowCount());
@@ -473,11 +546,7 @@ void test_api_football_resolves_the_season() {
       feed(r, R"({"response":[{"seasons":[{"year":2025,)"
               R"("current":false},{"year":2026,"current":true}]}]})"));
   TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(0)));
-  r = expect(cfg::DataType::kFixtures,
-             "https://v3.football.api-sports.io/fixtures?league=78&season=2026"
-             "&from=2026-10-07&to=2026-10-21",
-             2);
-  TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(2)));
+  emptyApiSeason(2);
   expect(cfg::DataType::kLive,
          "https://v3.football.api-sports.io/fixtures?league=78&season=2026"
          "&from=2026-10-14&to=2026-10-14",
@@ -498,48 +567,29 @@ void test_api_football_fixtures_recheck_the_season_daily() {
   TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(0)));
   TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(kBase),
                            planner.state(0).season_utc);
-  expect(cfg::DataType::kFixtures,
-         "https://v3.football.api-sports.io/fixtures?league=78&season=2026"
-         "&from=2026-10-07&to=2026-10-21",
-         2);
-  planner.finish(true, at(2));
+  emptyApiSeason(2);
   // Less than 24 h later: the known season.
   const int64_t day = cfg::kSeasonRecheckS;
-  expect(cfg::DataType::kFixtures,
-         "https://v3.football.api-sports.io/fixtures?league=78&season=2026"
-         "&from=2026-10-08&to=2026-10-22",
-         day - 1);
-  planner.finish(true, at(day - 1));
+  emptyApiSeason(day - 2);
   // A table run does not resolve it again.
   expect(cfg::DataType::kTable,
          "https://v3.football.api-sports.io/standings?league=78&season=2026",
          day);
   planner.finish(true, at(day));
-  // Saved and restored: the resolution time comes back with the season.
-  const auto resolved = planner.saved(0, entry);
-  TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(kBase), resolved.season_utc);
-  planner.reset();
-  planner.restore(0, entry, resolved);
-  TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(kBase),
-                           planner.state(0).season_utc);
   // 24 h after the resolution: the fixtures run asks for the season first.
   r = expect(cfg::DataType::kFixtures, leagues, day + 2);
   TEST_ASSERT_TRUE(feed(r, season));
   TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(day + 2)));
   TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(kBase + day + 2),
                            planner.state(0).season_utc);
-  expect(cfg::DataType::kFixtures,
-         "https://v3.football.api-sports.io/fixtures?league=78&season=2026"
-         "&from=2026-10-08&to=2026-10-22",
-         day + 4);
-  TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(day + 4)));
+  emptyApiSeason(day + 4);
   // A clock that went back before the resolution counts as stale too.
   expect(cfg::DataType::kFixtures, leagues, -10);
 }
 
 // OQ-264: the daily-cap degradation counts an API-Football fixtures run as
-// the requests it really sends: 2 while the season is unknown or due, 1 in
-// between.
+// the requests it really sends: 3 while the season is unknown or due, 2 in
+// between (complete-season index + admission).
 void test_api_football_fixtures_cost_matches_the_sent_requests() {
   setSource(cfg::Provider::kApiFootball, "78");
   const char* season =
@@ -553,8 +603,10 @@ void test_api_football_fixtures_cost_matches_the_sent_requests() {
       Request r;
       TEST_ASSERT_TRUE(planner.request(job(cfg::DataType::kFixtures), entry,
                                        store, at(dt + sent), r));
-      TEST_ASSERT_TRUE(feed(
-          r, std::strstr(r.url, "leagues?") ? season : R"({"response":[]})"));
+      TEST_ASSERT_TRUE(
+          feed(r, std::strstr(football::test_support::http(r).url, "leagues?")
+                      ? season
+                      : kApiSeasonEmpty));
       step = planner.finish(true, at(dt + sent));
       ++sent;
     }
@@ -563,10 +615,10 @@ void test_api_football_fixtures_cost_matches_the_sent_requests() {
     return sent;
   };
   const int64_t day = cfg::kSeasonRecheckS;
-  TEST_ASSERT_EQUAL_UINT32(2, run(0));         // season unknown
-  TEST_ASSERT_EQUAL_UINT32(1, run(day - 10));  // season known
-  TEST_ASSERT_EQUAL_UINT32(2, run(day + 10));  // season due again
-  TEST_ASSERT_EQUAL_UINT32(1, run(day + 20));
+  TEST_ASSERT_EQUAL_UINT32(3, run(0));         // season unknown
+  TEST_ASSERT_EQUAL_UINT32(2, run(day - 10));  // season known
+  TEST_ASSERT_EQUAL_UINT32(3, run(day + 10));  // season due again
+  TEST_ASSERT_EQUAL_UINT32(2, run(day + 20));
 }
 
 // Without a valid UTC clock the known season is kept.
@@ -578,26 +630,31 @@ void test_api_football_season_kept_without_a_clock() {
   TEST_ASSERT_TRUE(feed(r, R"({"response":[{"seasons":[{"year":2026,)"
                            R"("current":true}]}]})"));
   TEST_ASSERT_EQUAL(Step::kMore, planner.finish(true, at(0)));
-  expect(cfg::DataType::kFixtures,
-         "https://v3.football.api-sports.io/fixtures?league=78&season=2026"
-         "&from=2026-10-07&to=2026-10-21",
-         2);
-  TEST_ASSERT_EQUAL(Step::kDone, planner.finish(true, at(2)));
+  emptyApiSeason(2);
   const Clock no_utc{0, kBoot + 2 * cfg::kSeasonRecheckS};
   TEST_ASSERT_TRUE(
       planner.request(job(cfg::DataType::kFixtures), entry, store, no_utc, r));
-  TEST_ASSERT_NULL(std::strstr(r.url, "leagues?"));
-  TEST_ASSERT_NOT_NULL(std::strstr(r.url, "season=2026"));
+  // A full-season request needs no dated horizon. Without UTC, the resolved
+  // season is retained rather than triggering another season discovery.
+  TEST_ASSERT_EQUAL(football::provider::Operation::kFixtures, r.spec.operation);
+  TEST_ASSERT_EQUAL_STRING("2026", std::string(r.spec.source.season).c_str());
 }
 
 void test_football_data_urls() {
   setSource(cfg::Provider::kFootballData, "BL1", "", "2026");
-  // dateTo is exclusive: the horizon's last day and today's live matches
-  // need the following day as the end.
-  expect(cfg::DataType::kFixtures,
-         "https://api.football-data.org/v4/competitions/BL1/"
-         "matches?dateFrom=2026-10-07&dateTo=2026-10-22&season=2026");
-  planner.finish(true, at(0));
+  // Fixtures use two full-season passes; only live uses the dated endpoint.
+  for (unsigned pass = 0; pass < 2; ++pass) {
+    const auto request = expect(cfg::DataType::kFixtures,
+                                "https://api.football-data.org/v4/competitions/"
+                                "BL1/matches?season=2026");
+    TEST_ASSERT_EQUAL(pass == 0 ? Sink::kIndex : Sink::kMatches, request.sink);
+    TEST_ASSERT_TRUE(feed(
+        request, R"({"matches":[],"filters":{"season":"2026"},)"
+                 R"("competition":{"code":"BL1"},"resultSet":{"count":0}})"));
+    TEST_ASSERT_EQUAL(pass == 0 ? Step::kMore : Step::kDone,
+                      planner.finish(true, at(0)));
+  }
+  // dateTo is exclusive, so today's live endpoint ends on the next day.
   expect(cfg::DataType::kLive,
          "https://api.football-data.org/v4/competitions/BL1/"
          "matches?dateFrom=2026-10-14&dateTo=2026-10-15&season=2026");
@@ -624,14 +681,6 @@ void test_events_have_no_request_and_a_source_change_starts_fresh() {
   TEST_ASSERT_EQUAL_UINT8(0, planner.state(0).round);
 }
 
-void feedDays(const Request& r) {
-  JsonDocument doc;
-  deserializeJson(doc, kDays);
-  for (JsonVariantConst day : doc["eventDate"]["dates"].as<JsonArrayConst>())
-    TEST_ASSERT_TRUE(Planner::consume(day, &planner));
-  (void)r;
-}
-
 // ESPN substitutions from an exact canonical match target. The summary
 // rows below are written by the agent after the shape checked on
 // 2026-10-14 (keyEvents, type.type "substitution", participants: on, off).
@@ -642,7 +691,11 @@ void test_exact_target_summary_maps_available_substitutions() {
 
   // Kickoff 2026-10-16 18:30 UTC; ten minutes later.
   const int64_t now = football::parseUtc("2026-10-16T18:40:00Z") - kBase;
-  football::MapContext c{entry.id, cfg::Provider::kEspn, 125, at(now)};
+  football::MapContext c;
+  c.competition = entry.id;
+  c.provider = cfg::Provider::kEspn;
+  c.club = 125;
+  c.clock = at(now);
   JsonDocument doc;
   deserializeJson(doc, kEspnUpcoming);
   for (JsonVariantConst e : doc["events"].as<JsonArrayConst>())
@@ -663,10 +716,10 @@ void test_exact_target_summary_maps_available_substitutions() {
   TEST_ASSERT_EQUAL_STRING(
       "https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/"
       "summary?event=401884770",
-      r.url);
-  TEST_ASSERT_EQUAL_STRING("keyEvents", r.array);
-  TEST_ASSERT_TRUE(r.optional);
-  TEST_ASSERT_EQUAL_UINT32(cfg::kProviderSummaryBodyBytes, r.body);
+      football::test_support::http(r).url);
+  TEST_ASSERT_EQUAL(football::provider::Operation::kSummary, r.spec.operation);
+  TEST_ASSERT_EQUAL_UINT32(cfg::kProviderSummaryBodyBytes,
+                           football::test_support::http(r).body_limit);
   const char* summary =
       R"({"boxscore":{},"keyEvents":[)"
       R"({"id":"501","type":{"id":"76","text":"Substitution","type":"substitution"},)"
@@ -716,10 +769,37 @@ void test_openliga_live_without_a_known_round_asks_the_current_one() {
   TEST_ASSERT_TRUE(stored(1));
 }
 
+// Owner-approved dataset semantics: successful complete empty tables replace
+// stale rows; failed/incomplete responses keep the last successful table.
+void test_complete_empty_table_replaces_stale_rows() {
+  setSource(cfg::Provider::kOpenLigaDb, "bl1", "", "2026");
+  football::StoredRow row;
+  row.points = 12;
+  store.beginTable(entry.id);
+  TEST_ASSERT_TRUE(store.appendRow(row));
+  TEST_ASSERT_TRUE(store.commitTable(true));
+  Request request;
+  TEST_ASSERT_TRUE(planner.request(job(cfg::DataType::kTable), entry, store,
+                                   at(0), request));
+  TEST_ASSERT_TRUE(feed(request, "[]"));
+  planner.finish(false, at(0));
+  TEST_ASSERT_EQUAL_UINT(1, store.rowCount());
+  planner.reset();
+  TEST_ASSERT_TRUE(planner.request(job(cfg::DataType::kTable), entry, store,
+                                   at(1), request));
+  TEST_ASSERT_TRUE(feed(request, "[]"));
+  planner.finish(true, at(1));
+  TEST_ASSERT_EQUAL_UINT(0, store.rowCount());
+  TEST_ASSERT_EQUAL(
+      football::schedule::Outcome::kOk,
+      planner.complete(football::plan::Fetch::kOk, at(1)).outcome);
+}
+
 int main() {
   UNITY_BEGIN();
-  RUN_TEST(test_encode_escapes_and_cuts_at_a_whole_escape);
-  RUN_TEST(test_matchday_days_current_and_next);
+  RUN_TEST(test_complete_empty_table_replaces_stale_rows);
+  RUN_TEST(test_request_urls_escape_utf8_and_reject_overflow);
+  RUN_TEST(test_matchday_days_previous_current_and_next);
   RUN_TEST(test_change_hash);
   RUN_TEST(test_request_costs_and_inactive_source_no_demand);
   RUN_TEST(test_openliga_fixtures_run);

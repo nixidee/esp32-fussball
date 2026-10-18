@@ -24,6 +24,15 @@ Content probe(const Input& input, const Entry& entry, PageMode page_mode,
   return out;
 }
 
+policy::Rule ruleFor(const Input& input, const Entry& entry) {
+  for (unsigned i = 0; i < input.program.count; ++i) {
+    const auto& row = input.program.entries[i];
+    if (row.type == entry.type && row.competition == entry.competition)
+      return row.rule;
+  }
+  return {};
+}
+
 bool eligible(const Input& input, const Entry& entry, PageMode page_mode,
               Content* content = nullptr, uint16_t visible_page = 0) {
   if (!entry.valid() ||
@@ -36,9 +45,7 @@ bool eligible(const Input& input, const Entry& entry, PageMode page_mode,
              input.rules.slide_count == 0) {
     return false;
   }
-  const auto rule =
-      policy::resolve(input.rules, input.selected.phase, entry.type,
-                      entry.competition, entry.incarnation);
+  const auto rule = ruleFor(input, entry);
   if (!rule.enabled || (page_mode == PageMode::kAutomatic && !rule.automatic))
     return false;
   const auto found = probe(input, entry, page_mode, visible_page);
@@ -49,14 +56,12 @@ bool eligible(const Input& input, const Entry& entry, PageMode page_mode,
 
 template <class Visit>
 void rawEntries(const Input& input, Visit visit) {
-  int position = 0;
-  for (const auto type : input.rules.order) {
-    if (screen::sporting(type)) {
-      for (const auto& c : input.competitions.entries)
-        visit(Entry{type, c.id, c.incarnation}, position++);
-    } else {
-      visit(Entry{type}, position++);
-    }
+  for (unsigned position = 0; position < input.program.count; ++position) {
+    const auto& row = input.program.entries[position];
+    const auto* competition = input.competitions.find(row.competition);
+    visit(Entry{row.type, row.competition,
+                competition ? competition->incarnation : 0},
+          position);
   }
 }
 
@@ -66,31 +71,20 @@ Entry adjacentMode(const Input& input, const Entry& visible, PageMode page_mode,
   rawEntries(input, [&](const Entry& entry, int position) {
     if (entry == visible) origin = position;
   });
-  const int total =
-      2 + screen::kSportTypeCount * input.competitions.entries.size();
-  Entry chosen;
-  int best = total + 1;
-  rawEntries(input, [&](const Entry& entry, int position) {
-    if ((same_type && entry.type != visible.type) ||
-        !eligible(input, entry, page_mode))
-      return;
-    if (origin < 0) {
-      if (direction >= 0) {
-        if (!chosen.valid()) chosen = entry;
-      } else {
-        chosen = entry;
-      }
-      return;
-    }
-    int distance = direction >= 0 ? (position - origin + total) % total
-                                  : (origin - position + total) % total;
-    if (distance == 0) distance = total;
-    if (distance < best) {
-      chosen = entry;
-      best = distance;
-    }
-  });
-  return chosen;
+  const int total = input.program.count;
+  for (int step = 1; step <= total; ++step) {
+    const int position =
+        origin < 0 ? (direction >= 0 ? step - 1 : total - step)
+                   : (origin + (direction >= 0 ? step : -step) + total) % total;
+    const auto& row = input.program.entries[position];
+    const auto* competition = input.competitions.find(row.competition);
+    const Entry entry{row.type, row.competition,
+                      competition ? competition->incarnation : 0};
+    if ((!same_type || entry.type == visible.type) &&
+        eligible(input, entry, page_mode))
+      return entry;
+  }
+  return {};
 }
 
 void invalidate(State& state, int64_t now) {
@@ -116,9 +110,7 @@ void enter(State& state, const Input& input, Entry entry, bool manual,
   if (entry.valid()) {
     const auto content = probe(input, entry, mode(state));
     state.pages = screen::sporting(entry.type) ? content.pages : 1;
-    const auto rule =
-        policy::resolve(input.rules, input.selected.phase, entry.type,
-                        entry.competition, entry.incarnation);
+    const auto rule = ruleFor(input, entry);
     state.total_ms = policy::effectiveVisitMs(rule, state.pages);
     if (entry.type == screen::Type::kSlideshow && input.rules.slide_count) {
       state.image_count = input.rules.slide_count;
@@ -438,8 +430,8 @@ void applyAction(State& state, const Input& input, Action action, int64_t now) {
         state.elapsed_ms = std::min(state.total_ms, state.elapsed_ms + left);
         state.image_elapsed_ms = imageTime(input);
       } else if (screen::sporting(state.entry.type)) {
-        state.elapsed_ms = policy::pageBoundaryMs(state.total_ms, state.pages,
-                                                state.page + 1);
+        state.elapsed_ms =
+            policy::pageBoundaryMs(state.total_ms, state.pages, state.page + 1);
       } else {
         state.elapsed_ms = state.total_ms;
       }
@@ -472,7 +464,8 @@ void applyAction(State& state, const Input& input, Action action, int64_t now) {
   }
 }
 
-void presented(State& state, uint32_t revision, int64_t now) {
+void presented(State& state, uint32_t revision, int64_t now,
+               bool image_content) {
   if (revision != state.revision || state.presented || !state.entry.valid())
     return;
   state.presented = true;
@@ -480,8 +473,8 @@ void presented(State& state, uint32_t revision, int64_t now) {
   state.visible_entry = state.entry;
   state.visible_page = state.page;
   state.visible_image = state.image_id;
-  if (!state.frame && state.entry.type == screen::Type::kSlideshow &&
-      state.image_count)
+  if (image_content && !state.frame &&
+      state.entry.type == screen::Type::kSlideshow && state.image_count)
     state.next_image = (state.image_cursor + 1) % state.image_count;
 }
 

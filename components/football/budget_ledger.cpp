@@ -15,18 +15,6 @@ Load parse(const void* data, std::size_t length, Record* out) {
   return Load::kValid;
 }
 
-Load parseLegacy(const void* data, std::size_t length, unsigned provider,
-                 Record* out) {
-  if (data == nullptr) return Load::kMissing;
-  LegacyRecord legacy{};
-  if (length != sizeof(legacy) || provider >= cfg::kProviderCount)
-    return Load::kDamaged;
-  std::memcpy(&legacy, data, sizeof(legacy));
-  if (legacy.magic != cfg::kBudgetLegacyMagic) return Load::kDamaged;
-  *out = {cfg::kBudgetRecordMagic, legacy.day, legacy.reserved[provider]};
-  return Load::kValid;
-}
-
 void Counter::load(Load state, const Record& record) {
   record_ =
       state == Load::kValid ? record : Record{cfg::kBudgetRecordMagic, 0, 0};

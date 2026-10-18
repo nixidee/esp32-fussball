@@ -86,7 +86,7 @@ void addMatch(uint32_t id, int64_t kickoff_dt, bool own = false,
   m.home = store.team(kId, kOlg, id * 2, "Home");
   m.away = store.team(kId, kOlg, id * 2 + 1, "Away");
   if (own) m.flags = football::kMatchOwn;
-  TEST_ASSERT_NOT_NULL(store.upsert(m, at(0), "Home FC", "Away FC"));
+  TEST_ASSERT_NOT_NULL(store.upsert(m, at(0)));
 }
 
 // Runs the decision of next(): a run job sends its request now and ends
@@ -211,7 +211,8 @@ void test_degrade_gives_way_in_class_order() {
   // The live table alone is stretched: 117 others, 3 left for 100.
   f = degrade(demand, 120);
   TEST_ASSERT_EQUAL_UINT8(34, f[0]);
-  for (std::size_t c = 1; c < kClassCount; ++c) TEST_ASSERT_EQUAL_UINT8(1, f[c]);
+  for (std::size_t c = 1; c < kClassCount; ++c)
+    TEST_ASSERT_EQUAL_UINT8(1, f[c]);
   // Exactly the live and own demand fit: everything before is skipped.
   f = degrade(demand, 100);
   const Factors skip3{0, 0, 0, 1, 1};
@@ -254,7 +255,8 @@ void test_live_window_per_phase() {
   TEST_ASSERT_EQUAL_UINT32(utc(6300), end);
   m.finished_at = 0;
   TEST_ASSERT_FALSE(liveWindow(m, start, end));
-  for (const auto p : {Phase::kPostponed, Phase::kCancelled, Phase::kAbandoned}) {
+  for (const auto p :
+       {Phase::kPostponed, Phase::kCancelled, Phase::kAbandoned}) {
     m.phase = p;
     TEST_ASSERT_FALSE(liveWindow(m, start, end));
   }
@@ -344,8 +346,8 @@ void test_window_that_ended_just_before_boot_gets_its_final_fetch() {
 
 void test_table_and_live_table_share_their_start() {
   addMatch(1, 3600);
-  const uint8_t types = bit(cfg::DataType::kTable) |
-                        bit(cfg::DataType::kLiveTable);
+  const uint8_t types =
+      bit(cfg::DataType::kTable) | bit(cfg::DataType::kLiveTable);
   // At the window start both are due; the table (higher class) runs and
   // its start covers the live table.
   const int64_t start = 3600 - kLead;
@@ -508,36 +510,6 @@ void test_run_cost_multiplies_the_daily_demand() {
   TEST_ASSERT_TRUE(scheduler.degraded());
 }
 
-// ------------------------------------------------------- restored data
-
-void test_seeded_job_waits_for_the_rest_of_its_interval() {
-  const uint8_t types = bit(cfg::DataType::kFixtures);
-  // Restored data 600 s old: due 3000 s after the seed.
-  scheduler.seed(0, kId, cfg::DataType::kFixtures, 600, mono(0));
-  assertWaits(step(inputs(0, types)), Wait::kIdle, mono(3000));
-  assertRuns(step(inputs(3000, types)), cfg::DataType::kFixtures);
-}
-
-void test_seeded_job_older_than_its_interval_runs_at_once() {
-  const uint8_t types = bit(cfg::DataType::kFixtures);
-  // Older than the monotonic clock itself (saved before the boot).
-  scheduler.seed(0, kId, cfg::DataType::kFixtures, mono(0) + 7200, mono(0));
-  assertRuns(step(inputs(0, types)), cfg::DataType::kFixtures);
-}
-
-void test_seed_ignores_live_types_and_other_ids_start_fresh() {
-  const uint8_t live = bit(cfg::DataType::kLive);
-  addMatch(1, 0, false, Phase::kLive);
-  scheduler.seed(0, kId, cfg::DataType::kLive, 10, mono(0));
-  assertRuns(step(inputs(0, live)), cfg::DataType::kLive);
-
-  scheduler.reset();
-  const uint8_t fixtures = bit(cfg::DataType::kFixtures);
-  scheduler.seed(0, 2, cfg::DataType::kFixtures, 10, mono(0));
-  // The slot holds competition kId: the seed of competition 2 is gone.
-  assertRuns(step(inputs(0, fixtures)), cfg::DataType::kFixtures);
-}
-
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_window_never_exceeds_limit);
@@ -564,8 +536,5 @@ int main() {
   RUN_TEST(test_daily_cap_degrades_before_it_runs_out);
   RUN_TEST(test_continued_run_stays_due_until_its_last_request);
   RUN_TEST(test_run_cost_multiplies_the_daily_demand);
-  RUN_TEST(test_seeded_job_waits_for_the_rest_of_its_interval);
-  RUN_TEST(test_seeded_job_older_than_its_interval_runs_at_once);
-  RUN_TEST(test_seed_ignores_live_types_and_other_ids_start_fresh);
   return UNITY_END();
 }

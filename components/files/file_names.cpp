@@ -40,4 +40,10 @@ bool isErased(std::span<const uint8_t> bytes) {
                      [](uint8_t b) { return b == kErasedByte; });
 }
 
+bool hasReplacementSpace(std::size_t total, std::size_t used,
+                         std::size_t candidate) {
+  return used <= total &&
+         std::max(candidate, cfg::kImageReserveBytes) <= total - used;
+}
+
 }  // namespace files

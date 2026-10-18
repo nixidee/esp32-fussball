@@ -22,12 +22,14 @@
 #include "esp_lvgl_port.h"
 #include "esp_system.h"
 #include "esp_task_wdt.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "gc9a01_panel.h"
 #include "hw_target.h"
 #include "jpeg_observer.h"
 #include "lvgl.h"
+#include "scene_progress.h"
 #include "screenshot_capture.h"
 #include "sdkconfig.h"
 
@@ -38,19 +40,6 @@ constexpr const char* kTag = "display";
 
 constexpr spi_host_device_t kSpiHost = SPI2_HOST;
 constexpr std::size_t kBytesPerPixel = 2;  // RGB565
-
-// Each of the two LVGL draw buffers holds 1/kDrawBufferFraction of the screen
-// (240x240: 20 rows = 9600 B). Internal, DMA-capable RAM; no PSRAM on the C6.
-constexpr uint32_t kDrawBufferFraction = 12;
-// Queued SPI transactions of the panel IO (value of the earlier driver the
-// GC9A01 sequence comes from, see gc9a01_panel.h).
-constexpr std::size_t kTransQueueDepth = 10;
-// Rows per transfer when the panel is cleared to black before DISPON.
-constexpr uint32_t kClearRows = 8;
-// Upper bound, with margin, of esp_lvgl_port 2.9.0's private per-display
-// context (plain malloc in lvgl_port_add_disp; about 60 B on 32-bit targets),
-// used by the best-effort allocation probe.
-constexpr std::size_t kPortContextBytes = 256;
 
 using cfg::DisplayFault;
 
@@ -94,6 +83,8 @@ uint32_t g_draw_failures = 0;
 bool g_redraw_pending = false;
 bool g_stable = false;
 uint32_t g_init_tick = 0;
+detail::SceneProgress g_scenes;
+portMUX_TYPE g_scene_lock = portMUX_INITIALIZER_UNLOCKED;
 
 void setBacklight(const hw::DisplayWiring& wiring, bool on) {
   if (wiring.backlight == hw::kNoPin) return;
@@ -154,7 +145,8 @@ esp_err_t initBacklight(const hw::DisplayWiring& wiring) {
 // Fills the whole panel with black so no random RAM content is visible when
 // the display is switched on.
 esp_err_t clearToBlack(const hw::DisplayProfile& profile) {
-  const uint32_t rows = std::min<uint32_t>(kClearRows, profile.height);
+  const uint32_t rows =
+      std::min<uint32_t>(cfg::kDisplayClearRows, profile.height);
   const std::size_t size = std::size_t{profile.width} * rows * kBytesPerPixel;
   void* black = heap_caps_calloc(1, size, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
   ESP_RETURN_ON_FALSE(black != nullptr, ESP_ERR_NO_MEM, kTag,
@@ -196,7 +188,7 @@ esp_err_t initPanel(const hw::DisplayProfile& profile,
   io.dc_gpio_num = static_cast<gpio_num_t>(wiring.dc);
   io.spi_mode = profile.spi_mode;
   io.pclk_hz = wiring.spi_clock_hz;
-  io.trans_queue_depth = kTransQueueDepth;
+  io.trans_queue_depth = cfg::kDisplaySpiQueueDepth;
   io.lcd_cmd_bits = 8;
   io.lcd_param_bits = 8;
   ESP_RETURN_ON_ERROR(
@@ -233,7 +225,7 @@ bool portMemoryAvailable(std::size_t buffer_bytes) {
     ESP_LOGW(kTag, "fault injection: port allocation pre-check fails");
     buffer_bytes = heap_caps_get_total_size(MALLOC_CAP_DMA) + 1;
   }
-  void* context = std::malloc(kPortContextBytes);
+  void* context = std::malloc(cfg::kDisplayPortContextProbeBytes);
   void* buffer1 = heap_caps_aligned_alloc(CONFIG_LV_DRAW_BUF_ALIGN,
                                           buffer_bytes, MALLOC_CAP_DMA);
   void* buffer2 = heap_caps_aligned_alloc(CONFIG_LV_DRAW_BUF_ALIGN,
@@ -249,10 +241,18 @@ bool portMemoryAvailable(std::size_t buffer_bytes) {
 // Runs in the LVGL task inside the flush callback (via draw_bitmap).
 void onDrawResult(DrawResult result, void* ctx) {
   switch (result) {
-    case DrawResult::kSubmitted: g_draw_failures = 0; return;
+    case DrawResult::kSubmitted:
+      portENTER_CRITICAL(&g_scene_lock);
+      g_scenes.submitted();
+      portEXIT_CRITICAL(&g_scene_lock);
+      g_draw_failures = 0;
+      return;
     case DrawResult::kFailedBufferUnknown:
       failRestart(FailReason::kDrawStateUnknown);
     case DrawResult::kFailedBufferFree:
+      portENTER_CRITICAL(&g_scene_lock);
+      g_scenes.failed();
+      portEXIT_CRITICAL(&g_scene_lock);
       // No completion will come for this area: end LVGL's flush wait here
       // and redraw the screen from the supervision timer (invalidating is
       // not allowed while rendering).
@@ -265,6 +265,18 @@ void onDrawResult(DrawResult result, void* ctx) {
                static_cast<unsigned>(g_draw_failures));
       return;
   }
+}
+
+// Same flush-ready forwarding as esp_lvgl_port's SPI callback, with one
+// coherent acknowledgement of the actual completed stripe before LVGL reuses
+// it.
+bool onColorComplete(esp_lcd_panel_io_handle_t, esp_lcd_panel_io_event_data_t*,
+                     void* context) {
+  portENTER_CRITICAL_ISR(&g_scene_lock);
+  g_scenes.completed(esp_timer_get_time() / 1000);
+  portEXIT_CRITICAL_ISR(&g_scene_lock);
+  lv_display_flush_ready(static_cast<lv_display_t*>(context));
+  return false;
 }
 
 // LVGL timer, so it runs only while the LVGL task makes progress: a stuck
@@ -291,7 +303,6 @@ esp_err_t startSupervision() {
                       "task watchdog user failed");
   ESP_RETURN_ON_FALSE(lvgl_port_lock(0), ESP_ERR_TIMEOUT, kTag,
                       "LVGL lock failed");
-  setGc9a01DrawObserver(g_panel, onDrawResult, g_display);
   g_init_tick = lv_tick_get();
   // An allocation failure here ends in the LVGL malloc assert.
   lv_timer_create(superviseLvgl, cfg::kDisplaySupervisionPeriodMs, nullptr);
@@ -318,9 +329,14 @@ void injectRuntimeFault() {
 }
 
 esp_err_t initLvgl(const hw::DisplayProfile& profile, uint32_t buffer_pixels) {
-  // Defaults of esp_lvgl_port 2.9.0: task priority 4, stack 7168 B in
-  // internal RAM, any core, 5 ms tick timer.
-  const lvgl_port_cfg_t port = ESP_LVGL_PORT_INIT_CONFIG();
+  const lvgl_port_cfg_t port{
+      .task_priority = cfg::kLvglTaskPriority,
+      .task_stack = cfg::kLvglTaskStackBytes,
+      .task_affinity = cfg::kLvglTaskAffinity,
+      .task_max_sleep_ms = cfg::kLvglTaskMaxSleepMs,
+      .task_stack_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_DEFAULT,
+      .timer_period_ms = cfg::kLvglTickPeriodMs,
+  };
   ESP_RETURN_ON_ERROR(lvgl_port_init(&port), kTag, "LVGL port init failed");
   if (!lvgl_port_lock(cfg::kBootScreenLockTimeoutMs)) return ESP_ERR_TIMEOUT;
   lv_log_register_print_cb([](lv_log_level_t level, const char* message) {
@@ -351,10 +367,22 @@ esp_err_t initLvgl(const hw::DisplayProfile& profile, uint32_t buffer_pixels) {
              static_cast<unsigned>(buffer_pixels * kBytesPerPixel));
     failRestart(FailReason::kPortMemory);
   }
+  // The port uses a recursive mutex. Keep the first refresh paused until the
+  // permanent wrapper and completion callback form one matched lifecycle.
+  if (!lvgl_port_lock(cfg::kBootScreenLockTimeoutMs)) return ESP_ERR_TIMEOUT;
   g_display = lvgl_port_add_disp(&disp);
-  ESP_RETURN_ON_FALSE(g_display != nullptr, ESP_ERR_NO_MEM, kTag,
-                      "LVGL display registration failed");
-  return initScreenshotCapture(g_display, profile);
+  esp_err_t result = g_display == nullptr
+                         ? ESP_ERR_NO_MEM
+                         : initScreenshotCapture(g_display, profile);
+  if (result == ESP_OK) {
+    setGc9a01DrawObserver(g_panel, onDrawResult, g_display);
+    const esp_lcd_panel_io_callbacks_t callbacks{.on_color_trans_done =
+                                                     onColorComplete};
+    result =
+        esp_lcd_panel_io_register_event_callbacks(g_io, &callbacks, g_display);
+  }
+  lvgl_port_unlock();
+  return result;
 }
 
 }  // namespace
@@ -367,7 +395,7 @@ esp_err_t init(const hw::DisplayProfile& profile,
   g_wiring = &wiring;
 
   const uint32_t rows =
-      std::max<uint32_t>(1, profile.height / kDrawBufferFraction);
+      std::max<uint32_t>(1, profile.height / cfg::kDisplayDrawBufferFraction);
   const uint32_t buffer_pixels = uint32_t{profile.width} * rows;
   const std::size_t buffer_bytes = buffer_pixels * kBytesPerPixel;
 
@@ -395,6 +423,28 @@ bool lock(uint32_t timeout_ms) {
 }
 bool ready() { return g_display != nullptr; }
 
+void sceneFlushStarted(lv_display_t* display) {
+  portENTER_CRITICAL(&g_scene_lock);
+  const bool accepted = g_scenes.begin(lv_display_flush_is_last(display));
+  portEXIT_CRITICAL(&g_scene_lock);
+  if (!accepted) failRestart(FailReason::kDrawStateUnknown);
+}
+void sceneAccepted(uint32_t token) {
+  portENTER_CRITICAL(&g_scene_lock);
+  const bool changed = g_scenes.accept(token);
+  portEXIT_CRITICAL(&g_scene_lock);
+  if (changed && g_display != nullptr) {
+    if (auto* screen = lv_display_get_screen_active(g_display))
+      lv_obj_invalidate(screen);
+  }
+}
+SceneCompletion sceneCompletion() {
+  portENTER_CRITICAL(&g_scene_lock);
+  const auto result = g_scenes.completion();
+  portEXIT_CRITICAL(&g_scene_lock);
+  return result;
+}
+
 void setRotation(uint8_t quarter_turns) {
   // Setting the rotation invalidates the whole screen even when unchanged.
   const auto rotation = static_cast<lv_display_rotation_t>(quarter_turns);
@@ -405,9 +455,18 @@ void setRotation(uint8_t quarter_turns) {
 
 void setBrightness(uint8_t percent) {
   if constexpr (hw::kTarget.wiring.backlight != hw::kNoPin) {
-    if (g_wiring == nullptr || g_display == nullptr) return;
-    static bool configured = false;
-    if (!configured) {
+    static const hw::DisplayWiring* configured = nullptr;
+    static uint8_t applied_duty = 0;
+    static bool duty_known = false;
+    if (g_wiring == nullptr || g_display == nullptr ||
+        g_wiring->backlight == hw::kNoPin) {
+      configured = nullptr;
+      duty_known = false;
+      return;
+    }
+    // Wiring profiles are immutable. A new display/wiring owner needs fresh
+    // channel setup and its first duty, even if that duty is zero.
+    if (configured != g_wiring) {
       ledc_timer_config_t timer{};
       timer.speed_mode = LEDC_LOW_SPEED_MODE;
       timer.duty_resolution = LEDC_TIMER_8_BIT;
@@ -422,12 +481,17 @@ void setBrightness(uint8_t percent) {
       channel.timer_sel = LEDC_TIMER_0;
       channel.flags.output_invert = !g_wiring->backlight_active_high;
       ESP_ERROR_CHECK(ledc_channel_config(&channel));
-      configured = true;
+      configured = g_wiring;
+      duty_known = false;
     }
-    ESP_ERROR_CHECK(
-        ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0,
-                      std::min<unsigned>(percent, 100) * 255 / 100));
+    const uint8_t duty = std::min<unsigned>(percent, 100) * 255 / 100;
+    if (duty_known && applied_duty == duty) return;
+    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty));
     ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
+    // Advance only after both writes succeed. The existing fatal SDK-error
+    // contract remains; a retry/restart must never inherit a false receipt.
+    applied_duty = duty;
+    duty_known = true;
   }
 }
 

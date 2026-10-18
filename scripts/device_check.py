@@ -18,10 +18,13 @@ bytes, and schema ota_max). Missing evidence is UNVERIFIED, with exit code 2.
 It changes device state and restores it: browser_debug is set and put back,
 one test image is stored and deleted again, harmless saves keep the stored
 value. It never reboots, resets, flashes or opens the serial port.
+Configuration reads and writes use GET/PUT config with one revision and Apply
+ID. Unknown outcomes stop later mutations; the checker never resends a write.
 """
 
 import argparse
 import base64
+import copy
 import http.client
 import json
 import os
@@ -61,12 +64,15 @@ def unverifiable(name, detail=""):
 class Device:
     def __init__(self, host):
         self.host = host
+        self.mutation_unknown = False
 
     def connection(self):
         return http.client.HTTPConnection(self.host, 80, timeout=15)
 
     def call(self, method, path, body=None, token=None, headers=None, conn=None):
         """One request. Returns (status, headers, raw, json-or-None)."""
+        if self.mutation_unknown and method != "GET":
+            raise RuntimeError("Apply outcome is unknown; restart and inspect the device before another mutation")
         own = conn is None
         conn = conn or self.connection()
         h = dict(headers or {})
@@ -78,15 +84,25 @@ class Device:
             body = body.encode()
         if body is not None and "Content-Type" not in h:
             h["Content-Type"] = "application/json"
-        conn.request(method, API + path, body=body, headers=h)
-        response = conn.getresponse()
-        raw = response.read()
-        if own:
-            conn.close()
+        try:
+            conn.request(method, API + path, body=body, headers=h)
+            response = conn.getresponse()
+            raw = response.read()
+        except (OSError, http.client.HTTPException):
+            if method == "PUT" and path == "config":
+                self.mutation_unknown = True
+            raise
+        finally:
+            if own:
+                conn.close()
         try:
             parsed = json.loads(raw)
         except ValueError:
             parsed = None
+        if method == "PUT" and path == "config" and (
+            not isinstance(parsed, dict) or parsed.get("code") == "outcome_unknown"
+        ):
+            self.mutation_unknown = True
         return response.status, response, raw, parsed
 
     def login(self):
@@ -95,11 +111,44 @@ class Device:
             raise SystemExit(f"login failed: HTTP {status} {data}")
         return data["token"]
 
+    def config(self):
+        status, _, _, current = self.call("GET", "config")
+        desired = current.get("desired", {}) if isinstance(current, dict) else {}
+        if not isinstance(desired, dict):
+            raise RuntimeError("Cannot read a coherent application configuration; no mutation sent")
+        if (status != 200 or not isinstance(current, dict)
+                or type(current.get("revision")) is not int
+                or not isinstance(desired.get("settings"), dict)
+                or not isinstance(desired.get("competitions"), list)
+                or not isinstance(desired.get("screens"), dict)):
+            raise RuntimeError("Cannot read a coherent application configuration; no mutation sent")
+        return current
+
     def settings(self):
-        return self.call("GET", "settings")[3]
+        return self.config()["desired"]["settings"]
+
+    def apply_payload(self, change):
+        """One fresh revision; absent secrets and adopted names stay untouched."""
+        current = self.config()
+        desired = copy.deepcopy(current["desired"])
+        desired["settings"] = {key: value for key, value in desired["settings"].items()
+                               if not key.endswith("_set")}
+        desired["settings"].update(change)
+        return {"expected_revision": current["revision"],
+                "apply_id": f"{int.from_bytes(os.urandom(8), 'big') or 1:016x}",
+                "desired": desired}
 
     def save(self, token, change):
-        return self.call("PUT", "settings", change, token)
+        command = self.apply_payload(change)
+        result = self.call("PUT", "config", command, token)
+        if result[0] == 200:
+            saved = result[3] or {}
+            if (saved.get("apply_id") != command["apply_id"]
+                    or type(saved.get("revision")) is not int
+                    or saved["revision"] <= command["expected_revision"]):
+                self.mutation_unknown = True
+                raise RuntimeError("Apply acknowledgement does not identify this write; no further mutation sent")
+        return result
 
 
 def unchanged_field(device):
@@ -114,14 +163,14 @@ def unchanged_field(device):
 
 # ---- 1. W03: unauthenticated writes --------------------------------------
 def check_unauthenticated(device):
-    base = device.settings()
+    base = device.config()
     raw = json.dumps(base)
     for size in (2, len(raw), 2291, 8192, 30000):
         body = "{}" if size == 2 else raw.ljust(size)
         name = f"W03 unauthenticated PUT, {size} B body"
         conn = device.connection()
         try:
-            status, response, _, data = device.call("PUT", "settings", body, conn=conn)
+            status, response, _, data = device.call("PUT", "config", body, conn=conn)
             kept = False
             if not response.will_close:
                 kept = device.call("GET", "status", conn=conn)[0] == 200
@@ -139,7 +188,7 @@ def check_unauthenticated(device):
     # known limit of that case, so it is reported but not counted.
     conn = device.connection()
     try:
-        status = device.call("PUT", "settings", raw.ljust(40000), conn=conn)[0]
+        status = device.call("PUT", "config", raw.ljust(40000), conn=conn)[0]
         info("unauthenticated PUT, 40000 B body (above the drain limit)", f"HTTP {status}")
     except (OSError, http.client.HTTPException) as err:
         info("unauthenticated PUT, 40000 B body (above the drain limit)", type(err).__name__)
@@ -152,7 +201,7 @@ def check_keepalive(device, token):
     conn = device.connection()
     try:
         status, response, _, data = device.call(
-            "PUT", "settings", {"brightness": 999}, token, conn=conn
+            "PUT", "config", device.apply_payload({"brightness": 999}), token, conn=conn
         )
         port = conn.sock.getsockname()[1] if conn.sock else None
         again = device.call("GET", "status", conn=conn)
@@ -170,9 +219,9 @@ def check_keepalive(device, token):
 # ---- 3. every value error names its field ----------------------------
 FIELD_CASES = [
     # method, path, body, status, code, field   (code None = not compared)
-    ("PUT", "settings", {"brightness": 999}, 400, "range", "brightness"),
-    ("PUT", "settings", {"nonsense": 1}, 400, "unknown_key", "nonsense"),
-    ("PUT", "settings", {"brightness": "x"}, 400, "type", "brightness"),
+    ("PUT", "config", {"brightness": 999}, 400, "range", "desired.settings.brightness"),
+    ("PUT", "config", {"nonsense": 1}, 400, "unknown_key", "desired.settings.nonsense"),
+    ("PUT", "config", {"brightness": "x"}, 400, "type", "desired.settings.brightness"),
     ("POST", "data/select", {"teams": True}, 400, "required", "provider"),
     ("POST", "data/select", {"provider": 9, "teams": True}, 400, "range", "provider"),
     ("POST", "data/select", {"provider": 0}, 400, "required", "teams"),
@@ -183,11 +232,17 @@ FIELD_CASES = [
     ("POST", "display", {"action": "x"}, 400, "invalid", "action"),
     ("POST", "display", {}, 400, "required", "action"),
     ("POST", "display", {"action": 1}, 400, "type", "action"),
+    ("POST", "display", {"action": "next"}, 400, "required", "config_revision"),
+    ("POST", "display", {"action": "next", "config_revision": "x"}, 400, "type", "config_revision"),
+    ("POST", "display", {"action": "next", "config_revision": -1}, 400, "range", "config_revision"),
+    ("POST", "data/select/cancel", {}, 400, "required", "query"),
+    ("POST", "data/select/cancel", {"query": "0000000000000000"}, 400, "invalid", "query"),
     ("POST", "images/delete", {"id": 99}, 400, "range", "id"),
     ("POST", "images/delete", {}, 400, "required", "id"),
     ("POST", "images/delete", {"id": "a"}, 400, "type", "id"),
     ("POST", "reset", {"confirm": "no"}, 400, "invalid", "confirm"),
-    ("POST", "reset", {}, 400, "invalid", "confirm"),
+    # The shared strict schema distinguishes a missing confirmation from a wrong one.
+    ("POST", "reset", {}, 400, "required", "confirm"),
     ("GET", "images/file", None, 400, "required", "id"),
     ("GET", "images/file?id=99", None, 400, "range", "id"),
     ("GET", "images/file?id=abc", None, 400, "range", "id"),
@@ -198,7 +253,8 @@ FIELD_CASES = [
 def check_fields(device, token):
     for method, path, body, status, code, field in FIELD_CASES:
         label = f"{method} {path} {json.dumps(body) if body is not None else ''}".strip()
-        got, _, _, data = device.call(method, path, body, token)
+        command = device.apply_payload(body) if path == "config" else body
+        got, _, _, data = device.call(method, path, command, token)
         data = data or {}
         ok = (
             got == status
@@ -211,7 +267,7 @@ def check_fields(device, token):
     for label, call, status, code in (
         ("no token", lambda: device.call("POST", "data/select", {"teams": True}), 401, "session"),
         ("unknown route", lambda: device.call("GET", "nothing"), 404, "unknown_route"),
-        ("wrong method", lambda: device.call("DELETE", "settings"), 405, None),
+        ("wrong method", lambda: device.call("DELETE", "config"), 405, None),
         ("missing image", lambda: device.call("GET", "images/file?id=10"), 404, "not_found"),
     ):
         got, _, _, data = call()
@@ -227,11 +283,11 @@ def check_fields(device, token):
         ("invalid JSON", "{nope", None),
         ("wrong content type", "{}", {"Content-Type": "text/plain"}),
     ):
-        got, _, _, data = device.call("PUT", "settings", body, token, headers)
+        got, _, _, data = device.call("PUT", "config", body, token, headers)
         data = data or {}
         report(
             got in (400, 415) and bool(data.get("error")) and bool(data.get("code")),
-            f"PUT settings, {label}",
+            f"PUT config, {label}",
             f"HTTP {got}, code {data.get('code')}, field {data.get('field')}",
         )
 
@@ -463,10 +519,14 @@ def check_heap(device, token):
     def load():
         conn = device.connection()  # one kept connection per client, like a browser
         while not stop.is_set():
-            for path in ("status", "settings", "images", "schema", "selection"):
+            # Selection requires its acknowledged query ID. This background
+            # read-only load must neither inspect nor renew another owner's
+            # query, nor start a budget-consuming provider request of its own.
+            for path in ("status", "config", "images", "schema", "demo"):
                 try:
-                    if device.call("GET", path, conn=conn)[0] >= 500:
-                        errors.append(path)
+                    status = device.call("GET", path, conn=conn)[0]
+                    if status != 200:
+                        errors.append(f"{path}: HTTP {status}")
                 except (OSError, http.client.HTTPException) as err:
                     errors.append(f"{path}: {type(err).__name__}")
                     conn.close()

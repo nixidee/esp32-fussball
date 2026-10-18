@@ -7,8 +7,8 @@
 #include <ctime>
 #include <string>
 
+#include "provider_adapter.h"
 #include "provider_coverage.h"
-#include "provider_json_stream.h"
 
 namespace {
 using namespace football;
@@ -17,62 +17,39 @@ constexpr uint32_t kNow = 1792238400;  // 2026-10-17T12:00:00Z
 settings::Competition entry;
 c::Query query;
 c::Response response;
-class Stream {
- public:
-  explicit Stream(const char* value, std::size_t limit = SIZE_MAX)
-      : text_(value), limit_(limit) {}
-  int peek() {
-    if (at_ >= limit_ && text_[at_] != 0) {
-      failed_ = true;
-      return -1;
-    }
-    return text_[at_] ? static_cast<unsigned char>(text_[at_]) : -1;
+struct Stream {
+  std::string_view body;
+  std::size_t at = 0, limit = SIZE_MAX;
+  static int read(void* raw) {
+    auto& input = *static_cast<Stream*>(raw);
+    return input.at < input.body.size() && input.at < input.limit
+               ? static_cast<unsigned char>(input.body[input.at++])
+               : -1;
   }
-  int read() {
-    const int value = peek();
-    if (value < 0 || (number_ && !numberChar(value))) return -1;
-    ++at_;
-    return value;
-  }
-  std::size_t readBytes(char* out, std::size_t count) {
-    std::size_t n = 0;
-    for (; n < count; ++n) {
-      const int value = read();
-      if (value < 0) break;
-      out[n] = value;
-    }
-    return n;
-  }
-  int nonSpace() {
-    int value;
-    do {
-      value = read();
-    } while (json_detail::space(value));
-    return value;
-  }
-  void endAfterNumber(bool on) { number_ = on; }
-  bool complete() const { return !failed_ && text_[at_] == 0; }
-
- private:
-  static bool numberChar(int value) {
-    return (value >= '0' && value <= '9') || value == '-' || value == '+' ||
-           value == '.' || value == 'e' || value == 'E';
-  }
-  const char* text_;
-  std::size_t limit_, at_ = 0;
-  bool number_ = false, failed_ = false;
 };
-bool observe(ArduinoJson::JsonVariantConst row, void*) {
-  response.observe(row);
-  return true;
-}
 bool replay(const std::string& body, std::size_t limit = SIZE_MAX) {
   response.begin(entry, query, kNow);
-  Stream stream(body.c_str(), limit);
-  JsonAllocator allocator;
-  return readJson(stream, query.http.array, entry.primary.provider, observe,
-                  nullptr, allocator, false, nullptr, response.observer(),
-                  &response.scan());
+  Stream stream{body, 0, limit};
+  json::Reader reader({&stream, Stream::read});
+  auto request = query.http.spec;
+  request.from = query.from ? query.from : request.from;
+  request.to = query.to;
+  provider::Sink sink;
+  sink.fixture = [](const provider::Fixture& fixture,
+                    std::span<const provider::Event>, void*) {
+    response.observe(fixture);
+    return true;
+  };
+  const auto result = provider::readResponse(reader, request, sink);
+  response.parsed(result);
+  // Preserve this fixture helper's grammar-only return contract. Semantic
+  // failures remain in the typed result and cannot certify coverage.
+  return reader.error() == json::Error::kNone && stream.at == body.size();
+}
+provider::HttpRequest http() {
+  provider::HttpRequest request;
+  TEST_ASSERT_TRUE(provider::buildRequest(query.http.spec, request));
+  return request;
 }
 void source(cfg::Provider provider, const char* competition) {
   entry = {};
@@ -81,7 +58,10 @@ void source(cfg::Provider provider, const char* competition) {
   entry.primary.provider = provider;
   entry.primary.competition.assign(competition);
   entry.primary.season.assign("2026");
-  TEST_ASSERT_TRUE(c::discoveryQuery(entry, {}, kNow, 40, 0, query));
+  if (provider == cfg::Provider::kEspn)
+    TEST_ASSERT_FALSE(c::discoveryQuery(entry, {}, kNow, 40, 0, query));
+  else
+    TEST_ASSERT_TRUE(c::discoveryQuery(entry, {}, kNow, 40, 0, query));
 }
 const char* kOlRows =
     R"([{"matchID":1,"leagueShortcut":"bl1","leagueSeason":2026,"matchDateTimeUTC":"2026-09-01T12:00Z"},)"
@@ -220,27 +200,34 @@ void football_data_exclusive_end_and_narrowing_are_verified() {
   TEST_ASSERT_EQUAL(c::Completeness::kPartial,
                     response.finish(true, kNow).completeness);
 }
-void espn_day_whitelist_is_metadata_never_a_kickoff_proof() {
+void espn_extra_discovery_is_unavailable_and_cannot_invent_a_break() {
   source(cfg::Provider::kEspn, "aus.1");
-  const char* body =
-      R"({"leagues":[{"slug":"aus.1","season":{"year":2026},"calendarType":"day","calendarIsWhitelist":true,"calendarStartDate":"2026-07-01T04:00Z","calendarEndDate":"2027-07-01T03:59Z","calendar":["2026-10-17T07:00Z","2026-11-30T07:00Z"]}],"events":[{"id":"1","date":"2026-10-17T04:00Z","season":{"year":2026},"competitions":[{"timeValid":true}]}]})";
-  TEST_ASSERT_TRUE(replay(body));
-  TEST_ASSERT_EQUAL(c::Completeness::kPartial,
-                    response.finish(true, kNow).completeness);
-  TEST_ASSERT_TRUE(response.calendar().verified);
-  TEST_ASSERT_EQUAL(c::Reason::kMissingNeighbours,
-                    response.finish(true, kNow).reason);
+  TEST_ASSERT_FALSE(provider::capabilities(entry.primary.provider).coverage);
+  c::EvidenceArray proof{};
+  c::bind(proof[0], c::identity(entry));
+  settings::CompetitionRoutes configured;
+  configured.entries.push(entry);
+  TEST_ASSERT_EQUAL(c::Verdict::kUnknown,
+                    c::assess(proof, configured, kNow, 21).verdict);
+  // Ordinary season calendars remain a supported retention request.
+  provider::HttpRequest calendar;
+  provider::RequestSpec request;
+  request.source = {entry.primary.provider, entry.primary.competition.view(),
+                    entry.primary.season.view()};
+  request.operation = provider::Operation::kSeasonCalendar;
+  TEST_ASSERT_TRUE(provider::buildRequest(request, calendar));
+  TEST_ASSERT_NOT_NULL(strstr(calendar.url, "/calendar/ondays"));
 }
 void source_query_is_bounded_encoded_and_does_not_resolve_unknown_years() {
   source(cfg::Provider::kOpenLigaDb, "league test");
-  TEST_ASSERT_NOT_NULL(strstr(query.http.url, "league%20test/2026"));
+  TEST_ASSERT_NOT_NULL(strstr(http().url, "league%20test/2026"));
   TEST_ASSERT_TRUE(c::discoveryQuery(entry, {}, kNow, 40, 1, query));
   TEST_ASSERT_EQUAL_STRING("2027", query.season.data.data());
   TEST_ASSERT_FALSE(c::discoveryQuery(entry, {}, kNow, 40, 2, query));
   entry.primary.season = {};
   TEST_ASSERT_FALSE(c::discoveryQuery(entry, {}, kNow, 40, 0, query));
   source(cfg::Provider::kFootballData, "BL1");
-  TEST_ASSERT_NOT_NULL(strstr(query.http.url, "dateTo=2026-11-27"));
+  TEST_ASSERT_NOT_NULL(strstr(http().url, "dateTo=2026-11-27"));
 }
 void normal_rows_only_invalidate_and_never_refresh_coverage() {
   source(cfg::Provider::kOpenLigaDb, "bl1");
@@ -250,16 +237,14 @@ void normal_rows_only_invalidate_and_never_refresh_coverage() {
   c::bind(evidence, key);
   TEST_ASSERT_EQUAL(c::Reason::kNone,
                     c::accept(evidence, key, response.finish(true, kNow)));
-  ArduinoJson::JsonDocument row;
-  deserializeJson(
-      row,
-      R"({"leagueShortcut":"bl1","leagueSeason":2026,"matchDateTimeUTC":"2026-08-01T12:00Z"})");
-  TEST_ASSERT_FALSE(c::observeNormalRow(
-      evidence, entry, row.as<ArduinoJson::JsonVariantConst>()));
+  provider::Fixture row;
+  row.source_matches = true;
+  row.time_definite = true;
+  row.facts.kickoff = parseUtc("2026-08-01T12:00Z");
+  TEST_ASSERT_FALSE(c::observeNormalRow(evidence, entry, row));
   TEST_ASSERT_EQUAL_UINT32(kNow, evidence.seasons[0].checked_utc);
-  row["matchDateTimeUTC"] = "2026-10-17T12:00Z";
-  TEST_ASSERT_TRUE(c::observeNormalRow(
-      evidence, entry, row.as<ArduinoJson::JsonVariantConst>()));
+  row.facts.kickoff = parseUtc("2026-10-17T12:00Z");
+  TEST_ASSERT_TRUE(c::observeNormalRow(evidence, entry, row));
   TEST_ASSERT_EQUAL(c::Completeness::kPartial,
                     evidence.seasons[0].completeness);
   TEST_ASSERT_EQUAL(c::Reason::kTimingChanged, evidence.seasons[0].reason);
@@ -275,12 +260,11 @@ void espn_provisional_time_refutes_an_old_proof_before_display_admission() {
   collector.observe(kNow - 86400);
   collector.observe(kNow + 86400);
   c::accept(evidence, key, collector.finish(kNow, {2, true, true, true, true}));
-  ArduinoJson::JsonDocument row;
-  deserializeJson(
-      row,
-      R"({"date":"2026-10-17T04:00Z","season":{"year":2026},"competitions":[{"timeValid":false}]})");
-  TEST_ASSERT_TRUE(c::observeNormalRow(
-      evidence, entry, row.as<ArduinoJson::JsonVariantConst>()));
+  provider::Fixture row;
+  row.source_matches = true;
+  row.time_definite = false;
+  row.facts.kickoff = parseUtc("2026-10-17T04:00Z");
+  TEST_ASSERT_TRUE(c::observeNormalRow(evidence, entry, row));
   TEST_ASSERT_EQUAL(c::Reason::kUndatedFixture, evidence.seasons[0].reason);
   TEST_ASSERT_EQUAL_UINT32(kNow, evidence.seasons[0].checked_utc);
 }
@@ -297,7 +281,7 @@ int main() {
   RUN_TEST(
       nested_or_duplicate_primary_preserves_rows_without_certifying_coverage);
   RUN_TEST(football_data_exclusive_end_and_narrowing_are_verified);
-  RUN_TEST(espn_day_whitelist_is_metadata_never_a_kickoff_proof);
+  RUN_TEST(espn_extra_discovery_is_unavailable_and_cannot_invent_a_break);
   RUN_TEST(source_query_is_bounded_encoded_and_does_not_resolve_unknown_years);
   RUN_TEST(normal_rows_only_invalidate_and_never_refresh_coverage);
   RUN_TEST(espn_provisional_time_refutes_an_old_proof_before_display_admission);

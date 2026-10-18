@@ -105,8 +105,9 @@ XIAO S3 build of an earlier project (S3: SCLK 6, MOSI 5, DC 3, CS 4, RST 2).
 
 The display module has **no backlight (BL) pin**: the backlight is
 always on at full brightness and cannot be dimmed or switched off by the
-firmware on this target. Night mode here is software-only (dark UI), see
-[UI.md](UI.md) → “Colours and night”.
+firmware on this target. Brightness and night mode are therefore not offered;
+there is no software colour or image dimming. See [UI.md](UI.md) → “Colours
+and night”.
 SPI clock on the C6: 40 MHz works (LVGL boot screen verified on the device
 2026-10-08). Recorded runtime after display + LVGL init (device status log
 2026-10-08):
@@ -115,7 +116,7 @@ This is an idle boot-screen observation, not a new measurement or a WiFi/TLS,
 production-screen or long-run acceptance result.
 Backlight driver: a target with a BL pin uses LEDC PWM for saved day/night
 brightness. The pin is off during panel init and enabled after clearing black.
-The C6 target has no BL pin, so brightness is a no-op there. PWM is compiled
+The C6 target has no BL pin, so its UI does not apply brightness. PWM is compiled
 code only; the paused S3 profile has not been built or accepted with this path.
 
 ### Inputs (verified on the device)

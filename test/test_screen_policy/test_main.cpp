@@ -1,14 +1,17 @@
 // Owner-visible screen-policy contracts, using the production pure model and
-// explicit record. These checks do not prove API, provider or device behavior.
+// aggregate/payload codecs. These checks do not prove API, provider or device
+// behavior.
 #include <unity.h>
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
 
+#include "app_config_record.h"
+#include "demo_scenarios.h"
 #include "screen_policy.h"
 #include "screen_record.h"
-#include "settings_record.h"
+#include "ui_config.h"
 
 namespace {
 namespace policy = settings::screen_policy;
@@ -22,16 +25,16 @@ constexpr auto kSportIndex = screen::sportIndex(kType);
 
 policy::Policy model;
 policy::Policy restored;
-std::array<uint8_t, record::kRecordBytes> bytes{};
+settings::Competitions competitions;
+std::array<uint8_t, record::kPayloadBytes> bytes{};
 
 void addCompetitions() {
-  for (unsigned i = 0; i < model.competitions.size(); ++i)
-    model.competitions[i] = {1000u + i, static_cast<uint8_t>(i + 1),
-                             i % 2 == 0};
+  settings::initialCompetitions({.competition = "league"}, competitions);
+  competitions.entries[0].id = 1;
+  competitions.entries[0].incarnation = 1000;
 }
-
 policy::Rule resolved() {
-  return policy::resolve(model, kPhase, kType, 1, 1000);
+  return policy::resolve(model, kPhase, kType, &competitions.entries[0]);
 }
 
 void fresh_profiles_keep_every_sport_manual_and_choose_one_automatic_type() {
@@ -60,8 +63,9 @@ void fresh_profiles_keep_every_sport_manual_and_choose_one_automatic_type() {
 void live_inheritance_preserves_explicit_false_and_dormant_overrides() {
   addCompetitions();
   model.shared[kPhaseIndex][kTypeIndex] = {30, true, true};
-  model.expanded[kPhaseIndex] = 1u << kSportIndex;
-  auto& own = model.overrides[kPhaseIndex][kSportIndex][0];
+  model.per_competition[kPhaseIndex] = 1u << kSportIndex;
+  auto& own =
+      competitions.entries[0].display.overrides[kPhaseIndex][kSportIndex];
   own.fields = policy::kEnabled;
   TEST_ASSERT_FALSE(resolved().enabled);
   TEST_ASSERT_TRUE(resolved().automatic);
@@ -71,10 +75,10 @@ void live_inheritance_preserves_explicit_false_and_dormant_overrides() {
   own.visit_s = 45;
   TEST_ASSERT_FALSE(resolved().automatic);
   TEST_ASSERT_EQUAL_UINT16(45, resolved().visit_s);
-  model.expanded[kPhaseIndex] = 0;
+  model.per_competition[kPhaseIndex] = 0;
   TEST_ASSERT_TRUE(resolved().automaticallyReachable());
   TEST_ASSERT_EQUAL_UINT16(90, resolved().visit_s);
-  model.expanded[kPhaseIndex] = 1u << kSportIndex;
+  model.per_competition[kPhaseIndex] = 1u << kSportIndex;
   TEST_ASSERT_FALSE(resolved().enabled);
   TEST_ASSERT_EQUAL_UINT16(45, resolved().visit_s);
   own.fields &= ~policy::kEnabled;
@@ -86,22 +90,18 @@ void live_inheritance_preserves_explicit_false_and_dormant_overrides() {
 void reused_competition_id_cannot_inherit_a_former_competitions_override() {
   addCompetitions();
   model.shared[kPhaseIndex][kTypeIndex] = {60, true, true};
-  model.expanded[kPhaseIndex] = 1u << kSportIndex;
-  model.overrides[kPhaseIndex][kSportIndex][0] = {120, 0, policy::kVisit};
+  model.per_competition[kPhaseIndex] = 1u << kSportIndex;
+  competitions.entries[0].display.overrides[kPhaseIndex][kSportIndex] = {
+      120, 0, policy::kVisit};
   TEST_ASSERT_EQUAL_UINT16(120, resolved().visit_s);
+  // Replacement is a new competition value; preferences cannot leak through
+  // a separately retained identity-association slot because none exists.
+  settings::Competition replacement;
+  replacement.id = 1;
+  replacement.incarnation = 1001;
   TEST_ASSERT_EQUAL_UINT16(
-      60, policy::resolve(model, kPhase, kType, 1, 9999).visit_s);
-  TEST_ASSERT_EQUAL_UINT16(
-      60, policy::resolve(model, kPhase, kType, 9, 1000).visit_s);
-  model.competitions[1].id = model.competitions[0].id;
-  policy::Error error;
-  TEST_ASSERT_FALSE(policy::validate(model, &error));
-  TEST_ASSERT_EQUAL(policy::Reason::kDuplicate, error.reason);
-  TEST_ASSERT_EQUAL(policy::Property::kId, error.property);
-  model.competitions[1].id = 2;
-  model.competitions[1].incarnation = model.competitions[0].incarnation;
-  TEST_ASSERT_FALSE(policy::validate(model, &error));
-  TEST_ASSERT_EQUAL(policy::Property::kIncarnation, error.property);
+      60, policy::resolve(model, kPhase, kType, &replacement).visit_s);
+  TEST_ASSERT_EQUAL_UINT16(60, policy::resolve(model, kPhase, kType).visit_s);
 }
 
 void image_time_multiple_is_exact_and_disabled_visits_are_retained() {
@@ -170,10 +170,10 @@ void out_of_range_and_unknown_configuration_is_rejected_without_clamping() {
   TEST_ASSERT_FALSE(policy::validate(model, &error));
   TEST_ASSERT_EQUAL(policy::Field::kManualReturn, error.field);
   model.manual_return_s = 60;
-  model.expanded[kPhaseIndex] = 0x80;
+  model.per_competition[kPhaseIndex] = 0x80;
   TEST_ASSERT_FALSE(policy::validate(model, &error));
   TEST_ASSERT_EQUAL(policy::Reason::kUnknownBits, error.reason);
-  model.expanded[kPhaseIndex] = 0;
+  model.per_competition[kPhaseIndex] = 0;
   model.order[0] = model.order[1];
   TEST_ASSERT_FALSE(policy::validate(model, &error));
   TEST_ASSERT_EQUAL(policy::Field::kOrder, error.field);
@@ -182,17 +182,11 @@ void out_of_range_and_unknown_configuration_is_rejected_without_clamping() {
 void complete_record_retains_every_rule_appearance_and_option() {
   addCompetitions();
   for (unsigned phase = 0; phase < policy::kPhaseCount; ++phase) {
-    model.expanded[phase] = (1u << screen::kSportTypeCount) - 1;
+    model.per_competition[phase] = (1u << screen::kSportTypeCount) - 1;
     for (auto& rule : model.shared[phase]) {
       rule.enabled = true;
       rule.automatic = true;
     }
-    for (unsigned type = 0; type < screen::kSportTypeCount; ++type)
-      for (unsigned competition = 0; competition < cfg::kCompetitionMax;
-           ++competition)
-        model.overrides[phase][type][competition] = {
-            static_cast<uint16_t>(15 + 1000 * phase + 100 * type + competition),
-            static_cast<uint8_t>(competition % 4), policy::kOverrideFields};
   }
   for (unsigned type = 0; type < screen::kTypeCount; ++type) {
     auto& style = model.appearance[type];
@@ -225,67 +219,66 @@ void complete_record_retains_every_rule_appearance_and_option() {
   model.frame_crest = false;
   model.automatic_break = true;
   TEST_ASSERT_TRUE(policy::validate(model));
-  TEST_ASSERT_EQUAL(record::kRecordBytes, record::encode(model, bytes));
-  TEST_ASSERT_EQUAL_UINT8(1, bytes[0]);
-  TEST_ASSERT_EQUAL_UINT8(0, bytes[1]);
-  TEST_ASSERT_EQUAL(record::DecodeResult::kOk, record::decode(bytes, restored));
+  TEST_ASSERT_EQUAL(record::kPayloadBytes, record::encodePayload(model, bytes));
+  TEST_ASSERT_EQUAL(record::DecodeResult::kOk,
+                    record::decodePayload(bytes, restored));
   TEST_ASSERT_TRUE(model == restored);
 }
 
-void corrupt_truncated_or_unknown_records_never_reach_the_candidate() {
-  TEST_ASSERT_EQUAL(record::kRecordBytes, record::encode(model, bytes));
-  restored.manual_return_s = 321;
-  const auto before = restored;
-  for (auto& byte : bytes) {
-    byte ^= 0x80;
-    TEST_ASSERT_NOT_EQUAL(record::DecodeResult::kOk,
-                          record::decode(bytes, restored));
-    TEST_ASSERT_TRUE(before == restored);
-    byte ^= 0x80;
+void corrupt_truncated_or_unknown_aggregates_never_reach_screen_candidate() {
+  namespace aggregate = settings::app_record;
+  settings::AppConfig config;
+  config.model = settings::initialValues({});
+  config.screens = model;
+  std::array<uint8_t, aggregate::kMaxBytes> encoded{};
+  const auto used = aggregate::encode(config, encoded);
+  TEST_ASSERT_NOT_EQUAL(0, used);
+  settings::AppConfig scratch;
+  scratch.screens.manual_return_s = 321;
+  const auto before = scratch.screens;
+  for (std::size_t at = 0; at < used; ++at) {
+    auto corrupt = encoded;
+    corrupt[at] ^= 0x80;
+    TEST_ASSERT_NOT_EQUAL(
+        settings::DecodeResult::kOk,
+        aggregate::decode(std::span(corrupt).first(used), scratch));
+    TEST_ASSERT_TRUE(before == scratch.screens);
   }
-  TEST_ASSERT_EQUAL(record::DecodeResult::kTooShort,
-                    record::decode(std::span(bytes).first(7), restored));
-  TEST_ASSERT_EQUAL(
-      record::DecodeResult::kLengthMismatch,
-      record::decode(std::span(bytes).first(bytes.size() - 1), restored));
-  bytes[0] = 2;
-  TEST_ASSERT_EQUAL(record::DecodeResult::kUnknownVersion,
-                    record::decode(bytes, restored));
-  bytes[0] = 0;
-  TEST_ASSERT_EQUAL(record::DecodeResult::kOutdatedVersion,
-                    record::decode(bytes, restored));
+  for (std::size_t size = 0; size < used; ++size) {
+    TEST_ASSERT_NOT_EQUAL(
+        settings::DecodeResult::kOk,
+        aggregate::decode(std::span(encoded).first(size), scratch));
+    TEST_ASSERT_TRUE(before == scratch.screens);
+  }
+  for (const uint16_t version : {0, 2}) {
+    aggregate::seal(std::span(encoded).first(used), version);
+    TEST_ASSERT_EQUAL(
+        settings::DecodeResult::kUnknownVersion,
+        aggregate::decode(std::span(encoded).first(used), scratch));
+    TEST_ASSERT_TRUE(before == scratch.screens);
+  }
 }
 
-void reseal() {
-  const auto crc =
-      settings::crc32(std::span(bytes).subspan(record::kHeaderBytes),
-                      settings::crc32(std::span(bytes).first(4)));
-  for (unsigned i = 0; i < 4; ++i)
-    bytes[4 + i] = static_cast<uint8_t>(crc >> (8 * i));
-}
-
-void checksum_valid_but_semantically_invalid_records_are_rejected() {
-  TEST_ASSERT_EQUAL(record::kRecordBytes, record::encode(model, bytes));
-  bytes[record::kHeaderBytes] |= 0x80;  // Unknown global flag.
-  reseal();
+void exact_screen_payload_rejects_unknown_flags_and_wrong_capacity() {
+  TEST_ASSERT_EQUAL(record::kPayloadBytes, record::encodePayload(model, bytes));
+  bytes[0] |= 0x80;  // Unknown global flag.
   policy::Error error;
   TEST_ASSERT_EQUAL(record::DecodeResult::kInvalidValue,
-                    record::decode(bytes, restored, &error));
+                    record::decodePayload(bytes, restored, &error));
   TEST_ASSERT_EQUAL(policy::Reason::kUnknownBits, error.reason);
-  TEST_ASSERT_EQUAL(record::kRecordBytes, record::encode(model, bytes));
-  bytes.back() = 0x80;  // Unknown explicit-field mask in final override.
-  reseal();
+  TEST_ASSERT_EQUAL(record::kPayloadBytes, record::encodePayload(model, bytes));
+  bytes.back() = 0x80;  // Unknown flag in the final shared rule.
   TEST_ASSERT_EQUAL(record::DecodeResult::kInvalidValue,
-                    record::decode(bytes, restored, &error));
-  TEST_ASSERT_EQUAL(policy::Field::kOverride, error.field);
-  TEST_ASSERT_EQUAL(policy::Property::kFields, error.property);
+                    record::decodePayload(bytes, restored, &error));
+  TEST_ASSERT_EQUAL(policy::Field::kShared, error.field);
+  TEST_ASSERT_EQUAL(policy::Property::kValues, error.property);
   // Oversize/capacity errors are explicit and do not write a partial record.
-  std::array<uint8_t, record::kRecordBytes + 1> larger{};
-  TEST_ASSERT_EQUAL(record::DecodeResult::kTooLong,
-                    record::decode(larger, restored));
+  std::array<uint8_t, record::kPayloadBytes + 1> larger{};
+  TEST_ASSERT_EQUAL(record::DecodeResult::kLengthMismatch,
+                    record::decodePayload(larger, restored));
   bytes.fill(0xa5);
-  TEST_ASSERT_EQUAL(
-      0, record::encode(model, std::span(bytes).first(bytes.size() - 1)));
+  TEST_ASSERT_EQUAL(0, record::encodePayload(
+                           model, std::span(bytes).first(bytes.size() - 1)));
   TEST_ASSERT_TRUE(std::all_of(bytes.begin(), bytes.end(),
                                [](uint8_t value) { return value == 0xa5; }));
 }
@@ -300,9 +293,106 @@ void common_visible_count_requires_two_but_available_content_may_be_one() {
   TEST_ASSERT_TRUE(policy::validate(model));
 }
 
+void normalized_program_keeps_saved_demo_order_and_shared_synthetic_rules() {
+  settings::Competitions configured;
+  for (const auto id : {47, 12}) {
+    settings::Competition entry;
+    entry.id = id;
+    entry.incarnation = id == 47 ? 103 : 101;
+    entry.primary.competition.assign("league");
+    entry.club.team = 40;
+    configured.entries.push(entry);
+  }
+  configured.entries[0].club.own_special = false;
+  model.per_competition[policy::index(policy::Phase::kOwn)] =
+      1u << screen::sportIndex(Type::kLiveSingle);
+  configured.entries[0].display.overrides[0][0] = {27, policy::kAutomatic,
+                                                   policy::kOverrideFields};
+  const auto retained = policy::resolve(
+      model, policy::Phase::kOwn, Type::kLiveSingle, &configured.entries[0]);
+  TEST_ASSERT_FALSE(retained.enabled);
+  TEST_ASSERT_TRUE(retained.automatic);
+  TEST_ASSERT_EQUAL_UINT16(27, retained.visit_s);
+  settings::UiConfig ui;
+  settings::projectUiConfig({}, model, configured, policy::Phase::kOwn, ui);
+  settings::CompetitionRoutes routes;
+  for (const auto& c : configured.entries)
+    routes.entries.push(static_cast<const settings::CompetitionRoute&>(c));
+  const auto binding = football::demo::configure(routes);
+  TEST_ASSERT_EQUAL_UINT8(47, binding[0].competition);
+  TEST_ASSERT_EQUAL_UINT8(12, binding[1].competition);
+  const auto gates = policy::eligibility(model, routes, &configured);
+  TEST_ASSERT_FALSE(gates.allows(policy::Phase::kOwn, Type::kLiveSingle, 0));
+  TEST_ASSERT_TRUE(gates.allows(policy::Phase::kOwn, Type::kLiveSingle, 1));
+  policy::Program program;
+  settings::demoProgram(ui, routes, program);
+  for (unsigned i = 0; i < program.count; ++i)
+    if (program.entries[i].type == Type::kLiveSingle)
+      TEST_ASSERT_EQUAL_UINT8(12, program.entries[i].competition);
+  // A dedicated synthetic id has incarnation zero and shared rules, even if
+  // its numeric value happens to equal a previously configured identity.
+  routes.entries[0].incarnation = 0;
+  settings::demoProgram(ui, routes, program);
+  bool synthetic_single = false;
+  for (unsigned i = 0; i < program.count; ++i)
+    if (program.entries[i].type == Type::kLiveSingle &&
+        program.entries[i].competition == 47) {
+      synthetic_single = true;
+      TEST_ASSERT_TRUE(program.entries[i].rule.enabled);
+      TEST_ASSERT_EQUAL_UINT16(model.shared[0][0].visit_s,
+                               program.entries[i].rule.visit_s);
+    }
+  TEST_ASSERT_TRUE(synthetic_single);
+  configured.entries[0].id = football::demo::kSecondCompetition;
+  configured.entries[0].incarnation = 73;
+  configured.entries.count = 1;
+  settings::projectUiConfig({}, model, configured, policy::Phase::kOwn, ui);
+  routes.clear();
+  routes.entries.push(
+      static_cast<const settings::CompetitionRoute&>(configured.entries[0]));
+  const auto collision = football::demo::configure(routes);
+  TEST_ASSERT_FALSE(collision[1].saved);
+  TEST_ASSERT_EQUAL_UINT32(0, collision[1].incarnation);
+  TEST_ASSERT_NOT_EQUAL(collision[0].competition, collision[1].competition);
+  settings::demoProgram(ui, routes, program);
+  synthetic_single = false;
+  for (unsigned i = 0; i < program.count; ++i)
+    synthetic_single |=
+        program.entries[i].type == Type::kLiveSingle &&
+        program.entries[i].competition == collision[1].competition;
+  TEST_ASSERT_TRUE(synthetic_single);
+}
+void explicit_groups_keep_priority_and_appearance_keeps_navigation() {
+  settings::Competitions entries;
+  for (unsigned i = 0; i < 4; ++i) {
+    settings::Competition c;
+    c.id = i + 1;
+    c.incarnation = i + 1;
+    c.primary.competition.assign("league");
+    c.club.team = 40;
+    c.club.name.assign("Same name");
+    entries.entries.push(c);
+  }
+  entries.entries[0].club.group = entries.entries[2].club.group = 1;
+  auto order = policy::competitionOrder(entries);
+  TEST_ASSERT_EQUAL_UINT8(0, order.slots[0]);
+  TEST_ASSERT_EQUAL_UINT8(2, order.slots[1]);
+  TEST_ASSERT_EQUAL_UINT8(1, order.slots[2]);
+  TEST_ASSERT_EQUAL_UINT8(3, order.slots[3]);
+  settings::UiConfig before, after;
+  settings::projectUiConfig({}, model, entries, kPhase, before);
+  model.appearance[0].colour ^= 0x123456;
+  settings::projectUiConfig({}, model, entries, kPhase, after);
+  TEST_ASSERT_TRUE(settings::sameNavigation(before, after));
+  model.shared[kPhaseIndex][kTypeIndex].visit_s++;
+  settings::projectUiConfig({}, model, entries, kPhase, after);
+  TEST_ASSERT_FALSE(settings::sameNavigation(before, after));
+}
+
 }  // namespace
 
 void setUp() {
+  competitions = {};
   model = policy::Policy{};
   restored = policy::Policy{};
 }
@@ -319,8 +409,12 @@ int main() {
       manual_only_sports_keep_their_time_and_pages_receive_the_whole_visit);
   RUN_TEST(out_of_range_and_unknown_configuration_is_rejected_without_clamping);
   RUN_TEST(complete_record_retains_every_rule_appearance_and_option);
-  RUN_TEST(corrupt_truncated_or_unknown_records_never_reach_the_candidate);
-  RUN_TEST(checksum_valid_but_semantically_invalid_records_are_rejected);
+  RUN_TEST(
+      corrupt_truncated_or_unknown_aggregates_never_reach_screen_candidate);
+  RUN_TEST(exact_screen_payload_rejects_unknown_flags_and_wrong_capacity);
   RUN_TEST(common_visible_count_requires_two_but_available_content_may_be_one);
+  RUN_TEST(
+      normalized_program_keeps_saved_demo_order_and_shared_synthetic_rules);
+  RUN_TEST(explicit_groups_keep_priority_and_appearance_keeps_navigation);
   return UNITY_END();
 }

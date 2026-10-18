@@ -14,17 +14,16 @@
 #include "hw_target.h"
 
 extern "C" __attribute__((used, section(".rodata_custom_desc")))
-const ota::Identity fussball_image_identity = {0x46424c31, 1,
+const ota::Identity fussball_image_identity = {
+    0x46424c31, cfg::kFirmwareIdentityVersion,
 #if defined(FUSSBALL_TARGET_XIAO_ESP32C6_GC9A01)
-                                               "xiao_esp32c6_gc9a01",
-                                               "4mb_ota_littlefs_v1",
+    "xiao_esp32c6_gc9a01", "4mb_ota_littlefs_v1",
 #elif defined(FUSSBALL_TARGET_WAVESHARE_ESP32S3_LCD128)
-                                               "waveshare_esp32s3_lcd128",
-                                               "16mb_ota_littlefs_v1",
+    "waveshare_esp32s3_lcd128", "16mb_ota_littlefs_v1",
 #else
 #error "OTA identity is required for every target"
 #endif
-                                               cfg::kSettingsFormatVersion};
+    cfg::kAppConfigFormatVersion};
 namespace ota {
 namespace {
 const esp_partition_t* partition = nullptr;
@@ -99,8 +98,8 @@ esp_err_t begin(const uint8_t* bytes, std::size_t count, std::size_t total) {
              sizeof(app.project_name)) != 0 ||
       custom.magic != identity().magic ||
       custom.version != identity().version ||
-      // A newer image migrates the stored settings; an older one could not
-      // read them (OQ-72).
+      // Compatible aggregate formats are equal or newer. Development
+      // format changes start with initial settings; no migration is implied.
       custom.settings_format < identity().settings_format ||
       memcmp(custom.target, identity().target, sizeof(custom.target)) != 0 ||
       memcmp(custom.layout, identity().layout, sizeof(custom.layout)) != 0)

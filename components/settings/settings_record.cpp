@@ -6,66 +6,25 @@ namespace settings {
 
 namespace {
 
-constexpr std::size_t kVersionOffset = 0;
-constexpr std::size_t kLengthOffset = 2;
-constexpr std::size_t kCrcOffset = 4;
-
-uint16_t readU16(const uint8_t* at) {
-  return static_cast<uint16_t>(at[0] | (at[1] << 8));
-}
-
-uint32_t readU32(const uint8_t* at) {
-  return uint32_t{at[0]} | (uint32_t{at[1]} << 8) | (uint32_t{at[2]} << 16) |
-         (uint32_t{at[3]} << 24);
-}
-
-void writeU16(uint8_t* at, uint16_t value) {
-  at[0] = static_cast<uint8_t>(value);
-  at[1] = static_cast<uint8_t>(value >> 8);
-}
-
-void writeU32(uint8_t* at, uint32_t value) {
-  for (int i = 0; i < 4; ++i) at[i] = static_cast<uint8_t>(value >> (8 * i));
-}
-
-// CRC over the version/length bytes and the payload (the CRC field itself
-// is excluded).
-uint32_t recordCrc(std::span<const uint8_t> record) {
-  return crc32(record.subspan(kHeaderBytes), crc32(record.first(kCrcOffset)));
-}
-
-class Writer {
+using binary::readU16;
+using binary::readU32;
+class Writer : public binary::Writer {
  public:
-  explicit Writer(uint8_t* at) : at_(at) {}
-
+  using binary::Writer::Writer;
   template <std::size_t N>
   void text(const Bytes<N>& value) {
-    *at_++ = value.length;
-    std::copy_n(value.data.begin(), value.length, at_);
-    at_ += N;
+    auto* at = take(1 + N);
+    if (!at) return;
+    *at++ = value.length;
+    std::copy_n(value.data.begin(), value.length, at);
   }
-  void flag(bool value) { *at_++ = value ? 1 : 0; }
-  void u16(uint16_t value) {
-    writeU16(at_, value);
-    at_ += 2;
-  }
-  void u8(uint8_t value) { *at_++ = value; }
-  void u32(uint32_t value) {
-    writeU32(at_, value);
-    at_ += 4;
-  }
-  const uint8_t* position() const { return at_; }
-
- private:
-  uint8_t* at_;
+  void flag(bool value) { u8(value ? 1 : 0); }
 };
 
-// Reads fields in order. A field is either complete, missing (the payload
-// ended before it, so it keeps its initial value) or partial (an error). The
-// read functions return true when they read a value.
+// Exact payload reader; a missing or partial field is always an error.
 class Reader {
  public:
-  explicit Reader(std::span<const uint8_t> payload) : payload_(payload) {}
+  explicit Reader(std::span<const uint8_t> payload) : cursor_(payload) {}
 
   bool failed() const { return result_ != DecodeResult::kOk; }
   DecodeResult result() const { return result_; }
@@ -104,31 +63,16 @@ class Reader {
     value = readU32(at);
     return true;
   }
-  // Reads a list's entry count (at most 'capacity'). The entries that follow
-  // must be complete: a payload ending before them is a partial field, not a
-  // missing one. Call endList() after the entries.
-  bool count(std::size_t capacity, uint8_t& value) {
-    if (!u8(value)) return false;
-    if (value > capacity) return reject(Field::kApplication);
-    entries_required_ = value > 0;
-    return true;
-  }
-  void endList() { entries_required_ = false; }
+  bool complete() const { return !failed() && cursor_.remaining() == 0; }
 
  private:
   const uint8_t* take(std::size_t size) {
     if (failed()) return nullptr;
-    if (pos_ == payload_.size()) {
-      if (entries_required_) result_ = DecodeResult::kPartialField;
+    if (cursor_.remaining() < size) {
+      result_ = DecodeResult::kLengthMismatch;
       return nullptr;
     }
-    if (payload_.size() - pos_ < size) {
-      result_ = DecodeResult::kPartialField;
-      return nullptr;
-    }
-    const uint8_t* at = payload_.data() + pos_;
-    pos_ += size;
-    return at;
+    return cursor_.take(size);
   }
   bool reject(Field field) {
     result_ = DecodeResult::kInvalidValue;
@@ -136,18 +80,15 @@ class Reader {
     return false;
   }
 
-  std::span<const uint8_t> payload_;
-  std::size_t pos_ = 0;
+  binary::Cursor<const uint8_t> cursor_;
   DecodeResult result_ = DecodeResult::kOk;
   Field invalid_ = Field::kWifiSsid;
-  bool entries_required_ = false;
 };
 
 void writeSource(Writer& writer, const Source& source) {
   writer.u8(static_cast<uint8_t>(source.provider));
   writer.text(source.competition);
   writer.text(source.season);
-  writer.text(source.team);
 }
 
 void readSource(Reader& reader, Source& source) {
@@ -156,7 +97,6 @@ void readSource(Reader& reader, Source& source) {
   source.provider = static_cast<cfg::Provider>(provider);
   reader.text(Field::kApplication, source.competition);
   reader.text(Field::kApplication, source.season);
-  reader.text(Field::kApplication, source.team);
 }
 
 void readCore(Reader& reader, Model& model) {
@@ -177,7 +117,7 @@ void readSecrets(Reader& reader, Model& model) {
   reader.text(Field::kApplication, model.football_data_key);
 }
 
-// General application fields. Screen policy has its independent record.
+// General application fields; screen policy follows in the same AppConfig.
 void readScalars(Reader& reader, Model& model) {
   for (auto* value : {&model.espn_opt_in, &model.demo, &model.night_enabled,
                       &model.ip_badge_ap_permanent, &model.ip_badge_bottom,
@@ -216,14 +156,32 @@ void writeEntry(Writer& writer, const Competition& entry) {
   writer.flag(entry.active);
   writeSource(writer, entry.primary);
   writer.text(entry.competition_name);
-  writer.text(entry.team_name);
+  writer.u32(entry.club.team);
+  writer.text(entry.club.name);
+  writer.flag(entry.club.own_special);
+  writer.u8(entry.club.group);
+  for (const auto& phase : entry.display.overrides)
+    for (const auto& rule : phase) {
+      writer.u16(rule.visit_s);
+      writer.u8(rule.values);
+      writer.u8(rule.fields);
+    }
 }
 
 void readEntry(Reader& reader, Competition& entry) {
   reader.flag(Field::kApplication, entry.active);
   readSource(reader, entry.primary);
   reader.text(Field::kApplication, entry.competition_name);
-  reader.text(Field::kApplication, entry.team_name);
+  reader.u32(entry.club.team);
+  reader.text(Field::kApplication, entry.club.name);
+  reader.flag(Field::kApplication, entry.club.own_special);
+  reader.u8(entry.club.group);
+  for (auto& phase : entry.display.overrides)
+    for (auto& rule : phase) {
+      reader.u16(rule.visit_s);
+      reader.u8(rule.values);
+      reader.u8(rule.fields);
+    }
 }
 
 void writeScalars(Writer& writer, const Model& model) {
@@ -248,36 +206,12 @@ void readRoles(Reader& reader, Model& model) {
 
 }  // namespace
 
-const char* decodeResultText(DecodeResult result) noexcept {
-  switch (result) {
-    case DecodeResult::kOk: return "ok";
-    case DecodeResult::kTooShort: return "shorter than its header";
-    case DecodeResult::kTooLong: return "longer than the accepted maximum";
-    case DecodeResult::kLengthMismatch: return "length field mismatch";
-    case DecodeResult::kChecksumMismatch: return "check value mismatch";
-    case DecodeResult::kOutdatedVersion: return "older format version";
-    case DecodeResult::kUnknownVersion: return "unknown format version";
-    case DecodeResult::kPartialField: return "ends inside a field";
-    case DecodeResult::kInvalidValue: return "value out of limits";
-  }
-  return "unknown";
-}
-
-uint32_t crc32(std::span<const uint8_t> data, uint32_t crc) noexcept {
-  // Bitwise, no table: the record is small and read or written rarely.
-  crc = ~crc;
-  for (const uint8_t byte : data) {
-    crc ^= byte;
-    for (int bit = 0; bit < 8; ++bit)
-      crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
-  }
-  return ~crc;
-}
-
-std::size_t encode(const Model& model,
-                   std::span<uint8_t, kMaxRecordBytes> out) noexcept {
+std::size_t encodeModelPayload(const Model& model,
+                               std::span<uint8_t> out) noexcept {
+  if (out.size() < kModelPayloadBytes) return 0;
+  out = out.first(kModelPayloadBytes);
   std::fill(out.begin(), out.end(), 0);
-  Writer writer(out.data() + kHeaderBytes);
+  Writer writer(out);
   writer.text(model.wifi_ssid);
   writer.text(model.wifi_password);
   writer.text(model.ap_password);
@@ -299,78 +233,17 @@ std::size_t encode(const Model& model,
   }
   writeLimit(writer, model.global_limit);
   writer.flag(model.overview_screenshot);
-  const auto used = static_cast<std::size_t>(writer.position() - out.data());
-  seal(out.first(used));
-  return used;
+  return writer.good() ? writer.position() : 0;
 }
 
-void seal(std::span<uint8_t> record, uint16_t version) noexcept {
-  writeU16(record.data() + kVersionOffset, version);
-  writeU16(record.data() + kLengthOffset,
-           static_cast<uint16_t>(record.size() - kHeaderBytes));
-  writeU32(record.data() + kCrcOffset, recordCrc(record));
-}
-
-namespace {
-
-// Header checks shared by both records.
-DecodeResult checkHeader(std::span<const uint8_t> record, std::size_t max) {
-  if (record.size() < kHeaderBytes) return DecodeResult::kTooShort;
-  if (record.size() > max) return DecodeResult::kTooLong;
-  if (readU16(record.data() + kLengthOffset) != record.size() - kHeaderBytes)
-    return DecodeResult::kLengthMismatch;
-  if (readU32(record.data() + kCrcOffset) != recordCrc(record))
-    return DecodeResult::kChecksumMismatch;
-  return DecodeResult::kOk;
-}
-
-// An older format version (they start at 1) is no longer read (OQ-253);
-// any other version is unknown (a newer firmware wrote it).
-DecodeResult checkVersion(std::span<const uint8_t> record, uint16_t current) {
-  const auto version = readU16(record.data() + kVersionOffset);
-  if (version != 0 && version < current) return DecodeResult::kOutdatedVersion;
-  if (version != current) return DecodeResult::kUnknownVersion;
-  return DecodeResult::kOk;
-}
-
-}  // namespace
-
-DecodeResult decode(std::span<const uint8_t> record, Model& model,
-                    Field* invalid, const Limits& limits) noexcept {
-  if (const auto header = checkHeader(record, cfg::kSettingsMaxRecordBytes);
-      header != DecodeResult::kOk)
-    return header;
-  if (const auto version = checkVersion(record, cfg::kSettingsFormatVersion);
-      version != DecodeResult::kOk)
-    return version;
-
-  Model candidate = model;
-  Reader reader(record.subspan(kHeaderBytes));
-  readCore(reader, candidate);
-  readSecrets(reader, candidate);
-  readScalars(reader, candidate);
-  readRoles(reader, candidate);
-  readRequestPlans(reader, candidate);
-  reader.flag(Field::kApplication, candidate.overview_screenshot);
-  DecodeResult result = reader.result();
-  Field bad = reader.invalidField();
-  if (result == DecodeResult::kOk &&
-      !validate(candidate, &bad, nullptr, limits))
-    result = DecodeResult::kInvalidValue;
-  if (result != DecodeResult::kOk) {
-    if (result == DecodeResult::kInvalidValue && invalid != nullptr)
-      *invalid = bad;
-    return result;
-  }
-  model = candidate;
-  return DecodeResult::kOk;
-}
-
-std::size_t encodeCompetitions(
-    const Competitions& competitions,
-    std::span<uint8_t, kMaxCompetitionRecordBytes> out) noexcept {
+std::size_t encodeCompetitionPayload(const Competitions& competitions,
+                                     std::span<uint8_t> out) noexcept {
+  const auto required =
+      6 + competitions.entries.size() * (kCompetitionBytes + 5);
+  if (out.size() < required) return 0;
+  out = out.first(required);
   std::fill(out.begin(), out.end(), 0);
-  Writer writer(out.data() + kHeaderBytes);
+  Writer writer(out);
   writer.u8(competitions.next_id);
   writer.u32(competitions.next_incarnation);
   writer.u8(competitions.entries.count);
@@ -379,40 +252,53 @@ std::size_t encodeCompetitions(
     writer.u32(entry.incarnation);
     writeEntry(writer, entry);
   }
-  const auto used = static_cast<std::size_t>(writer.position() - out.data());
-  seal(out.first(used), cfg::kCompetitionsFormatVersion);
-  return used;
+  return writer.good() ? writer.position() : 0;
 }
 
-DecodeResult decodeCompetitions(std::span<const uint8_t> record,
-                                Competitions& competitions) noexcept {
-  if (const auto header = checkHeader(record, cfg::kCompetitionsMaxRecordBytes);
-      header != DecodeResult::kOk)
-    return header;
-  if (const auto version =
-          checkVersion(record, cfg::kCompetitionsFormatVersion);
-      version != DecodeResult::kOk)
-    return version;
-  Competitions candidate;
-  Reader reader(record.subspan(kHeaderBytes));
+DecodeResult decodeModelPayload(std::span<const uint8_t> payload,
+                                Model& candidate, Field* invalid,
+                                const Limits& limits) noexcept {
+  if (payload.size() != kModelPayloadBytes)
+    return DecodeResult::kLengthMismatch;
+  Reader reader(payload);
+  readCore(reader, candidate);
+  readSecrets(reader, candidate);
+  readScalars(reader, candidate);
+  readRoles(reader, candidate);
+  readRequestPlans(reader, candidate);
+  reader.flag(Field::kApplication, candidate.overview_screenshot);
+  if (!reader.complete()) {
+    if (invalid) *invalid = reader.invalidField();
+    return reader.failed() ? reader.result() : DecodeResult::kLengthMismatch;
+  }
+  return validate(candidate, invalid, nullptr, limits)
+             ? DecodeResult::kOk
+             : DecodeResult::kInvalidValue;
+}
+
+DecodeResult decodeCompetitionPayload(std::span<const uint8_t> payload,
+                                      Competitions& candidate) noexcept {
+  if (payload.size() < 6) return DecodeResult::kLengthMismatch;
+  const auto count = payload[5];
+  if (count > cfg::kCompetitionMax ||
+      payload.size() != 6 + count * (kCompetitionBytes + 5))
+    return DecodeResult::kLengthMismatch;
+  candidate.clear();
+  Reader reader(payload);
   reader.u8(candidate.next_id);
   reader.u32(candidate.next_incarnation);
-  uint8_t count = 0;
-  if (reader.count(candidate.entries.kCapacity, count)) {
-    for (uint8_t i = 0; i < count; ++i) {
-      auto& entry = candidate.entries.items[i];
-      reader.u8(entry.id);
-      reader.u32(entry.incarnation);
-      readEntry(reader, entry);
-    }
-    candidate.entries.count = count;
-    reader.endList();
+  uint8_t read_count = 0;
+  if (!reader.u8(read_count)) return reader.result();
+  for (uint8_t i = 0; i < read_count; ++i) {
+    auto& entry = candidate.entries.items[i];
+    reader.u8(entry.id);
+    reader.u32(entry.incarnation);
+    readEntry(reader, entry);
   }
-  DecodeResult result = reader.result();
-  if (result == DecodeResult::kOk && !validate(candidate))
-    result = DecodeResult::kInvalidValue;
-  if (result == DecodeResult::kOk) competitions = candidate;
-  return result;
+  candidate.entries.count = read_count;
+  if (!reader.complete())
+    return reader.failed() ? reader.result() : DecodeResult::kLengthMismatch;
+  return validate(candidate) ? DecodeResult::kOk : DecodeResult::kInvalidValue;
 }
 
 }  // namespace settings

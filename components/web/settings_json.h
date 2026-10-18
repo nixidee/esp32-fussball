@@ -1,35 +1,34 @@
 #pragma once
-#include <ArduinoJson.h>
-
-#include <string_view>
-
+#include "json_stream.h"
 #include "settings_model.h"
 namespace web {
-// True if the JSON text 's' is exactly 'literal'. The comparison uses the
-// text's explicit length, so a key or value with an embedded NUL never
-// passes as the shorter literal (strict API boundary).
-inline bool sameText(ArduinoJson::JsonString s, std::string_view literal) {
-  return !s.isNull() && std::string_view(s.c_str(), s.size()) == literal;
-}
-void settingsJson(ArduinoJson::JsonObject out, const settings::Model& model,
-                  bool secrets = false);
-// Applies a settings patch and validates the result. On failure *violation
-// (if given) names the first rejected value: its path in this JSON and why.
-bool applyJson(ArduinoJson::JsonObjectConst input, settings::Model& model,
-               settings::Violation* violation = nullptr,
-               const settings::Limits& limits = {});
-// The competition store: {"competitions": [...]}.
-void competitionsJson(ArduinoJson::JsonObject out,
-                      const settings::Competitions& competitions);
-// Applies a competitions patch: the list in the input replaces the stored
-// one, an entry without id (or id 0) is new. Only shapes and text sizes are
-// checked here; settings::saveCompetitions() assigns ids and validates the
-// result.
-bool applyCompetitionsJson(ArduinoJson::JsonObjectConst input,
-                           settings::Competitions& competitions,
-                           settings::Violation* violation = nullptr);
-// Bounds, list maxima, text maxima and defaults; 'limits' are the maxima of
-// the display profile. The service supplies its hardware backlight capability.
-void schemaJson(ArduinoJson::JsonObject out, const settings::Limits& limits,
-                bool backlight);
+enum class SettingsDecode : uint8_t { kOk, kSyntax, kViolation };
+
+// Object fields only. The caller owns the surrounding object and may compose
+// application configuration, schema and export without another JSON encoder.
+bool ssidValueJson(json::Writer&, std::string_view raw_bytes);
+bool settingsJson(json::Writer&, const settings::Model&, bool secrets = false);
+bool competitionsJson(json::Writer&, const settings::Competitions&);
+bool competitionArrayJson(json::Writer&, const settings::Competitions&);
+bool schemaJson(json::Writer&, const settings::Limits&, bool backlight);
+
+// Complete request wrappers leave the supplied value unchanged on failure.
+SettingsDecode exportOptions(json::Input, bool& secrets,
+                             settings::Violation* = nullptr);
+SettingsDecode applyJson(json::Input, settings::Model&,
+                         settings::Violation* = nullptr,
+                         const settings::Limits& = {});
+SettingsDecode applyCompetitionsJson(json::Input, settings::Competitions&,
+                                     settings::Violation* = nullptr);
+
+// Nested codecs mutate caller-owned candidates only. Their caller must prove
+// complete input and validate the whole application before any publication.
+SettingsDecode applySettingsObject(json::Reader&, const json::Token&,
+                                   settings::Model&, settings::Violation*,
+                                   const settings::Limits& = {},
+                                   const settings::FieldPath& = {});
+SettingsDecode applyCompetitionArray(json::Reader&, const json::Token&,
+                                     settings::Competitions&,
+                                     settings::Violation*,
+                                     const settings::FieldPath& = {});
 }  // namespace web

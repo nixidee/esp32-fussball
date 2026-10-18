@@ -16,21 +16,6 @@ enum class Action : uint8_t {
   kShowIp,        // from the Web UI only; no input maps to it
   kAutomaticNext  // Demo only; no physical input maps to it
 };
-// One UI command carries the full version of the model used to produce it.
-// The existing event bus and controller FIFO both transport this same word.
-constexpr uint64_t actionPayload(Action action, uint32_t generation) {
-  return static_cast<uint64_t>(generation) << 32 |
-         static_cast<uint32_t>(action);
-}
-constexpr uint32_t actionGeneration(uint64_t payload) {
-  return static_cast<uint32_t>(payload >> 32);
-}
-constexpr Action actionFromPayload(uint64_t payload) {
-  const uint32_t action = static_cast<uint32_t>(payload);
-  return action <= static_cast<uint32_t>(Action::kAutomaticNext)
-             ? static_cast<Action>(action)
-             : Action::kNone;
-}
 class InputPolicy {
  public:
   // Pure monotonic state machine: bit (1 << RawInput) per emitted event.

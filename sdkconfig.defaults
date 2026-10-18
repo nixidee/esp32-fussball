@@ -19,6 +19,11 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+# Product diagnostics toggle their own sampling; no caller changes tag levels.
+# Keep the global INFO runtime filter for independently compiled SDK libraries.
+# Removing only tag caches/lists preserves that filter and all warnings/errors.
+CONFIG_LOG_TAG_LEVEL_IMPL_NONE=y
+CONFIG_LOG_DYNAMIC_LEVEL_CONTROL=y
 
 # UI actions carry their full 32-bit settings generation plus action code.
 # Keep all 8 payload bytes inline in esp_event, without a heap allocation.
@@ -45,6 +50,13 @@ CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 # ---- LVGL 9.6 (trimmed config for the C6) ----
 # Unlisted LVGL options keep their Kconfig defaults.
 
+# Views place their measured content explicitly, including the developer
+# colour test. Unused layout registrations would retain their implementations.
+# CONFIG_LV_USE_FLEX is not set
+# CONFIG_LV_USE_GRID is not set
+# No subjects/observer bindings exist; updates use the UI controller and FIFO.
+# CONFIG_LV_USE_OBSERVER is not set
+
 # LVGL's own heap for widgets, styles and texts: a static block in internal
 # RAM (default 64 KB). 32 KB is enough for the planned screens; the boot log
 # prints the real usage (display: "LVGL pool ..."); the final value follows
@@ -52,8 +64,8 @@ CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 CONFIG_LV_MEM_SIZE=32768
 
 # Pixel formats LVGL can draw. Kept: RGB565 (display and raw images, ADR-008),
-# RGB565A8 (images with alpha), ARGB8888 (layers with transparency), A8
-# (alpha masks). The others are not used and only cost flash.
+# RGB888 (JPEG decoder input), RGB565A8 (images with alpha), ARGB8888 (layers
+# with transparency), A8 (alpha masks). The others are not used.
 # CONFIG_LV_DRAW_SW_SUPPORT_RGB565_SWAPPED is not set
 CONFIG_LV_DRAW_SW_SUPPORT_RGB888=y
 # CONFIG_LV_DRAW_SW_SUPPORT_XRGB8888 is not set
@@ -72,9 +84,10 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 # then restarts the device instead of LVGL running on with missing objects.
 CONFIG_LV_USE_ASSERT_MALLOC=y
 
-# Themes: only the default theme. Widgets: only what the screens need
-# (label, image, line, arc); the default theme links every enabled widget.
-# Enable further widgets when a screen needs them.
+# All scenes, images and colour-test labels own their styles/font explicitly.
+# Disable automatic themes, which otherwise allocate a theme per display and
+# retain generic widget styles. Labels remain for the developer colour test.
+# CONFIG_LV_USE_THEME_DEFAULT is not set
 # CONFIG_LV_USE_THEME_SIMPLE is not set
 # CONFIG_LV_USE_THEME_MONO is not set
 # CONFIG_LV_USE_ANIMIMG is not set
@@ -139,6 +152,9 @@ CONFIG_MBEDTLS_TLS_CLIENT_ONLY=y
 # CONFIG_MBEDTLS_TLS_SERVER_AND_CLIENT is not set
 # CONFIG_MBEDTLS_TLS_SERVER_ONLY is not set
 # CONFIG_MBEDTLS_SERVER_SSL_SESSION_TICKETS is not set
+# The device advertises its hostname/HTTP service, but never continuously
+# browses other services. Keep advertising and local .local DNS resolution.
+# CONFIG_MDNS_ENABLE_BROWSE is not set
 CONFIG_LWIP_DNS_SUPPORT_MDNS_QUERIES=y
 CONFIG_HTTPD_WS_SUPPORT=y
 # The debug socket checks origin, setting and session token before httpd

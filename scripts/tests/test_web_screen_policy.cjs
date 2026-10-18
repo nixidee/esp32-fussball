@@ -1,65 +1,355 @@
-"use strict";
-
-// The production script drives its real draft and request functions against a
-// bounded in-memory API. This does not establish browser or device acceptance.
-const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
-const root=path.join(__dirname,'../..'),html=fs.readFileSync(path.join(root,'web/index.html'),'utf8'),script=html.match(/<script>([\s\S]*?)<\/script>/)[1],boundary=script.lastIndexOf("\nsetInterval(()=>load('status',false),5000)");
-assert(boundary>0);
-const elements=new Map(),events={},copy=x=>JSON.parse(JSON.stringify(x));
-const element=id=>{if(!elements.has(id))elements.set(id,{id,innerHTML:'',textContent:'',value:'',dataset:{},style:{},hidden:false,disabled:false,classList:{toggle(){}},querySelector(s){return element(id+' '+s)},querySelectorAll(){return[]},remove(){},firstElementChild:{style:{}},close(){this.open=false},showModal(){this.open=true},focus(){},setAttribute(){},isConnected:true});return elements.get(id);};
-let backend,calls,failPath,onWrite,lastBlob;
-const respond=(status,data)=>({ok:status>=200&&status<300,status,json:async()=>copy(data)});
-async function fetchApi(url,options){const endpoint=url.split('/api/v1/')[1],method=options.method||'GET',body=options.body===undefined?undefined:JSON.parse(options.body);calls.push({endpoint,method,body});if(method==='GET'){if(endpoint==='settings')return respond(200,backend.settings);if(endpoint==='competitions')return respond(200,{competitions:backend.competitions});if(endpoint==='screen-settings')return respond(200,{...backend.policy,generation:backend.generation});if(endpoint==='session')return respond(200,{valid:true,password_set:false});throw Error('unhandled GET '+endpoint);}
- assert(!JSON.stringify(body).includes('_screenKey'),'browser-only binding leaked into '+endpoint);assert(Buffer.byteLength(JSON.stringify(body))<=8192,'API body exceeded bound');if(endpoint===failPath)return respond(503,{code:'internal'});
- if(endpoint==='settings'){Object.assign(backend.settings,body);backend.generation=(backend.generation+1)>>>0;}
- else if(endpoint==='competitions'){const prior=backend.competitions;backend.competitions=body.competitions.map(c=>{const previous=prior.find(x=>x.id===c.id),id=previous?previous.id:backend.ids.shift();return {...c,id,incarnation:previous?previous.incarnation:backend.incarnation++};});backend.policy.competitions=backend.policy.competitions.filter(c=>backend.competitions.some(x=>x.id===c.id&&x.incarnation===c.incarnation));backend.generation=(backend.generation+1)>>>0;}
- else if(endpoint==='screen-settings'){if(body.generation!==backend.generation)return respond(409,{code:'settings_changed'});for(const c of body.competitions)assert(backend.competitions.some(x=>x.id===c.id&&x.incarnation===c.incarnation),'policy must use committed service identities');backend.policy=copy(body);backend.generation=(backend.generation+1)>>>0;}
- else if(endpoint==='teams')backend.names=copy(body.short_names);
- else if(endpoint==='export')return respond(200,{...backend.settings,competitions:backend.competitions,short_names:backend.names});
- else throw Error('unhandled write '+endpoint);
- onWrite?.(endpoint);return respond(200,endpoint==='competitions'?{competitions:backend.competitions}:{ok:true});
+'use strict';
+// The actual current config/schema, full production event handlers and one
+// coherent Common Apply replace the retired multi-record policy choreography.
+const assert = require('node:assert/strict'),
+      {harness} = require('./web_config_harness.cjs');
+let h, U, events, element, passed = 0;
+const phases = ['own', 'other', 'matchday', 'idle', 'break'],
+      types = ['single', 'conference', 'table', 'crest', 'matchday', 'images'],
+      sports = ['single', 'conference', 'table', 'matchday'];
+const copy = x => JSON.parse(JSON.stringify(x));
+async function test(name, fn) {
+  h = harness(process.argv[2]);
+  ({U, events, element} = h);
+  await fn();
+  passed++;
+  console.log('PASS ' + name);
 }
-const context={console,TextEncoder,TextDecoder,Blob,AbortController,Uint8Array,DataView,ArrayBuffer,Map,Set,Date,Promise,Math,JSON,Number,String,Object,Error,Array,RegExp,structuredClone,scrollY:0,scrollTo(){},setTimeout:(fn)=>setTimeout(fn,1),clearTimeout,document:{getElementById:element,querySelectorAll(){return[]},querySelector(){return null},addEventListener(name,fn){events[name]=fn},documentElement:{dataset:{}},createElement(type){const e=element('new-'+type);e.click=()=>{};return e;}},URL:{createObjectURL(blob){lastBlob=blob;return'blob:test';},revokeObjectURL(){}},localStorage:{getItem(){return'auto'},setItem(){}},location:{host:'fussball.local',hostname:'fussball.local',protocol:'http:',assign(){}},window:{addEventListener(){}},fetch:fetchApi,confirm:()=>true};
-vm.createContext(context);vm.runInContext(script.slice(0,boundary)+"\nglobalThis.UI={S,W,ACT,prepareScreenModel,screenPayload,screenRow,screenRowPath,screenMeaning,sameScreenPolicy,validateScreenPolicy,validateImport,payload,splitLists,writeModel,save,changes,readModel,fresh,get,set,validate,screenPhaseMarkup,screenAppearanceMarkup,screenSlidesMarkup,overview,displayPage,competitions,moveCompetition,removeCompetition,imageIds,uses,pruneMissing,mergeBaseline,bindSystem,exportSettings};render=()=>{};",context,{filename:'web/index.html'});const U=context.UI;
-// Reuse the earlier suite's opaque, synthetic general-settings baseline. Its
-// old screen-selector expectations are not imported or executed here.
-const legacy=fs.readFileSync(path.join(__dirname,'test_web_ui.cjs'),'utf8'),modelLiteral=legacy.match(/^const model=(.*);$/m)[1],schemaLine=legacy.match(/^U\.S\.schema=.*;$/m)[0];vm.runInContext('const model='+modelLiteral+';globalThis.seedModel=model;'+schemaLine.replace('U.S.schema','UI.S.schema'),context);
-const base=copy(context.seedModel);base.screens.push(copy(base.screens[1]));base.input_roles=[1,2,3,0,0,0,0,0];
-const phases=['own','other','matchday','idle','break'],types=['single','conference','table','crest','matchday','images'],sports=['single','conference','table','matchday'];
-const metadata={version:1,max_body:8192,phases,types,sports,rule_fields:['enabled','automatic','visit_s'],max_competitions:8,max_slides:5,bounds:{visit_s:[15,43200],break_days:[1,366],buffer_min:[0,180],manual_return_s:[0,4000],per_image_s:[3,3600],text_scale:[70,130],visible_matches:[1,4],table_window:[1,7],image:[0,10],conference_mode:[0,1],matchday_mode:[0,1]}};
-function initialPolicy(){const auto=['single','conference','matchday','table','table'];return {generation:100,break_days:21,own_before_min:30,own_after_min:30,other_before_min:30,other_after_min:30,manual_return_s:60,per_image_s:15,visible_matches:4,table_window:5,backgrounds:true,pin_own_match:true,frame:false,frame_crest:true,automatic_break:false,conference_mode:0,matchday_mode:0,order:['crest','images','single','matchday','conference','table'],phases:Object.fromEntries(phases.map((phase,i)=>[phase,{...Object.fromEntries(types.map(t=>[t,[sports.includes(t),sports.includes(t)?t===auto[i]:true,t==='crest'?15:t==='images'||t==='table'?60:30]])),expanded:[]}])),competitions:[],appearance:Object.fromEntries(types.map(t=>[t,{colour:0x101820,text:0xffffff,accent:0x49cba0,text_scale:100,image:0,background:true,dots:true}])),slides:[]};}
-function entry(id=23,incarnation=800){return {id,incarnation,active:true,primary:{provider:0,competition:'bl1',season:'',team:'65'},competition_name:'Bundesliga',team_name:'FC',screens:{own_match:true,conference:true,matchday:true,table:true}};}
-function reset(stored=true){calls=[];failPath=null;onWrite=null;lastBlob=null;backend={settings:copy(base),competitions:[entry()],policy:initialPolicy(),generation:100,ids:[47,9,199,61,12,244,3,88],incarnation:901,names:[]};delete backend.settings.competitions;U.S.schema={...U.S.schema,limits:{...U.S.schema.limits,competitions:8,screens:5},inputs:3,short_names_max:48,short_name_max:26,defaults:copy(base),screen_policy:copy(metadata)};U.S.status={competitions_source:stored?'stored':'initial',settings_source:'stored',network:'connected',last_update_ms:1,uptime_s:10,screen:2,own_match:{present:false},ip:'192.0.2.1'};U.S.images={items:[{id:1},{id:2}],used:0};U.S.session={valid:true,password_set:false};U.S.token='test';U.S.page='display';U.S.server=null;U.S.screenPhase='own';U.S.screenAppearance='single';U.S.saving=false;U.fresh({...copy(base),competitions:copy(backend.competitions),screen_policy:copy(backend.policy)});}
-let passed=0;
-async function test(name,fn){reset();await fn();passed++;console.log('PASS',name);}
-async function run(){
- await test('strict policy validates the complete owner profiles',()=>{assert.equal(U.validate(U.S.draft).length,0);assert.equal(U.validateScreenPolicy(U.screenPayload(),backend.competitions).length,0);const bad=U.screenPayload();bad.phases.idle.table=[true];assert(U.validateScreenPolicy(bad,backend.competitions).length);bad.phases.idle.table=[true,false,43201];assert(U.validateScreenPolicy(bad,backend.competitions).some(x=>x.path==='screen_policy.phases.idle.table[2]'));bad.typo=true;assert(U.validateScreenPolicy(bad,backend.competitions).some(x=>x.path==='screen_policy.typo'));});
- await test('manual-only visit stays saved and image multiples are strict',()=>{const p=U.S.draft.screen_policy;p.phases.own.table=[true,false,321];assert(!U.screenPhaseMarkup().includes('data-path="screen_policy.phases.own.table[2]"'));assert.equal(p.phases.own.table[2],321);p.phases.own.images=[true,true,61];assert(U.validate(U.S.draft).some(x=>x.path==='screen_policy.phases.own.images[2]'));p.phases.own.images[2]=60;assert.equal(U.validate(U.S.draft).length,0);});
- await test('null inheritance and explicit false survive splitting and collapse',()=>{const row=U.screenRow(0);row.own.single=[false,null,null];U.S.draft.screen_policy.phases.own.expanded=['single'];U.ACT.policySplit({dataset:{phase:'own',type:'single'}});assert.deepEqual(copy(row.own.single),[false,null,null]);U.ACT.policySplit({dataset:{phase:'own',type:'single'}});assert.deepEqual(copy(row.own.single),[false,null,null]);const html=U.screenPhaseMarkup();assert(html.includes('data-kind="policybool"'));const path=U.screenRowPath(0)+'.own.single[0]';events.input({target:{dataset:{path,kind:'policybool'},type:'select-one',value:''}});assert.equal(row.own.single[0],null);events.input({target:{dataset:{path,kind:'policybool'},type:'select-one',value:'false'}});assert.equal(row.own.single[0],false);row.own.single[0]=null;const visit=U.screenRowPath(0)+'.own.single[2]';events.input({target:{dataset:{inherit:visit},checked:false}});assert.equal(row.own.single[2],30);events.input({target:{dataset:{inherit:visit},checked:true}});assert.equal(row.own.single[2],null);});
- await test('policy fields and generation never leak into general PUT',()=>{U.S.draft.hostname='new-host';const p=U.payload(),lists=U.splitLists(p);assert(!('screen_policy'in p));assert(!JSON.stringify(U.screenPayload()).includes('_screenKey'));assert(lists.competitions[0]._screenKey);});
- await test('frame lives on overview and new options use five compact phases',()=>{const overview=U.overview(),display=U.displayPage();assert(overview.includes('data-path="screen_policy.frame"'));assert(overview.includes('Bildschirmfoto herunterladen'));assert(display.includes('role="tablist"'));assert.equal((display.match(/data-act="policyPhase"/g)||[]).length,5);assert(display.includes('data-path="brightness"'));assert(display.includes('data-path="input_roles[0]"')===Number.isInteger(U.S.schema.inputs));assert(!display.includes('data-path="idle_screen"'));assert(!display.includes('data-path="whole_matchday"'));assert(!display.includes('data-disc='));});
- await test('display basics retain input roles night rotation and IP settings',async()=>{const markup=U.displayPage();for(const key of['night_start','night_end','night_brightness','rotation','ip_badge_s','ip_badge_bottom','ip_badge_ap_permanent','scroll_repeat_ms','input_roles[0]','input_roles[1]','input_roles[2]'])assert(markup.includes('data-path="'+key+'"'),key);U.S.draft.input_roles[0]=0;assert(U.validate(U.S.draft).some(e=>e.path==='input_roles'));U.S.draft.input_roles[0]=1;U.S.draft.night_brightness=20;U.S.draft.rotation=2;U.S.draft.ip_badge_s=120;await U.save();assert.equal(backend.settings.night_brightness,20);assert.equal(backend.settings.rotation,2);assert.equal(backend.settings.ip_badge_s,120);assert.deepEqual(backend.settings.input_roles,base.input_roles);assert(!calls.some(c=>c.endpoint==='screen-settings'&&c.method==='PUT'));});
- await test('new identical competitions follow receipt positions and nonsequential ids',async()=>{const a=entry(0,0),b=entry(0,0);U.S.draft.competitions.push(a,b);U.prepareScreenModel(U.S.draft);U.screenRow(1).own.single=[false,null,123];U.screenRow(2).own.single=[true,false,234];U.S.draft.screen_policy.frame=true;await U.writeModel(null,{competitions:copy(U.S.draft.competitions)},()=>{},true);assert.equal(U.S.saved.competitions[1].id,47);assert.equal(U.S.saved.competitions[2].id,9);assert.deepEqual(copy(backend.policy.competitions.find(c=>c.id===47).own.single),[false,null,123]);assert.deepEqual(copy(backend.policy.competitions.find(c=>c.id===9).own.single),[true,false,234]);assert.equal(U.changes().length,0);});
- await test('competition reorder and deletion keep the surviving identity overrides',async()=>{backend.competitions.push(entry(31,812));const m=copy(U.S.saved);m.competitions=copy(backend.competitions);U.fresh(m);U.screenRow(0).own_special=false;U.screenRow(1).idle.table[2]=99;await U.writeModel(null,null,()=>{},true);U.moveCompetition(1,-1);U.removeCompetition(1);assert.equal(U.S.draft.competitions[0].id,31);assert.equal(U.screenRow(0).idle.table[2],99);await U.save();assert.deepEqual(backend.competitions.map(c=>c.id),[31]);assert.deepEqual(backend.policy.competitions.map(c=>c.id),[31]);assert.equal(backend.policy.competitions[0].idle.table[2],99);assert.equal(U.changes().length,0);});
- await test('frame-only save persists an initial preset list before bindings',async()=>{reset(false);U.S.draft.screen_policy.frame=true;await U.save();const writes=calls.filter(c=>c.method==='PUT');assert.deepEqual(writes.map(x=>x.endpoint),['competitions','screen-settings']);assert.equal(backend.policy.frame,true);});
- await test('a failed policy PUT retains already accepted general and list writes',async()=>{U.S.draft.hostname='accepted-host';U.S.draft.competitions.push(entry(0,0));U.prepareScreenModel(U.S.draft);U.S.draft.screen_policy.frame=true;const body=U.payload(),lists=U.splitLists(body);failPath='screen-settings';await assert.rejects(U.writeModel(body,lists,()=>{},true));assert.equal(U.S.saved.hostname,'accepted-host');assert.equal(U.S.saved.competitions[1].id,47);assert.equal(U.S.saved.screen_policy.frame,false);assert.equal(U.S.draft.screen_policy.frame,true);assert(U.changes().some(c=>c.path==='screen_policy.frame'));assert(!U.changes().some(c=>c.path==='hostname'||c.path==='competitions'));});
- await test('foreign policy before save prevents every write',async()=>{U.S.draft.screen_policy.frame=true;backend.policy.frame_crest=false;backend.generation++;await assert.rejects(U.writeModel(null,null,()=>{},true),/WEB S01/);assert.equal(calls.filter(c=>c.method==='PUT').length,0);});
- await test('foreign policy after own general write is detected without replacing token',async()=>{U.S.draft.hostname='accepted-host';U.S.draft.screen_policy.frame=true;onWrite=endpoint=>{if(endpoint==='settings'){backend.policy.frame_crest=false;backend.generation++;}};const body=U.payload();U.splitLists(body);await assert.rejects(U.writeModel(body,null,()=>{},true),/WEB S01/);assert.equal(U.S.saved.hostname,'accepted-host');assert.equal(U.S.saved.screen_policy.frame_crest,true);assert(!calls.some(c=>c.endpoint==='screen-settings'&&c.method==='PUT'));});
- await test('foreign competition changes cannot silently refresh the policy token',async()=>{U.S.draft.screen_policy.frame=true;backend.competitions[0].team_name='Changed elsewhere';backend.generation++;await assert.rejects(U.writeModel(null,null,()=>{},true),/WEB S01/);assert(!calls.some(c=>c.method==='PUT'));});
- await test('generation zero and uint32 wrap are valid',async()=>{backend.generation=4294967295;backend.policy.generation=4294967295;U.S.saved.screen_policy.generation=4294967295;U.S.draft.screen_policy.generation=4294967295;U.S.draft.screen_policy.frame=true;await U.writeModel(null,null,()=>{},true);assert.equal(backend.generation,0);assert.equal(U.S.saved.screen_policy.generation,0);assert.equal(U.changes().length,0);});
- await test('policy comparison ignores object key order but preserves configured sequence',()=>{const a=U.screenPayload(),b=JSON.parse(JSON.stringify(a,(k,v)=>v));b.appearance.single=Object.fromEntries(Object.entries(b.appearance.single).reverse());assert(U.sameScreenPolicy(a,b));b.order.reverse();assert(!U.sameScreenPolicy(a,b));});
- await test('image reservations and pruning cover policy styles and selected library images',()=>{U.S.draft.screen_policy.slides=[1,2];U.S.draft.screen_policy.appearance.table.image=2;assert.deepEqual([...U.imageIds(U.S.draft)].sort(),[1,2]);assert(U.uses(2).some(x=>x.includes('Tabelle')));assert(U.uses(2).some(x=>x.includes('Bilderfolge')));U.pruneMissing(U.S.draft,new Set([2]));assert.deepEqual(copy(U.S.draft.screen_policy.slides),[2]);assert.equal(U.S.draft.screen_policy.appearance.table.image,2);});
- await test('image reconciliation accepts only its own reference cleanup',()=>{U.S.saved.screen_policy.slides=[1,2];U.S.draft.screen_policy.slides=[1,2];U.S.draft.hostname='keep-draft';const next=copy(U.S.saved);next.screen_policy.slides=[2];next.screen_policy.generation++;U.mergeBaseline(next,[1]);assert.equal(U.S.draft.hostname,'keep-draft');assert.deepEqual(copy(U.S.draft.screen_policy.slides),[2]);const foreign=copy(U.S.saved);foreign.screen_policy.frame=true;foreign.screen_policy.generation++;assert.throws(()=>U.mergeBaseline(foreign),/WEB S01/);assert.equal(U.S.saved.screen_policy.frame,false);});
- await test('failed image cleanup can leave the policy unchanged and retain edited selections',()=>{U.S.saved.screen_policy.slides=[1,2];U.S.draft.screen_policy.slides=[2,1];U.S.saved.screen_policy.appearance.single.image=1;U.S.draft.screen_policy.appearance.single.image=1;const next=copy(U.S.saved);U.mergeBaseline(next,[1]);assert.deepEqual(copy(U.S.draft.screen_policy.slides),[2,1]);assert.equal(U.S.draft.screen_policy.appearance.single.image,1);assert(U.changes().some(c=>c.path.startsWith('screen_policy.slides[')));});
- await test('partial image cleanup acknowledges references separately from confirmed deleted files',()=>{for(const m of[U.S.saved,U.S.draft]){m.screen_policy.slides=[1,1,2];m.screen_policy.appearance.single.image=1;m.screen_policy.appearance.table.image=2;}U.S.draft.screen_policy.slides=[2,1,1];const next=copy(U.S.saved);next.screen_policy.slides=[2];next.screen_policy.appearance.single.image=0;next.screen_policy.generation++;U.mergeBaseline(next,[1,2]);assert.deepEqual(copy(U.S.saved.screen_policy.slides),[2]);assert.deepEqual(copy(U.S.draft.screen_policy.slides),[2,1,1]);assert.equal(U.S.saved.screen_policy.appearance.table.image,2);assert.equal(U.S.draft.screen_policy.appearance.single.image,0);U.pruneMissing(U.S.draft,new Set([1]));assert.deepEqual(copy(U.S.draft.screen_policy.slides),[1,1]);assert.equal(U.S.draft.screen_policy.appearance.table.image,0);});
- await test('image cleanup rejects unrelated ids duplicate counts order and competition changes',()=>{for(const m of[U.S.saved,U.S.draft]){m.screen_policy.slides=[1,1,2,3];m.screen_policy.appearance.table.image=3;}for(const change of[next=>{next.screen_policy.appearance.table.image=0;},next=>{next.screen_policy.slides=[1,2,3];},next=>{next.screen_policy.slides=[1,1,3,2];},next=>{next.screen_policy.slides=[1,1,2];},next=>{next.competitions[0].team_name='Foreign';}]){const next=copy(U.S.saved);change(next);assert.throws(()=>U.mergeBaseline(next,[1,2]),/WEB S01/);assert.deepEqual(copy(U.S.saved.screen_policy.slides),[1,1,2,3]);}});
- await test('backup binds imported overrides to new service identities before any write',async()=>{const backup={competitions:[entry(23,800)],screen_policy:U.screenPayload()};backup.screen_policy.competitions[0].own.single=[false,null,123];const imported=U.validateImport(backup);assert.equal(imported.competitions[0].id,0);assert.equal(imported.screen_policy.competitions[0].id,0);assert.equal(calls.length,0);U.S.draft=imported;await U.writeModel(null,{competitions:copy(imported.competitions)},()=>{},true);assert.equal(backend.competitions[0].id,47);assert.deepEqual(copy(backend.policy.competitions[0].own.single),[false,null,123]);assert.equal(backend.policy.competitions[0].incarnation,901);});
- await test('null secret imports retain the existing absent-key marker after acknowledgement',async()=>{assert.equal(U.S.saved.api_football_key_set,false);U.S.draft=U.validateImport({api_football_key:null});await U.writeModel({api_football_key:null},null);assert.equal(U.S.saved.api_football_key_set,false);assert.equal(U.S.draft.api_football_key_set,false);});
- await test('invalid policy import and orphaned bindings reject before writes',()=>{const invalid={competitions:[entry()],screen_policy:U.screenPayload()};invalid.screen_policy.phases.own.images=[true,true,61];assert.throws(()=>U.validateImport(invalid));assert.equal(calls.length,0);assert.throws(()=>U.validateImport({screen_policy:U.screenPayload()}));const raw=U.screenPayload();raw.competitions[0]._screenKey='bad';assert.throws(()=>U.validateImport({competitions:[entry()],screen_policy:raw}));});
- await test('client backup includes a complete policy without browser-only metadata',async()=>{element('exportSecrets').checked=false;await U.exportSettings();assert(lastBlob);const backup=JSON.parse(await lastBlob.text());assert(backup.screen_policy);assert.equal(backup.screen_policy.generation,backend.generation);assert(!JSON.stringify(backup).includes('_screenKey'));});
- await test('confirmed import shares the partial acknowledgement and retry flow',async()=>{const backup={hostname:'imported-host',competitions:[entry()],screen_policy:U.screenPayload(),short_names:[{provider:0,id:40,name:'FCB'}]};backup.screen_policy.frame=true;U.bindSystem();const source=JSON.stringify(backup);await element('importFile').onchange({target:{value:'file',files:[{size:Buffer.byteLength(source),text:async()=>source}]}});assert(!calls.some(c=>c.method==='PUT'));failPath='teams';await element('dialog [data-act=confirm]').onclick({target:element('dialog [data-act=confirm]')});assert.equal(U.S.saved.hostname,'imported-host');assert.equal(U.S.saved.screen_policy.frame,true);assert.equal(U.S.saved.competitions[0].id,47);assert.deepEqual(copy(U.S.pendingNames),backup.short_names);assert.deepEqual(copy(U.changes()).map(c=>c.path),['short_names']);failPath=null;await U.save();assert.deepEqual(backend.names,backup.short_names);assert.equal(U.changes().length,0);});
- await test('maximum browser policy remains within the existing request cap',()=>{const m=copy(U.S.draft),p=m.screen_policy;m.competitions=Array.from({length:8},(_,i)=>entry(255-i,4294967294-i));U.prepareScreenModel(m);p.generation=4294967295;p.break_days=366;p.manual_return_s=4000;p.per_image_s=3600;p.visible_matches=4;p.table_window=7;p.conference_mode=p.matchday_mode=1;for(const k of['own_before_min','own_after_min','other_before_min','other_after_min'])p[k]=180;for(const k of['backgrounds','pin_own_match','frame','frame_crest','automatic_break'])p[k]=false;for(const phase of phases){p.phases[phase].expanded=copy(sports);for(const t of types)p.phases[phase][t]=[false,false,43200];for(const row of p.competitions){row.own_special=false;for(const t of sports)row[phase][t]=[false,false,43200];}}for(const [type,a]of Object.entries(p.appearance)){a.colour=a.text=a.accent=16777215;a.text_scale=130;a.image=type==='crest'?0:10;a.background=a.dots=false;}p.slides=[10,10,10,10,10];const wire=U.screenPayload(m);assert.equal(U.validateScreenPolicy(wire,m.competitions).length,0);assert.equal(Buffer.byteLength(JSON.stringify(wire)),8121);});
- await test('every new contextual help has an English translation',()=>{const decode=s=>s.replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>'),helps=new Set();for(const phase of phases){U.S.screenPhase=phase;U.S.draft.screen_policy.phases[phase].images=[true,true,60];U.S.draft.screen_policy.phases[phase].expanded=copy(sports);for(const t of sports)U.S.draft.screen_policy.phases[phase][t][1]=true;for(const type of types){U.S.screenAppearance=type;U.S.draft.screen_policy.automatic_break=true;for(const html of[U.displayPage(),U.overview()])for(const match of html.matchAll(/data-help="([^"]+)"/g))helps.add(decode(match[1]));}}U.S.open=0;for(const match of U.competitions().matchAll(/data-help="([^"]+)"/g))helps.add(decode(match[1]));assert(helps.size>20);for(const help of helps)assert(U.W[help],help);assert.equal(U.W.Ja,'Yes');assert.equal(U.W.Nein,'No');});
- console.log(passed+' screen-policy Web checks passed');
-}
-run().catch(e=>{console.error(e);process.exitCode=1;});
+(async () => {
+  await test('strict policy validates the complete owner profiles', () => {
+    assert.equal(U.validate(U.S.draft).length, 0);
+    assert.equal(
+        U.validateScreenPolicy(
+             U.screenPayload(), h.state.config.desired.competitions)
+            .length,
+        0);
+    const bad = U.screenPayload();
+    bad.phases.idle.table = [true];
+    assert(U.validateScreenPolicy(bad, h.state.config.desired.competitions)
+               .length);
+    bad.phases.idle.table = [true, false, 43201];
+    assert(U.validateScreenPolicy(bad, h.state.config.desired.competitions)
+               .some(x => x.path === 'screen_policy.phases.idle.table[2]'));
+    bad.typo = true;
+    assert(U.validateScreenPolicy(bad, h.state.config.desired.competitions)
+               .some(x => x.path === 'screen_policy.typo'));
+  });
+  await test(
+      'manual-only visit stays saved and image multiples are strict', () => {
+        const p = U.S.draft.screen_policy;
+        p.phases.own.table = [true, false, 321];
+        assert(!U.screenPhaseMarkup().includes(
+            'data-path="screen_policy.phases.own.table[2]"'));
+        assert.equal(p.phases.own.table[2], 321);
+        p.phases.own.images = [true, true, 61];
+        assert(U.validate(U.S.draft).some(
+            x => x.path === 'screen_policy.phases.own.images[2]'));
+        p.phases.own.images[2] = 60;
+        assert.equal(U.validate(U.S.draft).length, 0);
+      });
+  await test(
+      'null inheritance and explicit false survive splitting and collapse',
+      () => {
+        const row = U.screenRow(0);
+        row.own.single = [false, null, null];
+        U.S.draft.screen_policy.phases.own.per_competition = ['single'];
+        U.ACT.policySplit({dataset: {phase: 'own', type: 'single'}});
+        assert.deepEqual(copy(row.own.single), [false, null, null]);
+        U.ACT.policySplit({dataset: {phase: 'own', type: 'single'}});
+        assert.deepEqual(copy(row.own.single), [false, null, null]);
+        const html = U.screenPhaseMarkup();
+        assert(html.includes('data-kind="policybool"'));
+        const path = U.screenRowPath(0) + '.own.single[0]';
+        events.input({
+          target: {
+            dataset: {path, kind: 'policybool'},
+            type: 'select-one',
+            value: ''
+          }
+        });
+        assert.equal(row.own.single[0], null);
+        events.input({
+          target: {
+            dataset: {path, kind: 'policybool'},
+            type: 'select-one',
+            value: 'false'
+          }
+        });
+        assert.equal(row.own.single[0], false);
+        row.own.single[0] = null;
+        const visit = U.screenRowPath(0) + '.own.single[2]';
+        events.input({target: {dataset: {inherit: visit}, checked: false}});
+        assert.equal(row.own.single[2], 30);
+        events.input({target: {dataset: {inherit: visit}, checked: true}});
+        assert.equal(row.own.single[2], null);
+      });
+  await test(
+      'a device without backlight offers no brightness or night controls and retains rotation IP and inputs',
+      () => {
+        U.S.schema.backlight = false;
+        U.S.draft.night_enabled = true;
+        const markup = U.displayPage();
+        for (const key
+                 of ['brightness', 'night_enabled', 'night_start', 'night_end',
+                     'night_brightness'])
+          assert(!markup.includes('data-path="' + key + '"'), key);
+        for (const key
+                 of ['rotation', 'ip_badge_s', 'ip_badge_bottom',
+                     'ip_badge_ap_permanent', 'scroll_repeat_ms',
+                     'input_roles[0]', 'input_roles[1]', 'input_roles[2]'])
+          assert(markup.includes('data-path="' + key + '"'), key);
+        assert(!markup.includes('20 % Deckkraft'));
+        assert(!markup.includes('<div></div>'));
+        assert(markup.includes('Ausrichtung'));
+      });
+  await test(
+      'a backlight device retains hardware night brightness rotation IP and input settings',
+      async () => {
+        U.S.schema.backlight = true;
+        const markup = U.displayPage();
+        for (const key
+                 of ['brightness', 'night_enabled', 'night_start', 'night_end',
+                     'night_brightness', 'rotation', 'ip_badge_s',
+                     'ip_badge_bottom', 'ip_badge_ap_permanent',
+                     'scroll_repeat_ms', 'input_roles[0]', 'input_roles[1]',
+                     'input_roles[2]'])
+          assert(markup.includes('data-path="' + key + '"'), key);
+        U.S.draft.input_roles[0] = 0;
+        assert(U.validate(U.S.draft).some(e => e.path === 'input_roles'));
+        U.S.draft.input_roles[0] = 1;
+        U.S.draft.night_brightness = 20;
+        U.S.draft.rotation = 2;
+        U.S.draft.ip_badge_s = 120;
+        await U.save();
+        assert.equal(h.state.config.desired.settings.night_brightness, 20);
+        assert.equal(h.state.config.desired.settings.rotation, 2);
+        assert.equal(h.state.config.desired.settings.ip_badge_s, 120);
+        assert.deepEqual(
+            h.state.config.desired.settings.input_roles,
+            h.data.config.desired.settings.input_roles);
+        assert(!h.calls.some(
+            c => c.endpoint === 'screen-settings' && c.method === 'PUT'));
+      });
+  await test(
+      'hardware night controls explain the clock and bounds and disable only their inactive values',
+      () => {
+        U.S.schema.backlight = true;
+        U.S.draft.night_enabled = false;
+        const markup = U.displayPage();
+        for (const key of ['night_start', 'night_end', 'night_brightness'])
+          assert(
+              new RegExp('<input[^>]+data-path="' + key + '"[^>]*disabled')
+                  .test(markup),
+              key);
+        for (const key of ['brightness', 'night_enabled', 'rotation'])
+          assert(
+              !new RegExp(
+                   '<(?:input|select)[^>]+data-path="' + key + '"[^>]*disabled')
+                   .test(markup),
+              key);
+        assert(markup.includes('gültige Gerätezeit'));
+        assert(markup.includes(
+            'Farben, Hintergrund und Bilder bleiben unverändert'));
+        assert(markup.includes('0 bis 100 %'));
+        U.S.draft.language = 1;
+        const english = U.displayPage();
+        for (const text
+                 of ['Changes only the display backlight',
+                     'Requires a valid device clock',
+                     'Equal times give an empty night window'])
+          assert(english.includes(text), text);
+      });
+  await test(
+      'frame lives on overview and new options use five compact phases', () => {
+        const overview = U.overview(), display = U.displayPage();
+        assert(overview.includes('data-path="screen_policy.frame"'));
+        assert(!overview.includes('data-act=\"screenshot\"'));
+        U.S.saved.overview_screenshot = true;
+        assert(U.overview().includes('Bildschirmfoto herunterladen'));
+        assert(display.includes('role="tablist"'));
+        assert.equal(
+            (display.match(/data-act="policyPhase"/g) || []).length, 5);
+        assert.equal(
+            display.includes('data-path="brightness"'),
+            U.S.schema.backlight === true);
+        assert(
+            display.includes('data-path="input_roles[0]"') ===
+            Number.isInteger(U.S.schema.inputs));
+        assert(!display.includes('data-path="idle_screen"'));
+        assert(!display.includes('data-path="whole_matchday"'));
+        assert(!display.includes('data-disc='));
+      });
+  await test(
+      'one Apply contains general settings competitions shared rules and attached overrides',
+      async () => {
+        U.S.draft.night_brightness = 20;
+        U.S.draft.screen_policy.frame = true;
+        U.screenRow(0).idle.table = [false, null, 99];
+        await U.writeModel();
+        assert.equal(h.state.writes, 1);
+        const body = h.calls.find(x => x.method === 'PUT').body;
+        assert.equal(body.desired.settings.night_brightness, 20);
+        assert(!('screen_policy' in body.desired.settings));
+        assert(!('_revision' in body.desired.settings));
+        assert.deepEqual(
+            copy(body.desired.competitions[0].display.idle.table),
+            [false, null, 99]);
+        assert.equal(body.desired.screens.frame, true);
+        assert(!JSON.stringify(body).includes('_screenKey'));
+      });
+  await test(
+      'new identical competitions retain attached preferences through nonsequential identities',
+      async () => {
+        U.S.draft.competitions.push(h.entry(), h.entry());
+        U.prepareScreenModel(U.S.draft);
+        U.screenRow(1).own.single = [false, null, 123];
+        U.screenRow(2).own.single = [true, false, 234];
+        await U.writeModel();
+        assert.equal(U.S.saved.competitions[1].id, 47);
+        assert.equal(U.S.saved.competitions[2].id, 9);
+        assert.deepEqual(
+            copy(h.state.config.desired.competitions[1].display.own.single),
+            [false, null, 123]);
+        assert.deepEqual(
+            copy(h.state.config.desired.competitions[2].display.own.single),
+            [true, false, 234]);
+        assert.equal(U.changes().length, 0);
+      });
+  await test(
+      'reorder and delete carry surviving club and display preferences together',
+      async () => {
+        U.S.draft.competitions.push(h.entry(31, 812));
+        U.S.draft.competitions[0].club.own_special = false;
+        U.screenRow(1).idle.table[2] = 99;
+        await U.writeModel();
+        await U.verifySaved();
+        U.moveCompetition(1, -1);
+        U.removeCompetition(1);
+        assert.equal(U.S.draft.competitions[0].id, 31);
+        assert.equal(U.screenRow(0).idle.table[2], 99);
+        await U.save();
+        assert.deepEqual(
+            h.state.config.desired.competitions.map(c => c.id), [31]);
+        assert.equal(
+            h.state.config.desired.competitions[0].display.idle.table[2], 99);
+        assert.equal(U.changes().length, 0);
+      });
+  await test(
+      'frame-only saves the complete initial list in one Apply', async () => {
+        U.S.draft.screen_policy.frame = true;
+        await U.save();
+        assert.deepEqual(
+            h.calls.filter(c => c.method === 'PUT').map(c => c.endpoint),
+            ['config']);
+        assert.equal(h.state.config.desired.screens.frame, true);
+        assert.equal(h.state.config.desired.competitions.length, 1);
+      });
+  await test(
+      'rejected Apply preserves every section instead of partially publishing',
+      async () => {
+        const before = copy(h.state.config);
+        U.S.draft.night_brightness = 20;
+        U.S.draft.screen_policy.frame = true;
+        U.S.draft.competitions.push(h.entry());
+        h.state.mode = 'reject';
+        await assert.rejects(U.writeModel());
+        assert.deepEqual(h.state.config, before);
+        assert.equal(
+            U.S.saved.night_brightness,
+            before.desired.settings.night_brightness);
+        assert(U.changes().some(c => c.path === 'night_brightness'));
+        assert(U.changes().some(c => c.path === 'screen_policy.frame'));
+        assert(U.changes().some(c => c.path === 'competitions'));
+      });
+  await test(
+      'foreign coherent revision rejects the draft without adopting another programme',
+      async () => {
+        U.S.draft.screen_policy.frame = true;
+        h.state.config.revision++;
+        h.state.config.desired.screens.frame_crest = false;
+        await assert.rejects(
+            U.writeModel(), e => e.code === 'settings_changed');
+        assert.equal(h.state.writes, 1);
+        assert.equal(
+            U.S.saved.screen_policy.frame_crest,
+            h.data.config.desired.screens.frame_crest);
+        assert.equal(U.S.draft.screen_policy.frame, true);
+      });
+  await test(
+      'adopted collection metadata is accepted using actual published schema',
+      () => {
+        const n = {
+          format: h.data.schema.names_format,
+          version: h.data.schema.names_source_version,
+          clubs: [{
+            key: 'club',
+            de: 'Verein',
+            short: 'FCB',
+            league: 'league',
+            ids: {espn: [40]},
+            aliases: ['original']
+          }],
+          exceptions: [{provider: 2, id: 40, name: ''}]
+        };
+        const wire = U.packAdoptedNames(n);
+        assert.equal(wire.version, h.data.schema.names_wire_version);
+        assert.deepEqual(
+            copy(U.validateAdoptedNames(wire)),
+            copy(U.validateAdoptedNames(n)));
+      });
+  await test(
+      'maximum competition matrix uses aggregate transport limit with no browser identity',
+      () => {
+        U.S.draft.competitions = Array.from(
+            {length: h.data.schema.limits.competitions},
+            (_, i) => h.entry(i + 1, 100 + i));
+        U.prepareScreenModel(U.S.draft);
+        for (const c of U.S.draft.competitions)
+          for (const phase of phases)
+            for (const type of sports)
+              c.display[phase][type] = [false, false, 43200];
+        for (const phase of phases)
+          U.S.draft.screen_policy.phases[phase].per_competition = copy(sports);
+        assert.equal(U.validate(U.S.draft).length, 0);
+        const wire = JSON.stringify(U.applicationPayload());
+        assert(!wire.includes('_screenKey'));
+        assert(Buffer.byteLength(wire) < h.data.schema.max_apply_body);
+      });
+  await test(
+      'every contextual programme and competition help has English translation',
+      () => {
+        const decode = s => s.replace(/&quot;/g, '"')
+                                .replace(/&#39;/g, '\'')
+                                .replace(/&amp;/g, '&')
+                                .replace(/&lt;/g, '<')
+                                .replace(/&gt;/g, '>'),
+              helps = new Set();
+        for (const phase of phases) {
+          U.S.screenPhase = phase;
+          U.S.draft.screen_policy.phases[phase].images = [true, true, 60];
+          U.S.draft.screen_policy.phases[phase].per_competition = copy(sports);
+          for (const t of sports)
+            U.S.draft.screen_policy.phases[phase][t][1] = true;
+          for (const type of types) {
+            U.S.screenAppearance = type;
+            U.S.draft.screen_policy.automatic_break = true;
+            for (const html of [U.displayPage(), U.overview()])
+              for (const match of html.matchAll(/data-help="([^"]+)"/g))
+                helps.add(decode(match[1]));
+          }
+        }
+        U.S.open = 0;
+        for (const match of U.competitions().matchAll(/data-help="([^"]+)"/g))
+          helps.add(decode(match[1]));
+        assert(helps.size > 20);
+        for (const help of helps) assert(U.W[help], help);
+        assert.equal(U.W.Ja, 'Yes');
+        assert.equal(U.W.Nein, 'No');
+      });
+  console.log(
+      passed +
+      ' current screen-policy/config cases passed; no layout/device claim');
+})().catch(e => {
+  console.error(e);
+  process.exitCode = 1
+});

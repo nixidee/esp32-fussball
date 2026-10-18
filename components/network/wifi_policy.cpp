@@ -1,6 +1,7 @@
 #include "wifi_policy.h"
 
 #include <algorithm>
+#include <iterator>
 namespace network {
 const char* stateName(State s) {
   switch (s) {
@@ -62,20 +63,23 @@ void WifiPolicy::lost(bool auth, bool missing, int64_t now) {
   since_ = now;
   if (auth) {
     state_ = State::kBackoffAuth;
-    due_ = now + (retries_ < 3 ? cfg::kWifiAuthRetryMs[retries_]
-                               : cfg::kWifiFallbackMs);
-    retries_ = std::min<uint8_t>(retries_ + 1, 4);
-    if (retries_ > 3) ap_ = true;
+    constexpr auto kAuthSteps = std::size(cfg::kWifiAuthRetryMs);
+    due_ = now + (retries_ < kAuthSteps ? cfg::kWifiAuthRetryMs[retries_]
+                                        : cfg::kWifiFallbackMs);
+    retries_ = std::min<uint8_t>(retries_ + 1, kAuthSteps + 1);
+    if (retries_ > kAuthSteps) ap_ = true;
   } else if (missing) {
     state_ = State::kWaitSsid;
     due_ = now + cfg::kWifiMissingScanMs;
   } else {
     state_ = State::kBackoff;
-    due_ = now + (retries_ == 0
-                      ? 0
-                      : std::min<uint32_t>(
-                            60000, 1000u << std::min<uint8_t>(retries_, 6)));
-    retries_ = std::min<uint8_t>(retries_ + 1, 7);
+    due_ =
+        now + (retries_ == 0 ? 0
+                             : std::min<uint32_t>(
+                                   cfg::kWifiRetryMaximumMs,
+                                   cfg::kWifiRetryBaseMs << std::min(
+                                       retries_, cfg::kWifiRetryMaximumShift)));
+    retries_ = std::min<uint8_t>(retries_ + 1, cfg::kWifiRetryMaximumShift + 1);
   }
 }
 Command WifiPolicy::poll(int64_t now, bool client, uint32_t jitter) {
@@ -114,8 +118,8 @@ Command WifiPolicy::poll(int64_t now, bool client, uint32_t jitter) {
   }
   if (state_ == State::kIdle || state_ == State::kWaitSsid ||
       state_ == State::kBackoffAuth || state_ == State::kBackoff) {
-    if (state_ == State::kBackoff && jitter % 1000 > 0) {
-      due_ += jitter % 1000;
+    if (state_ == State::kBackoff && jitter % cfg::kWifiRetryJitterMs > 0) {
+      due_ += jitter % cfg::kWifiRetryJitterMs;
       state_ = State::kIdle;
       return Command::kNone;
     }

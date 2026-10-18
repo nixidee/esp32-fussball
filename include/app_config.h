@@ -3,7 +3,7 @@
 // profiles (boards/, displays/, targets/), secrets in include/secrets.h.
 //
 // Runtime settings: defaults and limits here, model and record layout in
-// components/settings, storage in components/core (docs/CONFIGURATION.md).
+// components/settings (docs/CONFIGURATION.md).
 
 #pragma once
 
@@ -25,6 +25,34 @@ inline constexpr int32_t kBootTextWidthPercent = 70;
 // of the start screen. Must be kNone in every normal build.
 enum class DisplayTest : uint8_t { kNone, kColourTest };
 inline constexpr DisplayTest kDisplayTest = DisplayTest::kNone;
+
+// ---- Display resources -----------------------------------------------------
+// Each of the two DMA draw buffers holds 1/12 of the screen: 240x240 RGB565
+// uses 20 rows, 9600 bytes per buffer. Keep RAM bounded on targets without
+// PSRAM.
+inline constexpr uint32_t kDisplayDrawBufferFraction = 12;
+// Panel SPI transaction queue depth, preserving the GC9A01 driver profile.
+inline constexpr std::size_t kDisplaySpiQueueDepth = 10;
+// Rows per DMA transfer while clearing panel RAM before DISPON.
+inline constexpr uint32_t kDisplayClearRows = 8;
+// Best-effort allocation probe upper bound for esp_lvgl_port 2.9.0's private
+// per-display context (about 60 bytes on 32-bit targets); not reserved memory.
+inline constexpr std::size_t kDisplayPortContextProbeBytes = 256;
+// Explicit values of the current port defaults. Stack is bytes, affinity -1
+// allows either core; the C6 has one. Internal/default stack caps stay in port.
+inline constexpr int kLvglTaskPriority = 4;
+inline constexpr int kLvglTaskStackBytes = 7168;
+inline constexpr int kLvglTaskAffinity = -1;
+inline constexpr int kLvglTaskMaxSleepMs = 500;
+inline constexpr int kLvglTickPeriodMs = 5;
+// Fixed renderer workspace, reused for every screen; no per-frame heap.
+// Draw item bytes derive from sizeof(Item) in the renderer, not a second size.
+inline constexpr std::size_t kUiDrawItems = 72;
+inline constexpr std::size_t kUiTextArenaBytes = 1280;
+// TJPGD validation workspace under the single heavy-operation admission.
+// Current decoder profile uses this 4-byte-aligned buffer independently of
+// LVGL's heap. The decoder rejects content if the workspace is insufficient.
+inline constexpr std::size_t kJpegValidationWorkBytes = 4096;
 
 // ---- Display failure handling ----------------------------------------------
 // Consecutive failed draw calls (each one recovered) before a restart.
@@ -56,10 +84,8 @@ enum class DisplayFault : uint8_t {
 inline constexpr DisplayFault kDisplayFault = DisplayFault::kNone;
 
 // ---- Event bus (docs/ARCHITECTURE.md) --------------------------------------
-// Queue slots shared by UI actions; a UI action posted while all are taken
-// is dropped and counted. State events have one reserved slot per kind on
-// top (queue: 5 state kinds + these slots, 20 B per entry on the C6).
-inline constexpr std::size_t kEventUiActionSlots = 4;
+// UI controller command FIFO (the state-event bus carries no UI commands).
+inline constexpr std::size_t kUiActionSlots = 4;
 // Fixed subscriber table (no heap per subscriber).
 inline constexpr std::size_t kEventMaxSubscribers = 8;
 // Bus task: runs the subscriber callbacks, which only signal their own task.
@@ -80,6 +106,9 @@ inline constexpr char kFsBasePath[] = "/fs";
 // Flat file names: 1..kFileNameMaxChars of a-z, 0-9, '_', '-', '.', not
 // starting with '.' (reserved for the service's own temporary files).
 inline constexpr std::size_t kFileNameMaxChars = 31;
+// Main-task erased-flash scan and image copy run in different operations.
+inline constexpr std::size_t kFsEraseCheckChunkBytes = 256;
+inline constexpr std::size_t kFileCopyChunkBytes = 512;
 
 // Device tests of the file service. Must be kNone in every normal build.
 // They destroy the filesystem content: never run them on owner data.
@@ -161,24 +190,16 @@ enum class TimeTest : uint8_t {
 };
 inline constexpr TimeTest kTimeTest = TimeTest::kNone;
 
-// ---- Settings record -------------------------------------------------------
-// Format 11 contains only general settings; screen rules and appearance
-// belong to the independent screen-policy record. Current general records
-// have fixed length; omitted trailing fields keep defaults. Formats1..10
-// start fresh during development, without rewriting the old blob at boot.
-inline constexpr uint16_t kSettingsFormatVersion = 11;
-// Longest stored record that is read (newer firmware may have appended
-// fields); a longer one counts as damaged.
-inline constexpr std::size_t kSettingsMaxRecordBytes = 2048;
+// ---- Application configuration record -------------------------------------
+// One exact current-format record for general settings, competitions, screen
+// policy and adopted-names reference. No standalone records or migration.
+inline constexpr uint16_t kAppConfigFormatVersion = 1;
+// Descriptor v2 identifies the aggregate configuration format rather than
+// the retired general-settings record. The descriptor remains 92 bytes.
+inline constexpr uint32_t kFirmwareIdentityVersion = 2;
+inline constexpr char kAppConfigNvsKey[] = "app_config";
 // NVS namespace and key, at most 15 characters each.
 inline constexpr char kSettingsNvsNamespace[] = "settings";
-inline constexpr char kSettingsNvsKey[] = "record";
-// Competition format4: one source and service-owned incarnation per entry,
-// without legacy screen masks. Formats1..3 start fresh during development.
-inline constexpr uint16_t kCompetitionsFormatVersion = 4;
-inline constexpr char kCompetitionsNvsKey[] = "competitions";
-// Longest competition record that is read (newer firmware may append).
-inline constexpr std::size_t kCompetitionsMaxRecordBytes = 4096;
 
 // ---- Settings: WiFi station (one network, docs/NETWORK.md) -----------------
 // SSID: 1..32 arbitrary bytes; empty = no network configured (setup AP).
@@ -314,33 +335,38 @@ inline constexpr std::size_t kNameBytes = 64;
 inline constexpr std::size_t kSelectionTextMaxBytes = 48;
 inline constexpr std::size_t kMatchEvents = 12;
 // Compact match store (OQ-227, football::MatchStore), sized for the
-// envelope of OQ-290: four 36-team and four 20-team competitions with two
-// matchdays each (224 matches, 224 table rows; 224 teams without shared
-// ones). Teams of all tables and stored matches (one entry per provider and
-// team id; at most 254, the directory index is one byte), matches of every
-// competition, table rows of all competitions, own-club matches with full
-// names and events, the shared event pool (four full own matches, OQ-292)
-// and round labels. Beyond it a competition shows a notice (E19).
-inline constexpr std::size_t kStoreTeams = 240;
-inline constexpr std::size_t kStoreMatches = 224;
+// Runtime envelope: four 36-team and four 20-team competitions, three
+// complete rounds (336 matches) plus up to four own games per competition
+// (32). 512 match slots leave bounded headroom; 256 distinct provider/team
+// identities cover the 224-club workload plus teams of additional own games.
+// No per-competition team ceiling is imposed. Overflow reports a notice.
+inline constexpr std::size_t kStoreTeams = 256;
+inline constexpr std::size_t kStoreMatches = 512;
 inline constexpr std::size_t kStoreTableRows = 224;
 // Rows a table refresh stages before it replaces the stored table (OQ-291,
 // OQ-309): the largest merged group table known (54 rows) fits; a longer
 // table keeps the stored one and shows the notice.
 inline constexpr std::size_t kStoreTableStageRows = 64;
+inline constexpr std::size_t kStoreTableGroups = 32;
+inline constexpr std::size_t kStoreRounds = 64;
 inline constexpr std::size_t kStoreOwnMatches = 8;
 inline constexpr std::size_t kStoreDetailMatches =
     kStoreOwnMatches + kCompetitionMax;
 inline constexpr std::size_t kStoreOwnEvents = 48;
 inline constexpr std::size_t kStoreOtherEvents = 48;
 inline constexpr std::size_t kStoreEvents = kStoreOwnEvents + kStoreOtherEvents;
-inline constexpr std::size_t kStoreRoundLabels = 24;
+inline constexpr std::size_t kStoreRoundLabels = 128;
+inline constexpr std::size_t kRetainedRounds = 3;
+inline constexpr std::size_t kRetainedOwnFixtures = 4;  // previous + next three
+inline constexpr std::size_t kFixtureCalendarDays = 16;
+inline constexpr std::size_t kProviderCalendarDays = 366;
 // Matches of one competition whose kickoffs are less than this apart form
 // one matchday (OQ-201, OQ-224).
 inline constexpr uint16_t kMatchdayGapHours = 48;
 inline constexpr std::size_t kSelectionEntries = 64;
-inline constexpr std::size_t kJsonHeapBytes = 24576;
 inline constexpr std::size_t kProviderBodyBytes = 262144;
+// A complete season is streamed for coverage/retention, never retained as JSON.
+inline constexpr std::size_t kProviderSeasonBodyBytes = 1048576;
 inline constexpr std::size_t kSelectionBodyBytes = 1048576;
 // ESPN match summary of the own match (substitutions, OQ-207): about 400 KB
 // measured 2026-10-14, streamed (no RAM growth).
@@ -348,6 +374,8 @@ inline constexpr std::size_t kProviderSummaryBodyBytes = 524288;
 inline constexpr uint8_t kJsonDepth = 16;
 inline constexpr uint32_t kOperationDeadlineMs = 30000;
 inline constexpr uint32_t kSocketTimeoutMs = 1000;
+// ESP HTTP server expresses these same socket waits in whole seconds.
+inline constexpr uint32_t kHttpSocketTimeoutS = (kSocketTimeoutMs + 999) / 1000;
 // On-demand screenshot: one copied RGB565 strip, no full frame on the device.
 // Bound all producer/consumer waits below the LVGL task watchdog timeout.
 inline constexpr uint16_t kScreenshotRows = 20;
@@ -355,11 +383,24 @@ inline constexpr uint32_t kScreenshotDeadlineMs = 5000;
 // Longest provider silence tolerated while sending a request or receiving
 // its response; waits run in kSocketTimeoutMs slices within the deadline.
 inline constexpr uint32_t kProviderIdleTimeoutMs = 8000;
+// Transport and its pull-reader share the same bounded I/O chunk size.
+inline constexpr std::size_t kProviderReadBufferBytes = 1024;
+inline constexpr std::size_t kProviderSendBufferBytes = 512;
+// Explicit provider-original queries stream to HTTP through one small ring.
+inline constexpr std::size_t kOriginalNamesBufferBytes = 256;
 inline constexpr std::size_t kProviderHostBytes = 64;
 inline constexpr uint32_t kProviderStackBytes = 12800;
+inline constexpr uint32_t kProviderTaskPriority = 3;
 inline constexpr uint32_t kHttpStackBytes = 10240;
 inline constexpr uint32_t kDnsStackBytes = 2048;
+inline constexpr uint32_t kDnsTaskPriority = 2;
+// Portal UDP DNS uses the classic512-B packet ceiling; off the small task
+// stack.
+inline constexpr std::size_t kDnsPacketBytes = 512;
+// One scheduler tick between portal DNS packets, including malformed ones.
+inline constexpr uint8_t kDnsYieldTicks = 1;
 inline constexpr uint8_t kHttpSockets = 4;
+inline constexpr uint32_t kHttpInitRetryMs = 10000;
 inline constexpr std::size_t kApiBodyBytes = 8192;
 inline constexpr uint32_t kWifiScanDeadlineMs = 15000;
 inline constexpr uint32_t kWifiIpDeadlineMs = 30000;
@@ -368,6 +409,13 @@ inline constexpr uint32_t kWifiFallbackMs = 300000;
 // Longest time a phone on the setup AP postpones home-network attempts.
 inline constexpr uint32_t kWifiApClientHoldMs = 300000;
 inline constexpr uint32_t kWifiAuthRetryMs[] = {10000, 30000, 60000};
+// Connection-loss retry: first retry is immediate, then exponential delay.
+// Saturation bounds both the shift and retry counter; jitter spreads
+// reconnects.
+inline constexpr uint32_t kWifiRetryBaseMs = 1000;
+inline constexpr uint32_t kWifiRetryMaximumMs = 60000;
+inline constexpr uint8_t kWifiRetryMaximumShift = 6;
+inline constexpr uint32_t kWifiRetryJitterMs = 1000;
 // Retry delay for failed local-network initialization phases, radio/AP
 // reconfiguration, initial/runtime hostname acknowledgement and SNTP init.
 inline constexpr uint32_t kWifiRadioRetryMs = 10000;
@@ -406,7 +454,6 @@ inline constexpr uint32_t kCoverageMaxAgeS = 86400;
 inline constexpr std::size_t kCoverageMaxSeasons = 2;
 inline constexpr uint32_t kCoverageRequestsPerRun = 16;
 inline constexpr uint32_t kCoverageRunsPerUtcDay = 1;
-inline constexpr char kCoverageFile[] = "schedule.bin";
 inline constexpr char kCoverageGuardNvsKey[] = "schedule";
 // Defaults of the per-provider request limits (OQ-225), provider order
 // OpenLigaDB, API-Football, ESPN, football-data.org: the limits the
@@ -468,6 +515,7 @@ inline constexpr uint8_t kBrightnessDefault = 100;
 inline constexpr uint8_t kNightBrightnessDefault = 10;
 inline constexpr uint32_t kBacklightPwmHz = 5000;
 inline constexpr uint32_t kDebugTaskStackBytes = 4096;
+inline constexpr uint32_t kDebugTaskPriority = 2;
 inline constexpr uint32_t kOtaLocalHealthMs = 10000;
 // Login sessions (several browsers at once, least recently used replaced);
 // every accepted request moves the expiry to now + kSessionLifetimeMs.
@@ -480,31 +528,53 @@ inline constexpr std::size_t kDrainMaxBytes = 32768;
 inline constexpr std::size_t kImageMaxBytes = 32768;
 inline constexpr std::size_t kImageTotalBytes = 327680;
 inline constexpr std::size_t kImageReserveBytes = 40960;
-// Retry delay after legacy-image removal failed.
-inline constexpr uint32_t kImageMaintenanceRetryMs = 10000;
+inline constexpr char kImageTempFile[] = ".image_upload";
 // Retry delay for the desired image after file/source/decode failure.
 inline constexpr uint32_t kImageSourceRetryMs = 10000;
 // Whole JPEG/fallback-resolution pass, under the shared heavy admission.
 inline constexpr uint32_t kImageValidationTimeoutMs = 1000;
-// Competition files (football_files.h): "comp_<id>.bin" per competition,
-// written through a temporary file. A competition with new data is written
-// at most every kCompetitionFileGapS and never while one of its matches is
-// in its live window. All football files together (competition files and
-// the short-name file) use at most kFootballFilesBytes, counted in whole
-// filesystem blocks of kFsBlockBytes, and a write always leaves
-// kImageReserveBytes free.
-inline constexpr char kCompetitionFilePrefix[] = "comp_";
-inline constexpr char kCompetitionFileSuffix[] = ".bin";
-inline constexpr char kFootballTempFile[] = ".football_tmp";
-inline constexpr uint16_t kCompetitionFileGapS = 600;
-inline constexpr std::size_t kFootballFilesBytes = 49152;
-inline constexpr std::size_t kFsBlockBytes = 4096;
-// The owner's team short names (OQ-185): replacements per provider and team
-// id, at most kShortNamesMax, in one file.
-inline constexpr char kShortNameFile[] = "short_names.bin";
-inline constexpr std::size_t kShortNamesMax = 48;
+// Adopted team labels, in UTF-8 bytes excluding NUL. These software limits
+// currently use the reviewed C6 budget on every target; larger target values
+// require their own resource review. General-purpose kNameBytes stays separate.
+inline constexpr std::size_t kTeamNameBytes = 26;
+inline constexpr std::size_t kTeamShortBytes = 3;
+// Complete adopted collection, including identity data, indices and CRC.
+inline constexpr std::size_t kNamesStreamChunkBytes = 128;
+
+inline constexpr char kNamesLookupErrorCode[] = "NAM E01";
+inline constexpr char kTeamNamesJsonFormat[] = "football-team-names";
+inline constexpr uint8_t kTeamNamesJsonVersion = 1;
+inline constexpr uint8_t kAdoptedNamesJsonVersion = 2;
+inline constexpr std::array<const char*, 2> kTeamNamesSlotFiles = {
+    "names_a.bin", "names_b.bin"};
+inline constexpr std::size_t kTeamNamesFileBytes = 16384;
+// Whole Apply streams a shared-text adopted collection plus configuration.
+// A club costs >=12 wire bytes (9B fields +2B prefix/suffix lengths +suffix),
+// while its escaped63B key and fixed JSON fields need <640B. Other sections
+// expand by <7x.64x safely covers their weighted sum, the bounded config and
+// envelope. This is a transport ceiling, never a RAM buffer or longer deadline.
+inline constexpr std::size_t kConfigBodyMaxBytes =
+    kApiBodyBytes + 64 * kTeamNamesFileBytes + 1024;
 inline constexpr uint16_t kDebugStreamPeriodMs = 1000;
+// Bounded HTTP and diagnostic transfer workspaces, never whole bodies.
+inline constexpr std::size_t kDebugRecordBytes = 256;
+// Header lengths derive from the only accepted local host forms. Origin adds
+// the literal HTTP scheme; overlong/unrecognized hosts remain rejected.
+inline constexpr std::size_t kHttpHostBytes =
+    kHostnameMaxChars + sizeof(".local:80");
+inline constexpr std::size_t kHttpOriginBytes =
+    sizeof("http://") - 1 + kHttpHostBytes;
+inline constexpr std::size_t kHttpQueryBytes = 64;
+// uint32 decimal or the longest image role; neither is a display-name buffer.
+inline constexpr std::size_t kHttpQueryValueBytes = sizeof("4294967295");
+inline constexpr std::size_t kHttpContentTypeBytes = 48;
+inline constexpr std::size_t kHttpJsonChunkBytes = 512;
+inline constexpr std::size_t kHttpJsonReadBytes = 128;
+inline constexpr std::size_t kHttpDrainChunkBytes = 256;
+inline constexpr std::size_t kHttpFileChunkBytes = 1024;
 inline constexpr uint16_t kAppPollMs = 20;
+// Let LVGL render the initial boot scene before its memory diagnostic.
+inline constexpr uint32_t kFirstRenderWaitMs = 200;
 inline constexpr uint16_t kUiRefreshMs = 500;
 // Status pill (OQ-284, OQ-285): shown this long after a state change
 // (failure, network, time, stale data), then the screen is free again.
@@ -514,9 +584,9 @@ inline constexpr uint16_t kStatusPillS = 5;
 inline constexpr uint8_t kStatusPillOpa = 204;
 inline constexpr uint16_t kHighlightRotateMs = 5000;
 
-// Longest field path of a rejected value, e.g. "competitions[2].primary.team"
+// Longest field path of a rejected value, e.g. "competitions[2].club.team"
 // (NUL included); the API error names the field with it.
-inline constexpr std::size_t kFieldPathBytes = 48;
+inline constexpr std::size_t kFieldPathBytes = 64;
 
 // Validation and schema share these bounds. Browser controls read the schema.
 struct Range {
@@ -536,7 +606,9 @@ inline constexpr bool kScreenFrameDefault = false,
                       kScreenFrameCrestDefault = true,
                       kScreenBreakDefault = false, kScreenDotsDefault = true,
                       kScreenSportsEnabledDefault = true,
-                      kScreenImagesEnabledDefault = false;
+                      kScreenImagesEnabledDefault = false,
+                      kOwnSpecialDefault = true,
+                      kOnlyOneOwnSingleDefault = true;
 inline constexpr std::array<uint16_t, screen::kTypeCount> kScreenVisitDefaultS{
     30, 30, 60, 15, 30, 60};
 inline constexpr std::array<screen::Type, screen::kTypeCount>
@@ -548,9 +620,8 @@ inline constexpr screen::Type kScreenAutomaticDefault[] = {
     screen::Type::kLiveSingle, screen::Type::kLiveMulti,
     screen::Type::kMatchday, screen::Type::kTable, screen::Type::kTable};
 inline constexpr uint16_t kScreenMinimumPageS = 5;
+// Compile-time RAM ceiling for Policy; its codec derives aggregate wire size.
 inline constexpr std::size_t kScreenPolicyMaxBytes = 1280;
-inline constexpr uint16_t kScreenPolicyFormatVersion = 1;
-inline constexpr char kScreenPolicyNvsKey[] = "screen_policy";
 // Request limits (0 = none): requests per UTC day, requests per window and
 // the window length in seconds. A window limit needs both values or none.
 inline constexpr Range kDailyRequestsRange{0, 65535},
@@ -584,11 +655,7 @@ inline constexpr char kStockImageFiles[][32] = {"default_crest.jpg",
 // kImageTotalBytes but not towards kImageLibraryMax (OQ-154).
 inline constexpr char kRoleImageFiles[][32] = {"role_crest.jpg",
                                                "role_background.jpg"};
-// Named image files of settings format 2 and earlier. Format 3 does not
-// migrate them; the image service removes them once (OQ-73).
-inline constexpr char kLegacyImageNames[][12] = {
-    "crest",  "slide1",      "slide2",     "slide3", "slide4",
-    "slide5", "live_single", "live_multi", "table",  "slideshow"};
+
 inline constexpr std::size_t kProviderCount = 4;
 static_assert(sizeof(kDailyRequestsDefault) / sizeof(uint16_t) ==
                   kProviderCount &&
@@ -596,23 +663,19 @@ static_assert(sizeof(kDailyRequestsDefault) / sizeof(uint16_t) ==
                   kProviderCount &&
               sizeof(kWindowDefaultS) / sizeof(uint16_t) == kProviderCount);
 // Daily request counters: one record per provider with a daily cap, so a
-// damaged record affects only its provider. The single record of earlier
-// firmware ("credits", all providers) is read once for API-Football.
-inline constexpr char kBudgetNvsNamespace[] = "provider_budget",
-                      kBudgetLegacyNvsKey[] = "credits";
+// damaged record affects only its provider. No older-format migration.
+inline constexpr char kBudgetNvsNamespace[] = "provider_budget";
 inline constexpr char kBudgetNvsKeys[][16] = {"openligadb", "api_football",
                                               "espn", "football_data"};
 // The optional global daily cap over all providers (same record format).
 inline constexpr char kBudgetGlobalNvsKey[] = "global";
-inline constexpr uint32_t kBudgetLegacyMagic = 0x46554231,
-                          kBudgetRecordMagic = 0x46554232;
+inline constexpr uint32_t kBudgetRecordMagic = 0x46554232;
 inline constexpr uint8_t kBudgetReservationRequests = 8;
 inline constexpr char kSelectionCountryDefault[] = "Germany";
 // The OpenLigaDB competition list loads one season. Without a season in the
 // request it is the current one: from this month on the season named after
 // the current year, before it the previous year's.
 inline constexpr int kSeasonStartMonth = 7;
-inline constexpr uint32_t kNightBackground = 0x030609;
 inline constexpr uint16_t kSizeClassSmallMax = 260, kSizeClassMediumMax = 400;
 // Display design (docs/UI.md "Layout rules"): font role sizes in px per size
 // class (caption, body, title, score); the text scale picks the largest

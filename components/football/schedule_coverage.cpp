@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <limits>
 
+#include "binary_codec.h"
 #include "settings_record.h"
 
 namespace football::coverage {
@@ -106,11 +107,10 @@ uint64_t sourceHash(const settings::Source& source) noexcept {
   };
   text(source.competition.view());
   text(source.season.view());
-  text(source.team.view());
   return hash == 0 ? 1 : hash;
 }
 
-Identity identity(const settings::Competition& competition) noexcept {
+Identity identity(const settings::CompetitionRoute& competition) noexcept {
   return {sourceHash(competition.primary), competition.incarnation,
           competition.id, competition.primary.provider};
 }
@@ -293,8 +293,8 @@ const Span& Collector::finish(uint32_t checked_utc,
 }
 
 Assessment assess(const EvidenceArray& evidence,
-                  const settings::Competitions& competitions, uint32_t now_utc,
-                  uint16_t threshold_days) noexcept {
+                  const settings::CompetitionRoutes& competitions,
+                  uint32_t now_utc, uint16_t threshold_days) noexcept {
   Assessment out;
   if (now_utc == 0) {
     out.reason = Reason::kClock;
@@ -306,7 +306,8 @@ Assessment assess(const EvidenceArray& evidence,
     out.reason = Reason::kRange;
     return out;
   }
-  const auto find = [&](const settings::Competition& entry) -> const Evidence* {
+  const auto find =
+      [&](const settings::CompetitionRoute& entry) -> const Evidence* {
     for (const auto& row : evidence)
       if (row.id == entry.id) return &row;
     return nullptr;
@@ -374,17 +375,13 @@ bool validate(const DiscoveryRecord& record) noexcept {
   if (record.runs.magic != cfg::kBudgetRecordMagic ||
       record.requests.magic != cfg::kBudgetRecordMagic ||
       record.runs.reserved > cfg::kCoverageRunsPerUtcDay ||
-      record.requests.reserved > cfg::kCoverageRequestsPerRun ||
-      record.progress.route >= cfg::kCompetitionMax ||
-      record.progress.season >= cfg::kCoverageMaxSeasons)
+      record.requests.reserved > cfg::kCoverageRequestsPerRun)
     return false;
-  if (record.progress.run_day == 0)
-    return !record.progress.active && record.runs.day == 0 &&
-           record.runs.reserved == 0 && record.requests.day == 0 &&
-           record.requests.reserved == 0;
-  return record.runs.day == record.progress.run_day &&
-         record.runs.reserved == cfg::kCoverageRunsPerUtcDay &&
-         record.requests.day == record.progress.run_day;
+  if (record.runs.day == 0)
+    return !record.active && record.runs.reserved == 0 &&
+           record.requests.day == 0 && record.requests.reserved == 0;
+  return record.runs.reserved == cfg::kCoverageRunsPerUtcDay &&
+         record.requests.day == record.runs.day;
 }
 
 void Discovery::load(budget::Load state,
@@ -399,7 +396,7 @@ void Discovery::load(budget::Load state,
 
 Discovery::Admission Discovery::start(uint32_t utc_day,
                                       DiscoveryRecord& proposed) noexcept {
-  if (stored_.progress.active) return Admission::kActive;
+  if (stored_.active) return Admission::kActive;
   if (utc_day == 0) return Admission::kUsedUp;
   budget::Record next{};
   if (runs_.admit(utc_day, cfg::kCoverageRunsPerUtcDay, &next) !=
@@ -408,15 +405,13 @@ Discovery::Admission Discovery::start(uint32_t utc_day,
   proposed = stored_;
   proposed.runs = next;
   proposed.requests = {cfg::kBudgetRecordMagic, next.day, 0};
-  proposed.progress = {next.day, true, 0, 0, 0};
+  proposed.active = true;
   return Admission::kStore;
 }
 
 void Discovery::commitStart(const DiscoveryRecord& stored) noexcept {
-  if (!validate(stored) || !stored.progress.active || stored_.progress.active ||
-      stored.runs.day <= stored_.runs.day || stored.requests.reserved != 0 ||
-      stored.progress.route != 0 || stored.progress.season != 0 ||
-      stored.progress.step != 0)
+  if (!validate(stored) || !stored.active || stored_.active ||
+      stored.runs.day <= stored_.runs.day || stored.requests.reserved != 0)
     return;
   runs_.commit(stored.runs);
   requests_.load(budget::Load::kValid, stored.requests);
@@ -425,10 +420,10 @@ void Discovery::commitStart(const DiscoveryRecord& stored) noexcept {
 }
 
 Discovery::Admission Discovery::request(DiscoveryRecord& proposed) noexcept {
-  if (!stored_.progress.active || !readable_) return Admission::kNoRun;
+  if (!stored_.active || !readable_) return Admission::kNoRun;
   budget::Record next{};
-  switch (requests_.admit(stored_.progress.run_day,
-                          cfg::kCoverageRequestsPerRun, &next)) {
+  switch (
+      requests_.admit(stored_.runs.day, cfg::kCoverageRequestsPerRun, &next)) {
     case budget::Counter::Verdict::kAllowed: return Admission::kAllowed;
     case budget::Counter::Verdict::kUsedUp: return Admission::kUsedUp;
     case budget::Counter::Verdict::kStore:
@@ -440,7 +435,7 @@ Discovery::Admission Discovery::request(DiscoveryRecord& proposed) noexcept {
 }
 
 void Discovery::commitRequest(const DiscoveryRecord& stored) noexcept {
-  if (!validate(stored) || !stored.progress.active ||
+  if (!validate(stored) || !stored.active || !stored_.active ||
       !same(stored.runs, stored_.runs) ||
       stored.requests.reserved <= stored_.requests.reserved)
     return;
@@ -448,223 +443,78 @@ void Discovery::commitRequest(const DiscoveryRecord& stored) noexcept {
   stored_ = stored;
 }
 
-bool Discovery::stage(const Progress& progress,
-                      DiscoveryRecord& proposed) const noexcept {
-  if (!readable_ || progress.run_day != stored_.progress.run_day ||
-      (!stored_.progress.active && progress.active))
-    return false;
+bool Discovery::finish(DiscoveryRecord& proposed) const noexcept {
+  if (!readable_ || !stored_.active) return false;
   proposed = stored_;
-  proposed.progress = progress;
-  return validate(proposed);
+  proposed.active = false;
+  return true;
 }
 
-void Discovery::commitProgress(const DiscoveryRecord& stored) noexcept {
-  if (validate(stored) && same(stored.runs, stored_.runs) &&
-      same(stored.requests, stored_.requests) &&
-      (stored_.progress.active || !stored.progress.active))
+void Discovery::commitFinish(const DiscoveryRecord& stored) noexcept {
+  if (validate(stored) && !stored.active && stored_.active &&
+      same(stored.runs, stored_.runs) &&
+      same(stored.requests, stored_.requests))
     stored_ = stored;
 }
 
 namespace record {
 namespace {
-uint16_t u16(const uint8_t* at) {
-  return uint16_t{at[0]} | (uint16_t{at[1]} << 8);
-}
-uint32_t u32(const uint8_t* at) {
-  return uint32_t{at[0]} | (uint32_t{at[1]} << 8) | (uint32_t{at[2]} << 16) |
-         (uint32_t{at[3]} << 24);
-}
-void put16(uint8_t* at, uint16_t value) {
-  at[0] = static_cast<uint8_t>(value);
-  at[1] = static_cast<uint8_t>(value >> 8);
-}
-void put32(uint8_t* at, uint32_t value) {
-  for (unsigned i = 0; i < 4; ++i)
-    at[i] = static_cast<uint8_t>(value >> (8 * i));
-}
 uint32_t crc(std::span<const uint8_t> bytes) {
   return settings::crc32(bytes.subspan(kHeaderBytes),
                          settings::crc32(bytes.first(4)));
 }
-struct Writer {
-  uint8_t* at;
-  void byte(uint8_t value) { *at++ = value; }
-  void word(uint32_t value) {
-    put32(at, value);
-    at += 4;
-  }
-  void wide(uint64_t value) {
-    word(static_cast<uint32_t>(value));
-    word(static_cast<uint32_t>(value >> 32));
-  }
-  void span(const Span& value) {
-    byte(value.season.length);
-    for (unsigned i = 0; i < cfg::kSeasonMaxBytes; ++i)
-      byte(i < value.season.length ? value.season.data[i] : 0);
-    byte(static_cast<uint8_t>(value.completeness));
-    byte(static_cast<uint8_t>(value.proof));
-    byte(static_cast<uint8_t>(value.reason));
-    for (auto v :
-         {value.from, value.to, value.checked_utc, value.previous, value.next})
-      word(v);
-  }
+struct Writer : binary::Writer {
+  using binary::Writer::Writer;
   void counter(const budget::Record& value) {
-    word(value.magic);
-    word(value.day);
-    word(value.reserved);
+    u32(value.magic);
+    u32(value.day);
+    u32(value.reserved);
   }
 };
-struct Reader {
-  const uint8_t* at;
-  uint8_t byte() { return *at++; }
-  uint32_t word() {
-    const auto v = u32(at);
-    at += 4;
-    return v;
-  }
-  uint64_t wide() {
-    const uint64_t low = word();
-    return low | (uint64_t{word()} << 32);
-  }
-  bool span(Span& value) {
-    const auto length = byte();
-    if (length > cfg::kSeasonMaxBytes) return false;
-    value.season.assign({reinterpret_cast<const char*>(at), length});
-    at += cfg::kSeasonMaxBytes;
-    value.completeness = static_cast<Completeness>(byte());
-    value.proof = static_cast<Proof>(byte());
-    value.reason = static_cast<Reason>(byte());
-    value.from = word();
-    value.to = word();
-    value.checked_utc = word();
-    value.previous = word();
-    value.next = word();
-    return true;
-  }
+struct Reader : binary::Reader {
+  using binary::Reader::Reader;
   void counter(budget::Record& value) {
-    value.magic = word();
-    value.day = word();
-    value.reserved = word();
+    value.magic = u32();
+    value.day = u32();
+    value.reserved = u32();
   }
 };
 }  // namespace
-
-std::size_t encode(const EvidenceArray& evidence, const DiscoveryRecord& guard,
-                   std::span<uint8_t> out,
-                   uint8_t pending_competition) noexcept {
-  if (out.size() < kRecordBytes || !validArray(evidence) || !validate(guard))
-    return 0;
-  auto bytes = out.first(kRecordBytes);
-  Writer writer{bytes.data() + kHeaderBytes};
-  for (const auto& value : evidence) {
-    writer.wide(value.source);
-    writer.word(value.incarnation);
-    writer.byte(value.id);
-    writer.byte(static_cast<uint8_t>(value.provider));
-    writer.byte(value.season_count);
-    const bool pending = value.id != 0 && value.id == pending_competition;
-    writer.byte(static_cast<uint8_t>(pending ? Reason::kPartialResponse
-                                             : value.blocked));
-    for (const auto& span : value.seasons) {
-      // Before an ordinary match request, persist a conservative version of
-      // this source's proof. A reset during streaming must never resurrect a
-      // gap that a newly received fixture has already contradicted. No second
-      // retained EvidenceArray or alternative record format is needed.
-      if (pending && span.completeness == Completeness::kComplete) {
-        Span incomplete = span;
-        incomplete.completeness = Completeness::kPartial;
-        incomplete.reason = Reason::kPartialResponse;
-        writer.span(incomplete);
-      } else {
-        writer.span(span);
-      }
-    }
-  }
-  writer.counter(guard.runs);
-  writer.counter(guard.requests);
-  writer.word(guard.progress.run_day);
-  writer.byte(guard.progress.active ? 1 : 0);
-  writer.byte(guard.progress.route);
-  writer.byte(guard.progress.season);
-  writer.byte(guard.progress.step);
-  writer.wide(guard.binding);
-  put16(bytes.data(), kVersion);
-  put16(bytes.data() + 2, kRecordBytes - kHeaderBytes);
-  put32(bytes.data() + 4, crc(bytes));
-  return kRecordBytes;
-}
-
-DecodeResult decode(std::span<const uint8_t> bytes, EvidenceArray& evidence,
-                    DiscoveryRecord& guard) noexcept {
-  if (bytes.size() != kRecordBytes ||
-      u16(bytes.data() + 2) != kRecordBytes - kHeaderBytes)
-    return DecodeResult::kLength;
-  if (u16(bytes.data()) != kVersion) return DecodeResult::kVersion;
-  if (u32(bytes.data() + 4) != crc(bytes)) return DecodeResult::kChecksum;
-  Reader reader{bytes.data() + kHeaderBytes};
-  for (auto& value : evidence) {
-    value.source = reader.wide();
-    value.incarnation = reader.word();
-    value.id = reader.byte();
-    value.provider = static_cast<cfg::Provider>(reader.byte());
-    value.season_count = reader.byte();
-    value.blocked = static_cast<Reason>(reader.byte());
-    for (auto& span : value.seasons)
-      if (!reader.span(span)) return DecodeResult::kInvalid;
-  }
-  reader.counter(guard.runs);
-  reader.counter(guard.requests);
-  guard.progress.run_day = reader.word();
-  const auto active = reader.byte();
-  if (active > 1) return DecodeResult::kInvalid;
-  guard.progress.active = active != 0;
-  guard.progress.route = reader.byte();
-  guard.progress.season = reader.byte();
-  guard.progress.step = reader.byte();
-  guard.binding = reader.wide();
-  return validArray(evidence) && validate(guard) ? DecodeResult::kOk
-                                                 : DecodeResult::kInvalid;
-}
 
 std::size_t encodeGuard(const DiscoveryRecord& guard,
                         std::span<uint8_t> out) noexcept {
   if (out.size() < kGuardBytes || !validate(guard)) return 0;
   const auto bytes = out.first(kGuardBytes);
-  Writer writer{bytes.data() + kHeaderBytes};
+  Writer writer{bytes.subspan(kHeaderBytes)};
   writer.counter(guard.runs);
   writer.counter(guard.requests);
-  writer.word(guard.progress.run_day);
-  writer.byte(guard.progress.active ? 1 : 0);
-  writer.byte(guard.progress.route);
-  writer.byte(guard.progress.season);
-  writer.byte(guard.progress.step);
-  writer.wide(guard.binding);
-  put16(bytes.data(), kVersion);
-  put16(bytes.data() + 2, kGuardBytes - kHeaderBytes);
-  put32(bytes.data() + 4, crc(bytes));
-  return kGuardBytes;
+  writer.u8(guard.active ? 1 : 0);
+  writer.u8(0);
+  writer.u8(0);
+  writer.u8(0);
+  binary::writeU16(bytes.data(), kVersion);
+  binary::writeU16(bytes.data() + 2, kGuardBytes - kHeaderBytes);
+  binary::writeU32(bytes.data() + 4, crc(bytes));
+  return writer.complete() ? kGuardBytes : 0;
 }
 
 DecodeResult decodeGuard(std::span<const uint8_t> bytes,
                          DiscoveryRecord& guard) noexcept {
   if (bytes.size() != kGuardBytes ||
-      u16(bytes.data() + 2) != kGuardBytes - kHeaderBytes)
+      binary::readU16(bytes.data() + 2) != kGuardBytes - kHeaderBytes)
     return DecodeResult::kLength;
-  if (u16(bytes.data()) != kVersion) return DecodeResult::kVersion;
-  if (u32(bytes.data() + 4) != crc(bytes)) return DecodeResult::kChecksum;
+  if (binary::readU16(bytes.data()) != kVersion) return DecodeResult::kVersion;
+  if (binary::readU32(bytes.data() + 4) != crc(bytes))
+    return DecodeResult::kChecksum;
   DiscoveryRecord candidate;
-  Reader reader{bytes.data() + kHeaderBytes};
+  Reader reader{bytes.subspan(kHeaderBytes)};
   reader.counter(candidate.runs);
   reader.counter(candidate.requests);
-  candidate.progress.run_day = reader.word();
-  const auto active = reader.byte();
-  if (active > 1) return DecodeResult::kInvalid;
-  candidate.progress.active = active != 0;
-  candidate.progress.route = reader.byte();
-  candidate.progress.season = reader.byte();
-  candidate.progress.step = reader.byte();
-  candidate.binding = reader.wide();
-  if (!validate(candidate)) return DecodeResult::kInvalid;
+  const auto active = reader.u8();
+  if (active > 1 || reader.u8() || reader.u8() || reader.u8())
+    return DecodeResult::kInvalid;
+  candidate.active = active != 0;
+  if (!reader.complete() || !validate(candidate)) return DecodeResult::kInvalid;
   guard = candidate;
   return DecodeResult::kOk;
 }

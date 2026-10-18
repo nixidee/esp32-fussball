@@ -5,7 +5,7 @@
 namespace football::selection {
 namespace {
 
-bool belongs(const settings::Competition& c, const StoredMatch& m) {
+bool belongs(const settings::CompetitionRoute& c, const StoredMatch& m) {
   return c.active && c.id != 0 && m.competition == c.id &&
          m.provider == c.primary.provider;
 }
@@ -35,7 +35,7 @@ bool sameVerifiedRound(const MatchStore& store, const StoredMatch& a,
   return store.labelAt(a.label) == store.labelAt(b.label);
 }
 
-Window basicWindow(const Input& input, const settings::Competition& c,
+Window basicWindow(const Input& input, const settings::CompetitionRoute& c,
                    const StoredMatch& m) {
   Window out;
   if (!belongs(c, m) || input.clock.utc <= 0 || m.phase == Phase::kPostponed ||
@@ -70,8 +70,8 @@ Window basicWindow(const Input& input, const settings::Competition& c,
   return out;
 }
 
-const settings::Competition* ownCompetition(const Input& input,
-                                            const StoredMatch& m) {
+const settings::CompetitionRoute* ownCompetition(const Input& input,
+                                                 const StoredMatch& m) {
   if (!m.isOwn()) return nullptr;
   const auto* c = input.competitions.find(m.competition);
   return c && belongs(*c, m) && ownSpecial(input, *c) ? c : nullptr;
@@ -80,7 +80,8 @@ const settings::Competition* ownCompetition(const Input& input,
 // Enumerates date clusters without a retained group table. Verified rounds
 // may be noncontiguous in kickoff order; fallback groups have no round claim.
 template <class Visit>
-void clusters(const Input& input, const settings::Competition& c, Visit visit) {
+void clusters(const Input& input, const settings::CompetitionRoute& c,
+              Visit visit) {
   const auto& store = input.store;
   const auto flush = [&](Round& cluster) {
     if (cluster.valid()) visit(cluster);
@@ -137,7 +138,7 @@ Single activeSingle(const StoredMatch& m) {
   return {key(m), content};
 }
 
-Single staticSingle(const Input& input, const settings::Competition& c) {
+Single staticSingle(const Input& input, const settings::CompetitionRoute& c) {
   if (!c.hasClub()) return {};
   const StoredMatch* result = nullptr;
   const StoredMatch* preview = nullptr;
@@ -165,7 +166,7 @@ const StoredMatch* find(const Input& input, const MatchKey& match) {
              : nullptr;
 }
 
-bool ownSpecial(const Input& input, const settings::Competition& c) {
+bool ownSpecial(const Input& input, const settings::CompetitionRoute& c) {
   if (!c.active || !c.hasClub()) return false;
   for (std::size_t slot = 0; slot < input.competitions.entries.size(); ++slot) {
     const auto& entry = input.competitions.entries[slot];
@@ -175,7 +176,7 @@ bool ownSpecial(const Input& input, const settings::Competition& c) {
   return false;
 }
 
-Window window(const Input& input, const settings::Competition& c,
+Window window(const Input& input, const settings::CompetitionRoute& c,
               const StoredMatch& m) {
   auto out = basicWindow(input, c, m);
   if (!out.own_special || out.end == 0) return out;
@@ -224,7 +225,10 @@ Selection select(const Input& input) {
   if (input.clock.utc <= 0) return out;
   MatchKey buffered;
   bool other_active = false;
-  for (const auto& c : input.competitions.entries) {
+  const auto priority =
+      settings::screen_policy::competitionOrder(input.competitions);
+  for (unsigned slot = 0; slot < priority.count; ++slot) {
+    const auto& c = input.competitions.entries[priority.slots[slot]];
     if (!c.active || c.id == 0) continue;
     for (std::size_t i = 0; i < input.store.matchCount(); ++i) {
       const auto& m = input.store.match(i);
@@ -252,13 +256,26 @@ Selection select(const Input& input) {
 }
 
 Single single(const Input& input, const Selection& selected,
-              const settings::Competition& c) {
+              const settings::CompetitionRoute& c) {
   if (!c.active || c.id == 0 || input.clock.utc <= 0) return {};
   if (selected.phase == ScreenPhase::kOwn) {
-    const auto* focused = find(input, selected.focus);
-    return focused && belongs(c, *focused) && window(input, c, *focused).active
-               ? activeSingle(*focused)
-               : Single{};
+    if (input.rules.only_one_own_single) {
+      const auto* focused = find(input, selected.focus);
+      return focused && belongs(c, *focused) &&
+                     window(input, c, *focused).active
+                 ? activeSingle(*focused)
+                 : Single{};
+    }
+    const StoredMatch* buffered = nullptr;
+    for (std::size_t i = 0; i < input.store.matchCount(); ++i) {
+      const auto& match = input.store.match(i);
+      if (!belongs(c, match)) continue;
+      const auto period = window(input, c, match);
+      if (!period.active || !period.own_special) continue;
+      if (period.reported_running) return activeSingle(match);
+      if (!buffered) buffered = &match;
+    }
+    return buffered ? activeSingle(*buffered) : Single{};
   }
   if (selected.phase == ScreenPhase::kOtherGames) {
     const StoredMatch* live = nullptr;
@@ -283,7 +300,7 @@ Single single(const Input& input, const Selection& selected,
   return staticSingle(input, c);
 }
 
-Round phasePeriod(const Input& input, const settings::Competition& c) {
+Round phasePeriod(const Input& input, const settings::CompetitionRoute& c) {
   Round out;
   if (!c.active || input.clock.utc <= 0) return out;
   const auto today = civilDay(input.clock.utc, input.dates);
@@ -295,7 +312,7 @@ Round phasePeriod(const Input& input, const settings::Competition& c) {
   return out;
 }
 
-Round round(const Input& input, const settings::Competition& c,
+Round round(const Input& input, const settings::CompetitionRoute& c,
             cfg::MatchdayMode mode) {
   Round active, held, upcoming;
   if (!c.active || input.clock.utc <= 0) return {};
@@ -329,7 +346,7 @@ bool roundContains(const Input& input, const Round& selected,
   return day >= selected.first_day && day <= selected.last_day;
 }
 
-RoundReach rounds(const Input& input, const settings::Competition& c,
+RoundReach rounds(const Input& input, const settings::CompetitionRoute& c,
                   cfg::MatchdayMode mode) {
   RoundReach out;
   if (!c.active || input.clock.utc <= 0) return out;

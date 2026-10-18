@@ -9,6 +9,8 @@ struct Identity {
   char target[48], layout[32];
   uint32_t settings_format;
 };
+// Local display/application-loop health only. Network, HTTP, filesystem,
+// synchronized time and provider availability never veto trial confirmation.
 void init(bool local_health);
 void startupHealth(bool local_health);
 void poll(bool local_health);

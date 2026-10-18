@@ -1,9 +1,11 @@
-# Event catalog and queue admission of the event bus (docs/ARCHITECTURE.md);
-# no ESP-IDF includes, host-tested. app_config.h is a public dependency.
+# Portable admission policy and the state-notification bus own one contract.
 idf_component_register(
   SRCS
     "event_admission.cpp"
+    "event_bus.cpp"
+    "event_test.cpp"
   INCLUDE_DIRS
     "include"
     "../../include"
+  PRIV_REQUIRES esp_event freertos log
 )

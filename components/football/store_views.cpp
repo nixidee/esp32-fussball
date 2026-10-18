@@ -3,8 +3,6 @@
 #include <algorithm>
 #include <cstdlib>
 
-#include "football_files.h"
-
 namespace football::view {
 namespace {
 
@@ -73,10 +71,9 @@ struct ConferenceSplit {
 
 }  // namespace
 
-void Shown::add(const settings::Competition& entry) {
+void Shown::add(const settings::CompetitionRoute& entry) {
   if (!entry.active || entry.id == 0) return;
-  add(Source{entry.id, entry.primary.provider,
-             decimalId(entry.primary.team.view())});
+  add(Source{entry.id, entry.primary.provider, entry.club.team});
 }
 
 void Shown::add(const Source& source) {
@@ -109,38 +106,52 @@ ConferencePage conferencePage(const MatchStore& store, const List& list,
       std::min<unsigned>(request.per_page, kConferenceRowsMax);
   if (list.count == 0 || per_page == 0) return page;
   const int pinned = conferencePin(store, list, request.pin_own);
-  std::array<uint8_t, cfg::kStoreMatches> others{};
-  unsigned count = 0;
-  for (unsigned i = 0; i < list.count; ++i)
-    if (list.index[i] != pinned) others[count++] = list.index[i];
+  const unsigned count = list.count - (pinned >= 0 ? 1 : 0);
   const unsigned slots = per_page - (pinned >= 0 ? 1 : 0);
-  unsigned first = 0, rows = slots;
   page.pages = 1;
+  if (pinned >= 0)
+    page.rows[page.row_count++] = static_cast<MatchIndex>(pinned);
   if (request.mode == cfg::ConferenceMode::kOnePage && !request.manual) {
-    stableSort(others.data(), count, [&](uint8_t a, uint8_t b) {
+    // Only the visible rows need ranking. Keep their stable top-N order in
+    // the bounded output, rather than copying every retained match index.
+    const auto before = [&](MatchIndex a, MatchIndex b) {
       const auto& x = store.match(a);
       const auto& y = store.match(b);
       const int rx = rank(x), ry = rank(y);
       if (rx != ry) return rx < ry;
       return rx == 0 && x.score_changed > y.score_changed;
-    });
+    };
+    for (unsigned i = 0; i < list.count; ++i) {
+      const auto index = list.index[i];
+      if (index == pinned) continue;
+      unsigned at = pinned >= 0 ? 1 : 0;
+      while (at < page.row_count && !before(index, page.rows[at])) ++at;
+      if (at >= per_page) continue;
+      for (unsigned j = std::min<unsigned>(page.row_count, per_page - 1);
+           j > at; --j)
+        page.rows[j] = page.rows[j - 1];
+      page.rows[at] = index;
+      page.row_count = std::min<unsigned>(page.row_count + 1, per_page);
+    }
   } else if (slots > 0 && count > 0) {
     const ConferenceSplit split(count, slots);
-    page.pages = static_cast<uint8_t>(std::min(split.pages, 255u));
-    page.page = static_cast<uint8_t>(
+    page.pages = static_cast<uint16_t>(split.pages);
+    page.page = static_cast<uint16_t>(
         request.manual ? std::min<unsigned>(request.page, page.pages - 1u)
                        : request.page % page.pages);
-    first = split.first(page.page);
-    rows = split.size(page.page, count);
+    const unsigned first = split.first(page.page);
+    const unsigned rows = split.size(page.page, count);
+    unsigned ordinal = 0;
+    for (unsigned i = 0; i < list.count && ordinal < first + rows; ++i) {
+      if (list.index[i] == pinned) continue;
+      if (ordinal++ >= first) page.rows[page.row_count++] = list.index[i];
+    }
   }
-  if (pinned >= 0) page.rows[page.row_count++] = static_cast<uint8_t>(pinned);
-  for (unsigned i = first; i < count && i - first < rows; ++i)
-    page.rows[page.row_count++] = others[i];
   return page;
 }
 
 int conferencePageOf(const MatchStore& store, const List& list,
-                     const ConferenceRequest& request, uint8_t store_index) {
+                     const ConferenceRequest& request, MatchIndex store_index) {
   const unsigned per_page =
       std::min<unsigned>(request.per_page, kConferenceRowsMax);
   if (!list.count || !per_page) return -1;
@@ -196,7 +207,7 @@ void ownSides(const MatchStore& store, const StoredMatch& match,
   home = away = false;
   const auto* s = shown.source(match.competition);
   if (!match.isOwn() || s == nullptr || s->club == 0) return;
-  const auto club = [&](uint8_t team) {
+  const auto club = [&](TeamIndex team) {
     return team < cfg::kStoreTeams && store.teamAt(team).id == s->club &&
            store.teamAt(team).provider == match.provider;
   };
@@ -204,55 +215,58 @@ void ownSides(const MatchStore& store, const StoredMatch& match,
   away = club(match.away);
 }
 
-namespace {
-// The owner's replacement of a stored team's short name, nullptr when none.
-const char* replaced(const MatchStore& store, uint8_t team,
-                     const persist::ShortNames* names) {
-  if (!names || team >= cfg::kStoreTeams) return nullptr;
-  const auto& t = store.teamAt(team);
-  return t.id != 0 ? names->find(t.provider, t.id) : nullptr;
-}
-}  // namespace
-
 const char* teamName(const MatchStore& store, const StoredMatch& match,
-                     bool home, const persist::ShortNames* names) {
-  const uint8_t team = home ? match.home : match.away;
-  if (const char* name = replaced(store, team, names)) return name;
+                     bool home) {
+  const TeamIndex team = home ? match.home : match.away;
   if (team < cfg::kStoreTeams && store.teamAt(team).id != 0 &&
-      !store.teamAt(team).short_name.empty())
-    return store.teamAt(team).short_name.data;
-  if (detailSlot(store, match)) {
-    const auto& own = store.detailAt(match.detail);
-    return home ? own.home_name.data : own.away_name.data;
-  }
+      !store.teamAt(team).name.empty())
+    return store.teamAt(team).name.data;
   return "";
 }
 
-const char* fullName(const MatchStore& store, const StoredMatch& match,
-                     bool home, const persist::ShortNames* names) {
-  if (detailSlot(store, match)) {
-    const auto& own = store.detailAt(match.detail);
-    const auto& name = home ? own.home_name : own.away_name;
-    if (!name.empty()) return name.data;
-  }
-  return teamName(store, match, home, names);
-}
-
-const char* rowName(const MatchStore& store, const StoredRow& row,
-                    const persist::ShortNames* names) {
-  if (const char* name = replaced(store, row.team, names)) return name;
-  if (row.team < cfg::kStoreTeams)
-    return store.teamAt(row.team).short_name.data;
+const char* rowName(const MatchStore& store, const StoredRow& row) {
+  if (row.team < cfg::kStoreTeams && store.teamAt(row.team).id != 0)
+    return store.teamAt(row.team).name.data;
   return "";
 }
 
-Table table(const MatchStore& store, uint8_t competition) {
+TableGroups tableGroups(const MatchStore& store, uint8_t competition) {
+  TableGroups out;
+  for (std::size_t i = 0; i < store.groupCount(); ++i)
+    if (store.group(i).competition == competition)
+      out.ordinal[out.count++] = store.group(i).ordinal;
+  // Pure/demo callers can still supply a single table without group metadata.
+  if (!out.count)
+    for (std::size_t i = 0; i < store.rowCount(); ++i)
+      if (store.row(i).competition == competition) {
+        out.ordinal[out.count++] = kNoIndex;
+        break;
+      }
+  return out;
+}
+Table table(const MatchStore& store, uint8_t competition, uint8_t group) {
   Table out;
+  if (group == kNoIndex) {
+    const auto groups = tableGroups(store, competition);
+    if (groups.count) group = groups.ordinal[0];
+    for (std::size_t i = 0; i < store.rowCount(); ++i)
+      if (store.row(i).competition == competition &&
+          (store.row(i).flags & kRowOwn)) {
+        group = store.row(i).group;
+        break;
+      }
+  }
+  out.group = group;
+  for (std::size_t i = 0; i < store.groupCount(); ++i) {
+    const auto& metadata = store.group(i);
+    if (metadata.competition == competition && metadata.ordinal == group)
+      out.label = metadata.label;
+  }
   for (std::size_t i = 0; i < store.rowCount() && out.count < out.row.size();
        ++i) {
-    const auto& r = store.row(i);
-    if (r.competition != competition) continue;
-    if ((r.flags & kRowOwn) && out.own < 0) out.own = out.count;
+    const auto& row = store.row(i);
+    if (row.competition != competition || row.group != group) continue;
+    if ((row.flags & kRowOwn) && out.own < 0) out.own = out.count;
     out.row[out.count++] = static_cast<uint8_t>(i);
   }
   return out;
@@ -280,9 +294,29 @@ Events events(const MatchStore& store, const StoredMatch& match) {
   std::array<uint8_t, cfg::kMatchEvents> order{};
   for (uint8_t i = 0; i < out.count; ++i) order[i] = i;
   stableSort(order.data(), out.count,
-             [&](uint8_t a, uint8_t b) { return key[a] < key[b]; });
+             [&](MatchIndex a, MatchIndex b) { return key[a] < key[b]; });
   const auto unsorted = out.index;
   for (uint8_t i = 0; i < out.count; ++i) out.index[i] = unsorted[order[i]];
+  return out;
+}
+
+Shootout shootout(const MatchStore& store, const StoredMatch& match) {
+  Shootout out;
+  if (!detailSlot(store, match)) return out;
+  for (uint8_t at = 0; at < cfg::kStoreEvents; ++at) {
+    const auto& event = store.eventAt(at);
+    if (event.slot != match.detail || !(event.flags & kEventShootout) ||
+        (event.flags & kEventRemoved))
+      continue;
+    uint8_t position = out.count;
+    while (position &&
+           store.eventAt(out.index[position - 1]).ordinal > event.ordinal) {
+      out.index[position] = out.index[position - 1];
+      --position;
+    }
+    out.index[position] = at;
+    ++out.count;
+  }
   return out;
 }
 

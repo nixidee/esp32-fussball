@@ -6,17 +6,15 @@
 #include <unity.h>
 
 #include <cstring>
-#include <vector>
 
+#include "../provider_adapter_support.h"
+#include "../provider_status_support.h"
 #include "../test_match_store/recorded.h"
-#include "football_files.h"
 #include "match_store.h"
-#include "store_mappers.h"
 #include "store_views.h"
 
 namespace {
 using namespace football;
-namespace persist = football::persist;
 constexpr auto kProvider = cfg::Provider::kEspn;
 constexpr uint32_t kNow = 1792245600;
 MatchStore store;
@@ -29,8 +27,10 @@ StoredMatch* add(uint8_t competition, uint32_t id, bool own,
   m.provider = kProvider;
   m.kickoff = kickoff;
   m.phase = Phase::kLive;
+  m.home = store.team(competition, kProvider, id * 2, "Ordinary home");
+  m.away = store.team(competition, kProvider, id * 2 + 1, "Ordinary away");
   if (own) m.flags = kMatchOwn;
-  return store.upsert(m, {kNow, 100}, "Home full", "Away full");
+  return store.upsert(m, {kNow, 100});
 }
 
 const StoredMatch& find(uint8_t competition, uint32_t id) {
@@ -55,12 +55,11 @@ void fillEvents(uint8_t competition, uint32_t id, uint32_t seed) {
 void test_ordinary_details_require_an_explicit_identity() {
   add(1, 10, false);
   TEST_ASSERT_FALSE(store.hasDetail(find(1, 10)));
-  auto* m = store.ensureDetail(1, kProvider, 10, {kNow, 100}, "Ordinary home",
-                               "Ordinary away");
+  auto* m = store.ensureDetail(1, kProvider, 10, {kNow, 100});
   TEST_ASSERT_NOT_NULL(m);
   TEST_ASSERT_FALSE(m->isOwn());
   TEST_ASSERT_TRUE(m->detail >= cfg::kStoreOwnMatches);
-  TEST_ASSERT_EQUAL_STRING("Ordinary home", view::fullName(store, *m, true));
+  TEST_ASSERT_EQUAL_STRING("Ordinary home", view::teamName(store, *m, true));
   fillEvents(1, 10, 100);
   TEST_ASSERT_EQUAL_UINT8(12, view::events(store, find(1, 10)).count);
   add(1, 10, false);
@@ -131,7 +130,11 @@ void test_recorded_espn_ordinary_and_own_details_use_the_same_parser() {
   JsonDocument doc;
   TEST_ASSERT_FALSE(deserializeJson(doc, recorded::kEspnDay));
   const auto row = doc["events"][0].as<JsonVariantConst>();
-  MapContext c{1, kProvider, 598, {kNow, 1}};
+  MapContext c;
+  c.competition = 1;
+  c.provider = kProvider;
+  c.club = 598;
+  c.clock = {kNow, 1};
   TEST_ASSERT_TRUE(storeMatch(row, store, c));
   const auto& own = find(1, 401884775);
   const auto own_events = view::events(store, own);
@@ -139,7 +142,7 @@ void test_recorded_espn_ordinary_and_own_details_use_the_same_parser() {
   TEST_ASSERT_EQUAL_UINT8(4, own_events.count);
   const StoredEvent first = store.eventAt(own_events.index[0]);
   Text<cfg::kNameBytes> name;
-  name.assign(view::fullName(store, own, true));
+  name.assign(view::teamName(store, own, true));
   store.clear();
   c.club = 0;
   TEST_ASSERT_TRUE(storeMatch(row, store, c));
@@ -149,7 +152,7 @@ void test_recorded_espn_ordinary_and_own_details_use_the_same_parser() {
   const auto ordinary_events = view::events(store, ordinary);
   TEST_ASSERT_FALSE(ordinary.isOwn());
   TEST_ASSERT_EQUAL_UINT8(own_events.count, ordinary_events.count);
-  TEST_ASSERT_EQUAL_STRING(name.data, view::fullName(store, ordinary, true));
+  TEST_ASSERT_EQUAL_STRING(name.data, view::teamName(store, ordinary, true));
   const auto& ordinary_first = store.eventAt(ordinary_events.index[0]);
   TEST_ASSERT_EQUAL_UINT32(first.identity, ordinary_first.identity);
   TEST_ASSERT_EQUAL_STRING(first.player.data, ordinary_first.player.data);
@@ -195,55 +198,15 @@ void test_suspension_keeps_observation_and_freezes_an_existing_minute() {
   m.phase = Phase::kFinished;
   store.upsert(m, {kNow + 7200, 3});
   TEST_ASSERT_EQUAL_UINT32(kNow + 7200, find(1, 10).finished_at);
-  TEST_ASSERT_EQUAL(Phase::kSuspended, statusPhase("SUSP"));
-  TEST_ASSERT_EQUAL(Phase::kSuspended, statusPhase("SUSPENDED"));
-  TEST_ASSERT_EQUAL(Phase::kPostponed, statusPhase("POSTPONED"));
-}
-
-struct Buffer {
-  std::vector<uint8_t> bytes;
-  std::size_t at = 0;
-};
-bool write(const void* p, std::size_t n, void* context) {
-  auto& b = *static_cast<Buffer*>(context);
-  const auto* first = static_cast<const uint8_t*>(p);
-  b.bytes.insert(b.bytes.end(), first, first + n);
-  return true;
-}
-bool read(void* p, std::size_t n, void* context) {
-  auto& b = *static_cast<Buffer*>(context);
-  if (b.at + n > b.bytes.size()) return false;
-  std::memcpy(p, b.bytes.data() + b.at, n);
-  b.at += n;
-  return true;
-}
-
-void test_cache_restores_ordinary_events_and_original_live_observation() {
-  add(1, 10, false, 0);
-  store.ensureDetail(1, kProvider, 10, {kNow, 1}, "Full home", "Full away");
-  fillEvents(1, 10, 100);
-  auto suspended = find(1, 10);
-  suspended.phase = Phase::kSuspended;
-  store.upsert(suspended, {kNow + 10, 1});
-  persist::Saved saved;
-  saved.competition = 1;
-  Buffer b;
-  TEST_ASSERT_TRUE(persist::encode(store, saved, write, &b) > 0);
-  persist::Saved checked;
-  TEST_ASSERT_TRUE(persist::check(read, &b, checked));
-  store.clear();
-  b.at = 0;
-  TEST_ASSERT_TRUE(persist::load(read, &b, store, {kNow + 3600, 1}));
-  const auto& restored = find(1, 10);
-  TEST_ASSERT_FALSE(restored.isOwn());
-  TEST_ASSERT_EQUAL(Phase::kSuspended, restored.phase);
-  TEST_ASSERT_EQUAL_UINT32(kNow, restored.first_live_observed_utc);
-  TEST_ASSERT_EQUAL_UINT8(12, view::events(store, restored).count);
-  TEST_ASSERT_EQUAL_STRING("Full home", view::fullName(store, restored, true));
-  b.bytes[8] = 3;  // old competition cache version, before CRC is examined
-  b.bytes[9] = 0;
-  b.at = 0;
-  TEST_ASSERT_FALSE(persist::check(read, &b, checked));
+  TEST_ASSERT_EQUAL(Phase::kSuspended,
+                    football::test_support::mappedStatus(
+                        cfg::Provider::kApiFootball, "SUSP"));
+  TEST_ASSERT_EQUAL(Phase::kSuspended,
+                    football::test_support::mappedStatus(
+                        cfg::Provider::kFootballData, "SUSPENDED"));
+  TEST_ASSERT_EQUAL(Phase::kPostponed,
+                    football::test_support::mappedStatus(
+                        cfg::Provider::kFootballData, "POSTPONED"));
 }
 
 int32_t berlinFallOffset(int64_t instant, void*) {
@@ -263,12 +226,12 @@ void test_finish_day_retention_survives_midnight_dst_and_store_expiry() {
   const DateContext dates{berlinFallOffset};
   const auto monday = parseUtc("2026-10-26T22:30:00Z");
   TEST_ASSERT_TRUE(resultHeld(find(1, 10), monday, dates));
-  store.expire(1, monday, 3600, &dates);
+  store.retain(1, retention::Selection{}, monday, dates);
   TEST_ASSERT_NOT_NULL(store.find(1, kProvider, 10));
   TEST_ASSERT_TRUE(find(1, 10).estimated & kEstimatedFinish);
   const auto tuesday = parseUtc("2026-10-26T23:00:00Z");
   TEST_ASSERT_FALSE(resultHeld(find(1, 10), tuesday, dates));
-  store.expire(1, tuesday, 3600, &dates);
+  store.retain(1, retention::Selection{}, tuesday, dates);
   TEST_ASSERT_NULL(store.find(1, kProvider, 10));
 }
 
@@ -293,7 +256,6 @@ int main() {
   RUN_TEST(test_recorded_espn_ordinary_and_own_details_use_the_same_parser);
   RUN_TEST(test_live_observation_is_confirmed_and_does_not_slide_each_poll);
   RUN_TEST(test_suspension_keeps_observation_and_freezes_an_existing_minute);
-  RUN_TEST(test_cache_restores_ordinary_events_and_original_live_observation);
   RUN_TEST(test_finish_day_retention_survives_midnight_dst_and_store_expiry);
   RUN_TEST(test_result_hold_recomputes_after_timezone_change);
   return UNITY_END();

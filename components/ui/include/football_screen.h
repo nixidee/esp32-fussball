@@ -18,28 +18,50 @@ struct Rim {
   Tone tone = Tone::kAccent;  // kRing
   // kMatch: played minute (-1 = no progress), finished match (dim ring),
   // extra time as a second inner lap, and the half-time mark.
-  int16_t minute = -1;
-  bool finished = false, extra = false, gap = false;
-  uint8_t done = 0, current = 0;            // kSegments: three steps
-  uint8_t first = 0, count = 0, total = 0;  // kScroll: visible rows
+  uint16_t progress_degrees = 0, extra_degrees = 0;
+  bool progress_known = false, extra_known = false, gap = false;
+  Tone progress_tone = Tone::kAccent, top = Tone::kDim, bottom = Tone::kDim;
+  uint8_t done = 0, current = 0;             // kSegments: three steps
+  uint16_t first = 0, count = 0, total = 0;  // kScroll: visible rows
 };
 struct MatchRow {
   char home[41]{}, away[41]{}, centre[12]{};
+  char home_short[4]{}, away_short[4]{};
   Tone centre_tone = Tone::kText;
   // Own club name in accent; own match as a dark row; a recent goal as an
   // accent row.
   bool own_home = false, own_away = false, own = false, goal = false;
 };
+enum class Attempt : uint8_t {
+  kUnknown,
+  kHomeScored,
+  kHomeMissed,
+  kAwayScored,
+  kAwayMissed,
+  kUnknownScored,
+  kUnknownMissed,
+  kHomeUnknown,
+  kAwayUnknown
+};
+struct Shootout {
+  std::array<Attempt, 10> attempts{};
+  char caption[48]{};
+  uint8_t count = 0;
+  bool active = false;
+};
 struct OwnMatch {
   char home[41]{}, away[41]{}, centre[12]{}, pill[24]{}, highlight[96]{};
+  char home_short[4]{}, away_short[4]{};
   Tone pill_tone = Tone::kAccent, pill_text = Tone::kAccent,
        highlight_tone = Tone::kText;
-  bool own_home = false, own_away = false;
+  bool own_home = false, own_away = false, large_centre = true;
+  Shootout shootout;
 };
 struct TableRow {
   // Signed table values accept -10000..10000; difference also shows a '+'
   // for positive values. Both need six characters plus the terminator.
   char name[41]{}, position[4]{}, played[4]{}, difference[7]{}, points[7]{};
+  char name_short[4]{};
   bool own = false;
 };
 // Full-screen state: title, up to two lines (an accent line stands out) and
@@ -57,7 +79,7 @@ struct ViewModel {
   Layout layout = Layout::kImage;
   // Own match: competition · round; Konferenz: title with page; table:
   // competition name.
-  char caption[64]{};
+  char caption[80]{};
   OwnMatch own;
   std::array<MatchRow, cfg::kVisibleMatchesRange.max> matches{};
   std::array<TableRow, cfg::kTableWindowRange.max> table{};
@@ -77,14 +99,10 @@ struct ViewModel {
   bool badge_bottom = false;
   Rim rim;
   // Konferenz pages or slideshow position (dots); pages 0 or 1 = no dots.
-  uint8_t page = 0, pages = 0;
+  uint16_t page = 0, pages = 0;
   char image[64]{};
   // Image-service attempt, including fallback/retry of an unchanged file path.
   uint32_t image_revision = 0;
-  bool night = false;
-  // Night colour level 0..255 towards the night background; 255 = colours
-  // unchanged (a backlight dims instead).
-  uint8_t night_colour = 255;
 };
 bool render(const ViewModel& model, const geometry::SafeArea& safe_area);
 }  // namespace ui

@@ -15,6 +15,7 @@ idf_component_register(
     "fonts/ui_font_text_14.c"
     "fonts/ui_font_text_18.c"
     "fonts/ui_font_score_48.c"
+    "fonts/ui_font_rle.c"
   INCLUDE_DIRS
     "include"
   PRIV_INCLUDE_DIRS
@@ -22,10 +23,13 @@ idf_component_register(
   PRIV_REQUIRES
     geometry
     lvgl__lvgl
-    core
+    system
+    timekeeping
+    events
     display
     esp_app_format
     football
+    names
     images
     network
     settings

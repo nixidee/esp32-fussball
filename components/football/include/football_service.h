@@ -3,9 +3,9 @@
 
 #include "demo_scenarios.h"
 #include "esp_err.h"
-#include "football_files.h"
 #include "football_model.h"
 #include "match_store.h"
+#include "provider_query.h"
 #include "store_views.h"
 namespace football {
 // Why no provider request runs before the scheduler's next wake time (Web
@@ -57,6 +57,10 @@ inline const CompetitionState* findState(const CompetitionStates& states,
     if (id != 0 && state.id == id) return &state;
   return nullptr;
 }
+// Optional REST-only coherent projection. UI/debug keep the narrow summary;
+// HTTP never sends while the repository is locked.
+using DatasetSnapshots =
+    std::array<std::array<DatasetStatus, 3>, cfg::kCompetitionMax>;
 struct Status {
   // False until init() ran: no other field is set.
   bool started;
@@ -64,7 +68,7 @@ struct Status {
   // Monotonic time of the oldest last successful request over the active
   // competitions (a failed competition keeps earlier data); 0 = none yet.
   int64_t fetched_ms;
-  uint8_t matches;
+  uint16_t matches;
   bool stale, busy;
   CompetitionStates competitions;
   // Monotonic time the next request is due (0 = none scheduled: kNone,
@@ -73,15 +77,9 @@ struct Status {
   int64_t next_ms;
   Cadence cadence;
 };
-struct SelectionRequest {
-  cfg::Provider provider = cfg::Provider::kOpenLigaDb;
-  bool teams = false;
-  Id competition, season;
-  Text<cfg::kSelectionTextMaxBytes> search;
-  Text<cfg::kSelectionTextMaxBytes> country;
-  uint16_t offset = 0;
-};
+using SelectionQuery = uint64_t;
 struct SelectionStatus {
+  SelectionQuery query = 0;
   bool busy, more;
   uint16_t count;
   uint32_t revision;
@@ -102,13 +100,15 @@ struct OwnOverview {
   bool present = false;
   uint8_t competition = 0;  // canonical identity of the published dataset
   Phase phase = Phase::kUnknown;
+  cfg::Provider provider = cfg::kProviderDefault;
+  uint32_t home_id = 0, away_id = 0;
   int64_t kickoff = 0;  // UTC seconds, 0 = unknown
   int16_t home_goals = -1, away_goals = -1, minute = -1;  // -1 = unknown
   Text<cfg::kNameBytes> home, away;
 };
 struct RouteInfo {
   uint8_t id = 0;  // canonical published id; 0 = no dataset in this position
-  uint8_t matches = 0;  // matches of the competition in the published data
+  uint16_t matches = 0;  // matches of the competition in the published data
   cfg::Provider provider = cfg::kProviderDefault;  // source of those matches
 };
 struct Overview {
@@ -135,12 +135,10 @@ esp_err_t demoScenario(demo::Scenario scenario, uint8_t step);
 // The published data: the compact store with the sources it shows
 // (store_views.h). 'fetched_ms', 'stale' and 'competitions' as in Status;
 // 'retry_ms' is the monotonic ms of the next retry of a failed competition
-// (0 = none); 'names' are the owner's replacements of team short names
-// (view::teamName()).
+// (0 = none). Team labels in the store are original compact provider fallback.
 struct Published {
   const MatchStore& store;
   const view::Shown& shown;
-  const persist::ShortNames& names;
   uint32_t revision, generation;
   bool configured, stale;
   int64_t fetched_ms, retry_ms;
@@ -148,7 +146,7 @@ struct Published {
   // Borrowed from the worker while this read holds the repository mutex.
   // Use only with the UI snapshot's matching data generation. These are the
   // effective canonical routes, also used by the device Demo.
-  const settings::Competitions& routes;
+  const settings::CompetitionRoutes& routes;
   bool break_proven;
   uint8_t loaded_matches, loaded_tables;  // bits in routes.entries order
   Clock clock;  // Demo clock when enabled; otherwise ordinary UTC/monotonic
@@ -161,39 +159,32 @@ void read(Reader reader, void* context);
 // count per competition of the published data. No provider request.
 // Optional Status is filled in place under the same repository lock as the
 // overview: rows, causes/notices and Demo identity bindings share a revision.
-Overview overview(int64_t utc, Status* status_out = nullptr);
-esp_err_t select(const SelectionRequest& request);
-SelectionStatus selectionStatus();
-bool selectionAt(uint16_t index, uint32_t revision, Selection& out);
-// Teams of competition 'competition' in the published data (its matches
-// and table rows, every provider) with the owner's short name ("" = none).
+Overview overview(int64_t utc, Status* status_out = nullptr,
+                  DatasetSnapshots* datasets_out = nullptr);
+// Query identity includes a boot nonce. Only this matching owner can read,
+// renew the idle lease or cancel. A cancelled in-flight request keeps the
+// single interactive slot until the provider worker acknowledges completion.
+esp_err_t select(const SelectionRequest& request, SelectionQuery& query);
+// Explicit original-name query; same worker/admission slot, no adoption.
+esp_err_t beginOriginalNames(uint8_t competition, uint32_t& query);
+esp_err_t selectionStatus(SelectionQuery query, SelectionStatus& out);
+bool selectionAt(SelectionQuery query, uint16_t index, uint32_t revision,
+                 Selection& out);
+esp_err_t cancelSelection(SelectionQuery query);
+// Volatile provider fallback labels of teams in the published matches/table.
+// Adopted names belong to the separate full collection; no filesystem read.
 // 'revision' of the published data guards a consistent read across count
 // and At: At() fails after a newer publication.
 struct TeamInfo {
   uint32_t id = 0;
   cfg::Provider provider = cfg::Provider::kOpenLigaDb;
-  Text<26> short_name, custom;
+  Text<cfg::kTeamNameBytes> name;
+  Text<cfg::kTeamShortBytes> short_name;
 };
 uint16_t teamCount(uint8_t competition, uint32_t& revision);
 bool teamAt(uint8_t competition, uint16_t index, uint32_t revision,
             TeamInfo& out);
-// Sets the owner's short name of a team (an empty name removes it) and
-// writes the short-name file; the caller holds the heavy-operation token.
-// ESP_ERR_NO_MEM: the table, the football file budget or the storage is
-// full (the previous name stays); ESP_ERR_INVALID_STATE: no storage or
-// update test.
-esp_err_t setShortName(cfg::Provider provider, uint32_t id,
-                       std::string_view name);
-// Replaces every short name by 'table' (exchanged: 'table' then holds the
-// previous names) and writes the short-name file once; errors and the
-// caller's token as in setShortName(), and the previous names stay.
-esp_err_t replaceShortNames(persist::ShortNames& table);
-// A copy of the owner's short names (settings export). Any task.
-void shortNames(persist::ShortNames& out);
-// images::format() wiped the files: the competition files and the short
-// names are written again from RAM. Any task.
-void filesLost();
-// Deletes every football file (settings reset before the restart); the
-// caller holds the heavy-operation token.
-void eraseFiles();
+// Blocks every working-identity mutation through the explicit reset workflow.
+esp_err_t beginReset();
+void endReset();
 }  // namespace football

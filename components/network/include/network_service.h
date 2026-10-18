@@ -78,6 +78,9 @@ struct AccessPoint {
 };
 esp_err_t init();
 void poll();
+// Actual HTTP listener readiness, not a desire to advertise a future server.
+// The network owner applies/removes the mDNS advertisement in poll().
+void setHttpReady(bool ready);
 void applySettings();
 Status status();
 esp_err_t requestScan();

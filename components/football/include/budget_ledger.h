@@ -14,17 +14,9 @@ namespace football::budget {
 struct Record {
   uint32_t magic, day, reserved;
 };
-// The single record of earlier firmware: one day for all providers.
-struct LegacyRecord {
-  uint32_t magic, day, reserved[cfg::kProviderCount];
-};
-
 enum class Load : uint8_t { kMissing, kValid, kDamaged };
 // Checks stored bytes; 'data' null = no record. On kValid *out holds it.
 Load parse(const void* data, std::size_t length, Record* out);
-// The earlier record's entry of 'provider', converted to a Record.
-Load parseLegacy(const void* data, std::size_t length, unsigned provider,
-                 Record* out);
 
 class Counter {
  public:

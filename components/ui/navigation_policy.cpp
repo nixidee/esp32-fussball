@@ -10,14 +10,12 @@ using Kind = sequence::ContentKind;
 
 Kind absent(const NavigationContext& context, const sequence::Entry& entry) {
   const auto& facts = context.data;
-  for (std::size_t i = 0; i < facts.competitions.entries.size(); ++i) {
-    if (facts.competitions.entries[i].id != entry.competition) continue;
-    const auto loaded =
-        entry.type == Type::kTable ? facts.loaded_tables : facts.loaded_matches;
-    return (facts.failed & (1u << i)) || !(loaded & (1u << i)) ? Kind::kError
-                                                               : Kind::kEmpty;
-  }
-  return Kind::kEmpty;
+  const auto status = contentStatus(facts.store, entry.competition, entry.type,
+                                    facts.clock.utc);
+  return status.state == football::DatasetState::kComplete &&
+                 status.cause == football::Cause::kNone
+             ? Kind::kEmpty
+             : Kind::kError;
 }
 uint16_t pages(unsigned count, unsigned per_page) {
   return static_cast<uint16_t>(std::max(1u, (count + per_page - 1) / per_page));
@@ -25,7 +23,7 @@ uint16_t pages(unsigned count, unsigned per_page) {
 }  // namespace
 
 sequence::Input NavigationContext::input() {
-  return {policy, data.competitions, selected, content, this};
+  return {policy, *program, data.competitions, selected, content, this};
 }
 
 football::view::List conferenceMembers(const NavigationContext& context,
@@ -55,37 +53,9 @@ football::view::List conferenceMembers(const NavigationContext& context,
           active =
               football::selection::window(context.selection, *c, other).active;
       }
-    if (active) out.index[out.count++] = static_cast<uint8_t>(i);
+    if (active) out.index[out.count++] = static_cast<football::MatchIndex>(i);
   }
   return out;
-}
-
-football::ConferencePage conferencePage(const NavigationContext& context,
-                                        const sequence::Entry& entry, Mode mode,
-                                        uint16_t page) {
-  const auto members = conferenceMembers(context, entry.competition);
-  football::ConferenceRequest request;
-  request.mode = context.policy.conference_mode;
-  request.pin_own = context.policy.pin_own_match;
-  request.manual = mode == Mode::kManualHeld;
-  request.per_page = context.policy.visible_matches;
-  request.page = page;
-  return football::view::conferencePage(context.data.store, members, request);
-}
-
-TableSelection tableSelection(const NavigationContext& context,
-                              const sequence::Entry& entry, Mode mode,
-                              uint16_t page) {
-  const auto table =
-      football::view::table(context.data.store, entry.competition);
-  const int count = std::min<int>(context.policy.table_window, table.count);
-  const int last = std::max(0, table.count - count);
-  const int first = mode == Mode::kManualHeld ? std::min<int>(page, last)
-                    : table.own >= 0
-                        ? std::clamp(table.own - count / 2, 0, last)
-                        : std::min<int>(page * count, last);
-  return {entry.competition, first, count, table.count,
-          table.count == 0 && absent(context, entry) == Kind::kError};
 }
 
 football::view::List roundMembers(const NavigationContext& context,
@@ -95,13 +65,13 @@ football::view::List roundMembers(const NavigationContext& context,
   for (std::size_t i = 0; i < store.matchCount(); ++i)
     if (football::selection::roundContains(context.selection, round,
                                            store.match(i)))
-      out.index[out.count++] = static_cast<uint8_t>(i);
+      out.index[out.count++] = static_cast<football::MatchIndex>(i);
   return out;
 }
 
-MatchdaySelection matchdaySelection(const NavigationContext& context,
-                                    const sequence::Entry& entry, Mode mode,
-                                    uint16_t page) {
+static MatchdaySelection selectMatchday(const NavigationContext& context,
+                                        const sequence::Entry& entry, Mode mode,
+                                        uint16_t page) {
   const auto* c = context.data.competitions.find(entry.competition);
   if (!c) return {};
   const auto per_page = std::max<unsigned>(1, context.policy.visible_matches);
@@ -129,28 +99,87 @@ MatchdaySelection matchdaySelection(const NavigationContext& context,
 
 sequence::Content content(const sequence::Entry& entry, Mode mode,
                           uint16_t visible_page, void* raw) {
-  const auto& context = *static_cast<NavigationContext*>(raw);
-  if (!screen::sporting(entry.type)) return {Kind::kData, 1};
+  return static_cast<NavigationContext*>(raw)
+      ->prepare(entry, mode, visible_page)
+      .content;
+}
+const PreparedContent& NavigationContext::prepare(const sequence::Entry& entry,
+                                                  Mode mode,
+                                                  uint16_t visible_page) {
+  const auto status =
+      data.store.datasetStatus(entry.competition, contentDataset(entry.type));
+  const uint32_t proofs = static_cast<uint32_t>(status.state) |
+                          static_cast<uint32_t>(status.cause) << 8 |
+                          uint32_t{data.store.notices(entry.competition)} << 16;
+  if (prepared_.valid && prepared_.entry == entry && prepared_.mode == mode &&
+      prepared_.page == visible_page &&
+      match_count_ == data.store.matchCount() &&
+      row_count_ == data.store.rowCount() && proofs_ == proofs)
+    return prepared_;
+  auto& out = prepared_;
+  out = {};
+  out.entry = entry;
+  out.mode = mode;
+  out.page = visible_page;
+  out.valid = true;
+  match_count_ = data.store.matchCount();
+  row_count_ = data.store.rowCount();
+  proofs_ = proofs;
+  const auto& context = *this;
+  if (!screen::sporting(entry.type)) {
+    out.content = {Kind::kData, 1};
+    return out;
+  }
   const auto* c = context.data.competitions.find(entry.competition);
-  if (!c) return {};
+  if (!c) return out;
   unsigned count = 0;
   uint16_t anchor = 0;
   if (entry.type == Type::kLiveSingle) {
-    if (context.selected.phase == settings::screen_policy::Phase::kOwn &&
+    if (context.policy.only_one_own_single &&
+        context.selected.phase == settings::screen_policy::Phase::kOwn &&
         context.selected.focus.competition != entry.competition)
-      return {};
+      return out;
     const auto single =
         football::selection::single(context.selection, context.selected, *c);
-    count = single.match.valid();
+    out.single = football::selection::find(context.selection, single.match);
+    count = out.single != nullptr;
   } else if (entry.type == Type::kLiveMulti) {
-    const auto page = conferencePage(context, entry, mode, visible_page);
+    const auto members = conferenceMembers(context, entry.competition);
+    if (mode == Mode::kAutomatic && members.count == 1 &&
+        context.selected.phase == settings::screen_policy::Phase::kOwn) {
+      const auto& only = context.data.store.match(members.index[0]);
+      if (only.id == context.selected.focus.id &&
+          only.competition == context.selected.focus.competition)
+        for (unsigned i = 0; i < context.program->count; ++i) {
+          const auto& row = context.program->entries[i];
+          if (row.type == Type::kLiveSingle &&
+              row.competition == entry.competition && row.rule.automatic)
+            return out;  // The same focused Single already owns this visit.
+        }
+    }
+    football::ConferenceRequest request;
+    request.mode = policy.conference_mode;
+    request.pin_own = policy.pin_own_match;
+    request.manual = mode == Mode::kManualHeld;
+    request.per_page = policy.visible_matches;
+    request.page = visible_page;
+    const auto page =
+        football::view::conferencePage(data.store, members, request);
+    out.matches = page;
+    out.total = members.count;
+    if (members.count == 1) out.single = &data.store.match(members.index[0]);
+    for (unsigned i = 0; i < members.count; ++i)
+      if (data.store.match(members.index[i]).isOwn()) {
+        out.own = members.index[i];
+        break;
+      }
     count = page.row_count ? page.pages : 0;
     anchor = visible_page;
     if (mode == Mode::kManualHeld &&
         context.policy.conference_mode == cfg::ConferenceMode::kOnePage) {
+      request.manual = false;
       const auto automatic =
-          conferencePage(context, entry, Mode::kAutomatic, visible_page);
-      const auto members = conferenceMembers(context, entry.competition);
+          football::view::conferencePage(data.store, members, request);
       int pinned = -1;
       if (context.policy.pin_own_match)
         for (unsigned i = 0; i < members.count && pinned < 0; ++i)
@@ -169,19 +198,66 @@ sequence::Content content(const sequence::Entry& entry, Mode mode,
       }
     }
   } else if (entry.type == Type::kTable) {
-    const auto table =
-        football::view::table(context.data.store, entry.competition);
-    const unsigned visible =
-        std::min<unsigned>(context.policy.table_window, table.count);
-    if (visible) {
-      count = mode == Mode::kManualHeld ? table.count - visible + 1
-              : table.own >= 0          ? 1
-                                        : pages(table.count, visible);
-      const int last = std::max<int>(0, table.count - visible);
-      anchor = static_cast<uint16_t>(
-          table.own >= 0 ? std::clamp<int>(table.own - visible / 2, 0, last)
-                         : std::min<unsigned>(visible_page * visible, last));
+    const auto groups =
+        football::view::tableGroups(data.store, entry.competition);
+    const auto preferred = football::view::table(data.store, entry.competition);
+    football::view::Table automatic_table, held_table;
+    unsigned automatic_pages = 0, held_pages = 0, automatic_first = 0,
+             held_first = 0, automatic_anchor = 0, own_anchor = 0;
+    for (unsigned i = 0; i < groups.count; ++i) {
+      const auto table = football::view::table(data.store, entry.competition,
+                                               groups.ordinal[i]);
+      const unsigned visible =
+          std::min<unsigned>(policy.table_window, table.count);
+      if (!visible) continue;
+      const unsigned last = table.count - visible;
+      const unsigned auto_count = pages(table.count, visible);
+      const unsigned held_count = last + 1;
+      if (table.group == preferred.group && preferred.own >= 0)
+        own_anchor = held_pages +
+                     std::clamp(preferred.own - static_cast<int>(visible) / 2,
+                                0, static_cast<int>(last));
+      if (visible_page >= automatic_pages) {
+        automatic_table = table;
+        automatic_first = std::min<unsigned>(
+            (visible_page - automatic_pages) * visible, last);
+        automatic_anchor = held_pages + automatic_first;
+      }
+      if (visible_page >= held_pages) {
+        held_table = table;
+        held_first = std::min<unsigned>(visible_page - held_pages, last);
+      }
+      automatic_pages += auto_count;
+      held_pages += held_count;
     }
+    const bool own = preferred.own >= 0;
+    anchor = static_cast<uint16_t>(own ? own_anchor : automatic_anchor);
+    const auto& table = mode == Mode::kManualHeld ? held_table
+                        : own                     ? preferred
+                                                  : automatic_table;
+    const unsigned visible =
+        std::min<unsigned>(policy.table_window, table.count);
+    if (visible) {
+      count = mode == Mode::kManualHeld ? held_pages
+              : own                     ? 1
+                                        : automatic_pages;
+      const int first =
+          mode == Mode::kManualHeld ? held_first
+          : own ? std::clamp(preferred.own - static_cast<int>(visible) / 2, 0,
+                             static_cast<int>(table.count - visible))
+                : automatic_first;
+      out.table = {entry.competition,         table.group, table.label, first,
+                   static_cast<int>(visible), table.count, false};
+      for (unsigned i = 0; i < visible; ++i)
+        out.table_rows[i] = table.row[first + i];
+    } else
+      out.table = {entry.competition,
+                   football::kNoIndex,
+                   football::kNoIndex,
+                   0,
+                   0,
+                   0,
+                   absent(context, entry) == Kind::kError};
   } else if (entry.type == Type::kMatchday) {
     if (mode == Mode::kManualHeld) {
       const auto reach = football::selection::rounds(
@@ -194,11 +270,26 @@ sequence::Content content(const sequence::Entry& entry, Mode mode,
         count += pages(list.count, context.policy.visible_matches);
       }
     } else {
-      const auto chosen = matchdaySelection(context, entry, mode, visible_page);
-      count = chosen.available ? chosen.pages : 0;
+      out.matchday = selectMatchday(context, entry, mode, visible_page);
+      count = out.matchday.available ? out.matchday.pages : 0;
+    }
+    if (mode == Mode::kManualHeld)
+      out.matchday = selectMatchday(context, entry, mode, visible_page);
+    if (out.matchday.available) {
+      const auto members = roundMembers(context, out.matchday.round);
+      out.total = members.count;
+      out.matchday.page =
+          std::min<uint16_t>(out.matchday.page, out.matchday.pages - 1);
+      out.first = out.matchday.page * policy.visible_matches;
+      const auto rows =
+          std::min<unsigned>(policy.visible_matches, members.count - out.first);
+      out.matches.row_count = rows;
+      for (unsigned i = 0; i < rows; ++i)
+        out.matches.rows[i] = members.index[out.first + i];
     }
   }
-  return {count ? Kind::kData : absent(context, entry),
-          static_cast<uint16_t>(std::max(1u, count)), anchor};
+  out.content = {count ? Kind::kData : absent(context, entry),
+                 static_cast<uint16_t>(std::max(1u, count)), anchor};
+  return out;
 }
 }  // namespace ui

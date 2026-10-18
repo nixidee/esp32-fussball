@@ -17,35 +17,17 @@ const char* eventName(Event event) {
     case Event::kDataUpdated: return "data updated";
     case Event::kOtaState: return "OTA state";
     case Event::kTimeChanged: return "time changed";
-    case Event::kUiAction: return "UI action";
   }
   return "unknown";
 }
 
 bool Admission::admit(Event event) {
-  if (isStateEvent(event)) {
-    const uint32_t bit = pendingBit(event);
-    return (pending_.fetch_or(bit, std::memory_order_acq_rel) & bit) == 0;
-  }
-  uint32_t taken = ui_in_flight_.load(std::memory_order_relaxed);
-  do {
-    if (taken >= cfg::kEventUiActionSlots) return false;
-  } while (!ui_in_flight_.compare_exchange_weak(
-      taken, taken + 1, std::memory_order_acq_rel, std::memory_order_relaxed));
-  return true;
+  if (!isStateEvent(event)) return false;
+  const uint32_t bit = pendingBit(event);
+  return (pending_.fetch_or(bit, std::memory_order_acq_rel) & bit) == 0;
 }
-
 void Admission::release(Event event) {
-  if (isStateEvent(event)) {
+  if (isStateEvent(event))
     pending_.fetch_and(~pendingBit(event), std::memory_order_acq_rel);
-    return;
-  }
-  // Never below zero, even after an unmatched release.
-  uint32_t taken = ui_in_flight_.load(std::memory_order_relaxed);
-  do {
-    if (taken == 0) return;
-  } while (!ui_in_flight_.compare_exchange_weak(
-      taken, taken - 1, std::memory_order_acq_rel, std::memory_order_relaxed));
 }
-
 }  // namespace events

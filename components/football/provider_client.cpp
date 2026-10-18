@@ -12,11 +12,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "http_send_admission.h"
+#include "json_stream.h"
 #include "lwip/dns.h"
 #include "lwip/sockets.h"
 #include "lwip/tcpip.h"
 #include "network_service.h"
-#include "provider_json_stream.h"
 #include "settings_store.h"
 #include "time_service.h"
 namespace football {
@@ -32,6 +32,7 @@ struct Transport {
   uint32_t ending = 0;
   bool headers = true, failed = false;
   const SendHooks* send_hooks = nullptr;
+  const provider::Sink* consumer = nullptr;
   http::SendAdmission send{};
   // Where the request stopped and the socket's pending error, for the log.
   const char* stage = "dns";
@@ -43,7 +44,9 @@ struct Transport {
     const bool ok = timekeeping::monotonicMs() < deadline &&
                     settings::dataGeneration() == generation &&
                     network::ready() && network::status().epoch == epoch &&
-                    allowed;
+                    allowed &&
+                    (!consumer || !consumer->cancelled ||
+                     !consumer->cancelled(consumer->context));
     failed |= !ok;
     return ok;
   }
@@ -251,56 +254,32 @@ int destroyTransport(esp_transport_handle_t) { return 0; }
 class Stream {
  public:
   Stream(esp_http_client_handle_t client, uint32_t generation,
-         std::size_t limit, int64_t deadline)
+         std::size_t limit, int64_t deadline,
+         const provider::Sink* consumer = nullptr)
       : client_(client),
         generation_(generation),
         epoch_(network::status().epoch),
         limit_(limit),
-        deadline_(deadline) {}
-  int peek() {
-    if (look_ == -2) look_ = next();
-    return look_;
-  }
-  int read() {
-    const auto c = peek();
-    if (number_ && !numberChar(c)) return -1;
-    look_ = -2;
-    return c;
-  }
-  // While set, the stream ends before the first character that cannot be
-  // part of a number; that character stays unread.
-  void endAfterNumber(bool on) { number_ = on; }
-  std::size_t readBytes(char* out, std::size_t n) {
-    std::size_t i = 0;
-    for (; i < n; ++i) {
-      const int c = read();
-      if (c < 0) break;
-      out[i] = c;
-    }
-    return i;
-  }
-  int nonSpace() {
-    int c;
-    do {
-      c = read();
-    } while (c == ' ' || c == '\r' || c == '\n' || c == '\t');
-    return c;
+        deadline_(deadline),
+        consumer_(consumer) {}
+  json::Input input() {
+    return {this, [](void* raw) { return static_cast<Stream*>(raw)->next(); }};
   }
   bool complete() const {
-    return !failed_ && esp_http_client_is_complete_data_received(client_);
+    return !failed_ && pos_ == size_ &&
+           esp_http_client_is_complete_data_received(client_);
   }
   bool failed() const { return failed_; }
+  bool tooLarge() const { return too_large_; }
   std::size_t bytes() const { return bytes_; }
 
  private:
-  static bool numberChar(int c) {
-    return (c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' ||
-           c == 'e' || c == 'E';
-  }
   int next() {
     if (timekeeping::monotonicMs() >= deadline_ ||
         settings::dataGeneration() != generation_ || !network::ready() ||
-        network::status().epoch != epoch_) {
+        network::status().epoch != epoch_ ||
+        (consumer_ && consumer_->cancelled &&
+         consumer_->cancelled(consumer_->context))) {
       failed_ = true;
       return -1;
     }
@@ -312,7 +291,7 @@ class Stream {
       }
       bytes_ += received;
       if (bytes_ > limit_) {
-        failed_ = true;
+        failed_ = too_large_ = true;
         return -1;
       }
       pos_ = 0;
@@ -324,31 +303,33 @@ class Stream {
   uint32_t generation_, epoch_;
   std::size_t limit_, bytes_ = 0, pos_ = 0, size_ = 0;
   int64_t deadline_;
-  char buffer_[1024];
-  int look_ = -2;
-  bool failed_ = false, number_ = false;
+  const provider::Sink* consumer_;
+  char buffer_[cfg::kProviderReadBufferBytes];
+  bool failed_ = false, too_large_ = false;
 };
 }  // namespace
-esp_err_t fetchJson(const char* url, const char* array_key,
-                    cfg::Provider provider, const settings::Model& model,
-                    uint32_t generation, JsonConsumer consume, void* context,
-                    std::size_t limit, FetchResult* result, bool optional,
-                    const bool* enough, const SendHooks* send_hooks,
-                    const JsonObserver* observer, JsonScan* scan) {
-  if (scan) *scan = {};
-  if (consume == nullptr || !validJsonObserver(observer, array_key)) {
-    if (scan) scan->invalid_configuration = true;
+esp_err_t fetchProvider(const provider::RequestSpec& spec,
+                        const provider::Sink& sink,
+                        const settings::ProviderSettings& model,
+                        uint32_t generation, provider::ParseResult& parsed,
+                        FetchResult* result, const SendHooks* send_hooks) {
+  parsed = {};
+  if (result) *result = {};
+  provider::HttpRequest request;
+  if (!provider::buildRequest(spec, request) || request.body_limit == 0 ||
+      (send_hooks && (!send_hooks->begin || !send_hooks->end)))
     return ESP_ERR_INVALID_ARG;
-  }
-  if (send_hooks != nullptr &&
-      (send_hooks->begin == nullptr || send_hooks->end == nullptr))
-    return ESP_ERR_INVALID_ARG;
+  const auto limit = request.body_limit;
   esp_http_client_config_t config{};
   Transport context_transport{
       esp_transport_ssl_init(), generation, network::status().epoch,
       timekeeping::monotonicMs() + cfg::kOperationDeadlineMs,
       limit + cfg::kProviderHeaderBytes + cfg::kProviderWireOverheadBytes};
+  if (send_hooks && send_hooks->deadline_ms > 0)
+    context_transport.deadline =
+        std::min(context_transport.deadline, send_hooks->deadline_ms);
   context_transport.send_hooks = send_hooks;
+  context_transport.consumer = &sink;
   auto bounded = esp_transport_init();
   if (bounded == nullptr || context_transport.tls == nullptr) {
     if (bounded) esp_transport_destroy(bounded);
@@ -362,12 +343,12 @@ esp_err_t fetchJson(const char* url, const char* array_key,
   esp_transport_set_func(bounded, connect, readTransport, writeTransport,
                          closeTransport, pollRead, pollWrite, destroyTransport);
   config.transport = bounded;
-  config.url = url;
+  config.url = request.url;
   config.crt_bundle_attach = esp_crt_bundle_attach;
   config.timeout_ms = cfg::kProviderIdleTimeoutMs;
   config.disable_auto_redirect = true;
-  config.buffer_size = 1024;
-  config.buffer_size_tx = 512;
+  config.buffer_size = cfg::kProviderReadBufferBytes;
+  config.buffer_size_tx = cfg::kProviderSendBufferBytes;
   config.keep_alive_enable = false;
   auto client = esp_http_client_init(&config);
   if (client == nullptr) {
@@ -375,18 +356,21 @@ esp_err_t fetchJson(const char* url, const char* array_key,
     esp_transport_destroy(context_transport.tls);
     return ESP_ERR_NO_MEM;
   }
-  char key[97]{};
-  if (provider == cfg::Provider::kApiFootball) {
-    memcpy(key, model.api_football_key.data.data(),
-           model.api_football_key.length);
-    esp_http_client_set_header(client, "x-apisports-key", key);
-  } else if (provider == cfg::Provider::kFootballData) {
-    memcpy(key, model.football_data_key.data.data(),
-           model.football_data_key.length);
-    esp_http_client_set_header(client, "X-Auth-Token", key);
+  constexpr auto key_capacity =
+      std::max(cfg::kApiFootballKeyMaxBytes, cfg::kFootballDataKeyMaxBytes);
+  char key[key_capacity + 1]{};
+  const auto auth = provider::authentication(spec.source.provider, model);
+  esp_err_t err = ESP_OK;
+  if (auth.header) {
+    if (auth.value.size() >= sizeof(key))
+      err = ESP_ERR_INVALID_ARG;
+    else {
+      std::memcpy(key, auth.value.data(), auth.value.size());
+      err = esp_http_client_set_header(client, auth.header, key);
+    }
   }
   std::memset(key, 0, sizeof(key));
-  esp_err_t err = esp_http_client_open(client, 0);
+  if (err == ESP_OK) err = esp_http_client_open(client, 0);
   if (err == ESP_OK) {
     const auto length = esp_http_client_fetch_headers(client);
     const int code = esp_http_client_get_status_code(client);
@@ -402,13 +386,30 @@ esp_err_t fetchJson(const char* url, const char* array_key,
       err = ESP_FAIL;
   }
   if (err == ESP_OK) {
-    Stream stream(client, generation, limit, context_transport.deadline);
-    JsonAllocator allocator;
-    if (!readJson(stream, array_key, provider, consume, context, allocator,
-                  optional, enough, observer, scan) ||
-        context_transport.failed)
-      err = ESP_ERR_INVALID_RESPONSE;
-    if (context_transport.failed && scan) scan->document_complete = false;
+    Stream stream(client, generation, limit, context_transport.deadline, &sink);
+    json::Reader reader(stream.input());
+    parsed = provider::readResponse(reader, spec, sink);
+    if (stream.tooLarge()) {
+      parsed.status = provider::Status::kTooLarge;
+      parsed.document_complete = false;
+    }
+    if (context_transport.failed || stream.failed() ||
+        (!parsed.early_stopped && !stream.complete())) {
+      parsed.document_complete = false;
+      if (parsed.status == provider::Status::kOk)
+        parsed.status = provider::Status::kBadResponse;
+    }
+    switch (parsed.status) {
+      case provider::Status::kOk:
+        if (!parsed.document_complete && !parsed.early_stopped)
+          err = ESP_ERR_INVALID_RESPONSE;
+        break;
+      case provider::Status::kNoMemory: err = ESP_ERR_NO_MEM; break;
+      case provider::Status::kTooLarge: err = ESP_ERR_INVALID_SIZE; break;
+      case provider::Status::kBadResponse:
+      case provider::Status::kMissing:
+      case provider::Status::kRejected: err = ESP_ERR_INVALID_RESPONSE; break;
+    }
     if (result) result->bytes = stream.bytes();
   }
   if (result) {

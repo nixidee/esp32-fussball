@@ -4,8 +4,8 @@
 
 #include "esp_err.h"
 #include "football_model.h"
-#include "provider_json.h"
-#include "settings_model.h"
+#include "provider_adapter.h"
+#include "provider_settings.h"
 namespace football {
 // HTTP status (0 = none received), body bytes read, the stage the request
 // reached ("dns", "tcp", "tls", "http") and the socket's pending error after
@@ -30,21 +30,16 @@ struct SendHooks {
   void (*end)(void* context) = nullptr;
   void* context = nullptr;
   bool pause_with_frame = true;
+  // Optional enclosing interactive operation deadline; never extends transport.
+  int64_t deadline_ms = 0;
 };
-// 'body_limit': the most body bytes read (cfg::kProviderBodyBytes, the
-// owner's selection lists cfg::kSelectionBodyBytes, ESPN match summaries
-// cfg::kProviderSummaryBodyBytes); a longer response fails.
-// 'optional': a response without 'array_key' is valid (no elements), e.g.
-// a provider that leaves out an empty list. 'enough': set by the consumer
-// (through its context) when it needs no further element; the response ends
-// there with success and its rest is not read.
-esp_err_t fetchJson(const char* url, const char* array_key,
-                    cfg::Provider provider, const settings::Model& model,
-                    uint32_t generation, JsonConsumer consumer, void* context,
-                    std::size_t body_limit = cfg::kProviderBodyBytes,
-                    FetchResult* result = nullptr, bool optional = false,
-                    const bool* enough = nullptr,
-                    const SendHooks* send_hooks = nullptr,
-                    const JsonObserver* observer = nullptr,
-                    JsonScan* scan = nullptr);
+// Adapter owns URL, authentication provider, scope and body ceiling. Transport
+// owns DNS/TLS, absolute deadlines, actual send admission and complete I/O.
+// All borrowed request/sink/model values remain alive until this returns.
+esp_err_t fetchProvider(const provider::RequestSpec& spec,
+                        const provider::Sink& sink,
+                        const settings::ProviderSettings& model,
+                        uint32_t generation, provider::ParseResult& parsed,
+                        FetchResult* transport = nullptr,
+                        const SendHooks* hooks = nullptr);
 }  // namespace football

@@ -9,21 +9,63 @@ The dedicated screen-policy options are available in the current source. They
 share the existing draft/save flow with general settings and competitions.
 The active controller now uses the same policy and common sequence. The
 frame request-admission gate applies before the first HTTP write.
-The [screen-system contract](UI.md#planned-screen-system-redesign) distinguishes
+The [screen-system contract](UI.md#current-screens-and-automatic-sequence) distinguishes
 this staged implementation from final device behavior and layout acceptance.
 The overview contains frame mode; Display contains phase rules, common order,
 appearance and library-image sequence. Image files remain managed under Images.
 
-## Six pages
+## Source organization and offline bundle
+
+`web/index.html` contains the document shell and the ordered list of local
+stylesheet/script sources. `web/style.css` owns the shared layout and design
+tokens. The plain JavaScript files in `web/js/` share the application's existing
+lexical scope; they do not create additional state owners or a module runtime.
+
+| Source | Responsibility |
+|---|---|
+| `i18n.js`, `state.js`, `messages.js` | Translations, the single application state, field metadata, errors and diagnostic text |
+| `controls.js`, `pages.js` | Shared fields/dialogs and composition/navigation/status updates for the seven pages |
+| `api.js` | HTTP/session admission, uploads and device snapshot loading |
+| `draft.js` | The shared settings draft, validation, save receipts and baseline reconciliation |
+| `screens.js`, `competitions.js` | Screen-policy options and the competition/provider-selection editor |
+| `names.js`, `images.js`, `debug.js`, `system.js` | Name drafts, image editing, Demo/screenshots/logging and system actions |
+| `app.js` | User-action wiring, theme and autonomous polling |
+
+The existing `scripts/embed_web.py` pre-build step inlines these local sources
+in their HTML order into one script and stylesheet, then emits the same single
+deterministic gzip firmware asset. The device still serves one offline document
+without additional requests, LittleFS files, framework or dependencies. Changing
+any included source updates that asset; unchanged input preserves the generated
+header. The script's `--document` option prints the bundled HTML without writing
+files. Client checks use `scripts/tests/web_source.cjs`, which calls this same
+bundler instead of maintaining a second source list.
+
+## Lossless WiFi names
+
+WiFi names retain their original bytes, up to 32 bytes. Ordinary valid UTF-8
+uses a JSON string. A name containing other bytes uses the explicit wire value
+`{"base64":"..."}`. The editor labels that representation **Base64**, explains
+its original-byte limit and edits it directly in the shared draft. NUL and line
+ending bytes also use this editable presentation because an HTML text input
+cannot retain them verbatim. Their wire value remains a valid JSON string when
+they are UTF-8. A scan selection replaces the same draft field.
+
+Validation rejects malformed or noncanonical base64 and names exceeding 32
+original bytes before a write. Encoding metadata is derived from the draft;
+there is no separate hidden WiFi-name state. A decoded UTF-8 value uses the same
+wire representation as the device's subsequent readback.
+
+## Seven pages
 
 | Page | Content |
 |---|---|
 | Overview | Frame mode, current screen/reason, own match or kickoff, global data age, next provider round and its reason, source/match count/data time/cause, action and error code per competition, warnings and refresh/next/IP actions |
 | Competitions | Compact ordered list of active/paused entries with a Details expander (season, own special treatment, move/edit/short names/remove), add/edit wizard, provider competition/club lists |
-| Display | Five phase tabs, six types, shared rules and retained per-competition overrides, common type order, visit/image times, separate crest and library images, appearance, brightness/night/rotation, badges and input roles |
+| Display | Five phase tabs, six types, shared rules and retained per-competition overrides, common type order, visit/image times, separate crest and library images, appearance, rotation, badges and input roles; brightness/night controls only with a controllable backlight pin |
 | Images | Revisioned thumbnails, usage, quota, upload/replace editor, confirmed real deletion, and the crest and standard background (replace, copy from the library, restore the factory image) |
-| Settings | WiFi scan and credentials, hostname/antenna, provider keys/opt-in and request limits (daily cap, window limit) per provider, time/language/access, expert Demo scenario/step controls and diagnostics |
-| System | Firmware/update, backup/import, restart, separate image-storage repair, delete user images, factory reset and live diagnostics |
+| Settings | WiFi scan and credentials, hostname/antenna, provider keys/opt-in and request limits (daily cap, window limit) per provider, time/language/access |
+| Debug | Screenshot at the top, optional Overview screenshot preference, Demo enable/scenarios/automatic-next, expert logs and device diagnostics |
+| System | Firmware/update, backup/import, restart, reset-gated storage formatting, delete user images, factory reset |
 
 The page starts with session discovery. Without an admin password it obtains
 its mutation token silently and shows no login/logout controls. With a password,
@@ -34,12 +76,12 @@ Status failures mark the connection as unavailable even when older data exists.
 Short notices appear at a fixed position near the bottom of the window, in the
 browser's top layer so they stay visible above open dialogs; browsers without
 that layer show them as an ordinary fixed element.
-System diagnostics label provider request attempts as "since restart". The
+Debug device diagnostics label provider request attempts as "since restart". The
 daily caps are separate settings; the boot counter is not displayed as daily
 consumption or as a fraction of a cap.
 
 Local network-service errors appear in the existing overview warnings and
-System diagnostics. A working WiFi connection remains shown as connected
+Debug device diagnostics. A working WiFi connection remains shown as connected
 when only setup DNS, local naming or HTTP advertisement failed. The error
 names the failed phase, likely cause, automatic retry time, short `NET E..`
 code and SDK error; naming/DNS faults with an active IP advise opening that
@@ -47,8 +89,9 @@ IP directly. Normal status polling clears recovered errors and preserves
 unsaved form edits. Local-service readiness is listed with the device
 measurements, separately from the WiFi address.
 
-The overview reports the current screen and its reason and offers the existing
-real-device screenshot download. It does not generate a simulated display for
+The overview reports the current screen and its reason. Screenshot download is
+available when its additional Overview preference is saved; Debug always offers
+the same real-device capture operation. It does not generate a simulated display for
 the new screen policy. Ground layouts and rings are chosen from owner-flashed
 device drafts; a future preview must consume the device's actual draw list.
 Status polling preserves unsaved controls and shows actionable network/image
@@ -60,7 +103,7 @@ polling updates its own nodes and does not replace unsaved form input.
 
 ## Runtime Demo controls
 
-Under Settings → Demo and logs, enable Demo and save first. Load the scenario
+Under Debug → Demo, enable Demo and save first. Load the scenario
 catalogue, select a scenario/step, or move to the previous/next step. Controls
 wait for the worker publication, show busy/pending state and report an
 unconfirmed step with an actionable retry message. They do not change or save
@@ -81,9 +124,27 @@ step is applied. Display visits still use the saved durations and normal
 manual/automatic rules. A manually held Table can therefore remain across
 steps within the same phase; a zero manual-return time keeps it held.
 "Nächster Bildschirm" enters manual navigation. It does not advance the
-automatic sequence or the simulated match. A Demo-only automatic-sequence
-advance is selected as a follow-up, not yet implemented. Normal timings remain;
-shorter visits, clock acceleration and new stored Demo settings are excluded.
+automatic sequence or the simulated match. Debug's Demo-only "Automatik
+weiterschalten" requests the next automatic page/image boundary; the next screen
+kind or competition follows only at the end of its visit. While a manual view
+is held, "Zur Automatik zurückkehren" first resumes the first eligible automatic
+entry (the current frame image in frame mode). Following clicks advance normally.
+Phase, type, manual/frame state and automatic entry count explain the last
+controller-bound state, not a successful physical redraw. Commands are disabled
+while Demo is off or preparing. Normal timings remain; shorter visits, clock
+acceleration and new stored Demo fields are excluded.
+
+## Provider-selection ownership
+
+The competition/club wizard reads only its acknowledged opaque query ID.
+Another browser's result, a changed configuration or an expired query leaves
+its draft/previous rows intact and reports a retryable error. Header Close,
+Cancel and Escape stop polling and cancel only that query; late start replies
+are cancelled by their returned ID. Closing/reopening cannot revive an old
+editor. An unacknowledged start is not retried; only explicit busy rejection
+has bounded retry. A lost browser/start response expires through the device's
+30-second idle-read lease. Further pages reuse the loaded list's filters but
+receive their own query identity.
 
 ## One global draft and save
 
@@ -109,17 +170,20 @@ keep; only Remove sends an empty value. Unsaved summaries never reveal secret
 contents. Secret inputs use new-password autocomplete. Editing is locked while
 saving so input made during a login/network wait cannot be marked as saved.
 Normal saves preserve the session unless the admin password changes.
-Screen-policy read/save can report busy while a provider/storage operation owns
-the shared memory token. The failed part remains in the draft; retry after the
-operation ends. A busy error never marks an unconfirmed write as saved.
+Save sends the complete desired configuration and optional names in one Apply
+with the expected revision and a unique64-bit ID. The device validates the whole
+candidate, stages changed names and publishes one NVS reference. No part ordering
+or two-step provider-key change is needed. A rejection retains the whole draft.
+A received success receipt establishes the new baseline; later edits remain
+unsaved. A failed follow-up GET shows an amber verification warning and a
+read-only **Check status again** action. It never resends an acknowledged write.
 
-Known feedback defect, reproduced2026-10-17: after an acknowledged successful
-write, a busy follow-up read can still display the generic save error. With all
-changes acknowledged the Save bar disappears, even though the message suggests
-retrying the save. This must be distinguished from a rejected write, which
-retains the draft. The planned correction preserves write/conflict checks and
-separates confirmation, readback warning and failed-save error; it is not yet
-implemented. Current toasts have neutral and red-error states only.
+After a lost response or uncertain NVS outcome, the client retains the Apply ID
+and blocks another save. GET-only reconciliation accepts a matching receipt.
+Reading the old revision does not prove the write absent; the page requires
+reboot/recovery to establish durable state. A newer different revision establishes
+a conflict; the draft is retained for reconciliation. Errors and warnings remain
+visible above dialogs. No uncertain operation silently becomes a success.
 
 Network-affecting changes include WiFi credentials, setup password, antenna
 and hostname. The page explains reconnection and shows the new hostname/IP
@@ -134,14 +198,10 @@ each sporting type. Entry details expose own special handling separately from
 active state; phase/type eligibility and overrides live in Display. Without a
 club there is no own focus or static club Single. The current display controller
 uses the same effective screen policy exposed by the Display page.
-The competitions are saved through their own endpoint
-(`/api/v1/competitions`) as part of the global save; the device assigns each
-new competition its id, so moving a competition keeps its id and its kept
-data. When the global save changes both
-the settings and the competitions, the page writes first the part that the
-other one needs (for example a newly entered provider key before a
-competition that uses it). A change that both removes one keyed provider and
-moves a competition to another keyed provider must be saved in two steps.
+Competitions, provider credentials and screen preferences are saved together
+through the common Apply. The device assigns new identities once; moving an
+entry keeps its identity and dataset. Switching only the preferred club keeps
+the source's match/table/coverage facts and reclassifies their own-club view.
 Chosen provider names are stored for display; ids remain the identity. Names
 exceeding the storage byte capacity can be edited before accepting the wizard.
 Changing a competition clears its previous club selection.
@@ -222,27 +282,56 @@ confirmation, names it and takes effect on save. The wizard
 asks for a country filter only for API-Football, whose competition list
 supports it; the Next button shows why it is not yet available.
 
-"Kurznamen" in the details of a saved, active competition lists the teams the
-device holds for it (from its matches and table), each with the provider's
-name as placeholder and the owner's short name, if any. "Übernehmen" saves
-one name at once on the device, outside the global draft; an empty field
-removes it. At most 26 bytes per name and 48 names over all competitions;
-a full table or a full device is reported and keeps the previous name. A
-competition without fetched data shows a hint to fetch first. The names
-are part of the settings export; an import replaces all of them (a backup
-without names keeps them). A settings reset deletes them.
+The competition's names action opens one collection editor in the common
+application draft. German, English and short fields distinguish inherited
+(absent) values from explicit empty values. The UTF-8 adoption preview shows
+26B names and3B shorts; full input is checked before clipping. Closing invalidates
+pending reads, and late responses cannot replace another dialog or draft.
+Changes become durable only through the global Save/Common Apply action.
 
-Known editor defect: saving one row, or rejecting an overlong row, rebuilds the
-dialog and loses other typed edits. Batch editing with retained drafts is
-requested. Editable/localized full names and approximate lookup tables are also
-requested but do not exist yet; short-name overrides do not translate full names.
-The requested catalogue covers Bundesliga,2.Bundesliga,3.Liga and German
-Regionalligen. Each future editor row should expose German/English/short-name
-inputs, exact-match prefill and a catalogue dropdown. User mappings should
-export/import in the catalogue's format. A readable JSON source beside
-app_config.h in include/ is proposed. The selected shape uses direct de/en/short
-fields per club and provider IDs under ids. Exact fallback/import behavior,
-resource costs and integration remain design work, not current API support.
+The maintained [catalogue](../include/team_names.json) contains all147 supplied
+clubs from Bundesliga,2.Bundesliga,3.Liga and the German regional groups.
+Loading it, selecting a proposal and previewing an import change only the draft.
+Confirmed provider IDs remain identity; coincident short/name texts never group
+competitions or connect clubs automatically.71 preferred English names match
+checked ESPN fields verbatim;76 do not have that verbatim evidence, including40
+with confirmed club identity. Provider aliases do not silently replace a
+preferred translation. Full provider-original acquisition remains a separate
+explicit provider operation; clipped fallback labels cannot recover originals.
+
+Collection import replaces the complete names draft after confirmation and
+clipping/removal preview. It retains every provider-ID array, alias, league and
+explicit exception. It does not impose a48-row exception limit. Source JSON
+version1 uses full text values. Adopted export and Apply use version2 with a
+shared `texts` dictionary and numeric references, so repeated long metadata is
+sent once. The browser expands references for editing and deduplicates/clips
+only at the confirmed adoption boundary. Names export includes the entire
+adopted collection, not only fetched teams or the currently visible page.
+
+The firmware enforces16KiB for the complete binary collection, including
+identity/index/CRC bytes. A transport-body limit is separate and does not
+allocate an equally large RAM buffer. Names use two immutable versions selected
+by the exact reference in NVS AppConfig. One Common Apply saves configuration
+and that reference together. If the result is uncertain, the browser checks
+state without repeating the mutation and preserves the draft. A referenced
+missing/corrupt file reports an error without discarding other settings.
+
+Ordinary restart/power loss preserves adopted names. The existing confirmed
+factory reset deletes them; the immutable firmware catalogue survives. Full
+storage formatting is part of that reset. There is no names backup in RAM/NVS,
+automatic repair rewrite, football-cache eviction or original-name archive.
+Image-only deletion remains separate. Device transfer timing, heap/stack and
+physical display acceptance remain open.
+
+Original provider labels can be fetched explicitly in the names editor for a
+saved competition. The query uses the existing worker, provider budgets and
+absolute operation deadline; closing the dialog cancels its ownership. Complete
+original full/short strings are shown, with full names and aliases used for
+unambiguous matching before display clipping. An existing provider ID binding
+takes precedence. Ambiguous equal names require an explicit target choice.
+Adopting into an existing or new club changes only the shared names draft.
+Other metadata, bindings and competition grouping remain intact; Save adopts
+labels within the normalized16KiB collection envelope and26/3 display bounds.
 
 ## Display page
 
@@ -256,8 +345,8 @@ than offering an independent table-page clock.
 Timing/sports options include the shared minimum-two maximum visible matches
 for Conference/Matchday, balanced pinned pages, table rows, conference mode,
 shown matchday and manual return. Appearance options hold colours, backgrounds,
-text scale and subpage dots. Help explains each non-obvious option. Complete
-settings/phase-option reorganization remains planned after device layout work.
+text scale and subpage dots. Help explains each non-obvious option. The common draft and phase/appearance/timing sections are implemented;
+physical screen readability remains a separate device check.
 
 Crest and library Images are separate screen types. The image sequence holds
 only library ids; frame mode can additionally include the crest. Display selects
@@ -305,31 +394,43 @@ replacement after a confirmation (disabled while the factory image is shown).
 Replacements count towards the shared library quota but not towards the ten
 library entries.
 
-The editor decodes a selected local source image, preserves the old image on decode
-failure, and crops at device resolution. It supports drag, numeric zoom, fit/
-fill, mouse wheel, two-finger zoom, base colour, opacity and sample text. The
-round mask follows the profile. Sample text is not stored. JPEG encoding tries
-bounded quality levels before upload and reports the actual quality and bytes.
-Upload has its own progress indicator and locks the intended source/target.
-Dragging changes both X/Y offsets; explicit position inputs are requested.
-Opening an existing image currently does not load its stored JPEG for editing;
-it asks for a source file. Gallery/slide masks are still always round, which
-does not match rectangular profiles. The reported mask/image offset on the
-round C6 remains under investigation and has not been attributed to that defect.
+The editor loads a stored library/role JPEG when opened, or decodes a selected
+local source file. Late loads cannot replace a newer file or a closed/reopened
+editor. A missing/corrupt stored source keeps the stored file and offers local
+replacement. Stored JPEG pixels do not recover the original source/crop history;
+further edits re-encode those pixels.
 
-Library quota and temporary filesystem reserve are separate checks. Replacing
+Cropping uses the device profile resolution. Drag and horizontal/vertical numeric
+inputs share the same offsets in device pixels:0 centers, positive is right/down,
+negative left/up. Decimal values are retained; an empty/invalid value restores
+the previous position with a warning. Numeric zoom, fit/fill, mouse wheel,
+two-finger zoom, base colour, opacity and sample text remain available. Fit/fill
+recenter and update both inputs. The editor mask/canvas share the profile;
+sample text is not stored. Bounded JPEG encoding reports actual quality/bytes;
+upload locks its intended source/target and has a progress indicator.
+
+Gallery/role/slide images render as blocks, removing the reproduced inline
+baseline space between image and round frame. Desktop/phone browser bounds now
+align; this does not establish pixel agreement with the physical panel. The
+existing gallery/slide masks still assume round images, a separate limitation
+for rectangular profiles. No guessed device crop shift was introduced.
+
+Library quota and temporary filesystem workspace are separate checks. Replacing
 an image subtracts its old size from the library quota, but the old file still
-occupies filesystem space while its replacement is written. The firmware
-performs its own baseline-JPEG, dimensions, complete-decode and quota checks.
+occupies filesystem space while its replacement is written. Admission requires
+available space of at least the larger of the candidate size and the 40 KiB
+workspace; writing consumes that workspace. It is not charged a second time or
+reserved for unused future library capacity. Actual filesystem allocation can
+still fail; every write, synchronization, close and final rename is checked.
+Upload and library-to-role copy use this same temporary-file pipeline. Both
+validate the actual copied bytes for baseline JPEG, dimensions and complete
+decode before replacing the published file. A failure preserves that file.
 An expired validation deadline, including time spent in file I/O, is
 answered as `timeout` ("try again"). A confirmed read, seek or close failure
 is an I/O error; rejected format, dimensions or JPEG content is `content`.
 An already expired deadline stops before opening or decoding the file.
-The kept football data and the short names share the partition (at most
-48 KiB, typically one 4 KiB block per competition); the free-space check of
-an upload counts them, the library quota does not. Images come first: the
-device writes a football file only while the unused part of the library
-quota plus the reserve stays free.
+Adopted names and stock images also occupy the partition and are included in
+actual used space, but not the image-library quota. Football data is RAM-only.
 
 | Bound | Current C6 |
 |---|---|
@@ -347,14 +448,24 @@ image mutations the page reloads inventory/settings, clears only explicitly
 deleted image references and preserves other missing references and unrelated
 unsaved edits. Refresh failure must not
 hide an earlier destructive-operation error.
+Deletion reports saved-reference cleanup and file removal separately. If
+references were saved but unlink failed, the page explains that the file remains
+and offers a later explicit retry. If the settings write has an unknown outcome,
+delete-all stops, sends no further mutations and asks for a restart/state check.
 
-Separate storage repair requires confirmation. It erases uploads AND stock
-files, preserves other settings, does not restart and reports a failed
-reference save as a partial result. USB uploadfs restores stock files and can
-itself erase uploads. Firmware OTA preserves shared image storage; trial
-firmware blocks persistent image changes. Images are not part of settings
-backup/import. Missing/damaged desired images use the appropriate protected role replacement,
-then its factory file. A damaged replacement uses the unchanged factory file.
+The repair action opens the existing factory-reset dialog with full formatting
+selected. It explicitly warns that setup, names, uploads and stock files are
+removed, and retains the existing hostname confirmation. Settings and request
+counters reset before formatting; failure reports the failed stage and completed
+steps and permits retry. Only complete success restarts. Reconfiguration or an
+existing backup restores setup; the firmware name preset stays intact. There is no standalone repair endpoint
+or older-format alias.
+USB uploadfs restores stock files and can itself erase uploads. Firmware OTA
+preserves shared image storage; trial firmware blocks persistent image changes.
+Images are not part of settings backup/import. Missing/damaged desired images
+use the protected role replacement, then its factory file. A damaged replacement
+uses the unchanged factory file.
+
 If every candidate fails, football content stays on the configured base colour
 with a warning; the pure crest view shows a repair card. The desired settings
 reference and every slideshow position remain intact. After ten seconds, or
@@ -365,7 +476,7 @@ explicit storage repair/reset keeps its confirmed destructive semantics.
 
 The overview and Images page show the selected reference, failed file kind,
 actual fallback (or absence of a usable file), cause, action, short code and
-next retry. System diagnostics retains the image state as well. Status polling
+next retry. Debug device diagnostics retains the image state as well. Status polling
 clears recovered errors while preserving unrelated unsaved edits. The live
 schematic preview reads the actual selected file, including factory fallback
 with a damaged replacement still present. Its status pill remains visible
@@ -378,23 +489,23 @@ different network/provider pill can retain its own action.
 Image file faults are content errors: a working UI with this fallback/error
 presentation may confirm firmware during the existing ten-second OTA trial.
 Confirmation does not guarantee successful JPEG output. Hardware/LVGL fatal
-rules and the strict network-startup-error veto remain unchanged; firmware
-rollback cannot repair image files shared by both slots.
-
-Startup maintenance only removes legacy named image files outside an update
-trial, once storage is available. It waits without blocking when another
-expensive operation holds exclusive access. Failed legacy removal stays
-pending and retries after 10 s;
-the waiting period holds no exclusive-operation admission. Desired image
-references/positions are retained by the independent content fallback path.
+rules remain independent; network availability is not an OTA verdict. Firmware
+rollback cannot repair image files shared by both slots. Startup no longer runs
+a legacy-image cleanup mechanism.
 
 The shipped stock crest/background are generated project artwork, not downloaded
 club crests. Normal firmware does not resize images; host stock generation uses
 scripts/build_assets.py. Automatic provider-crest import is still deferred.
 
-## System and diagnostics
+## Debug and screenshot capture
 
-Under **System → Diagnose**, **Bildschirmfoto herunterladen** downloads a
+Next, IP and Demo automatic-advance commands use the revision of the last-read
+saved configuration. Draft edits do not change that revision. If another
+configuration was activated, the command fails without being applied; reload
+the configuration before sending a new command. The page never silently retries
+that rejected action against a newer revision.
+
+Under **Debug → Bildschirmfoto**, **Bildschirmfoto herunterladen** downloads a
 real redraw as a PNG, independently of the schematic overview preview and
 the optional live log. The adjacent `?` explains the five-second maximum
 display pause, login, orientation and capture limits. The existing session
@@ -413,32 +524,16 @@ local `SCREEN E01` (timeout), `E02` (connection), `E03` (incomplete/invalid
 format), `E04` (browser PNG creation). A busy provider/upload asks the owner
 to retry, while a RAM shortage asks them to let other work finish.
 
-Export optionally includes secrets with an explicit notice; it carries the
-settings, the competitions and the owner's short names.
-Import sends them as up to three requests (settings, competitions, short
-names), each at most the API body limit; it checks size,
-JSON shape, types and the same validation rules before confirmation, the
-short names included (provider, team id 1…4,294,967,295, a non-empty name
-within the schema's byte bound without control characters, every team once,
-at most the schema's count), so an invalid backup sends no request at all. The
-size bound applies to the file (three request bodies) and to each request
-part, not to the combined data (an old
-matchday default of Own match is converted to Conference first, in the data
-that is sent; a backup of earlier firmware with fewer screen styles sets
-those, the later screens keep their values; the crest
-choice of an older backup is dropped, and the result message says so,
-because the crest is an image role now and images are not in the backup; the
-API-Football daily budget of an older backup becomes API-Football's daily cap,
-and the result message says so as well; the minimum request spacing of an
-older backup is ignored with a message; competitions of an older backup
-without ids get the ids 1, 2, 3 in list order; the fallback sources and
-fixture pairs of an older backup are dropped, the rest is imported, and the
-result message says that each competition has one source; the core-data
-interval of an older backup is ignored, and the result message says that
-team names now come with fixtures and table); successful
-import refreshes the settings and session state instead of rewriting an old
-draft. Restart and factory reset are separate confirmed actions. Factory reset
-requires the device name and explains how to reconnect to setup afterwards.
+Export optionally includes secrets after an explicit notice. One protected
+request returns the current-version desired settings, competitions, screens
+and complete adopted names collection. Images remain separately managed.
+Import accepts that current version, validates its complete shape and loads it
+into the shared draft after confirmation. It sends no configuration write.
+Only Save publishes one common Apply. Old development formats are rejected;
+there are no legacy backup transforms or partial section commits.
+
+Restart and factory reset are separate confirmed actions. Factory reset
+requires the device name and explains reconnection to setup afterwards.
 
 Firmware upload checks the file's descriptor, target/layout, settings format
 and actual OTA capacity before transmission; firmware validates the image
@@ -488,10 +583,10 @@ No OTA/reset/storage-format action has been executed on owner data.
 
 Overview currently reports screen/reason as text. Physical layout acceptance
 uses device screenshots; a future graphical preview must use the actual device
-draw list. On a display without adjustable backlight (C6 with GC9A01) the
-night mode turns the background almost black, shows images at 20 % opacity
-and dims all colours according to the night brightness; the day brightness is
-stored but only takes effect with an adjustable backlight. See UI.md and
+draw list. Brightness and night controls appear only on a target with a
+controllable backlight pin. The current C6 with GC9A01 has no such pin and
+offers neither control. On a capable target, night mode changes only the
+backlight; colours, background and image opacity stay unchanged. See UI.md and
 NETWORK.md and API.md for the display and server contracts.
 
 
@@ -504,28 +599,30 @@ collapsing an override preserves its stored values. A manual-only entry retains
 its visit time while the field is hidden. Image visits must be whole multiples
 of the separate image time; invalid values are explained instead of rounded.
 
-The browser uses one saved model and draft. General settings, competitions and
-screen policy are separate bounded requests. Each successful part is acknowledged
-before proceeding; a later failure leaves only unconfirmed edits pending. The
-policy token and comparison of fresh competition/policy content prevent silent
-overwrite by another client. New/imported competition bindings use the identities
-returned by the service. Backup includes the complete policy; import validates
-before writing and uses the same partial-acknowledgement/retry flow. Browser-only
-binding keys never enter an API request or backup.
+The browser uses one saved aggregate and one draft. Settings, competitions,
+screen rules and edited names apply in one revision-checked request. Each
+competition carries its own fieldwise display overrides. Browser-only draft
+keys are removed from requests and exports. Failed/stale writes preserve edits;
+an uncertain outcome is checked by Apply ID using GET only, with no mutation
+retry. An uncertain NVS result keeps writes disabled until restart.
+
+The competition page explicitly selects group members, shows the derived club
+heading, and offers edit/dissolve actions. Names and matching labels never create
+groups. The highest member priority places the group; members retain their list
+order. The club wizard visibly retains an existing membership during a club
+change and offers removal. “Only one own single match” defaults on; switching
+it off admits further eligible own singles in the same type/competition sequence.
 
 Image deletion/recovery may monotonically remove the explicitly affected image
 references. Other policy or competition changes cause a visible conflict instead
 of being silently merged. Confirmed file deletion and already saved reference
 cleanup are reconciled separately after partial failures.
 
-Targeted production-JavaScript checks: 27/27, existing screenshot checks: 22/22.
-Local synthetic-API browser checks covered desktop 1440×1000 and phone390×844,
-phase controls/inheritance/explicit No, shared saving, frame toggle, partial
-save failure/retry, image reference/deletion and export. Neither width had
-horizontal page overflow. This is browser evidence, not device/NVS acceptance;
-full wizard/import/editor flows and final control/Demo behavior remain open.
-The unchanged older UI suite reaches 25 passing cases before an obsolete
-five-style/fixed-table-time expectation; it was not altered to conceal this.
+Current production-function tests cover explicit grouping, group edits without
+source changes, numeric club boundaries, independent nullable overrides and
+common Apply outcomes. Earlier browser evidence below describes the previous
+wire format. No current desktop/phone browser or physical-display acceptance is
+claimed for this model cutover; those remain separate checks.
 
 ## Current control/Demo verification — 2026-10-17
 
@@ -543,15 +640,31 @@ and owner-flashed device checks remain the display evidence boundary.
 
 ## Owner feedback follow-up — 2026-10-17
 
-The current Overview exposes screenshot download without an opt-in diagnostics
-switch. The planned Debug tab keeps screenshot always available near the top,
-with Demo just below and no duplicated screenshot inside Demo. One default-off
-preference additionally shows screenshot on Overview; it does not gate Demo or
-the browser log stream. A Demo-only automatic-sequence advance with normal
-timings is requested before the full redesign.
-Their settings/API are not yet implemented. The current Overview screenshot
-button also lacks the progress text shown by the System button; both use the
-same guarded capture operation. The reported Table-only Demo and round-image
-mask offset still need state-specific device evidence, rather than an assumed
-cause. Targeted script reproductions confirm the save-feedback and short-name
-draft-loss defects; fixes and complete physical acceptance remain outstanding.
+Focused fixes are implemented before the full settings redesign: one Debug
+screenshot, a default-off additional Overview screenshot, Demo automatic boundary
+advance with manual return, truthful acknowledged-save verification, retained
+name drafts/closed-dialog fences, stored-JPEG editing and explicit X/Y controls.
+The Web thumbnail baseline gap is reproduced and corrected; the physical
+mask comparison and the owner's Table-only device path still require device
+state/screenshots. A fixed Demo step and a manually held Table can legitimately
+remain while the normal saved rules apply; no guessed selector cause is claimed.
+
+Current scoped host checks:50 native cases (sequence/general record/input),22 save
+feedback,22 screenshot,16 Debug controls,23 image-editor,6 name drafts and7 name
+close/race cases. The earlier12 current-codec scenarios remain separately
+recorded. Production-page browser checks cover desktop1440 and phone390 placement,
+save warning/recovery, Overview opt-in, stored JPEG loading, explicit positioning
+and exact image/frame bounds. Services/data are synthetic; they do not establish
+NVS, provider scheduling, device rendering or physical runtime reserves. Complete
+wizard/import, physical capture and upload/reload acceptance remain open.
+
+### Shared field help
+
+General settings, secrets and screen controls use one contextual `?` button
+implementation. Complete explanations remain available in the help dialog;
+short allowed ranges and text limits stay next to their controls. Long provider
+limit/password descriptions no longer repeat as always-visible paragraphs on
+the Settings page. Provider configuration uses the same expandable sections as
+other infrequent settings; all four providers remain visible by name and
+capability, with credentials and limits inside their own section. Open state
+survives normal page redraws. This changes no option, saved value or API contract.

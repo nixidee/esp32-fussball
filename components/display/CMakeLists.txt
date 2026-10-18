@@ -13,6 +13,7 @@ idf_component_register(
     "../../include"
   PRIV_INCLUDE_DIRS "../.."
   PRIV_REQUIRES
+    files
     esp_driver_gpio
     esp_driver_ledc
     esp_driver_spi

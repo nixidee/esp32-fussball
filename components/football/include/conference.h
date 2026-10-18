@@ -19,7 +19,8 @@ struct ConferenceRequest {
   unsigned page = 0;
 };
 struct ConferencePage {
-  std::array<uint8_t, kConferenceRowsMax> rows{};  // store indices
-  uint8_t row_count = 0, page = 0, pages = 0;
+  std::array<uint16_t, kConferenceRowsMax> rows{};  // store indices
+  uint8_t row_count = 0;
+  uint16_t page = 0, pages = 0;
 };
 }  // namespace football

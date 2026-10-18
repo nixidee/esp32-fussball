@@ -25,7 +25,7 @@ struct MatchKey {
 
 struct Input {
   settings::screen_policy::SelectionRules rules;
-  const settings::Competitions& competitions;
+  const settings::CompetitionRoutes& competitions;
   const MatchStore& store;
   Clock clock;
   DateContext dates;
@@ -33,7 +33,7 @@ struct Input {
   // selector never infers an empty schedule from absent display-store rows.
   bool break_proven = false;
   Input(settings::screen_policy::SelectionRules values,
-        const settings::Competitions& entries, const MatchStore& matches,
+        const settings::CompetitionRoutes& entries, const MatchStore& matches,
         Clock time, DateContext calendar = {}, bool proven = false)
       : rules(values),
         competitions(entries),
@@ -41,8 +41,8 @@ struct Input {
         clock(time),
         dates(calendar),
         break_proven(proven) {}
-  Input(const settings::screen_policy::Policy& policy,
-        const settings::Competitions& entries, const MatchStore& matches,
+  Input(const settings::screen_policy::Options& policy,
+        const settings::CompetitionRoutes& entries, const MatchStore& matches,
         Clock time, DateContext calendar = {}, bool proven = false)
       : Input(settings::screen_policy::selectionRules(policy, entries), entries,
               matches, time, calendar, proven) {}
@@ -88,8 +88,9 @@ struct Round {
 };
 
 const StoredMatch* find(const Input& input, const MatchKey& match);
-bool ownSpecial(const Input& input, const settings::Competition& competition);
-Window window(const Input& input, const settings::Competition& competition,
+bool ownSpecial(const Input& input,
+                const settings::CompetitionRoute& competition);
+Window window(const Input& input, const settings::CompetitionRoute& competition,
               const StoredMatch& match);
 // One highest phase: Own > OtherGames > Matchday > Idle/optional Break.
 // Confirmed running own games beat every own buffer, then competition order.
@@ -99,13 +100,14 @@ Selection select(const Input& input);
 // running game, else a unique window candidate. Static result/preview requires
 // a selected club; no unique active candidate never invents a foreign preview.
 Single single(const Input& input, const Selection& selected,
-              const settings::Competition& competition);
+              const settings::CompetitionRoute& competition);
 // Current local-date phase period, empty outside every eligible cluster.
-Round phasePeriod(const Input& input, const settings::Competition& competition);
+Round phasePeriod(const Input& input,
+                  const settings::CompetitionRoute& competition);
 // Selected Matchday content. Current: active cluster, then held, then next.
 // Next: active or next, never a held-only group. A verified round's content
 // includes all its known fixtures, even outside this chosen date cluster.
-Round round(const Input& input, const settings::Competition& competition,
+Round round(const Input& input, const settings::CompetitionRoute& competition,
             cfg::MatchdayMode mode);
 // Complete held/current/next navigation, using the same round identity and
 // date-cluster rules as the automatic selection. Split phase clusters of one
@@ -115,7 +117,8 @@ struct RoundReach {
   uint8_t count = 0;
   int8_t selected = -1;
 };
-RoundReach rounds(const Input& input, const settings::Competition& competition,
+RoundReach rounds(const Input& input,
+                  const settings::CompetitionRoute& competition,
                   cfg::MatchdayMode mode);
 bool roundContains(const Input& input, const Round& round,
                    const StoredMatch& match);

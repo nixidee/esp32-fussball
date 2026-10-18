@@ -87,8 +87,8 @@ constexpr Event kCupEvents[] = {
     {EventType::kYellow, Side::kAway, 117, "Kevin Sessa"},
     {EventType::kYellow, Side::kHome, 118, "Sebastian Vasiliadis"}};
 
-const settings::Competition* competition(const settings::Competitions& routes,
-                                         const Binding& binding) {
+const settings::CompetitionRoute* competition(
+    const settings::CompetitionRoutes& routes, const Binding& binding) {
   const auto* entry = routes.find(binding.competition);
   return entry && entry->active && entry->primary.provider == kProvider &&
                  binding.competition != 0 &&
@@ -97,7 +97,8 @@ const settings::Competition* competition(const settings::Competitions& routes,
              ? entry
              : nullptr;
 }
-StoredMatch* put(MatchStore& store, const settings::Competition& competition,
+StoredMatch* put(MatchStore& store,
+                 const settings::CompetitionRoute& competition,
                  const Fixture& fixture, Clock clock, int64_t kickoff,
                  Phase phase, uint8_t minute = kNoValue, Goals score = {},
                  uint8_t round = 6, bool flash = false, bool details = true) {
@@ -111,20 +112,19 @@ StoredMatch* put(MatchStore& store, const settings::Competition& competition,
   row.principal = score;
   row.round = round;
   row.home = store.team(competition.id, kProvider, fixture.home.id,
-                        fixture.home.short_name);
+                        fixture.home.name, fixture.home.short_name);
   row.away = store.team(competition.id, kProvider, fixture.away.id,
-                        fixture.away.short_name);
-  const auto club = decimalId(competition.primary.team.view());
+                        fixture.away.name, fixture.away.short_name);
+  const auto club = competition.club.team;
   if (club == fixture.home.id || club == fixture.away.id)
     row.flags |= kMatchOwn;
   if (running(phase) || phase == Phase::kSuspended)
     row.first_live_observed_utc = kKickoff;
   if (phase == Phase::kFinished) row.finished_at = row.kickoff + 95 * 60;
   if (flash) row.score_changed = std::max<uint32_t>(1, clock.mono_s);
-  auto* stored = store.upsert(row, clock, fixture.home.name, fixture.away.name);
+  auto* stored = store.upsert(row, clock);
   if (stored != nullptr && details)
-    stored = store.ensureDetail(competition.id, kProvider, fixture.id, clock,
-                                fixture.home.name, fixture.away.name);
+    stored = store.ensureDetail(competition.id, kProvider, fixture.id, clock);
   return stored;
 }
 void events(MatchStore& store, const StoredMatch& match, const Event* input,
@@ -138,24 +138,21 @@ void events(MatchStore& store, const StoredMatch& match, const Event* input,
     StoredEvent event;
     // Stable demo event identity, deliberately not a provider event-id claim.
     event.identity = match.id + i + 1;
-    event.revision = event.identity;
     event.type = input[i].type;
     event.actor = input[i].side;
     event.minute = input[i].minute;
     event.added = input[i].added;
     event.player.assign(input[i].player);
-    if (event.type == EventType::kGoal || event.type == EventType::kPenaltyGoal)
-      event.beneficiary = event.actor;
     if (input[i].shootout) event.flags |= kEventShootout;
     store.addEvent(event);
   }
   store.endEvents(true);
 }
-void table(MatchStore& store, const settings::Competition& competition) {
+void table(MatchStore& store, const settings::CompetitionRoute& competition) {
   store.beginTable(competition.id);
   for (unsigned i = 0; i < std::size(kConference); ++i) {
     StoredRow row;
-    const auto club = decimalId(competition.primary.team.view());
+    const auto club = competition.club.team;
     const auto& team = i == 0 && club == kUnion.home.id ? kUnion.home
                        : i == 0 && club == kAugsburg.away.id
                            ? kAugsburg.away
@@ -165,8 +162,7 @@ void table(MatchStore& store, const settings::Competition& competition) {
     row.played = 6;
     row.points = static_cast<int16_t>(15 - i * 2);
     row.difference = static_cast<int16_t>(6 - i * 2);
-    if (decimalId(competition.primary.team.view()) == team.id)
-      row.flags = kRowOwn;
+    if (competition.club.team == team.id) row.flags = kRowOwn;
     store.appendRow(row);
   }
   store.commitTable(true);
@@ -251,15 +247,22 @@ const char* stepTitle(Scenario scenario, uint8_t step) {
   }
   return "";
 }
-Bindings configure(settings::Competitions& routes, Scenario scenario,
+Bindings configure(settings::CompetitionRoutes& routes, Scenario scenario,
                    bool saved_competitions) {
   Bindings bindings;
   if (!valid(scenario)) return bindings;
+  struct Preferences {
+    bool own_special = true;
+    uint8_t group = 0;
+  };
+  std::array<Preferences, 2> preferences{};
   for (unsigned i = 0; i < bindings.size(); ++i) {
     if (saved_competitions && i < routes.entries.size()) {
       const auto& saved = routes.entries[i];
-      if (saved.id != 0 && saved.incarnation != 0)
+      if (saved.id != 0 && saved.incarnation != 0) {
         bindings[i] = {saved.incarnation, saved.id, true};
+        preferences[i] = {saved.club.own_special, saved.club.group};
+      }
     }
   }
   for (unsigned i = 0; i < bindings.size(); ++i) {
@@ -275,19 +278,22 @@ Bindings configure(settings::Competitions& routes, Scenario scenario,
   for (unsigned i = 0; i < 2; ++i) {
     // Construct directly in the caller's existing storage, not a 2.5 KiB copy.
     auto& entry = routes.entries.items[i];
-    new (&entry) settings::Competition{};
+    new (&entry) settings::CompetitionRoute{};
     entry.id = bindings[i].competition;
     entry.incarnation = bindings[i].incarnation;
     entry.active = true;
+    if (bindings[i].saved) {
+      entry.club.own_special = preferences[i].own_special;
+      entry.club.group = preferences[i].group;
+    }
     entry.primary.provider = kProvider;
     entry.primary.competition.assign(
         i && scenario == Scenario::kCup ? "ger.dfb_pokal" : "ger.1");
     entry.primary.season.assign("2026");
-    entry.primary.team.assign(i ? (scenario == Scenario::kOwn ? "132" : "")
-                                : "598");
+    entry.club.team = i ? (scenario == Scenario::kOwn ? 132 : 0) : 598;
     entry.competition_name.assign(i ? "Demo second competition"
                                     : "Demo competition");
-    entry.team_name.assign(
+    entry.club.name.assign(
         i ? (scenario == Scenario::kOwn ? "Bayern Munich" : "")
           : "1. FC Union Berlin");
   }
@@ -295,7 +301,7 @@ Bindings configure(settings::Competitions& routes, Scenario scenario,
   return bindings;
 }
 
-Clock apply(MatchStore& store, const settings::Competitions& routes,
+Clock apply(MatchStore& store, const settings::CompetitionRoutes& routes,
             const Bindings& bindings, Scenario scenario, uint8_t step,
             uint32_t realtime_mono_s) {
   const auto* first = competition(routes, bindings[0]);

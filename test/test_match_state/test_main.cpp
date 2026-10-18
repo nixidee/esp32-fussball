@@ -7,18 +7,20 @@
 #include <cstring>
 #include <string>
 
+#include "../provider_status_support.h"
 #include "cause_text.h"
 #include "football_model.h"
 
 namespace {
 
 using football::Phase;
-using football::statusPhase;
 
 void expectPhase(Phase expected, const char* status) {
-  TEST_ASSERT_EQUAL_UINT_MESSAGE(static_cast<unsigned>(expected),
-                                 static_cast<unsigned>(statusPhase(status)),
-                                 status);
+  TEST_ASSERT_EQUAL_UINT_MESSAGE(
+      static_cast<unsigned>(expected),
+      static_cast<unsigned>(football::test_support::mappedStatus(
+          cfg::Provider::kFootballData, status)),
+      status);
 }
 
 // Every value of the football-data.org v4 match status lookup table.
@@ -30,7 +32,7 @@ void test_football_data_statuses() {
   expectPhase(Phase::kExtraTime, "EXTRA_TIME");
   expectPhase(Phase::kPenalties, "PENALTY_SHOOTOUT");
   expectPhase(Phase::kFinished, "FINISHED");
-  expectPhase(Phase::kPostponed, "SUSPENDED");
+  expectPhase(Phase::kSuspended, "SUSPENDED");
   expectPhase(Phase::kPostponed, "POSTPONED");
   expectPhase(Phase::kCancelled, "CANCELLED");
   expectPhase(Phase::kAbandoned, "AWARDED");

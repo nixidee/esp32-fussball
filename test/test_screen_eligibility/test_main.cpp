@@ -17,52 +17,54 @@ void add(uint8_t id, uint32_t incarnation) {
   c.id = id;
   c.incarnation = incarnation;
   c.primary.competition.assign("league");
-  c.primary.team.assign("40");
+  c.club.team = 40;
   competitions.entries.push(c);
 }
 
+policy::Eligibility eligibility() {
+  settings::CompetitionRoutes routes;
+  for (const auto& entry : competitions.entries)
+    routes.entries.push(static_cast<const settings::CompetitionRoute&>(entry));
+  return policy::eligibility(rules, routes, &competitions);
+}
 void manual_only_content_still_needs_its_data() {
   add(1, 37);
   const auto phase = policy::Phase::kOtherGames;
   auto& table =
       rules.shared[policy::index(phase)][screen::index(screen::Type::kTable)];
   table = {60, true, false};
-  const auto derived = policy::eligibility(rules, competitions);
+  const auto derived = eligibility();
   TEST_ASSERT_TRUE(derived.allows(phase, screen::Type::kTable, 0));
   table.enabled = false;
-  TEST_ASSERT_FALSE(policy::eligibility(rules, competitions)
-                        .allows(phase, screen::Type::kTable, 0));
+  TEST_ASSERT_FALSE(eligibility().allows(phase, screen::Type::kTable, 0));
   competitions.entries[0].active = false;
-  TEST_ASSERT_EQUAL_UINT8(0, policy::eligibility(rules, competitions)
-                                 .enabled[policy::index(phase)][0]);
+  TEST_ASSERT_EQUAL_UINT8(0, eligibility().enabled[policy::index(phase)][0]);
 }
 
 void shared_edits_and_dormant_overrides_have_one_effective_value() {
   add(1, 37);
-  rules.competitions[3] = {37, 1, true};
   const auto phase = policy::Phase::kIdle;
   const auto type = screen::Type::kTable;
-  rules.overrides[policy::index(phase)][screen::sportIndex(type)][3] = {
+  competitions.entries[0]
+      .display.overrides[policy::index(phase)][screen::sportIndex(type)] = {
       60, 0, policy::kEnabled};
-  TEST_ASSERT_TRUE(
-      policy::eligibility(rules, competitions).allows(phase, type, 0));
-  rules.expanded[policy::index(phase)] |= 1u << screen::sportIndex(type);
-  TEST_ASSERT_FALSE(
-      policy::eligibility(rules, competitions).allows(phase, type, 0));
-  rules.expanded[policy::index(phase)] = 0;
+  TEST_ASSERT_TRUE(eligibility().allows(phase, type, 0));
+  rules.per_competition[policy::index(phase)] |= 1u << screen::sportIndex(type);
+  TEST_ASSERT_FALSE(eligibility().allows(phase, type, 0));
+  rules.per_competition[policy::index(phase)] = 0;
   rules.shared[policy::index(phase)][screen::index(type)].enabled = false;
-  TEST_ASSERT_FALSE(
-      policy::eligibility(rules, competitions).allows(phase, type, 0));
+  TEST_ASSERT_FALSE(eligibility().allows(phase, type, 0));
   TEST_ASSERT_EQUAL_UINT8(
       policy::kEnabled,
-      rules.overrides[policy::index(phase)][screen::sportIndex(type)][3]
+      competitions.entries[0]
+          .display.overrides[policy::index(phase)][screen::sportIndex(type)]
           .fields);
 }
 
 void reorder_moves_special_treatment_with_identity_and_keeps_buffers() {
   add(1, 37);
   add(2, 81);
-  rules.competitions[5] = {37, 1, false};
+  competitions.entries[0].club.own_special = false;
   rules.own_before_min = 10;
   rules.own_after_min = 20;
   rules.other_before_min = 30;
@@ -80,13 +82,17 @@ void reorder_moves_special_treatment_with_identity_and_keeps_buffers() {
 
 void reused_id_cannot_inherit_an_old_data_gate() {
   add(1, 38);
-  rules.competitions[0] = {37, 1, false};
   const auto phase = policy::Phase::kIdle;
   const auto type = screen::Type::kTable;
-  rules.expanded[policy::index(phase)] = 1u << screen::sportIndex(type);
-  rules.overrides[policy::index(phase)][screen::sportIndex(type)][0] = {
+  rules.per_competition[policy::index(phase)] = 1u << screen::sportIndex(type);
+  settings::CompetitionRoutes old;
+  old.entries.push(
+      static_cast<const settings::CompetitionRoute&>(competitions.entries[0]));
+  old.entries[0].incarnation = 37;
+  competitions.entries[0]
+      .display.overrides[policy::index(phase)][screen::sportIndex(type)] = {
       60, 0, policy::kEnabled};
-  const auto derived = policy::eligibility(rules, competitions);
+  const auto derived = policy::eligibility(rules, old, &competitions);
   TEST_ASSERT_TRUE(derived.allows(phase, type, 0));
   TEST_ASSERT_EQUAL_UINT8(1, derived.selection.own_special);
   TEST_ASSERT_LESS_OR_EQUAL_UINT32(56, sizeof(derived));

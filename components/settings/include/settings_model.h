@@ -1,7 +1,7 @@
 // Runtime settings model: fixed-capacity values, validation against the
 // limits in app_config.h and the initial values (secrets.h presets over
 // defaults). Pure C++, independent of ESP-IDF; storage lives in
-// components/core.
+// this component's settings_store adapter.
 
 #pragma once
 
@@ -14,6 +14,8 @@
 
 #include "app_config.h"
 #include "hw_profile.h"
+#include "screen_policy.h"
+#include "value_utils.h"
 
 namespace settings {
 
@@ -32,10 +34,7 @@ struct Bytes {
   // Fails and keeps the old value if the value does not fit; never truncates.
   bool assign(std::string_view value) noexcept {
     if (value.size() > Capacity) return false;
-    data.fill(0);
-    // memcpy: string_view::copy links the libstdc++ exception support (about
-    // 2 KB flash), std::copy_n becomes memmove (about 200 B IRAM on the C6).
-    if (!value.empty()) std::memcpy(data.data(), value.data(), value.size());
+    values::copyPadded(data.data(), data.size(), value);
     length = static_cast<uint8_t>(value.size());
     return true;
   }
@@ -96,16 +95,21 @@ struct List {
   }
 };
 
-// Where one competition's data comes from: a provider's competition and team.
+// Source identity contains no selected-club or display preference.
 struct Source {
   cfg::Provider provider = cfg::kProviderDefault;
   Bytes<cfg::kCompetitionIdMaxBytes> competition;
   Bytes<cfg::kSeasonMaxBytes> season;
-  Bytes<cfg::kTeamIdMaxBytes> team;
-  bool complete() const noexcept {
-    return !competition.empty() && !team.empty();
-  }
+  bool complete() const noexcept { return !competition.empty(); }
   bool operator==(const Source&) const noexcept = default;
+};
+
+struct ClubPreference {
+  uint32_t team = 0;  // zero means no preferred club
+  Bytes<cfg::kDisplayNameMaxBytes> name;
+  bool own_special = cfg::kOwnSpecialDefault;
+  uint8_t group = 0;  // explicit membership; zero is ungrouped
+  bool operator==(const ClubPreference&) const noexcept = default;
 };
 
 // A league or cup, optionally with an own club (OQ-195: an empty team id
@@ -114,16 +118,30 @@ struct Source {
 // names are stored when a competition and club are picked from a provider
 // list (OQ-75); they may be empty. 'id' is the stable id the competition
 // store assigns (OQ-209; 0 = not stored yet).
-struct Competition {
+struct CompetitionRoute {
   uint8_t id = 0;
   bool active = cfg::kEntryActiveDefault;
   Source primary;
   Bytes<cfg::kDisplayNameMaxBytes> competition_name;
-  Bytes<cfg::kDisplayNameMaxBytes> team_name;
+  ClubPreference club;
   // Service-owned identity revision. Never reused when a small id wraps.
   uint32_t incarnation = 0;
-  bool hasClub() const noexcept { return !primary.team.empty(); }
+  bool hasClub() const noexcept { return club.team != 0; }
+  bool operator==(const CompetitionRoute&) const noexcept = default;
+};
+
+struct Competition : CompetitionRoute {
+  screen_policy::CompetitionPreferences display;
   bool operator==(const Competition&) const noexcept = default;
+};
+struct CompetitionRoutes {
+  List<CompetitionRoute, cfg::kCompetitionMax> entries;
+  const CompetitionRoute* find(uint8_t id) const noexcept {
+    for (const auto& entry : entries)
+      if (entry.id == id) return &entry;
+    return nullptr;
+  }
+  void clear() noexcept { entries.clear(); }
 };
 
 struct ScreenStyle {
@@ -140,7 +158,7 @@ struct ScreenStyle {
 
 const char* fieldName(Field field) noexcept;
 
-// The competition store (OQ-200): its own NVS record, not part of Model.
+// Competition configuration within AppConfig, separate from general Model.
 // 'next_id' is the id the store tries first for a new entry.
 struct Competitions {
   List<Competition, cfg::kCompetitionMax> entries;
@@ -255,10 +273,12 @@ bool isValidHostname(std::string_view value) noexcept;
 bool isValidStatusInterval(uint16_t seconds) noexcept;
 bool isValidTimeZone(std::string_view label) noexcept;
 bool isValidNtpServer(std::string_view value) noexcept;
-// A provider's competition, team or fixture identifier (may be empty): any
+// A provider's textual competition identifier (may be empty): any
 // text without control characters and without a space at either end. Some
 // OpenLigaDB shortcuts contain spaces or umlauts; requests percent-encode it.
 bool isValidIdentifier(std::string_view value) noexcept;
+// No club, or the positive uint32 identity accepted by every current mapper.
+bool isValidTeamId(std::string_view value) noexcept;
 // A season: empty, or digits (exactly four unless the provider is OpenLigaDB).
 bool isValidSeason(cfg::Provider provider, std::string_view season) noexcept;
 
@@ -287,7 +307,7 @@ enum class Reason : uint8_t {
 };
 const char* reasonName(Reason reason) noexcept;
 
-// A JSON path such as "competitions[1].primary.team" (names as in the
+// A JSON path such as "competitions[1].club.team" (names as in the
 // settings or competitions JSON). Text beyond the buffer is cut, never written
 // past it.
 class FieldPath {
@@ -299,8 +319,13 @@ class FieldPath {
   }
   FieldPath& index(unsigned n) noexcept {
     append('[');
-    if (n >= 10) append(static_cast<char>('0' + n / 10 % 10));
-    append(static_cast<char>('0' + n % 10));
+    char digits[10];
+    unsigned count = 0;
+    do {
+      digits[count++] = static_cast<char>('0' + n % 10);
+      n /= 10;
+    } while (n != 0);
+    while (count) append(digits[--count]);
     append(']');
     return *this;
   }
@@ -383,15 +408,6 @@ void assignIds(Competitions& competitions) noexcept;
 // Candidate is scratch and may change on failure; current remains unchanged.
 bool assignIncarnations(Competitions& candidate, const Competitions& current,
                         Violation* violation = nullptr) noexcept;
-
-// Reserves every incarnation <= highwater from an independently retained
-// policy before orphan bindings are pruned. Stored identities stay unchanged;
-// provisional fallback identities are reissued above the floor so they cannot
-// resurrect an old binding after their first save/reboot. Refuses overflow
-// before changing any provisional entry; UINT32_MAX leaves allocation
-// exhausted.
-bool reserveIncarnationFloor(Competitions& competitions, uint32_t highwater,
-                             bool provisional) noexcept;
 
 // Bit n identifies library image n (bit 0, the stock image, is ignored).
 using ImageMask = uint16_t;

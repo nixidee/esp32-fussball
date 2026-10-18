@@ -9,22 +9,23 @@ using namespace football;
 namespace sel = football::selection;
 namespace policy = settings::screen_policy;
 MatchStore store;
-settings::Competitions competitions;
+settings::CompetitionRoutes competitions;
 policy::Policy rules;
 constexpr auto kProvider = cfg::Provider::kOpenLigaDb;
 
 int64_t at(const char* value) { return parseUtc(value); }
 
-settings::Competition& competition(uint8_t id, bool club = false,
-                                   bool special = true) {
-  settings::Competition c;
+settings::CompetitionRoute& competition(uint8_t id, bool club = false,
+                                        bool special = true) {
+  settings::CompetitionRoute c;
   c.id = id;
   c.incarnation = id;
   c.primary.provider = kProvider;
   c.primary.competition.assign("league");
-  if (club) c.primary.team.assign("40");
+  if (club) c.club.team = 40;
   TEST_ASSERT_TRUE(competitions.entries.push(c));
-  rules.competitions[id - 1] = {id, id, special};
+  competitions.entries[competitions.entries.size() - 1].club.own_special =
+      special;
   return competitions.entries[competitions.entries.size() - 1];
 }
 
@@ -268,6 +269,28 @@ void test_break_requires_explicit_enable_and_proof_and_yields_to_matchday() {
   TEST_ASSERT_EQUAL(policy::Phase::kMatchday,
                     sel::select(input(now, true)).phase);
 }
+void test_explicit_group_priority_and_optional_multiple_own_singles() {
+  competition(1, true);
+  competition(2, true);
+  competition(3, true);
+  competitions.entries[0].club.group = competitions.entries[2].club.group = 1;
+  const auto now = at("2026-10-17T14:00:00Z");
+  match(2, 20, now - 300, Phase::kLive, true, 0, now - 300);
+  match(3, 30, now - 300, Phase::kLive, true, 0, now - 300);
+  auto selected = sel::select(input(now));
+  TEST_ASSERT_EQUAL_UINT32(30, selected.focus.id);
+  TEST_ASSERT_FALSE(
+      sel::single(input(now), selected, competitions.entries[1]).match.valid());
+  rules.only_one_own_single = false;
+  TEST_ASSERT_EQUAL_UINT32(
+      20, sel::single(input(now), selected, competitions.entries[1]).match.id);
+  TEST_ASSERT_EQUAL_UINT32(
+      30, sel::single(input(now), selected, competitions.entries[2]).match.id);
+  competitions.entries[2].club.group = 0;
+  selected = sel::select(input(now));
+  TEST_ASSERT_EQUAL_UINT32(20, selected.focus.id);
+}
+
 }  // namespace
 
 void setUp() {
@@ -298,5 +321,6 @@ int main() {
       test_static_result_uses_finish_day_then_preview_even_after_dst_change);
   RUN_TEST(
       test_break_requires_explicit_enable_and_proof_and_yields_to_matchday);
+  RUN_TEST(test_explicit_group_priority_and_optional_multiple_own_singles);
   return UNITY_END();
 }

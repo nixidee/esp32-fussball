@@ -71,8 +71,8 @@ antenna, mode, station and AP configuration and start. If the WiFi driver
 refuses one of these steps, the device logs `radio <step>: <error>` and
 retries the whole reconfiguration every 10 seconds (`kWifiRadioRetryMs`);
 it does not reboot, because the stored settings would meet the same error at
-boot. Until a retry succeeds the local network counts as unhealthy, so an OTA
-trial in that state is not confirmed.
+boot. Until a retry succeeds the network reports its incomplete initialization;
+this does not veto the independent local OTA health trial.
 The stop result is checked before reconfiguration. A failed stop retains
 the AP/client state and applied settings and retries without configuring a
 still-running radio. A successful stop clears the AP/client state before
@@ -153,6 +153,18 @@ The managed mDNS component is pinned to `espressif/mdns@1.14.0`, checked against
 the component registry on 2026-10-10. The default host is `fussball`, giving
 `http://fussball.local`. The saved hostname overrides the initial preset.
 The mDNS worker has a 4 KB SDK-configured stack.
+The HTTP advertisement is added only after the actual listener, handlers and
+debug worker have started. Failed advertisement setup or removal uses the
+existing network retry path; a working radio is retained. HTTP startup itself
+is retried every ten seconds from the existing application loop. A partial
+server is stopped before another is created; successful startup does not
+create another server or debug worker on later polls.
+
+The portal DNS worker yields for one scheduler tick before each packet,
+including malformed queries. Continuous traffic therefore cannot keep this
+higher-priority worker immediately ready without giving the application loop
+an opportunity to run. Packet storage and the existing worker/task remain
+unchanged.
 
 ## Time
 
@@ -217,8 +229,13 @@ explains the HTTP server's generic `uri handler execution failed` warning.
 The HTTP server has a 10 KB task stack, four client slots and bounded request
 headers. Each session's receive override starts a 30-second request deadline
 with the first header bytes; body reads and response writes share that deadline.
-Idle socket wait slices are one second. JSON bodies are at most 8 KB and use a
-24 KB bounded allocator; firmware/image bodies are streamed. Slow headers,
+The send override completes every requested header/body fragment, checking the
+remaining absolute time before and after each partial socket write. Zero
+progress or an error ends the response; partial progress never renews its
+deadline. Buffered keep-alive requests receive a fresh deadline at handler entry.
+Idle socket wait slices are one second. Small JSON commands are at most8 KiB. The complete configuration/names Apply
+has its separate formal wire bound and streams through the common strict reader;
+it never allocates the body or a JSON document. Firmware/image bodies are streamed. Slow headers,
 bodies and readers must be exercised on hardware. The configured ten lwIP
 sockets must also be checked with all permitted services active.
 
@@ -227,13 +244,26 @@ across producer waits and every underlying partial socket send. A screenshot
 send override is scoped to its connection, which is closed after completion
 or failure. The producer never sends on the HTTP task's behalf or waits for
 queued work there. Cleanup detaches its copy buffer before scheduling the
-connection close. This does not establish slow-reader or watchdog timing on
-the device. The existing ordinary-response timeout behavior is unchanged.
+connection close. Both ordinary and screenshot paths use the same checked
+socket-send helper with their respective absolute deadline. This does not
+establish slow-reader or watchdog timing on the device.
 
-The 24 KB JSON limit is per allocator. The HTTP document and its temporary
-8 KB receive buffer can overlap the provider's separate 24 KB document/TLS
-context; admission does not block basic configuration requests. This combined
-peak is part of the pending heap/fragmentation acceptance.
+Debug frames keep one pinned 256-B payload until their queued HTTP-task work
+finishes. That task checks the original authenticated session, connection
+detachment and actual WebSocket state before sending. A reconnect invalidates
+older work even if it reuses both the socket number and session token. There
+is no per-frame SDK async-transfer allocation. One four-byte atomic length is
+resident; idle/pending/detached replaces the existing one-byte busy flag. Idle
+frame headers/payloads each use the established one-second socket window and
+complete all partial writes. Failed queue admission releases the pinned buffer
+and retries sampling later without clearing a newer connection.
+
+HTTP input/output use128/512-B fixed chunks. Configuration parsing retains one
+2704-B candidate and, only for changed names, a temporary bounded import arena;
+provider parsing uses a typed response workspace and streamed season index.
+These allocations, TLS, LVGL/JPEG and SDK buffers need combined peak and
+fragmentation measurement. Basic settings-only Apply does not require the
+filesystem or a names rewrite.
 
 ## Web server and REST API
 
@@ -251,20 +281,21 @@ requests. No certificate or local HTTPS service is installed.
 ## OTA and rollback
 
 The firmware contains a 92-byte versioned identity descriptor after the ESP
-application descriptor. Upload checks cover project name, chip, target profile,
-`4mb_ota_littlefs_v1` layout, a settings format equal to or newer than the running one and slot size before writing;
+application descriptor. Descriptor version 2 identifies the current aggregate
+configuration format; version 1 described a retired general-settings record and
+is rejected. Upload checks cover project name, chip, target profile,
+`4mb_ota_littlefs_v1` layout, an aggregate configuration format equal to or newer
+than the running one and slot size before writing;
 ESP-IDF validates the final image. A malformed/truncated upload does not select
 the new slot. Compatible development versions are allowed in either direction;
 there is no enforced monotonic version counter.
 
-A pending trial has ten seconds to pass local health: initialized event bus,
-settings, filesystem, display/UI, HTTP and local network services (including
-a configured radio) plus the
-application-loop watchdog. Router connectivity, IP, SNTP and provider success
-are not prerequisites. Any local network initialization error remains a
-startup veto for that particular trial even if retries restore all network
-services later. Recovery during a normal boot remains available. Failed
-local health explicitly invalidates/reboots the
+A pending trial has ten seconds to pass local display/UI health while the
+application-loop watchdog remains active. Network or HTTP initialization,
+filesystem availability, router connectivity, IP, SNTP and provider success
+are not prerequisites. Their retries continue independently in a normal boot
+and during the trial. Failed local display/UI health explicitly
+invalidates/reboots the
 image; if no previous bootable image exists, the fallback is a reboot path,
 not a promised recovery image.
 

@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <cstring>
 
+#include "civil_time.h"
+
 namespace football {
 const char* providerName(cfg::Provider p) {
   switch (p) {
@@ -141,13 +143,11 @@ int64_t parseUtc(const char* text) {
     s = digits(at + 1, 2);
     at += 3;
   }
-  if (y < 2020 || y > 2100 || m < 1 || m > 12 || d < 1 || h < 0 || h > 23 ||
-      n < 0 || n > 59 || s < 0 || s > 59)
+  if (y < 0 ||
+      !timekeeping::validCivilDate(y, static_cast<unsigned>(m),
+                                   static_cast<unsigned>(d)) ||
+      h < 0 || h > 23 || n < 0 || n > 59 || s < 0 || s > 59)
     return 0;
-  const unsigned month_days[] = {31, 28, 31, 30, 31, 30,
-                                 31, 31, 30, 31, 30, 31};
-  const bool leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-  if (static_cast<unsigned>(d) > month_days[m - 1] + (m == 2 && leap)) return 0;
   if (text[at] == '.') {
     const auto first = ++at;
     while (at < length && text[at] >= '0' && text[at] <= '9') ++at;
@@ -166,40 +166,12 @@ int64_t parseUtc(const char* text) {
     at += 6;
   }
   if (at != length) return 0;
-  // Gregorian days-to-epoch, independent of process TZ and libc timegm.
-  y -= m <= 2;
-  const int era = y / 400;
-  const unsigned yo = y - era * 400;
-  const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
-  const unsigned doe = yo * 365 + yo / 4 - yo / 100 + doy;
-  int64_t utc = (era * 146097LL + doe - 719468) * 86400 + h * 3600 + n * 60 + s;
+  const int64_t utc = timekeeping::daysFromCivil(y, static_cast<unsigned>(m),
+                                                 static_cast<unsigned>(d)) *
+                          86400 +
+                      h * 3600 + n * 60 + s;
   return utc - offset;
 }
-Phase statusPhase(const char* s) {
-  if (!strcmp(s, "NS") || !strcmp(s, "TBD") || !strcmp(s, "TIMED") ||
-      !strcmp(s, "SCHEDULED"))
-    return Phase::kScheduled;
-  if (!strcmp(s, "1H") || !strcmp(s, "2H") || !strcmp(s, "IN_PLAY") ||
-      !strcmp(s, "LIVE"))
-    return Phase::kLive;
-  if (!strcmp(s, "HT") || !strcmp(s, "PAUSED")) return Phase::kHalfTime;
-  if (!strcmp(s, "ET") || !strcmp(s, "EXTRA_TIME")) return Phase::kExtraTime;
-  if (!strcmp(s, "P") || !strcmp(s, "PENALTY_SHOOTOUT"))
-    return Phase::kPenalties;
-  if (!strcmp(s, "FT") || !strcmp(s, "AET") || !strcmp(s, "PEN") ||
-      !strcmp(s, "FINISHED"))
-    return Phase::kFinished;
-  if (!strcmp(s, "SUSP") || !strcmp(s, "SUSPENDED")) return Phase::kSuspended;
-  if (!strcmp(s, "PST") || !strcmp(s, "POSTPONED")) return Phase::kPostponed;
-  if (!strcmp(s, "CANC") || !strcmp(s, "CANCELLED")) return Phase::kCancelled;
-  if (!strcmp(s, "ABD") || !strcmp(s, "AWD") || !strcmp(s, "ABANDONED") ||
-      !strcmp(s, "AWARDED"))
-    return Phase::kAbandoned;
-  return Phase::kUnknown;
-}
-uint32_t fingerprint(std::string_view text) {
-  uint32_t h = 2166136261;
-  for (unsigned char c : text) h = (h ^ c) * 16777619;
-  return h;
-}
+
+uint32_t fingerprint(std::string_view text) { return values::fnv1a32(text); }
 }  // namespace football

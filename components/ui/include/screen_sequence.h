@@ -16,7 +16,7 @@ struct Entry {
   uint32_t incarnation = 0;
   bool valid() const {
     return screen::valid(type) &&
-           (screen::sporting(type) ? competition != 0 && incarnation != 0
+           (screen::sporting(type) ? competition != 0
                                    : competition == 0 && incarnation == 0);
   }
   bool operator==(const Entry&) const = default;
@@ -50,8 +50,9 @@ using Probe = Content (*)(const Entry&, PageMode, uint16_t visible_page,
                           void* context);
 
 struct Input {
-  const policy::Policy& rules;
-  const settings::Competitions& competitions;
+  const policy::Options& rules;
+  const policy::Program& program;
+  const settings::CompetitionRoutes& competitions;
   const football::selection::Selection& selected;
   Probe probe = nullptr;
   void* context = nullptr;
@@ -95,7 +96,10 @@ void applyAction(State& state, const Input& input, Action action, int64_t now);
 // Confirm only a matching successfully displayed output. Stale confirmations
 // do nothing. Unseen pages/images earn no time, and a late tick never skips
 // through unseen outputs. Repeated confirmation does not reset a visible clock.
-void presented(State& state, uint32_t revision, int64_t now);
+// A settled image-error card earns its finite visit, but does not consume the
+// ordinary slideshow continuation cursor.
+void presented(State& state, uint32_t revision, int64_t now,
+               bool image_content = true);
 View view(const State& state, const Input& input, int64_t now);
 
 // Array-free NORMAL profile sequence access; frame uses View's image pages.

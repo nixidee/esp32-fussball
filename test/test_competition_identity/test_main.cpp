@@ -6,16 +6,15 @@
 #include <array>
 #include <limits>
 
+#include "app_config_record.h"
 #include "screen_policy.h"
-#include "screen_record.h"
 #include "settings_model.h"
-#include "settings_record.h"
 
 namespace {
 settings::Competitions current;
 settings::Competitions candidate;
 settings::Competitions restored;
-std::array<uint8_t, settings::kMaxCompetitionRecordBytes> bytes;
+std::array<uint8_t, settings::app_record::kMaxBytes> bytes;
 
 settings::Competition entry(uint8_t id = 0) {
   settings::Competition value;
@@ -53,30 +52,30 @@ void edits_and_reordering_retain_service_owned_identity() {
 void deleting_and_reusing_an_id_cannot_transfer_screen_overrides() {
   seedTwo();
   settings::screen_policy::Policy policy;
-  const auto old = current.entries[0];
-  policy.competitions[0] = {old.incarnation, old.id, true};
   const auto phase =
       settings::screen_policy::index(settings::screen_policy::Phase::kIdle);
   const auto type = screen::sportIndex(screen::Type::kTable);
-  policy.expanded[phase] = 1u << type;
-  policy.overrides[phase][type][0] = {120, 0, settings::screen_policy::kVisit};
+  policy.per_competition[phase] = 1u << type;
+  current.entries[0].display.overrides[phase][type] = {
+      120, 0, settings::screen_policy::kVisit};
+  const auto old = current.entries[0];
   candidate.clear();
   candidate.entries.push(entry());
-  current.next_id = old.id;  // force the allocator's wrap/reuse case
+  current.next_id = old.id;
   TEST_ASSERT_TRUE(settings::assignIncarnations(candidate, current));
-  const auto replacement = candidate.entries[0];
+  const auto& replacement = candidate.entries[0];
   TEST_ASSERT_EQUAL_UINT8(old.id, replacement.id);
   TEST_ASSERT_NOT_EQUAL(old.incarnation, replacement.incarnation);
   TEST_ASSERT_EQUAL_UINT16(120,
                            settings::screen_policy::resolve(
                                policy, settings::screen_policy::Phase::kIdle,
-                               screen::Type::kTable, old.id, old.incarnation)
+                               screen::Type::kTable, &old)
                                .visit_s);
   TEST_ASSERT_EQUAL_UINT16(
       cfg::kScreenVisitDefaultS[screen::index(screen::Type::kTable)],
-      settings::screen_policy::resolve(
-          policy, settings::screen_policy::Phase::kIdle, screen::Type::kTable,
-          replacement.id, replacement.incarnation)
+      settings::screen_policy::resolve(policy,
+                                       settings::screen_policy::Phase::kIdle,
+                                       screen::Type::kTable, &replacement)
           .visit_s);
   TEST_ASSERT_FALSE(settings::sameProviderData(current, candidate));
 }
@@ -99,29 +98,25 @@ void exhaustion_refuses_new_identity_without_wrapping_or_changing_current() {
   TEST_ASSERT_TRUE(settings::validate(candidate));
 }
 
-void record_restores_identity_counter_and_rejects_old_or_corrupt_identity() {
+void aggregate_restores_identity_counter_and_rejects_corrupt_identity() {
   seedTwo();
-  const auto size = settings::encodeCompetitions(current, bytes);
+  settings::AppConfig config;
+  config.model = settings::initialValues({});
+  config.competitions = current;
+  const auto size = settings::app_record::encode(config, bytes);
+  settings::AppConfig scratch;
   TEST_ASSERT_EQUAL(
       settings::DecodeResult::kOk,
-      settings::decodeCompetitions({bytes.data(), size}, restored));
-  TEST_ASSERT_TRUE(current == restored);
-  // A correctly sealed old format is discarded; successful decoding never
-  // turns a zero incarnation into an allocation for a different identity.
-  settings::seal({bytes.data(), size}, 2);
-  TEST_ASSERT_EQUAL(
-      settings::DecodeResult::kOutdatedVersion,
-      settings::decodeCompetitions({bytes.data(), size}, restored));
-  TEST_ASSERT_TRUE(current == restored);
-  const auto size2 = settings::encodeCompetitions(current, bytes);
-  // Header + next_id + next_incarnation + count + first id => incarnation.
-  constexpr auto at = settings::kHeaderBytes + 1 + 4 + 1 + 1;
-  std::fill_n(bytes.begin() + at, 4, 0);
-  settings::seal({bytes.data(), size2}, cfg::kCompetitionsFormatVersion);
+      settings::app_record::decode(std::span(bytes).first(size), scratch));
+  TEST_ASSERT_TRUE(current == scratch.competitions);
+  constexpr auto incarnation_at = settings::app_record::kHeaderBytes +
+                                  settings::app_record::kMetadataBytes +
+                                  settings::kModelPayloadBytes + 6 + 1;
+  std::fill_n(bytes.begin() + incarnation_at, 4, 0);
+  settings::app_record::seal(std::span(bytes).first(size));
   TEST_ASSERT_EQUAL(
       settings::DecodeResult::kInvalidValue,
-      settings::decodeCompetitions({bytes.data(), size2}, restored));
-  TEST_ASSERT_TRUE(current == restored);
+      settings::app_record::decode(std::span(bytes).first(size), scratch));
 }
 
 void changed_incarnation_invalidates_provider_data_even_with_same_small_id() {
@@ -156,81 +151,27 @@ void initial_presets_allocate_in_ram_without_external_identity() {
   TEST_ASSERT_TRUE(settings::validate(current));
 }
 
-void retained_policy_cannot_resurrect_after_fallback_save_and_second_boot() {
-  namespace policy = settings::screen_policy;
-  policy::Policy old_policy;
-  old_policy.competitions[0] = {1, 1, true};
-  const auto phase = policy::index(policy::Phase::kIdle);
-  const auto type = screen::sportIndex(screen::Type::kTable);
-  old_policy.expanded[phase] = 1u << type;
-  old_policy.overrides[phase][type][0] = {120, 0, policy::kVisit};
-  std::array<uint8_t, settings::screen_record::kRecordBytes> old_bytes;
-  TEST_ASSERT_EQUAL_UINT32(
-      old_bytes.size(), settings::screen_record::encode(old_policy, old_bytes));
-
-  // First reboot: competition blob is missing/damaged, but the old policy
-  // blob remains intact. Presets initially reuse its small id/revision.
-  settings::Presets presets{};
-  presets.competition = "bl1";
-  settings::initialCompetitions(presets, current);
-  policy::Policy loaded;
-  TEST_ASSERT_EQUAL(settings::screen_record::DecodeResult::kOk,
-                    settings::screen_record::decode(old_bytes, loaded));
-  uint32_t highwater = 0;
-  for (const auto& binding : loaded.competitions)
-    highwater = std::max(highwater, binding.incarnation);
-  TEST_ASSERT_TRUE(settings::reserveIncarnationFloor(current, highwater, true));
-  TEST_ASSERT_GREATER_THAN_UINT32(1, current.entries[0].incarnation);
-  candidate = current;
-  TEST_ASSERT_TRUE(settings::assignIncarnations(candidate, current));
-  const auto size = settings::encodeCompetitions(candidate, bytes);
-
-  // The owner saves only competitions. On the second reboot, load the NEW
-  // competition blob alongside the SAME OLD, unmodified policy blob.
+// Split-record fallback/high-water repair tests are retired: one AppConfig
+// now owns identities and preferences. Actual NVS fault tests prove complete
+// old/new publication; this check proves their same-record roundtrip.
+void aggregate_keeps_attached_preferences_with_their_reordered_identity() {
+  seedTwo();
+  candidate.entries[0].display.overrides[3][3] = {
+      120, 0, settings::screen_policy::kVisit};
+  std::swap(candidate.entries[0], candidate.entries[1]);
+  settings::AppConfig config;
+  config.model = settings::initialValues({});
+  config.competitions = candidate;
+  const auto used = settings::app_record::encode(config, bytes);
+  settings::AppConfig scratch;
   TEST_ASSERT_EQUAL(
       settings::DecodeResult::kOk,
-      settings::decodeCompetitions({bytes.data(), size}, restored));
-  TEST_ASSERT_EQUAL(settings::screen_record::DecodeResult::kOk,
-                    settings::screen_record::decode(old_bytes, loaded));
-  TEST_ASSERT_TRUE(
-      settings::reserveIncarnationFloor(restored, highwater, false));
-  TEST_ASSERT_EQUAL_UINT8(1, restored.entries[0].id);
+      settings::app_record::decode(std::span(bytes).first(used), scratch));
+  TEST_ASSERT_TRUE(candidate == scratch.competitions);
   TEST_ASSERT_EQUAL_UINT16(
-      60,
-      policy::resolve(loaded, policy::Phase::kIdle, screen::Type::kTable,
-                      restored.entries[0].id, restored.entries[0].incarnation)
-          .visit_s);
-}
-
-void stored_counter_reserves_even_bindings_that_will_be_pruned() {
-  seedTwo();
-  const auto first = current.entries[0].incarnation;
-  TEST_ASSERT_TRUE(settings::reserveIncarnationFloor(current, 40, false));
-  TEST_ASSERT_EQUAL_UINT32(first, current.entries[0].incarnation);
-  TEST_ASSERT_EQUAL_UINT32(41, current.next_incarnation);
-  candidate = current;
-  candidate.entries.push(entry());
-  TEST_ASSERT_TRUE(settings::assignIncarnations(candidate, current));
-  TEST_ASSERT_EQUAL_UINT32(41, candidate.entries[2].incarnation);
-  TEST_ASSERT_TRUE(settings::validate(candidate));
-}
-
-void retained_maximum_identity_never_wraps_or_reissues_a_provisional_id() {
-  seedTwo();
-  const auto first = current.entries[0].incarnation;
-  TEST_ASSERT_FALSE(settings::reserveIncarnationFloor(
-      current, std::numeric_limits<uint32_t>::max(), true));
-  TEST_ASSERT_EQUAL_UINT32(first, current.entries[0].incarnation);
-  TEST_ASSERT_EQUAL_UINT32(std::numeric_limits<uint32_t>::max(),
-                           current.next_incarnation);
-  candidate = current;
-  candidate.entries.push(entry());
-  TEST_ASSERT_FALSE(settings::assignIncarnations(candidate, current));
-  TEST_ASSERT_TRUE(settings::reserveIncarnationFloor(
-      current, std::numeric_limits<uint32_t>::max(), false));
-  candidate = current;
-  TEST_ASSERT_TRUE(settings::assignIncarnations(candidate, current));
-  TEST_ASSERT_TRUE(settings::validate(candidate));
+      120, scratch.competitions.entries[1].display.overrides[3][3].visit_s);
+  TEST_ASSERT_EQUAL_UINT16(
+      0, scratch.competitions.entries[0].display.overrides[3][3].fields);
 }
 }  // namespace
 
@@ -247,15 +188,11 @@ int main(int, char**) {
   RUN_TEST(deleting_and_reusing_an_id_cannot_transfer_screen_overrides);
   RUN_TEST(
       exhaustion_refuses_new_identity_without_wrapping_or_changing_current);
-  RUN_TEST(
-      record_restores_identity_counter_and_rejects_old_or_corrupt_identity);
+  RUN_TEST(aggregate_restores_identity_counter_and_rejects_corrupt_identity);
   RUN_TEST(
       changed_incarnation_invalidates_provider_data_even_with_same_small_id);
   RUN_TEST(duplicate_or_backward_record_identities_are_rejected);
   RUN_TEST(initial_presets_allocate_in_ram_without_external_identity);
-  RUN_TEST(
-      retained_policy_cannot_resurrect_after_fallback_save_and_second_boot);
-  RUN_TEST(stored_counter_reserves_even_bindings_that_will_be_pruned);
-  RUN_TEST(retained_maximum_identity_never_wraps_or_reissues_a_provisional_id);
+  RUN_TEST(aggregate_keeps_attached_preferences_with_their_reordered_identity);
   return UNITY_END();
 }

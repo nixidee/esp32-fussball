@@ -4,45 +4,58 @@ Football information for **one club** on small (round) ESP32 displays: live
 scores, conference view of all running matches, league table and club crest.
 Configured through a built-in web interface.
 
-> **Project status: implementation candidate, 0.1.0-dev.** WiFi/setup AP,
-> all four data adapters, bounded routing, six screen types with a common phase/sequence controller, navigation,
-> images, the German/English Web UI, screenshot download, live debug and OTA/rollback are implemented.
-> The active C6 firmware and stock filesystem image build successfully.
-> Device acceptance is pending; provider fixture, browser, maximum-load and
-> long-run tests remain. Earlier boot/core tests
-> do not establish acceptance of these new services.
->
-> Baseline C6 checkpoint (2026-10-16): 1,656,288 B firmware binary, 1,655,528 B PlatformIO flash
-> (90.2% of one OTA slot), 150,972 B static RAM and 71,204 B embedded UI gzip.
-> The binary fits the slot and is 96,532 B above the 85% flash-reserve line; the
-> savings are decided at alpha from a size map.
-> Peak heap, largest
-> block, stack and LVGL reserves remain unmeasured
-> for the complete candidate. The [screen-system integration](docs/UI.md#planned-screen-system-redesign)
-> now includes data demand, coverage, the common controller/options and a
-> controllable canonical Demo. Current combined resource/build and browser
-> verification is recorded separately; device drafts and complete website redesign follow.
-> Existing resource/device acceptance remains open; this is not a release.
-> S3 development remains paused.
+The current implementation candidate is **0.1.0-dev**. It includes four provider
+adapters, six screen types with one controller, German/English Web UI, image
+management, device screenshots, diagnostics and firmware OTA/rollback.
+The source contains the consolidation cutovers; completion of the whole-code
+maintainability review and remaining refactoring is still open, alongside
+device and resource acceptance. This is not an accepted release. S3 development
+remains paused.
 
-Current integrated C6 source checkpoint (2026-10-17): **1,719,344 B linked flash,
-161,452 B static RAM, 1,720,096 B binary, 75,656 B Web gzip**. Baseline deltas:
-+63,816 B flash/+10,480 B RAM; the binary remains160,340 B above the85% reserve
-line. Data demand, the common controller/options and seven runtime Demo scenarios
-are linked. General/competition settings formats11/4 reset development records;
-image files stay separate. The event-target test fixtures now supply explicit
-selected identities:70scoped host cases pass with original assertions preserved.
-Production firmware is unchanged by this test-only correction; target heap/stack,
-providers and device acceptance remain open. Enable/save Demo under Settings, then load/select steps;
-the first two saved competition rules apply to its runtime datasets.
+The current architecture has one NVS application configuration and one common
+Apply for settings, competitions, explicit club groups, screen programmes and
+adopted names. Football data is RAM-only and is reacquired after boot. Provider
+adapters and Web commands share one strict streaming JSON reader/writer.
+Software night effects have been removed; night scheduling is offered only
+when the hardware has a controllable backlight pin.
 
-Owner testing on2026-10-17 supplied a matching upload/runtime log. Focused
-investigation reproduced misleading busy feedback after a confirmed save and
-lost edits in the per-row short-name editor. Corrections, optional Overview
-diagnostics and manual advancement of the Demo automatic sequence are planned before
-the complete interface redesign. See [current limits](docs/WEB_UI.md#owner-feedback-follow-up--2026-10-17).
+Matched C6 integration build (2026-10-18): **1,732,486 B linked flash,
+174,200 B static RAM, 1,733,248 B binary, 89,818 B Web gzip**. Against the
+pre-consolidation baseline this is −33,812 / +13,188 / −33,808 / +9,631 B.
+The canonical MatchStore grows from33,784 to46,928 B to hold the required
+round/own-match union and independent dataset state; it accounts for13,144 B
+of that static increase. Other changes offset to a net44 B. No football data
+is persisted to compensate for that runtime cost.
 
----
+The binary leaves **101,760 B** in the unchanged1,835,008-B OTA slot; it exceeds
+the85% reserve limit by **173,492 B**. This is an unmet acceptance criterion,
+not a waived target. Source/bin SHA256 and detailed operation lifetimes are
+recorded with the build evidence. None of these figures proves runtime
+heap/stack reserves. No feature, TLS trust or partition was removed to force
+an apparently passing budget.
+
+Focused host checks cover actual parser responses, complete/partial acquisition,
+configuration and names failures, coherent reboot, browser draft races, file
+faults and screen layout calculations. Local browser checks use controlled
+non-secret HTTP fixtures and the real bundled page. Physical LCD output,
+maximum-load heap/stack, long-run operation and OTA trial/rollback still require
+owner-flashed hardware evidence. Device screenshots are the screen-acceptance
+path; there is no host LCD renderer.
+
+The maintained [club catalogue](include/team_names.json) preserves all147 supplied
+clubs with German/English/short names, aliases and verified provider ID lists.
+The running firmware now embeds the complete immutable source and serves it
+through `GET /api/v1/team-names/preset`, with its source SHA256 in a response
+header. The full collection editor/import/export uses the common application
+draft and one Apply boundary. Adopted DE/EN/short values, all provider bindings,
+aliases, league metadata and ID exceptions share one bounded16-KiB collection.
+NVS settings select its exact immutable names version; an uncertain write
+preserves both versions and blocks mutations until recovery/reboot. There is
+no legacy migration, per-row immediate save, football cache or original-name
+archive. Source version1 retains full texts; adopted version2 exports each
+unique text once and uses local references. Only current visible adopted fields
+are cached. Provider fallback26/3 remains volatile. Physical device, provider
+and maximum-load acceptance are separate from host/build checks.
 
 ## Command reference
 
@@ -53,7 +66,7 @@ environments below.
 |---|---|---|
 | `xiao_esp32c6_gc9a01` | Seeed XIAO ESP32-C6 + 1.28" GC9A01 round display | current implementation candidate compiled; earlier boot/display/input acceptance only; current device acceptance pending; default env |
 | `waveshare_esp32s3_lcd128` | Waveshare ESP32-S3-LCD-1.28 | paused; last build and boot log before the display code (P1.2); not built with the display code yet; if the first log lines are missing after upload, press RST |
-| `native` | Host computer, unit tests only | pure-logic suites; provider mapping uses ArduinoJson 7.4.3 like the firmware; checks are scoped to the suites actually run |
+| `native` | Host computer, unit tests only | pure logic and actual typed codecs; scoped suites and sanitised integration replays |
 
 | Task | Command |
 |---|---|
@@ -70,7 +83,15 @@ environments below.
 | Run only the settings suite | `pio test -e native -f test_settings` |
 | Run only screen-policy model/codec checks | `pio test -e native -f test_screen_policy` |
 | Run classification and sequence checks | `pio test -e native -f test_screen_selection -f test_screen_sequence -f test_screen_eligibility` |
-| Run bounded provider parser and coverage checks | `pio test -e native -f test_provider_json -f test_provider_coverage -f test_schedule_coverage -f test_coverage_persistence` |
+| Run canonical coverage checks | `pio test -e native -f test_provider_coverage -f test_schedule_coverage -f test_coverage_persistence` |
+| Replay actual typed provider adapters and transport | `python3 scripts/tests/test_provider_adapters.py` and `python3 scripts/tests/test_provider_transport.py` |
+| Check two-pass fixture retention against real season responses | `python3 scripts/tests/test_fixture_retention.py` |
+| Check common strict JSON grammar and checked binary primitives | `python3 scripts/tests/test_json_stream.py` and `python3 scripts/tests/test_binary_codec.py` |
+| Check display-command HTTP/FIFO admission and input revision changes | `python3 scripts/tests/test_display_commands.py` |
+| Check hardware brightness receipts and repeated-duty suppression | `python3 scripts/tests/test_backlight_pwm.py` |
+| Check every lossless font bitmap and metric through LVGL | `python3 scripts/tests/test_font_bitmaps.py` |
+| Check actual LVGL colour-test geometry without drawing pixels | `python3 scripts/tests/test_boot_geometry.py` |
+| Check the SDK INFO filter without the unused tag cache | `python3 scripts/tests/test_log_filter.py` |
 | Run live-window scheduling checks, including unknown kickoff and suspension | `pio test -e native -f test_live_window` |
 | Run screen API and image-reference checks | `pio test -e native -f test_screen_json -f test_screen_images` |
 | Run selected ordinary details, Demo and event visibility checks | `pio test -e native -f test_ordinary_details -f test_demo_scenarios -f test_event_visibility` |
@@ -79,16 +100,39 @@ environments below.
 | Run only the timekeeping suite | `pio test -e native -f test_timekeeping` |
 | Run only the heap-meter suite | `pio test -e native -f test_health` |
 | Run browser logic regression tests on the host (Node.js) | `node scripts/tests/test_web_ui.cjs` |
+| Check Debug/Overview/Demo controls against current C++ fixtures | `node scripts/tests/test_web_debug_controls.cjs` |
 | Run screenshot protocol/client checks on the host (Node.js) | `node scripts/tests/test_web_screenshot.cjs` |
+| Run image-editor loading, positioning and race checks | `node scripts/tests/test_web_image_editor.cjs` |
+| Check coherent application draft/save and complete names collection | `node scripts/tests/test_web_common_apply.cjs` |
+| Run full-name dialog close/race and inherit/empty checks | `node scripts/tests/test_web_names_close.cjs` |
+| Run confirmed factory-reset browser flow | `node scripts/tests/test_web_factory_reset.cjs` |
+| Check complete firmware name source and deterministic generation | `python3 scripts/tests/test_team_name_catalogue.py` |
+| Check bounded adopted-name codec with sanitizers | `python3 scripts/tests/test_team_name_store.py --sanitize` |
+| Check full source/shared-text names import/export and POSIX candidates | `python3 scripts/tests/test_team_name_json.py` |
+| Check effective names and read failures | `python3 scripts/tests/test_effective_names.py` |
+| Check common config/names commit and uncertain NVS recovery | `python3 scripts/tests/test_names_config_apply.py` |
+| Check the current aggregate record and coherent NVS owner under faults | `python3 scripts/tests/test_app_config_owner.py` |
+| Check current provider/global counters through the actual NVS adapter | `python3 scripts/tests/test_request_budget_owner.py` |
+| Check actual preset HTTP handler, cancellation and retry | `python3 scripts/tests/test_team_names_http.py` |
+| Check names/backup HTTP export preflight, OOM and partial I/O | `python3 scripts/tests/test_web_names_export.py` |
 | Run screen-policy draft/save/import checks on the host (Node.js) | `node scripts/tests/test_web_screen_policy.cjs` |
+| Check accessible save feedback and atomic import/export flows | `node scripts/tests/test_web_save_feedback.cjs` |
+| Emit current production schema/config fixtures for controlled client checks | `python3 scripts/tests/web_config_fixture.py` |
+| Check the device-checker's current Apply and HTTP load without device access | `python3 scripts/tests/test_device_check_config.py` |
+| Check original-name stream correlation and backpressure | `python3 scripts/tests/test_original_names_channel.py` |
+| Check original-name worker, encoder and actual provider parser integration | `python3 scripts/tests/test_original_names_integration.py` |
+| Check original-name HTTP completion, disconnect and partial failures | `python3 scripts/tests/test_original_names_http.py` |
+| Check actual HTTP/WebSocket partial-send deadlines, debug ownership and file completion | `python3 scripts/tests/test_web_transport.py` |
+| Check selector receipts, stale IDs, result replacement and strict cancel HTTP | `python3 scripts/tests/test_selection_query_http.py` |
+| Check correlated wizard results, closing, cancellation and lost replies | `node scripts/tests/test_web_selection.cjs` |
 | Set up host tools (once) | see “Code formatting” below |
 | Check formatting of changed lines | `.venv-tools/bin/python scripts/check_format.py` |
 
 Upload, erase, filesystem and monitor commands apply to firmware environments.
 Browser acceptance uses the real embedded page after the owner uploads the
 firmware. Resource acceptance uses the existing health log; it is separate
-from a successful build. The old device-check script is not part of the
-current workflow.
+from a successful build. The device-check script uses the current configuration revision/Apply contract;
+its offline command checks do not establish device acceptance.
 Native tests use Native 1.2.1 and Unity's exact `v2.7.0` Git tag, checked against
 official releases on 2026-10-09. Unity's tag retains stale 2.6.0 package metadata,
 so PlatformIO may display that version and download an unused registry copy;
@@ -116,7 +160,7 @@ Build configuration files:
   defaults file. After a failed check the next build regenerates the file.
 - `partitions/*.csv` — flash layout per flash size.
 - `components/*/idf_component.yml` — exact versions of external ESP-IDF
-  components (LVGL, esp_lvgl_port, LittleFS, ArduinoJson and mDNS), resolved into one lockfile per chip target,
+  components (LVGL, esp_lvgl_port, LittleFS and mDNS), resolved into one lockfile per chip target,
   `dependencies.lock.<chip>` (e.g. `dependencies.lock.esp32c6`), set in the
   root `CMakeLists.txt`. Lockfiles are tracked. The component manager changes
   a lockfile only when a manifest changes; review and commit both together.
@@ -189,14 +233,17 @@ argument to check a range, e.g. `scripts/check_format.py main`.
 
 The C6 candidate uses the existing 4 MB dual-OTA layout, a fixed 32 KB LVGL
 pool and two 9,600 B DMA draw buffers. One fixed match store holds the
-football data of all competitions in 26,712 B; parser allocations are
-capped at 24 KB. Shared admission prevents
+football data of all competitions in 48,976 B (512 matches, 256 teams; C6
+compiler layout). Typed parsers stream full responses and retain one bounded
+response workspace, rather than a JSON document. Season selection uses a
+transient compact index and admits the required round/own-match union; it does
+not load an entire season into the store. Shared admission prevents
 simultaneous provider TLS/JSON, image mutation, screenshot capture and OTA. Normal JPEG redraw
 can overlap provider traffic and still needs peak-memory measurement.
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) records ownership and the current
 linker budget.
 
-**System → Diagnose → Bildschirmfoto herunterladen** saves a round PNG of
+**Debug → Bildschirmfoto herunterladen** saves a round PNG of
 the next real device redraw, with transparent corners and a dated filename.
 It uses the existing login policy and keeps the current reading orientation.
 The C6 temporarily copies one 9,600 B strip; the browser makes the PNG.
@@ -217,6 +264,10 @@ pio run -e xiao_esp32c6_gc9a01 -t buildfs
 The asset/font builders require Pillow 12.3.0; ordinary firmware builds use
 the committed generated fonts and need no Pillow. Font source/licence are in
 `assets/fonts/`; stock artwork provenance is in `assets/src/README.md`.
+Regenerate the lossless 4-bpp fonts with `python3 scripts/build_fonts.py` using
+an interpreter with that pinned Pillow already installed. The builder checks
+the original source SHA-256; `python3 scripts/tests/test_font_bitmaps.py`
+compares every decoded glyph and metric through the actual LVGL reader.
 The gzip Web UI header is regenerated by the PlatformIO pre-build script,
 including cached CMake builds; unchanged content does not recompile it.
 
@@ -231,27 +282,28 @@ The C6 antenna driver is implemented; RF switching has not been tested.
 
 ## What it shows
 
-The table and selection rules below describe the current firmware. A confirmed
-[screen-system redesign](docs/UI.md#planned-screen-system-redesign) is planned:
-timed sequences for different match situations, separate crest/slideshow slots,
-competition-specific screen rules and a picture frame mode. Its behavior has
-been discussed; model/API/storage design, resource approval, implementation and
-device acceptance still follow. The current build does not contain these new
-controls.
+The controller uses one ordered programme for each situation: own match, other
+matches, matchday, idle and optional season break. Six screen types participate:
 
-| Screen | When |
+| Screen | Content |
 |---|---|
-| Live (single match) | Your club plays: big score, match minute, teams, highlights |
-| Live (conference) | Match days: the matches of the current kickoff times, your match pinned on top (optional), several pages |
-| Matchday | The whole matchday of each competition, one after another, with results or kickoff times; set to the current matchday (a finished one stays until the end of the next day) or the next matchday; the buttons page through the pages, the neighbouring matchdays and the competitions |
-| Table | Default outside match days: positions around your club; the tables of several competitions in turn |
-| Crest / slideshow | Club crest or your own images |
+| Single | Focused own or unique ordinary match, principal score, phase/minute, events, real reported shootout attempts; held result or next preview when applicable |
+| Conference | Applicable matches within one competition, optional own pin, balanced pages and complete manual paging |
+| Matchday | The selected sporting round, including rescheduled fixtures; previous/current/next navigation and competition stepping |
+| Table | Provider groups remain distinct; automatic own-group/club centring and complete manual groups/rows, with played/difference/points retained |
+| Crest | Dedicated crest replacement or factory image |
+| Images | Library image sequence, continuing after the last actually displayed image |
 
-The device picks the screen automatically from the situation (no match,
-matchday, own club playing); which screen is shown in each situation is a
-setting, and each competition can be switched on or off per screen. With inputs (buttons or small touch modules) you can switch screens
-and scroll; after a set time the device returns to the default screen.
-Details: [docs/UI.md](docs/UI.md).
+The common type order, automatic/manual participation and visit durations are
+configurable. Competition-specific values inherit field by field; returning to
+shared values preserves dormant overrides. Explicit club groups are shown in
+priority order and determine focus; equal names do not link competitions.
+Frame mode shows the configured images/crest. Buttons navigate and return to
+automatic mode according to their assignments; Web commands use the same FIFO.
+Software night effects are removed. Rotation, IP display, normal colours and
+backgrounds remain configurable; scheduled night brightness needs a real
+backlight pin. These controls are implemented; physical display/input and
+resource acceptance still need owner-flashed hardware. Details: [UI.md](docs/UI.md).
 
 ## Hardware
 Pinouts and wiring: [docs/HARDWARE.md](docs/HARDWARE.md).
@@ -284,6 +336,6 @@ the stored data and where it is shown: [docs/DATA_MODEL.md](docs/DATA_MODEL.md).
 | [docs/WEB_UI.md](docs/WEB_UI.md) | Web interface tabs, image editor |
 | [docs/API.md](docs/API.md) | Device REST API: endpoints, status fields, sessions, error codes |
 | [docs/DATA_MODEL.md](docs/DATA_MODEL.md) | Data sets, definitions, fields per provider, usage per screen, capacities, gaps |
-| [docs/DATA_FLOW.md](docs/DATA_FLOW.md) | Requests, filtering, mapping, combining, caches, publication, request bounds |
+| [docs/DATA_FLOW.md](docs/DATA_FLOW.md) | Requests, filtering, mapping, RAM retention, publication, request bounds |
 | [docs/DATA_PROVIDERS.md](docs/DATA_PROVIDERS.md) | Provider coverage, limits, conditions, endpoints, research |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | Architecture decisions (ADRs) |

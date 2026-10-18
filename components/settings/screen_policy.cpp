@@ -34,9 +34,9 @@ class Check {
 
 bool validateRules(const Policy& policy, const Check& check) noexcept {
   for (unsigned phase = 0; phase < kPhaseCount; ++phase) {
-    if (policy.expanded[phase] >> screen::kSportTypeCount)
-      return check.fail(Field::kExpanded, Reason::kUnknownBits, Property::kNone,
-                        phase);
+    if (policy.per_competition[phase] >> screen::kSportTypeCount)
+      return check.fail(Field::kPerCompetition, Reason::kUnknownBits,
+                        Property::kNone, phase);
     for (unsigned type = 0; type < screen::kTypeCount; ++type) {
       const Rule& rule = policy.shared[phase][type];
       if (!cfg::kScreenVisitRange.contains(rule.visit_s))
@@ -50,45 +50,6 @@ bool validateRules(const Policy& policy, const Check& check) noexcept {
           rule.visit_s % policy.per_image_s != 0)
         return check.fail(Field::kShared, Reason::kImageMultiple,
                           Property::kVisit, phase, type);
-      const auto sport = screen::sportIndex(kind);
-      if (sport == screen::kSportTypeCount) continue;
-      for (unsigned competition = 0; competition < cfg::kCompetitionMax;
-           ++competition) {
-        const Override& value = policy.overrides[phase][sport][competition];
-        if (value.fields & ~kOverrideFields)
-          return check.fail(Field::kOverride, Reason::kUnknownBits,
-                            Property::kFields, phase, type, competition);
-        if (value.values & ~kRuleFlags)
-          return check.fail(Field::kOverride, Reason::kUnknownBits,
-                            Property::kValues, phase, type, competition);
-        if (!cfg::kScreenVisitRange.contains(value.visit_s))
-          return check.fail(Field::kOverride, Reason::kRange, Property::kVisit,
-                            phase, type, competition);
-        if (value.fields != 0 && policy.competitions[competition].id == 0)
-          return check.fail(Field::kOverride, Reason::kUnusedSlot,
-                            Property::kFields, phase, type, competition);
-      }
-    }
-  }
-  return true;
-}
-
-bool validateAssociations(const Policy& policy, const Check& check) noexcept {
-  for (unsigned i = 0; i < policy.competitions.size(); ++i) {
-    const auto& entry = policy.competitions[i];
-    if ((entry.id == 0) != (entry.incarnation == 0))
-      return check.fail(Field::kCompetition, Reason::kRequired,
-                        entry.id == 0 ? Property::kId : Property::kIncarnation,
-                        0, 0, i);
-    if (entry.id == 0) continue;
-    for (unsigned previous = 0; previous < i; ++previous) {
-      const auto& other = policy.competitions[previous];
-      if (entry.id == other.id)
-        return check.fail(Field::kCompetition, Reason::kDuplicate,
-                          Property::kId, 0, 0, i);
-      if (entry.incarnation == other.incarnation)
-        return check.fail(Field::kCompetition, Reason::kDuplicate,
-                          Property::kIncarnation, 0, 0, i);
     }
   }
   return true;
@@ -177,36 +138,42 @@ bool validate(const Policy& policy, Error* error,
                         i);
     seen |= bit;
   }
-  return validateAssociations(policy, check) && validateRules(policy, check) &&
-         validateAppearance(policy, check);
+  return validateRules(policy, check) && validateAppearance(policy, check);
 }
 
-std::size_t associationIndex(const Policy& policy, uint8_t competition_id,
-                             uint32_t incarnation) noexcept {
-  if (competition_id != 0 && incarnation != 0)
-    for (std::size_t i = 0; i < policy.competitions.size(); ++i) {
-      const auto& entry = policy.competitions[i];
-      if (entry.id == competition_id && entry.incarnation == incarnation)
-        return i;
+bool validate(const CompetitionPreferences& preferences, Error* error,
+              uint8_t competition) noexcept {
+  const Check check(error);
+  for (unsigned phase = 0; phase < kPhaseCount; ++phase)
+    for (unsigned type = 0; type < screen::kSportTypeCount; ++type) {
+      const auto& value = preferences.overrides[phase][type];
+      if (value.fields & ~kOverrideFields)
+        return check.fail(Field::kOverride, Reason::kUnknownBits,
+                          Property::kFields, phase, type, competition);
+      if (value.values & ~kRuleFlags)
+        return check.fail(Field::kOverride, Reason::kUnknownBits,
+                          Property::kValues, phase, type, competition);
+      if (!cfg::kScreenVisitRange.contains(value.visit_s))
+        return check.fail(Field::kOverride, Reason::kRange, Property::kVisit,
+                          phase, type, competition);
     }
-  return policy.competitions.size();
+  return true;
 }
 
-bool expanded(const Policy& policy, Phase phase, screen::Type type) noexcept {
+bool perCompetition(const Policy& policy, Phase phase,
+                    screen::Type type) noexcept {
   return valid(phase) && screen::sporting(type) &&
-         (policy.expanded[index(phase)] & (1u << screen::sportIndex(type)));
+         (policy.per_competition[index(phase)] &
+          (1u << screen::sportIndex(type)));
 }
 
 Rule resolve(const Policy& policy, Phase phase, screen::Type type,
-             uint8_t competition_id, uint32_t incarnation) noexcept {
+             const Competition* competition) noexcept {
   if (!valid(phase) || !screen::valid(type)) return {};
   Rule rule = policy.shared[index(phase)][screen::index(type)];
-  const auto competition =
-      associationIndex(policy, competition_id, incarnation);
-  if (!expanded(policy, phase, type) || competition == cfg::kCompetitionMax)
-    return rule;
+  if (!competition || !perCompetition(policy, phase, type)) return rule;
   const auto& value =
-      policy.overrides[index(phase)][screen::sportIndex(type)][competition];
+      competition->display.overrides[index(phase)][screen::sportIndex(type)];
   if (value.fields & kEnabled) rule.enabled = (value.values & kEnabled) != 0;
   if (value.fields & kAutomatic)
     rule.automatic = (value.values & kAutomatic) != 0;
@@ -214,23 +181,80 @@ Rule resolve(const Policy& policy, Phase phase, screen::Type type,
   return rule;
 }
 
-SelectionRules selectionRules(const Policy& policy,
-                              const Competitions& competitions) noexcept {
+template <class Entries>
+CompetitionOrder ordered(const Entries& competitions) noexcept {
+  CompetitionOrder out;
+  uint8_t emitted = 0;
+  for (unsigned slot = 0; slot < competitions.entries.size(); ++slot) {
+    if (emitted & (1u << slot)) continue;
+    const auto group = competitions.entries[slot].club.group;
+    for (unsigned member = slot; member < competitions.entries.size();
+         ++member) {
+      if ((emitted & (1u << member)) ||
+          (member != slot &&
+           (!group || competitions.entries[member].club.group != group)))
+        continue;
+      out.slots[out.count++] = static_cast<uint8_t>(member);
+      emitted |= static_cast<uint8_t>(1u << member);
+    }
+  }
+  return out;
+}
+
+CompetitionOrder competitionOrder(const Competitions& competitions) noexcept {
+  return ordered(competitions);
+}
+CompetitionOrder competitionOrder(
+    const CompetitionRoutes& competitions) noexcept {
+  return ordered(competitions);
+}
+
+void program(const Policy& policy, const Competitions& competitions,
+             Phase phase, Program& out) noexcept {
+  out = {};
+  if (!valid(phase)) return;
+  const auto priority = competitionOrder(competitions);
+  for (const auto type : policy.order) {
+    if (screen::sporting(type)) {
+      for (unsigned position = 0; position < priority.count; ++position) {
+        const auto& competition =
+            competitions.entries[priority.slots[position]];
+        if (!competition.active || !competition.id) continue;
+        const auto rule = resolve(policy, phase, type, &competition);
+        if (rule.enabled)
+          out.entries[out.count++] = {rule, type, competition.id};
+      }
+    } else {
+      const auto rule = resolve(policy, phase, type);
+      if (rule.enabled) out.entries[out.count++] = {rule, type, 0};
+    }
+  }
+}
+
+template <class Entries>
+SelectionRules selection(const Options& policy,
+                         const Entries& competitions) noexcept {
   SelectionRules out{policy.own_before_min,
                      policy.own_after_min,
                      policy.other_before_min,
                      policy.other_after_min,
                      0,
                      policy.automatic_break};
-  for (std::size_t slot = 0; slot < competitions.entries.size(); ++slot) {
-    const auto& c = competitions.entries[slot];
-    const auto at = associationIndex(policy, c.id, c.incarnation);
-    const bool special = at == policy.competitions.size()
-                             ? Association{}.own_special
-                             : policy.competitions[at].own_special;
-    if (special) out.own_special |= static_cast<uint8_t>(1u << slot);
-  }
+  out.only_one_own_single = policy.only_one_own_single;
+  for (std::size_t slot = 0; slot < competitions.entries.size(); ++slot)
+    if (competitions.entries[slot].club.own_special)
+      out.own_special |= static_cast<uint8_t>(1u << slot);
+
   return out;
+}
+
+SelectionRules selectionRules(const Options& policy,
+                              const Competitions& competitions) noexcept {
+  return selection(policy, competitions);
+}
+SelectionRules selectionRules(const Options& policy,
+                              const CompetitionRoutes& competitions) noexcept {
+  return selection(policy, competitions);
 }
 
 Eligibility eligibility(const Policy& policy,
@@ -245,9 +269,33 @@ Eligibility eligibility(const Policy& policy,
       if (!c.active || c.id == 0) continue;
       for (std::size_t type = 0; type < screen::kTypeCount; ++type) {
         const auto kind = static_cast<screen::Type>(type);
-        if (screen::sporting(kind) && resolve(policy, static_cast<Phase>(phase),
-                                              kind, c.id, c.incarnation)
-                                          .enabled)
+        if (screen::sporting(kind) &&
+            resolve(policy, static_cast<Phase>(phase), kind, &c).enabled)
+          out.enabled[phase][slot] |= static_cast<uint8_t>(1u << type);
+      }
+    }
+  return out;
+}
+
+Eligibility eligibility(const Policy& policy, const CompetitionRoutes& routes,
+                        const Competitions* configured) noexcept {
+  Eligibility out;
+  out.selection = selectionRules(policy, routes);
+  out.break_days = policy.break_days;
+  out.frame = policy.frame;
+  for (std::size_t phase = 0; phase < kPhaseCount; ++phase)
+    for (std::size_t slot = 0; slot < routes.entries.size(); ++slot) {
+      const auto& route = routes.entries[slot];
+      if (!route.active || !route.id) continue;
+      const auto* preferences =
+          configured ? configured->find(route.id) : nullptr;
+      if (preferences && preferences->incarnation != route.incarnation)
+        preferences = nullptr;
+      for (unsigned type = 0; type < screen::kTypeCount; ++type) {
+        const auto kind = static_cast<screen::Type>(type);
+        if (screen::sporting(kind) &&
+            resolve(policy, static_cast<Phase>(phase), kind, preferences)
+                .enabled)
           out.enabled[phase][slot] |= static_cast<uint8_t>(1u << type);
       }
     }

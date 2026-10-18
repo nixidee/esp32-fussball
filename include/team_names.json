@@ -1,0 +1,2518 @@
+{
+  "format": "football-team-names",
+  "version": 1,
+  "clubs": [
+    {
+      "key": "fc-augsburg",
+      "league": "1. Bundesliga",
+      "de": "FC Augsburg",
+      "en": "FC Augsburg",
+      "short": "FCA",
+      "ids": {
+        "espn": [
+          3841
+        ],
+        "openligadb": [
+          95
+        ]
+      },
+      "aliases": [
+        "Augsburg"
+      ]
+    },
+    {
+      "key": "bayer-04-leverkusen",
+      "league": "1. Bundesliga",
+      "de": "Bayer 04 Leverkusen",
+      "en": "Bayer Leverkusen",
+      "short": "B04",
+      "ids": {
+        "espn": [
+          131
+        ],
+        "openligadb": [
+          6
+        ]
+      },
+      "aliases": [
+        "Leverkusen"
+      ]
+    },
+    {
+      "key": "fc-bayern-munchen",
+      "league": "1. Bundesliga",
+      "de": "FC Bayern München",
+      "en": "Bayern Munich",
+      "short": "FCB",
+      "ids": {
+        "espn": [
+          132
+        ],
+        "openligadb": [
+          40
+        ]
+      },
+      "aliases": [
+        "Bayern"
+      ]
+    },
+    {
+      "key": "borussia-dortmund",
+      "league": "1. Bundesliga",
+      "de": "Borussia Dortmund",
+      "en": "Borussia Dortmund",
+      "short": "BVB",
+      "ids": {
+        "espn": [
+          124
+        ],
+        "openligadb": [
+          7
+        ]
+      },
+      "aliases": [
+        "Dortmund"
+      ]
+    },
+    {
+      "key": "sv-elversberg",
+      "league": "1. Bundesliga",
+      "de": "SV Elversberg",
+      "en": "SV Elversberg",
+      "short": "SVE",
+      "ids": {
+        "espn": [
+          10388
+        ],
+        "openligadb": [
+          198,
+          2401,
+          3062
+        ]
+      },
+      "aliases": [
+        "Elversberg",
+        "SV 07 Elversberg"
+      ]
+    },
+    {
+      "key": "eintracht-frankfurt",
+      "league": "1. Bundesliga",
+      "de": "Eintracht Frankfurt",
+      "en": "Eintracht Frankfurt",
+      "short": "SGE",
+      "ids": {
+        "espn": [
+          125
+        ],
+        "openligadb": [
+          91
+        ]
+      },
+      "aliases": [
+        "Frankfurt"
+      ]
+    },
+    {
+      "key": "sc-freiburg",
+      "league": "1. Bundesliga",
+      "de": "SC Freiburg",
+      "en": "SC Freiburg",
+      "short": "SCF",
+      "ids": {
+        "espn": [
+          126
+        ],
+        "openligadb": [
+          112
+        ]
+      },
+      "aliases": [
+        "Freiburg"
+      ]
+    },
+    {
+      "key": "hamburger-sv",
+      "league": "1. Bundesliga",
+      "de": "Hamburger SV",
+      "en": "Hamburg SV",
+      "short": "HSV",
+      "ids": {
+        "espn": [
+          127
+        ],
+        "openligadb": [
+          100
+        ]
+      },
+      "aliases": [
+        "Hamburger SV",
+        "Hamburg"
+      ]
+    },
+    {
+      "key": "tsg-1899-hoffenheim",
+      "league": "1. Bundesliga",
+      "de": "TSG 1899 Hoffenheim",
+      "en": "TSG Hoffenheim",
+      "short": "TSG",
+      "ids": {
+        "espn": [
+          7911
+        ],
+        "openligadb": [
+          175,
+          907
+        ]
+      },
+      "aliases": [
+        "Hoffenheim"
+      ]
+    },
+    {
+      "key": "1-fc-koln",
+      "league": "1. Bundesliga",
+      "de": "1. FC Köln",
+      "en": "FC Cologne",
+      "short": "KOE",
+      "ids": {
+        "espn": [
+          122
+        ],
+        "openligadb": [
+          65
+        ]
+      },
+      "aliases": [
+        "Cologne"
+      ]
+    },
+    {
+      "key": "rb-leipzig",
+      "league": "1. Bundesliga",
+      "de": "RB Leipzig",
+      "en": "RB Leipzig",
+      "short": "RBL",
+      "ids": {
+        "espn": [
+          11420
+        ],
+        "openligadb": [
+          1635
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "1-fsv-mainz-05",
+      "league": "1. Bundesliga",
+      "de": "1. FSV Mainz 05",
+      "en": "Mainz 05",
+      "short": "M05",
+      "ids": {
+        "espn": [
+          2950
+        ],
+        "openligadb": [
+          81
+        ]
+      },
+      "aliases": [
+        "Mainz"
+      ]
+    },
+    {
+      "key": "borussia-monchengladbach",
+      "league": "1. Bundesliga",
+      "de": "Borussia Mönchengladbach",
+      "en": "Borussia Monchengladbach",
+      "short": "BMG",
+      "ids": {
+        "espn": [
+          268
+        ],
+        "openligadb": [
+          87
+        ]
+      },
+      "aliases": [
+        "Gladbach"
+      ]
+    },
+    {
+      "key": "sc-paderborn-07",
+      "league": "1. Bundesliga",
+      "de": "SC Paderborn 07",
+      "en": "SC Paderborn",
+      "short": "SCP",
+      "ids": {
+        "espn": [
+          3307
+        ],
+        "openligadb": [
+          31
+        ]
+      },
+      "aliases": [
+        "Paderborn"
+      ]
+    },
+    {
+      "key": "fc-schalke-04",
+      "league": "1. Bundesliga",
+      "de": "FC Schalke 04",
+      "en": "Schalke 04",
+      "short": "S04",
+      "ids": {
+        "espn": [
+          133
+        ],
+        "openligadb": [
+          9
+        ]
+      },
+      "aliases": [
+        "Schalke"
+      ]
+    },
+    {
+      "key": "vfb-stuttgart",
+      "league": "1. Bundesliga",
+      "de": "VfB Stuttgart",
+      "en": "VfB Stuttgart",
+      "short": "VFB",
+      "ids": {
+        "espn": [
+          134
+        ],
+        "openligadb": [
+          16
+        ]
+      },
+      "aliases": [
+        "Stuttgart"
+      ]
+    },
+    {
+      "key": "1-fc-union-berlin",
+      "league": "1. Bundesliga",
+      "de": "1. FC Union Berlin",
+      "en": "Union Berlin",
+      "short": "FCU",
+      "ids": {
+        "espn": [
+          598
+        ],
+        "openligadb": [
+          80
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "sv-werder-bremen",
+      "league": "1. Bundesliga",
+      "de": "SV Werder Bremen",
+      "en": "Werder Bremen",
+      "short": "SVW",
+      "ids": {
+        "espn": [
+          137
+        ],
+        "openligadb": [
+          134
+        ]
+      },
+      "aliases": [
+        "Bremen"
+      ]
+    },
+    {
+      "key": "arminia-bielefeld",
+      "league": "2. Bundesliga",
+      "de": "Arminia Bielefeld",
+      "en": "Arminia Bielefeld",
+      "short": "DSC",
+      "ids": {
+        "espn": [
+          2506
+        ],
+        "openligadb": [
+          83
+        ]
+      },
+      "aliases": [
+        "Bielefeld",
+        "DSC Arminia Bielefeld"
+      ]
+    },
+    {
+      "key": "vfl-bochum",
+      "league": "2. Bundesliga",
+      "de": "VfL Bochum",
+      "en": "VfL Bochum",
+      "short": "BOC",
+      "ids": {
+        "espn": [
+          121
+        ],
+        "openligadb": [
+          129
+        ]
+      },
+      "aliases": [
+        "Bochum"
+      ]
+    },
+    {
+      "key": "eintracht-braunschweig",
+      "league": "2. Bundesliga",
+      "de": "Eintracht Braunschweig",
+      "en": "Eintracht Braunschweig",
+      "short": "EBS",
+      "ids": {
+        "espn": [
+          3067
+        ],
+        "openligadb": [
+          74
+        ]
+      },
+      "aliases": [
+        "TSV Eintracht Braunschweig",
+        "E Braunschweig"
+      ]
+    },
+    {
+      "key": "fc-energie-cottbus",
+      "league": "2. Bundesliga",
+      "de": "FC Energie Cottbus",
+      "en": "Energie Cottbus",
+      "short": "FCE",
+      "ids": {
+        "espn": [
+          123
+        ],
+        "openligadb": [
+          93
+        ]
+      },
+      "aliases": [
+        "Cottbus"
+      ]
+    },
+    {
+      "key": "sv-darmstadt-98",
+      "league": "2. Bundesliga",
+      "de": "SV Darmstadt 98",
+      "en": "SV Darmstadt 98",
+      "short": "SVD",
+      "ids": {
+        "espn": [
+          3812
+        ],
+        "openligadb": [
+          118
+        ]
+      },
+      "aliases": [
+        "Darmstadt"
+      ]
+    },
+    {
+      "key": "sg-dynamo-dresden",
+      "league": "2. Bundesliga",
+      "de": "SG Dynamo Dresden",
+      "en": "Dynamo Dresden",
+      "short": "SGD",
+      "ids": {
+        "espn": [
+          7017
+        ],
+        "openligadb": [
+          177
+        ]
+      },
+      "aliases": [
+        "D Dresden"
+      ]
+    },
+    {
+      "key": "spvgg-greuther-furth",
+      "league": "2. Bundesliga",
+      "de": "SpVgg Greuther Fürth",
+      "en": "Greuther Furth",
+      "short": "SGF",
+      "ids": {
+        "espn": [
+          3070
+        ],
+        "openligadb": [
+          115
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "hannover-96",
+      "league": "2. Bundesliga",
+      "de": "Hannover 96",
+      "en": "Hannover 96",
+      "short": "H96",
+      "ids": {
+        "espn": [
+          2428
+        ],
+        "openligadb": [
+          55
+        ]
+      },
+      "aliases": [
+        "Hannover"
+      ]
+    },
+    {
+      "key": "1-fc-heidenheim-1846",
+      "league": "2. Bundesliga",
+      "de": "1. FC Heidenheim 1846",
+      "en": "FC Heidenheim",
+      "short": "FCH",
+      "ids": {
+        "espn": [
+          6418
+        ],
+        "openligadb": [
+          199
+        ]
+      },
+      "aliases": [
+        "Heidenheim"
+      ]
+    },
+    {
+      "key": "hertha-bsc",
+      "league": "2. Bundesliga",
+      "de": "Hertha BSC",
+      "en": "Hertha Berlin",
+      "short": "BSC",
+      "ids": {
+        "espn": [
+          129
+        ],
+        "openligadb": [
+          54
+        ]
+      },
+      "aliases": [
+        "Hertha BSC",
+        "Hertha"
+      ]
+    },
+    {
+      "key": "1-fc-kaiserslautern",
+      "league": "2. Bundesliga",
+      "de": "1. FC Kaiserslautern",
+      "en": "FC Kaiserslautern",
+      "short": "FCK",
+      "ids": {
+        "espn": [
+          130
+        ],
+        "openligadb": [
+          76
+        ]
+      },
+      "aliases": [
+        "Kaiserslautern"
+      ]
+    },
+    {
+      "key": "karlsruher-sc",
+      "league": "2. Bundesliga",
+      "de": "Karlsruher SC",
+      "en": "Karlsruher SC",
+      "short": "KSC",
+      "ids": {
+        "espn": [
+          4471
+        ],
+        "openligadb": [
+          105
+        ]
+      },
+      "aliases": [
+        "Karlsruher"
+      ]
+    },
+    {
+      "key": "holstein-kiel",
+      "league": "2. Bundesliga",
+      "de": "Holstein Kiel",
+      "en": "Holstein Kiel",
+      "short": "KSV",
+      "ids": {
+        "espn": [
+          7884
+        ],
+        "openligadb": [
+          104
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "1-fc-magdeburg",
+      "league": "2. Bundesliga",
+      "de": "1. FC Magdeburg",
+      "en": "FC Magdeburg",
+      "short": "FCM",
+      "ids": {
+        "espn": [
+          10382
+        ],
+        "openligadb": [
+          78
+        ]
+      },
+      "aliases": [
+        "Magdeburg"
+      ]
+    },
+    {
+      "key": "1-fc-nurnberg",
+      "league": "2. Bundesliga",
+      "de": "1. FC Nürnberg",
+      "en": "FC Nuremberg",
+      "short": "FCN",
+      "ids": {
+        "espn": [
+          269
+        ],
+        "openligadb": [
+          79
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "vfl-osnabruck",
+      "league": "2. Bundesliga",
+      "de": "VfL Osnabrück",
+      "en": "VfL Osnabruck",
+      "short": "OSN",
+      "ids": {
+        "espn": [
+          7013
+        ],
+        "openligadb": [
+          36
+        ]
+      },
+      "aliases": [
+        "Osnabruck"
+      ]
+    },
+    {
+      "key": "fc-st-pauli",
+      "league": "2. Bundesliga",
+      "de": "FC St. Pauli",
+      "en": "FC St. Pauli",
+      "short": "STP",
+      "ids": {
+        "espn": [
+          270
+        ],
+        "openligadb": [
+          98
+        ]
+      },
+      "aliases": [
+        "St. Pauli"
+      ]
+    },
+    {
+      "key": "vfl-wolfsburg",
+      "league": "2. Bundesliga",
+      "de": "VfL Wolfsburg",
+      "en": "VfL Wolfsburg",
+      "short": "WOB",
+      "ids": {
+        "espn": [
+          138
+        ],
+        "openligadb": [
+          131
+        ]
+      },
+      "aliases": [
+        "Wolfsburg"
+      ]
+    },
+    {
+      "key": "alemannia-aachen",
+      "league": "3. Liga",
+      "de": "Alemannia Aachen",
+      "en": "Alemannia Aachen",
+      "short": "AAC",
+      "ids": {
+        "espn": [
+          2997
+        ],
+        "openligadb": [
+          23
+        ]
+      },
+      "aliases": [
+        "Aachen"
+      ]
+    },
+    {
+      "key": "msv-duisburg",
+      "league": "3. Liga",
+      "de": "MSV Duisburg",
+      "en": "MSV Duisburg",
+      "short": "MSV",
+      "ids": {
+        "espn": [
+          3308
+        ],
+        "openligadb": [
+          107
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "fortuna-dusseldorf",
+      "league": "3. Liga",
+      "de": "Fortuna Düsseldorf",
+      "en": "Fortuna Dusseldorf",
+      "short": "F95",
+      "ids": {
+        "espn": [
+          9707
+        ],
+        "openligadb": [
+          185
+        ]
+      },
+      "aliases": [
+        "Düsseldorf"
+      ]
+    },
+    {
+      "key": "rot-weiss-essen",
+      "league": "3. Liga",
+      "de": "Rot-Weiss Essen",
+      "en": "Rot-Weiss Essen",
+      "short": "RWE",
+      "ids": {
+        "espn": [
+          9705
+        ],
+        "openligadb": [
+          109,
+          1719
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "sg-sonnenhof-grossaspach",
+      "league": "3. Liga",
+      "de": "SG Sonnenhof Großaspach",
+      "en": "SG Sonnenhof Grossaspach",
+      "short": "SGA",
+      "ids": {
+        "espn": [
+          6631
+        ],
+        "openligadb": [
+          529
+        ]
+      },
+      "aliases": [
+        "SG Sonnenhof"
+      ]
+    },
+    {
+      "key": "tsv-havelse",
+      "league": "3. Liga",
+      "de": "TSV Havelse",
+      "en": "TSV Havelse",
+      "short": "HAV",
+      "ids": {
+        "espn": [
+          7890
+        ],
+        "openligadb": [
+          126
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "tsg-1899-hoffenheim-ii",
+      "league": "3. Liga",
+      "de": "TSG 1899 Hoffenheim II",
+      "en": "TSG Hoffenheim II",
+      "short": "TSG II",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          2396
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "fc-ingolstadt-04",
+      "league": "3. Liga",
+      "de": "FC Ingolstadt 04",
+      "en": "FC Ingolstadt 04",
+      "short": "FCI",
+      "ids": {
+        "espn": [
+          6367
+        ],
+        "openligadb": [
+          171
+        ]
+      },
+      "aliases": [
+        "Ingolstadt"
+      ]
+    },
+    {
+      "key": "sc-fortuna-koln",
+      "league": "3. Liga",
+      "de": "SC Fortuna Köln",
+      "en": "Fortuna Cologne",
+      "short": "FOR",
+      "ids": {
+        "espn": [
+          15800
+        ],
+        "openligadb": [
+          1718,
+          1730
+        ]
+      },
+      "aliases": [
+        "Fortuna Colo",
+        "Fortuna Köln"
+      ]
+    },
+    {
+      "key": "fc-viktoria-koln",
+      "league": "3. Liga",
+      "de": "FC Viktoria Köln",
+      "en": "Viktoria Cologne",
+      "short": "VIK",
+      "ids": {
+        "espn": [
+          17492,
+          17576
+        ],
+        "openligadb": [
+          2199,
+          2537
+        ]
+      },
+      "aliases": [
+        "Viktoria Col",
+        "Viktoria Köln"
+      ]
+    },
+    {
+      "key": "sv-waldhof-mannheim",
+      "league": "3. Liga",
+      "de": "SV Waldhof Mannheim",
+      "en": "Waldhof Mannheim",
+      "short": "SVW",
+      "ids": {
+        "espn": [
+          6610
+        ],
+        "openligadb": [
+          553,
+          554,
+          3071
+        ]
+      },
+      "aliases": [
+        "SV Waldhof"
+      ]
+    },
+    {
+      "key": "sv-meppen",
+      "league": "3. Liga",
+      "de": "SV Meppen",
+      "en": "SV Meppen",
+      "short": "SVM",
+      "ids": {
+        "espn": [
+          6302
+        ],
+        "openligadb": [
+          599
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "sc-preussen-munster",
+      "league": "3. Liga",
+      "de": "SC Preußen Münster",
+      "en": "Preussen Munster",
+      "short": "SCP",
+      "ids": {
+        "espn": [
+          3757,
+          9867
+        ],
+        "openligadb": [
+          188
+        ]
+      },
+      "aliases": [
+        "SC Preußen M",
+        "Preußen Münster"
+      ]
+    },
+    {
+      "key": "ssv-jahn-regensburg",
+      "league": "3. Liga",
+      "de": "SSV Jahn Regensburg",
+      "en": "Jahn Regensburg",
+      "short": "SSV",
+      "ids": {
+        "espn": [
+          11017
+        ],
+        "openligadb": [
+          181,
+          2951
+        ]
+      },
+      "aliases": [
+        "J Regensburg"
+      ]
+    },
+    {
+      "key": "fc-hansa-rostock",
+      "league": "3. Liga",
+      "de": "FC Hansa Rostock",
+      "en": "Hansa Rostock",
+      "short": "FCH",
+      "ids": {
+        "espn": [
+          128
+        ],
+        "openligadb": [
+          102
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "1-fc-saarbrucken",
+      "league": "3. Liga",
+      "de": "1. FC Saarbrücken",
+      "en": "FC Saarbrucken",
+      "short": "FCS",
+      "ids": {
+        "espn": [
+          7035,
+          9708,
+          18741
+        ],
+        "openligadb": [
+          417,
+          3078
+        ]
+      },
+      "aliases": [
+        "Saarbrucken",
+        "Saarbrücken"
+      ]
+    },
+    {
+      "key": "vfb-stuttgart-ii",
+      "league": "3. Liga",
+      "de": "VfB Stuttgart II",
+      "en": "VfB Stuttgart II",
+      "short": "VFB II",
+      "ids": {
+        "espn": [
+          134001
+        ],
+        "openligadb": [
+          184
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "sc-verl",
+      "league": "3. Liga",
+      "de": "SC Verl",
+      "en": "SC Verl",
+      "short": "SCV",
+      "ids": {
+        "espn": [
+          6325
+        ],
+        "openligadb": [
+          114,
+          1723
+        ]
+      },
+      "aliases": [
+        "SC Verl 1924",
+        "SC Verl "
+      ]
+    },
+    {
+      "key": "sv-wehen-wiesbaden",
+      "league": "3. Liga",
+      "de": "SV Wehen Wiesbaden",
+      "en": "SV Wehen Wiesbaden",
+      "short": "SVWW",
+      "ids": {
+        "espn": [
+          3769
+        ],
+        "openligadb": [
+          174
+        ]
+      },
+      "aliases": [
+        "Wiesbaden"
+      ]
+    },
+    {
+      "key": "fc-wurzburger-kickers",
+      "league": "3. Liga",
+      "de": "FC Würzburger Kickers",
+      "en": "Wurzburger Kickers",
+      "short": "FWK",
+      "ids": {
+        "espn": [
+          17491
+        ],
+        "openligadb": [
+          398,
+          4437,
+          5276
+        ]
+      },
+      "aliases": [
+        "Würzburger Kickers",
+        "Würzburger K"
+      ]
+    },
+    {
+      "key": "bremer-sv",
+      "league": "Regionalliga Nord",
+      "de": "Bremer SV",
+      "en": "Bremer SV",
+      "short": "BSV",
+      "ids": {
+        "espn": [
+          17489
+        ],
+        "openligadb": [
+          2727,
+          2967
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "sv-werder-bremen-ii",
+      "league": "Regionalliga Nord",
+      "de": "SV Werder Bremen II",
+      "en": "Werder Bremen II",
+      "short": "SVW II",
+      "ids": {
+        "espn": [
+          7886
+        ],
+        "openligadb": [
+          135
+        ]
+      },
+      "aliases": [
+        "Werder Breme"
+      ]
+    },
+    {
+      "key": "sv-atlas-delmenhorst",
+      "league": "Regionalliga Nord",
+      "de": "SV Atlas Delmenhorst",
+      "en": "Atlas Delmenhorst",
+      "short": "DEL",
+      "ids": {
+        "espn": [
+          20023
+        ],
+        "openligadb": [
+          5024
+        ]
+      },
+      "aliases": [
+        "Delmenhorst"
+      ]
+    },
+    {
+      "key": "sv-drochtersen-assel",
+      "league": "Regionalliga Nord",
+      "de": "SV Drochtersen/Assel",
+      "en": "SV Drochtersen/Assel",
+      "short": "D/A",
+      "ids": {
+        "espn": [
+          18280
+        ],
+        "openligadb": [
+          4341
+        ]
+      },
+      "aliases": [
+        "SpVgg Drochtersen/Assel"
+      ]
+    },
+    {
+      "key": "eimsbutteler-tv",
+      "league": "Regionalliga Nord",
+      "de": "Eimsbütteler TV",
+      "en": "Eimsbutteler TV",
+      "short": "ETV",
+      "ids": {
+        "espn": [
+          11417
+        ],
+        "openligadb": [
+          8803
+        ]
+      },
+      "aliases": [
+        "Eimsbütteler"
+      ]
+    },
+    {
+      "key": "bsv-kickers-emden",
+      "league": "Regionalliga Nord",
+      "de": "BSV Kickers Emden",
+      "en": "Kickers Emden",
+      "short": "EMD",
+      "ids": {
+        "espn": [
+          10384
+        ],
+        "openligadb": [
+          180
+        ]
+      },
+      "aliases": [
+        "Kickers Emde"
+      ]
+    },
+    {
+      "key": "sc-weiche-flensburg-08",
+      "league": "Regionalliga Nord",
+      "de": "SC Weiche Flensburg 08",
+      "en": "Weiche Flensburg",
+      "short": "FLB",
+      "ids": {
+        "espn": [
+          19242
+        ],
+        "openligadb": [
+          2393
+        ]
+      },
+      "aliases": [
+        "Flensburg 08"
+      ]
+    },
+    {
+      "key": "hamburger-sv-ii",
+      "league": "Regionalliga Nord",
+      "de": "Hamburger SV II",
+      "en": "Hamburg SV II",
+      "short": "HSV II",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          1761
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "hannover-96-ii",
+      "league": "Regionalliga Nord",
+      "de": "Hannover 96 II",
+      "en": "Hannover 96 II",
+      "short": "H96 II",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          1766
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "hsc-hannover",
+      "league": "Regionalliga Nord",
+      "de": "HSC Hannover",
+      "en": "HSC Hannover",
+      "short": "HSC",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          8804
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "ssv-jeddeloh-ii",
+      "league": "Regionalliga Nord",
+      "de": "SSV Jeddeloh II",
+      "en": "SSV Jeddeloh",
+      "short": "JED",
+      "ids": {
+        "espn": [
+          19233
+        ],
+        "openligadb": [
+          4762
+        ]
+      },
+      "aliases": [
+        "Jeddeloh"
+      ]
+    },
+    {
+      "key": "1-fc-phonix-lubeck",
+      "league": "Regionalliga Nord",
+      "de": "1. FC Phönix Lübeck",
+      "en": "Phonix Lubeck",
+      "short": "PHL",
+      "ids": {
+        "espn": [
+          22272
+        ],
+        "openligadb": [
+          6326
+        ]
+      },
+      "aliases": [
+        "Phönix Lübeck"
+      ]
+    },
+    {
+      "key": "vfb-lubeck",
+      "league": "Regionalliga Nord",
+      "de": "VfB Lübeck",
+      "en": "VfB Lubeck",
+      "short": "VFB",
+      "ids": {
+        "espn": [
+          10387
+        ],
+        "openligadb": [
+          532
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "fc-eintracht-norderstedt",
+      "league": "Regionalliga Nord",
+      "de": "FC Eintracht Norderstedt",
+      "en": "Eintracht Norderstedt",
+      "short": "NOR",
+      "ids": {
+        "espn": [
+          18282
+        ],
+        "openligadb": [
+          4342
+        ]
+      },
+      "aliases": [
+        "E Norderstedt"
+      ]
+    },
+    {
+      "key": "vfb-oldenburg",
+      "league": "Regionalliga Nord",
+      "de": "VfB Oldenburg",
+      "en": "VfB Oldenburg",
+      "short": "OLD",
+      "ids": {
+        "espn": [
+          8766
+        ],
+        "openligadb": [
+          600
+        ]
+      },
+      "aliases": [
+        "Oldenburg"
+      ]
+    },
+    {
+      "key": "fc-st-pauli-ii",
+      "league": "Regionalliga Nord",
+      "de": "FC St. Pauli II",
+      "en": "FC St. Pauli II",
+      "short": "STP II",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          1765
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "fsv-schoningen",
+      "league": "Regionalliga Nord",
+      "de": "FSV Schöningen",
+      "en": "FSV Schoningen",
+      "short": "FSV",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          8802
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "sv-todesfelde",
+      "league": "Regionalliga Nord",
+      "de": "SV Todesfelde",
+      "en": "SV Todesfelde",
+      "short": "SVT",
+      "ids": {
+        "espn": [
+          20734
+        ],
+        "openligadb": [
+          5213
+        ]
+      },
+      "aliases": [
+        "Todesfelde"
+      ]
+    },
+    {
+      "key": "vsg-altglienicke",
+      "league": "Regionalliga Nordost",
+      "de": "VSG Altglienicke",
+      "en": "VSG Altglienicke",
+      "short": "VSG",
+      "ids": {
+        "espn": [
+          20735
+        ],
+        "openligadb": [
+          4600
+        ]
+      },
+      "aliases": [
+        "Altglienicke",
+        "VSG Altglienicke Berlin"
+      ]
+    },
+    {
+      "key": "fc-erzgebirge-aue",
+      "league": "Regionalliga Nordost",
+      "de": "FC Erzgebirge Aue",
+      "en": "Erzgebirge Aue",
+      "short": "AUE",
+      "ids": {
+        "espn": [
+          3849
+        ],
+        "openligadb": [
+          66
+        ]
+      },
+      "aliases": [
+        "Erzgebirge"
+      ]
+    },
+    {
+      "key": "sv-babelsberg-03",
+      "league": "Regionalliga Nordost",
+      "de": "SV Babelsberg 03",
+      "en": "SV Babelsberg 03",
+      "short": "SVB",
+      "ids": {
+        "espn": [
+          6628
+        ],
+        "openligadb": [
+          117
+        ]
+      },
+      "aliases": [
+        "Babelsberg"
+      ]
+    },
+    {
+      "key": "bfc-dynamo",
+      "league": "Regionalliga Nordost",
+      "de": "BFC Dynamo",
+      "en": "BFC Dynamo",
+      "short": "BFC",
+      "ids": {
+        "espn": [
+          6396
+        ],
+        "openligadb": [
+          1634,
+          2964
+        ]
+      },
+      "aliases": [
+        "BFC Dynamo Berlin",
+        "Dynamo Berlin"
+      ]
+    },
+    {
+      "key": "bfc-preussen-1894",
+      "league": "Regionalliga Nordost",
+      "de": "BFC Preussen 1894",
+      "en": "BFC Preussen",
+      "short": "BPR",
+      "ids": {
+        "espn": [
+          6373
+        ],
+        "openligadb": [
+          4344
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "hertha-bsc-ii",
+      "league": "Regionalliga Nordost",
+      "de": "Hertha BSC II",
+      "en": "Hertha Berlin II",
+      "short": "BSC II",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          1763
+        ]
+      },
+      "aliases": [
+        "Hertha BSC II"
+      ]
+    },
+    {
+      "key": "sv-tasmania-berlin",
+      "league": "Regionalliga Nordost",
+      "de": "SV Tasmania Berlin",
+      "en": "Tasmania Berlin",
+      "short": "TAS",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          8788
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "chemnitzer-fc",
+      "league": "Regionalliga Nordost",
+      "de": "Chemnitzer FC",
+      "en": "Chemnitzer FC",
+      "short": "CFC",
+      "ids": {
+        "espn": [
+          3781
+        ],
+        "openligadb": [
+          202
+        ]
+      },
+      "aliases": [
+        "Chemnitzer F"
+      ]
+    },
+    {
+      "key": "fc-rot-weiss-erfurt",
+      "league": "Regionalliga Nordost",
+      "de": "FC Rot-Weiß Erfurt",
+      "en": "Rot-Weiss Erfurt",
+      "short": "RWE",
+      "ids": {
+        "espn": [
+          3754
+        ],
+        "openligadb": [
+          176,
+          2111
+        ]
+      },
+      "aliases": [
+        "Rot-Weiß Erfurt"
+      ]
+    },
+    {
+      "key": "greifswalder-fc",
+      "league": "Regionalliga Nordost",
+      "de": "Greifswalder FC",
+      "en": "Greifswalder FC",
+      "short": "GFC",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          5389
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "hallescher-fc",
+      "league": "Regionalliga Nordost",
+      "de": "Hallescher FC",
+      "en": "Hallescher FC",
+      "short": "HFC",
+      "ids": {
+        "espn": [
+          6318
+        ],
+        "openligadb": [
+          208
+        ]
+      },
+      "aliases": [
+        "Hallescher"
+      ]
+    },
+    {
+      "key": "fc-carl-zeiss-jena",
+      "league": "Regionalliga Nordost",
+      "de": "FC Carl Zeiss Jena",
+      "en": "Carl Zeiss Jena",
+      "short": "FCC",
+      "ids": {
+        "espn": [
+          9865
+        ],
+        "openligadb": [
+          69
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "bsg-chemie-leipzig",
+      "league": "Regionalliga Nordost",
+      "de": "BSG Chemie Leipzig",
+      "en": "Chemie Leipzig",
+      "short": "BSG",
+      "ids": {
+        "espn": [
+          19240
+        ],
+        "openligadb": [
+          4599
+        ]
+      },
+      "aliases": [
+        "BSG Leipzig"
+      ]
+    },
+    {
+      "key": "1-fc-lokomotive-leipzig",
+      "league": "Regionalliga Nordost",
+      "de": "1. FC Lokomotive Leipzig",
+      "en": "Lokomotive Leipzig",
+      "short": "LOK",
+      "ids": {
+        "espn": [
+          20987
+        ],
+        "openligadb": [
+          1584
+        ]
+      },
+      "aliases": [
+        "Lok Leipzig",
+        "1. FC Lok Leipzig"
+      ]
+    },
+    {
+      "key": "fsv-63-luckenwalde",
+      "league": "Regionalliga Nordost",
+      "de": "FSV 63 Luckenwalde",
+      "en": "FSV Luckenwalde",
+      "short": "FSV",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          5798
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "1-fc-magdeburg-ii",
+      "league": "Regionalliga Nordost",
+      "de": "1. FC Magdeburg II",
+      "en": "FC Magdeburg II",
+      "short": "FCM II",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          7332
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "rsv-eintracht-1949",
+      "league": "Regionalliga Nordost",
+      "de": "RSV Eintracht 1949",
+      "en": "RSV Eintracht",
+      "short": "RSV",
+      "ids": {
+        "espn": [
+          131219
+        ],
+        "openligadb": [
+          6904
+        ]
+      },
+      "aliases": [
+        "Eintracht"
+      ]
+    },
+    {
+      "key": "fsv-zwickau",
+      "league": "Regionalliga Nordost",
+      "de": "FSV Zwickau",
+      "en": "FSV Zwickau",
+      "short": "ZWK",
+      "ids": {
+        "espn": [
+          7304
+        ],
+        "openligadb": [
+          1979
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "sv-bergisch-gladbach-09",
+      "league": "Regionalliga West",
+      "de": "SV Bergisch Gladbach 09",
+      "en": "Bergisch Gladbach 09",
+      "short": "BGL",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          2198
+        ]
+      },
+      "aliases": [
+        "SV Bergisch Gladbach"
+      ]
+    },
+    {
+      "key": "1-fc-bocholt",
+      "league": "Regionalliga West",
+      "de": "1. FC Bocholt",
+      "en": "FC Bocholt",
+      "short": "BOC",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          2712
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "vfl-bochum-ii",
+      "league": "Regionalliga West",
+      "de": "VfL Bochum II",
+      "en": "VfL Bochum II",
+      "short": "VFL II",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          1717
+        ]
+      },
+      "aliases": [
+        "VFL Bochum II"
+      ]
+    },
+    {
+      "key": "bonner-sc",
+      "league": "Regionalliga West",
+      "de": "Bonner SC",
+      "en": "Bonner SC",
+      "short": "BSC",
+      "ids": {
+        "espn": [
+          8960
+        ],
+        "openligadb": [
+          406
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "borussia-dortmund-ii",
+      "league": "Regionalliga West",
+      "de": "Borussia Dortmund II",
+      "en": "Borussia Dortmund II",
+      "short": "BVB II",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          187,
+          1714
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "fc-gutersloh",
+      "league": "Regionalliga West",
+      "de": "FC Gütersloh",
+      "en": "FC Gutersloh",
+      "short": "FCG",
+      "ids": {
+        "espn": [
+          21935
+        ],
+        "openligadb": [
+          5818
+        ]
+      },
+      "aliases": [
+        "FC Gütersloh 2000",
+        "Gütersloh"
+      ]
+    },
+    {
+      "key": "vfb-03-hilden",
+      "league": "Regionalliga West",
+      "de": "VfB 03 Hilden",
+      "en": "VfB Hilden",
+      "short": "HIL",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          2506
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "1-fc-koln-ii",
+      "league": "Regionalliga West",
+      "de": "1. FC Köln II",
+      "en": "FC Cologne II",
+      "short": "KOE II",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          403,
+          6569
+        ]
+      },
+      "aliases": [
+        " 1. FC Köln II"
+      ]
+    },
+    {
+      "key": "sportfreunde-lotte",
+      "league": "Regionalliga West",
+      "de": "Sportfreunde Lotte",
+      "en": "Sportfreunde Lotte",
+      "short": "SFL",
+      "ids": {
+        "espn": [
+          6324
+        ],
+        "openligadb": [
+          191
+        ]
+      },
+      "aliases": [
+        "Sportfreunde"
+      ]
+    },
+    {
+      "key": "borussia-monchengladbach-ii",
+      "league": "Regionalliga West",
+      "de": "Borussia Mönchengladbach II",
+      "en": "Borussia Monchengladbach II",
+      "short": "BMG II",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          1721
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "rot-weiss-oberhausen",
+      "league": "Regionalliga West",
+      "de": "Rot-Weiß Oberhausen",
+      "en": "Rot-Weiss Oberhausen",
+      "short": "RWO",
+      "ids": {
+        "espn": [
+          7264
+        ],
+        "openligadb": [
+          173
+        ]
+      },
+      "aliases": [
+        "RW Oberhausen",
+        "Oberhausen"
+      ]
+    },
+    {
+      "key": "sc-paderborn-07-ii",
+      "league": "Regionalliga West",
+      "de": "SC Paderborn 07 II",
+      "en": "SC Paderborn II",
+      "short": "SCP II",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          6834
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "sv-westfalia-rhynern",
+      "league": "Regionalliga West",
+      "de": "SV Westfalia Rhynern",
+      "en": "Westfalia Rhynern",
+      "short": "RHY",
+      "ids": {
+        "espn": [
+          21957
+        ],
+        "openligadb": [
+          4568
+        ]
+      },
+      "aliases": [
+        "W Rhynern"
+      ]
+    },
+    {
+      "key": "sv-rodinghausen",
+      "league": "Regionalliga West",
+      "de": "SV Rödinghausen",
+      "en": "SV Rodinghausen",
+      "short": "SVR",
+      "ids": {
+        "espn": [
+          19237
+        ],
+        "openligadb": [
+          4358
+        ]
+      },
+      "aliases": [
+        "Rödinghausen"
+      ]
+    },
+    {
+      "key": "fc-schalke-04-ii",
+      "league": "Regionalliga West",
+      "de": "FC Schalke 04 II",
+      "en": "Schalke 04 II",
+      "short": "S04 II",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          1712
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "sportfreunde-siegen",
+      "league": "Regionalliga West",
+      "de": "Sportfreunde Siegen",
+      "en": "Sportfreunde Siegen",
+      "short": "SFS",
+      "ids": {
+        "espn": [
+          7027
+        ],
+        "openligadb": [
+          430
+        ]
+      },
+      "aliases": [
+        "SF Siegen"
+      ]
+    },
+    {
+      "key": "sg-wattenscheid-09",
+      "league": "Regionalliga West",
+      "de": "SG Wattenscheid 09",
+      "en": "SG Wattenscheid 09",
+      "short": "SGW",
+      "ids": {
+        "espn": [
+          5297
+        ],
+        "openligadb": [
+          429
+        ]
+      },
+      "aliases": [
+        "SG Wattensch"
+      ]
+    },
+    {
+      "key": "sc-wiedenbruck",
+      "league": "Regionalliga West",
+      "de": "SC Wiedenbrück",
+      "en": "SC Wiedenbruck",
+      "short": "SCW",
+      "ids": {
+        "espn": [
+          11421
+        ],
+        "openligadb": [
+          1732
+        ]
+      },
+      "aliases": [
+        "SC Wiedenbrück 2000"
+      ]
+    },
+    {
+      "key": "vfr-aalen",
+      "league": "Regionalliga Südwest",
+      "de": "VfR Aalen",
+      "en": "VfR Aalen",
+      "short": "VFR",
+      "ids": {
+        "espn": [
+          3770
+        ],
+        "openligadb": [
+          183
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "eintracht-frankfurt-ii",
+      "league": "Regionalliga Südwest",
+      "de": "Eintracht Frankfurt II",
+      "en": "Eintracht Frankfurt II",
+      "short": "SGE II",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          2403
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "fsv-frankfurt",
+      "league": "Regionalliga Südwest",
+      "de": "FSV Frankfurt",
+      "en": "FSV Frankfurt",
+      "short": "FSV",
+      "ids": {
+        "espn": [
+          6608
+        ],
+        "openligadb": [
+          172
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "sgv-freiberg",
+      "league": "Regionalliga Südwest",
+      "de": "SGV Freiberg",
+      "en": "SGV Freiberg",
+      "short": "SGV",
+      "ids": {
+        "espn": [],
+        "openligadb": []
+      },
+      "aliases": []
+    },
+    {
+      "key": "sc-freiburg-ii",
+      "league": "Regionalliga Südwest",
+      "de": "SC Freiburg II",
+      "en": "SC Freiburg II",
+      "short": "SCF II",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          2397,
+          3066
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "sg-barockstadt-fulda-lehnerz",
+      "league": "Regionalliga Südwest",
+      "de": "SG Barockstadt Fulda-Lehnerz",
+      "en": "Barockstadt Fulda-Lehnerz",
+      "short": "SGB",
+      "ids": {
+        "espn": [],
+        "openligadb": []
+      },
+      "aliases": []
+    },
+    {
+      "key": "fc-08-homburg",
+      "league": "Regionalliga Südwest",
+      "de": "FC 08 Homburg",
+      "en": "FC Homburg",
+      "short": "FCH",
+      "ids": {
+        "espn": [
+          7026
+        ],
+        "openligadb": [
+          204,
+          3065
+        ]
+      },
+      "aliases": [
+        "Homburg"
+      ]
+    },
+    {
+      "key": "1-fc-kaiserslautern-ii",
+      "league": "Regionalliga Südwest",
+      "de": "1. FC Kaiserslautern II",
+      "en": "FC Kaiserslautern II",
+      "short": "FCK II",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          197
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "ksv-hessen-kassel",
+      "league": "Regionalliga Südwest",
+      "de": "KSV Hessen Kassel",
+      "en": "Hessen Kassel",
+      "short": "KSV",
+      "ids": {
+        "espn": [
+          6316
+        ],
+        "openligadb": [
+          1633,
+          3064
+        ]
+      },
+      "aliases": [
+        "KSV Hessen K"
+      ]
+    },
+    {
+      "key": "1-fsv-mainz-05-ii",
+      "league": "Regionalliga Südwest",
+      "de": "1. FSV Mainz 05 II",
+      "en": "Mainz 05 II",
+      "short": "M05 II",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          196,
+          1720
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "vfr-mannheim",
+      "league": "Regionalliga Südwest",
+      "de": "VfR Mannheim",
+      "en": "VfR Mannheim",
+      "short": "MAN",
+      "ids": {
+        "espn": [],
+        "openligadb": []
+      },
+      "aliases": []
+    },
+    {
+      "key": "kickers-offenbach",
+      "league": "Regionalliga Südwest",
+      "de": "Kickers Offenbach",
+      "en": "Kickers Offenbach",
+      "short": "OFC",
+      "ids": {
+        "espn": [
+          3811,
+          9864
+        ],
+        "openligadb": [
+          29,
+          3061
+        ]
+      },
+      "aliases": [
+        "Offenbach",
+        "K Offenbach"
+      ]
+    },
+    {
+      "key": "sv-sandhausen",
+      "league": "Regionalliga Südwest",
+      "de": "SV Sandhausen",
+      "en": "SV Sandhausen",
+      "short": "SVS",
+      "ids": {
+        "espn": [
+          6392
+        ],
+        "openligadb": [
+          119
+        ]
+      },
+      "aliases": [
+        "Sandhausen"
+      ]
+    },
+    {
+      "key": "tsv-steinbach-haiger",
+      "league": "Regionalliga Südwest",
+      "de": "TSV Steinbach Haiger",
+      "en": "TSV Steinbach Haiger",
+      "short": "TSV",
+      "ids": {
+        "espn": [
+          19238
+        ],
+        "openligadb": [
+          3067
+        ]
+      },
+      "aliases": [
+        "TSV Steinbach",
+        "Steinbach"
+      ]
+    },
+    {
+      "key": "stuttgarter-kickers",
+      "league": "Regionalliga Südwest",
+      "de": "Stuttgarter Kickers",
+      "en": "Stuttgarter Kickers",
+      "short": "SVK",
+      "ids": {
+        "espn": [
+          7023
+        ],
+        "openligadb": [
+          178
+        ]
+      },
+      "aliases": [
+        "Stuttgarter"
+      ]
+    },
+    {
+      "key": "sv-eintracht-trier-05",
+      "league": "Regionalliga Südwest",
+      "de": "SV Eintracht Trier 05",
+      "en": "Eintracht Trier",
+      "short": "SVE",
+      "ids": {
+        "espn": [
+          7891
+        ],
+        "openligadb": [
+          531,
+          1071,
+          1704,
+          3073
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "ssv-ulm-1846-fussball",
+      "league": "Regionalliga Südwest",
+      "de": "SSV Ulm 1846 Fußball",
+      "en": "SSV Ulm 1846",
+      "short": "ULM",
+      "ids": {
+        "espn": [
+          15710
+        ],
+        "openligadb": [
+          564
+        ]
+      },
+      "aliases": [
+        "SSV Ulm "
+      ]
+    },
+    {
+      "key": "fc-astoria-walldorf",
+      "league": "Regionalliga Südwest",
+      "de": "FC-Astoria Walldorf",
+      "en": "Astoria Walldorf",
+      "short": "FCA",
+      "ids": {
+        "espn": [
+          9543
+        ],
+        "openligadb": [
+          2728,
+          3075
+        ]
+      },
+      "aliases": [
+        "FC Astoria Walldorf"
+      ]
+    },
+    {
+      "key": "spvgg-ansbach-09",
+      "league": "Regionalliga Bayern",
+      "de": "SpVgg Ansbach 09",
+      "en": "SpVgg Ansbach",
+      "short": "ANS",
+      "ids": {
+        "espn": [
+          9653
+        ],
+        "openligadb": [
+          210
+        ]
+      },
+      "aliases": [
+        "SpVgg Ansbac"
+      ]
+    },
+    {
+      "key": "tsv-aubstadt",
+      "league": "Regionalliga Bayern",
+      "de": "TSV Aubstadt",
+      "en": "TSV Aubstadt",
+      "short": "AUB",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          2521
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "fc-augsburg-ii",
+      "league": "Regionalliga Bayern",
+      "de": "FC Augsburg II",
+      "en": "FC Augsburg II",
+      "short": "FCA II",
+      "ids": {
+        "espn": [
+          22170
+        ],
+        "openligadb": [
+          2420
+        ]
+      },
+      "aliases": [
+        "Augsburg II"
+      ]
+    },
+    {
+      "key": "tsv-schwaben-augsburg",
+      "league": "Regionalliga Bayern",
+      "de": "TSV Schwaben Augsburg",
+      "en": "Schwaben Augsburg",
+      "short": "TSV",
+      "ids": {
+        "espn": [],
+        "openligadb": []
+      },
+      "aliases": []
+    },
+    {
+      "key": "spvgg-oberfranken-bayreuth",
+      "league": "Regionalliga Bayern",
+      "de": "SpVgg Oberfranken Bayreuth",
+      "en": "SpVgg Bayreuth",
+      "short": "BAY",
+      "ids": {
+        "espn": [
+          5385
+        ],
+        "openligadb": [
+          385,
+          2953
+        ]
+      },
+      "aliases": [
+        "Bayreuth"
+      ]
+    },
+    {
+      "key": "tsv-buchbach",
+      "league": "Regionalliga Bayern",
+      "de": "TSV Buchbach",
+      "en": "TSV Buchbach",
+      "short": "TSB",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          387
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "sv-wacker-burghausen",
+      "league": "Regionalliga Bayern",
+      "de": "SV Wacker Burghausen",
+      "en": "Wacker Burghausen",
+      "short": "SVW",
+      "ids": {
+        "espn": [
+          3866
+        ],
+        "openligadb": [
+          73
+        ]
+      },
+      "aliases": [
+        "Burghausen"
+      ]
+    },
+    {
+      "key": "vfb-eichstatt",
+      "league": "Regionalliga Bayern",
+      "de": "VfB Eichstätt",
+      "en": "VfB Eichstatt",
+      "short": "VFB",
+      "ids": {
+        "espn": [
+          20022
+        ],
+        "openligadb": [
+          4565
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "sc-eltersdorf",
+      "league": "Regionalliga Bayern",
+      "de": "SC Eltersdorf",
+      "en": "SC Eltersdorf",
+      "short": "SCE",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          2419
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "spvgg-greuther-furth-ii",
+      "league": "Regionalliga Bayern",
+      "de": "SpVgg Greuther Fürth II",
+      "en": "Greuther Furth II",
+      "short": "SGF II",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          2416
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "fv-illertissen",
+      "league": "Regionalliga Bayern",
+      "de": "FV Illertissen",
+      "en": "FV Illertissen",
+      "short": "FVI",
+      "ids": {
+        "espn": [
+          15601
+        ],
+        "openligadb": [
+          2410
+        ]
+      },
+      "aliases": [
+        "Illertissen"
+      ]
+    },
+    {
+      "key": "tsv-landsberg",
+      "league": "Regionalliga Bayern",
+      "de": "TSV Landsberg",
+      "en": "TSV Landsberg",
+      "short": "TSL",
+      "ids": {
+        "espn": [],
+        "openligadb": []
+      },
+      "aliases": []
+    },
+    {
+      "key": "fc-memmingen",
+      "league": "Regionalliga Bayern",
+      "de": "FC Memmingen",
+      "en": "FC Memmingen",
+      "short": "FCM",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          4563
+        ]
+      },
+      "aliases": []
+    },
+    {
+      "key": "tsv-1860-munchen",
+      "league": "Regionalliga Bayern",
+      "de": "TSV 1860 München",
+      "en": "1860 Munich",
+      "short": "M60",
+      "ids": {
+        "espn": [
+          135
+        ],
+        "openligadb": [
+          125
+        ]
+      },
+      "aliases": [
+        "TSV 1860 Munich"
+      ]
+    },
+    {
+      "key": "fc-bayern-munchen-ii",
+      "league": "Regionalliga Bayern",
+      "de": "FC Bayern München II",
+      "en": "Bayern Munich II",
+      "short": "FCB II",
+      "ids": {
+        "espn": [
+          21630
+        ],
+        "openligadb": [
+          179
+        ]
+      },
+      "aliases": [
+        "Bayern II"
+      ]
+    },
+    {
+      "key": "1-fc-nurnberg-ii",
+      "league": "Regionalliga Bayern",
+      "de": "1. FC Nürnberg II",
+      "en": "FC Nuremberg II",
+      "short": "FCN II",
+      "ids": {
+        "espn": [],
+        "openligadb": [
+          2412,
+          2950,
+          5392
+        ]
+      },
+      "aliases": [
+        "1.FC Nürnberg II"
+      ]
+    },
+    {
+      "key": "1-fc-schweinfurt-05",
+      "league": "Regionalliga Bayern",
+      "de": "1. FC Schweinfurt 05",
+      "en": "FC Schweinfurt 05",
+      "short": "FCS",
+      "ids": {
+        "espn": [
+          18745
+        ],
+        "openligadb": [
+          399,
+          2952
+        ]
+      },
+      "aliases": [
+        "Schweinfurt"
+      ]
+    },
+    {
+      "key": "spvgg-unterhaching",
+      "league": "Regionalliga Bayern",
+      "de": "SpVgg Unterhaching",
+      "en": "SpVgg Unterhaching",
+      "short": "UHA",
+      "ids": {
+        "espn": [
+          136
+        ],
+        "openligadb": [
+          116
+        ]
+      },
+      "aliases": [
+        "Unterhaching"
+      ]
+    },
+    {
+      "key": "djk-vilzing",
+      "league": "Regionalliga Bayern",
+      "de": "DJK Vilzing",
+      "en": "DJK Vilzing",
+      "short": "DJK",
+      "ids": {
+        "espn": [],
+        "openligadb": []
+      },
+      "aliases": []
+    }
+  ]
+}

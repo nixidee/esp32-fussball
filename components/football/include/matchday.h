@@ -25,12 +25,16 @@ bool over(uint32_t last_kickoff, int64_t utc, int32_t local_offset_s);
 // Passed (OQ-202, OQ-268): the local day after that date has ended too. The
 // store drops a passed matchday and no view shows it.
 bool passed(uint32_t last_kickoff, int64_t utc, int32_t local_offset_s);
+// Previous/current/next derived date clusters when the provider gives no
+// distinct round sections. Overflow is explicit; no partial window is complete.
+std::size_t retainedDays(const uint32_t* days, std::size_t count, int64_t utc,
+                         uint32_t* out, std::size_t capacity, bool* complete);
 
 // One matchday of a competition: its matches lie in the store index range
 // [begin, end) (kickoff order; matches of other competitions or filtered
 // ones may lie in between).
 struct Span {
-  uint8_t begin = 0, end = 0;
+  MatchIndex begin = 0, end = 0;
   uint32_t first = 0, last = 0;  // first and last kickoff (UTC seconds)
 };
 
@@ -45,11 +49,11 @@ bool next(const MatchStore& store, uint8_t competition, Use use,
     if (m.competition != competition || m.kickoff == 0 || !use(m)) continue;
     if (open && starts(out.last, m.kickoff)) return true;
     if (!open) {
-      out = {static_cast<uint8_t>(i), 0, m.kickoff, 0};
+      out = {static_cast<MatchIndex>(i), 0, m.kickoff, 0};
       open = true;
     }
     out.last = m.kickoff;
-    out.end = static_cast<uint8_t>(i + 1);
+    out.end = static_cast<MatchIndex>(i + 1);
   }
   return open;
 }
@@ -71,14 +75,12 @@ Reach reach(const MatchStore& store, uint8_t competition, Use use,
   Reach out;
   Span span;
   for (std::size_t from = 0;
-       out.count < out.span.size() &&
-       next(store, competition, use, from, span);
+       out.count < out.span.size() && next(store, competition, use, from, span);
        from = span.end) {
     if (passed(span.last, utc, local_offset_s)) continue;
     if (out.selected >= 0 && out.count > out.selected + 1) break;
-    if (out.selected < 0 &&
-        (mode == cfg::MatchdayMode::kCurrent ||
-         !over(span.last, utc, local_offset_s)))
+    if (out.selected < 0 && (mode == cfg::MatchdayMode::kCurrent ||
+                             !over(span.last, utc, local_offset_s)))
       out.selected = static_cast<int8_t>(out.count);
     out.span[out.count++] = span;
   }

@@ -9,6 +9,7 @@
 #include <new>
 #include <string>
 
+#include "../provider_adapter_support.h"
 #include "../test_match_store/recorded.h"
 #include "provider_plan.h"
 #include "store_views.h"
@@ -38,12 +39,12 @@ constexpr auto kProvider = cfg::Provider::kEspn;
 const uint32_t kNow = static_cast<uint32_t>(parseUtc("2026-10-17T12:00:00Z"));
 MatchStore store;
 plan::Planner planner;
-settings::Competitions competitions;
+settings::CompetitionRoutes competitions;
 policy::Policy options;
 policy::Eligibility eligibility;
 settings::ProviderPlans plans;
 
-settings::Competition& entry() { return competitions.entries[0]; }
+settings::CompetitionRoute& entry() { return competitions.entries[0]; }
 Clock now() { return {kNow, 1000}; }
 void refresh() {
   eligibility = policy::eligibility(options, competitions);
@@ -64,7 +65,7 @@ void begin() {
 }
 void row(uint32_t id, const char* status = "STATUS_IN_PROGRESS",
          const char* state = "in", const char* date = "2026-10-17T11:30:00Z",
-         unsigned events = 1, bool own = false) {
+         unsigned events = 1, bool own = false, bool accepted = true) {
   ArduinoJson::JsonDocument doc;
   doc["id"] = id;
   doc["date"] = date;
@@ -93,8 +94,9 @@ void row(uint32_t id, const char* status = "STATUS_IN_PROGRESS",
     e["clock"]["displayValue"] = std::to_string(i + 1) + "'";
     e["athletesInvolved"][0]["displayName"] = "Scorer";
   }
-  TEST_ASSERT_TRUE(plan::Planner::consume(
-      doc.as<ArduinoJson::JsonVariantConst>(), &planner));
+  TEST_ASSERT_EQUAL(
+      accepted, test_support::consume(doc.as<ArduinoJson::JsonVariantConst>(),
+                                      planner, entry().primary));
 }
 const StoredMatch& find(uint32_t id) {
   const auto* m = store.find(1, kProvider, id);
@@ -128,7 +130,7 @@ void setUp() {
   competitions = {};
   options = {};
   plans = settings::Model{}.providers;
-  settings::Competition c;
+  settings::CompetitionRoute c;
   c.id = 1;
   c.incarnation = 1;
   c.primary.provider = kProvider;
@@ -148,7 +150,7 @@ void test_initial_complete_response_keeps_foreign_names_and_events() {
   TEST_ASSERT_TRUE(store.hasDetail(m));
   TEST_ASSERT_TRUE(m.detail >= cfg::kStoreOwnMatches);
   TEST_ASSERT_EQUAL_STRING("Full foreign home name",
-                           view::fullName(store, m, true));
+                           view::teamName(store, m, true));
   TEST_ASSERT_EQUAL_UINT8(1, view::events(store, m).count);
 }
 
@@ -208,13 +210,14 @@ void test_manual_single_requests_exact_foreign_summary_without_own_priority() {
   target.event_match = demand.event_match;
   plan::Request request;
   TEST_ASSERT_TRUE(planner.request(target, entry(), store, now(), request));
-  TEST_ASSERT_NOT_NULL(strstr(request.url, "summary?event=10"));
+  TEST_ASSERT_NOT_NULL(
+      strstr(test_support::http(request).url, "summary?event=10"));
   planner.abort();
 }
 
 void test_special_off_owned_single_keeps_owned_bank_without_special_priority() {
-  entry().primary.team.assign("99");
-  options.competitions[0] = {1, 1, false};
+  entry().club.team = 99;
+  entry().club.own_special = false;
   refresh();
   begin();
   row(10, "STATUS_IN_PROGRESS", "in", "2026-10-17T11:30:00Z", 1, true);
@@ -302,7 +305,8 @@ void test_recorded_scoreboard_row_keeps_first_response_foreign_detail() {
                     1000};
   plan::Request request;
   TEST_ASSERT_TRUE(planner.request(job(), entry(), store, clock, request));
-  TEST_ASSERT_TRUE(plan::Planner::consume(recorded_row, &planner));
+  TEST_ASSERT_TRUE(
+      test_support::consume(recorded_row, planner, entry().primary));
   planner.finish(true, clock);
   const auto& match = find(401884775);
   TEST_ASSERT_FALSE(match.isOwn());
@@ -310,7 +314,7 @@ void test_recorded_scoreboard_row_keeps_first_response_foreign_detail() {
   TEST_ASSERT_EQUAL_UINT8(4, view::events(store, match).count);
   TEST_ASSERT_EQUAL_STRING(
       recorded_row["competitions"][0]["competitors"][0]["team"]["displayName"],
-      view::fullName(store, match, true));
+      view::teamName(store, match, true));
 }
 
 void test_foreign_summary_adds_substitution_with_both_names() {
@@ -327,8 +331,8 @@ void test_foreign_summary_adds_substitution_with_both_names() {
            R"("clock":{"displayValue":"40'"},"participants":[)"
            R"({"athlete":{"displayName":"Coming on"}},)"
            R"({"athlete":{"displayName":"Going off"}}]})"));
-  TEST_ASSERT_TRUE(plan::Planner::consume(
-      doc.as<ArduinoJson::JsonVariantConst>(), &planner));
+  TEST_ASSERT_TRUE(test_support::consume(
+      doc.as<ArduinoJson::JsonVariantConst>(), planner, entry().primary));
   planner.finish(true, now());
   const auto events = view::events(store, find(10));
   TEST_ASSERT_EQUAL_UINT8(2, events.count);
@@ -377,7 +381,7 @@ namespace {
 void checkSelectedSummaryCompletion(bool own, bool past_deadline) {
   store.clear();
   planner.reset();
-  entry().primary.team.assign(own ? "99" : "");
+  entry().club.team = own ? 99 : 0;
   refresh();
   auto& source = plans[static_cast<unsigned>(kProvider)];
   source.limit = {};
@@ -389,9 +393,8 @@ void checkSelectedSummaryCompletion(bool own, bool past_deadline) {
   m.kickoff = kNow - 60;
   m.phase = Phase::kLive;
   if (own) m.flags = kMatchOwn;
-  TEST_ASSERT_NOT_NULL(store.upsert(m, now(), "Home name", "Away name"));
-  TEST_ASSERT_TRUE(store.ensureDetail(entry().id, kProvider, m.id, now(),
-                                      "Home name", "Away name"));
+  TEST_ASSERT_NOT_NULL(store.upsert(m, now()));
+  TEST_ASSERT_TRUE(store.ensureDetail(entry().id, kProvider, m.id, now()));
 
   const auto inputAt = [&](uint32_t dt) {
     const Clock clock{kNow + dt, 1000 + dt};
@@ -419,7 +422,7 @@ void checkSelectedSummaryCompletion(bool own, bool past_deadline) {
     TEST_ASSERT_EQUAL_STRING(
         "https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/"
         "summary?event=401892555",
-        request.url);
+        test_support::http(request).url);
     planner.abort();
     scheduler.sent(decision.job.provider, input.clock.mono_s);
     scheduler.finished(decision.job, schedule::Outcome::kOk,
@@ -465,7 +468,8 @@ void test_planner_rejects_a_summary_job_for_a_different_selected_match() {
   selected_job.event_match = demand.event_match;
   TEST_ASSERT_TRUE(
       planner.request(selected_job, entry(), store, now(), request));
-  TEST_ASSERT_NOT_NULL(std::strstr(request.url, "summary?event=10"));
+  TEST_ASSERT_NOT_NULL(
+      std::strstr(test_support::http(request).url, "summary?event=10"));
   planner.abort();
 }
 
@@ -501,7 +505,7 @@ void test_proven_break_uses_its_own_manual_eligibility_profile() {
 void test_protected_own_rows_can_evict_live_candidate_without_losing_buffer_events() {
   // Only two foreign rows fit. A subsequent own row evicts the farther live
   // row, leaving the earlier buffer as the final unique ordinary Single.
-  entry().primary.team.assign("99");
+  entry().club.team = 99;
   refresh();
   for (unsigned i = 0; i < cfg::kStoreMatches - 2; ++i) {
     StoredMatch own;
@@ -522,10 +526,14 @@ void test_protected_own_rows_can_evict_live_candidate_without_losing_buffer_even
   TEST_ASSERT_TRUE(store.hasDetail(find(10)));
   TEST_ASSERT_EQUAL_UINT8(1, view::events(store, find(10)).count);
   TEST_ASSERT_EQUAL_STRING("Full foreign home name",
-                           view::fullName(store, find(10), true));
+                           view::teamName(store, find(10), true));
 }
 
 void test_rejected_row_never_appends_its_events_to_the_previous_candidate() {
+  begin();
+  row(10, "STATUS_IN_PROGRESS", "in", "2026-10-17T11:45:00Z", 1);
+  planner.finish(true, now());
+  TEST_ASSERT_TRUE(store.hasDetail(find(10)));
   for (unsigned i = 0; i < cfg::kStoreMatches - 1; ++i) {
     StoredMatch own;
     own.competition = 2;
@@ -538,20 +546,21 @@ void test_rejected_row_never_appends_its_events_to_the_previous_candidate() {
   }
   begin();
   row(10, "STATUS_IN_PROGRESS", "in", "2026-10-17T11:45:00Z", 1);
-  row(20, "STATUS_IN_PROGRESS", "in", "2026-10-17T11:00:00Z", 3);
-  planner.finish(true, now());
+  row(20, "STATUS_IN_PROGRESS", "in", "2026-10-17T11:00:00Z", 3, false, false);
+  TEST_ASSERT_EQUAL(provider::Status::kTooLarge, planner.responseFailure());
+  planner.finish(false, now());
   TEST_ASSERT_NULL(store.find(1, kProvider, 20));
   TEST_ASSERT_TRUE(store.hasDetail(find(10)));
   TEST_ASSERT_EQUAL_UINT8(1, view::events(store, find(10)).count);
 }
 
-void test_shared_olg_filter_skips_legitimate_other_competitions_and_seasons() {
+void test_olg_discovery_filters_other_competitions_and_explicit_seasons() {
   entry().primary.provider = cfg::Provider::kOpenLigaDb;
   entry().primary.competition.assign("bl1");
-  entry().primary.team.assign("40");
+  entry().club.team = 40;
   entry().primary.season.assign("2026");
   refresh();
-  auto fixtures = job(cfg::DataType::kFixtures);
+  auto fixtures = job(cfg::DataType::kLive);
   fixtures.provider = cfg::Provider::kOpenLigaDb;
   plan::Request request;
   TEST_ASSERT_TRUE(planner.request(fixtures, entry(), store, now(), request));
@@ -559,36 +568,32 @@ void test_shared_olg_filter_skips_legitimate_other_competitions_and_seasons() {
   TEST_ASSERT_FALSE(deserializeJson(
       doc, R"({"matchID":10,"leagueShortcut":"bl1","leagueSeason":2026,)"
            R"("group":{"groupOrderID":6}})"));
-  TEST_ASSERT_TRUE(
-      planner.acceptsMatch(doc.as<ArduinoJson::JsonVariantConst>()));
-  TEST_ASSERT_TRUE(plan::Planner::consume(
-      doc.as<ArduinoJson::JsonVariantConst>(), &planner));
-  planner.finish(true, now());
-  TEST_ASSERT_TRUE(planner.request(fixtures, entry(), store, now(), request));
-  planner.finish(true, now());
-  TEST_ASSERT_TRUE(planner.request(fixtures, entry(), store, now(), request));
-  TEST_ASSERT_NOT_NULL(strstr(request.url, "getmatchesbyteamid"));
+  TEST_ASSERT_TRUE(test_support::accepts(
+      doc.as<ArduinoJson::JsonVariantConst>(), planner, entry().primary));
+  TEST_ASSERT_TRUE(test_support::consume(
+      doc.as<ArduinoJson::JsonVariantConst>(), planner, entry().primary));
+  TEST_ASSERT_EQUAL(provider::Operation::kCurrentRound, request.spec.operation);
   doc["matchID"] = 20;
   doc["leagueShortcut"] = "dfb";
-  TEST_ASSERT_FALSE(
-      planner.acceptsMatch(doc.as<ArduinoJson::JsonVariantConst>()));
-  TEST_ASSERT_TRUE(plan::Planner::consume(
-      doc.as<ArduinoJson::JsonVariantConst>(), &planner));
+  TEST_ASSERT_FALSE(test_support::accepts(
+      doc.as<ArduinoJson::JsonVariantConst>(), planner, entry().primary));
+  TEST_ASSERT_TRUE(test_support::consume(
+      doc.as<ArduinoJson::JsonVariantConst>(), planner, entry().primary));
   TEST_ASSERT_NULL(store.find(1, cfg::Provider::kOpenLigaDb, 20));
   doc["matchID"] = 30;
   doc["leagueShortcut"] = "BL1";
   doc["leagueSeason"] = 2025;
-  TEST_ASSERT_FALSE(
-      planner.acceptsMatch(doc.as<ArduinoJson::JsonVariantConst>()));
-  TEST_ASSERT_TRUE(plan::Planner::consume(
-      doc.as<ArduinoJson::JsonVariantConst>(), &planner));
+  TEST_ASSERT_FALSE(test_support::accepts(
+      doc.as<ArduinoJson::JsonVariantConst>(), planner, entry().primary));
+  TEST_ASSERT_TRUE(test_support::consume(
+      doc.as<ArduinoJson::JsonVariantConst>(), planner, entry().primary));
   TEST_ASSERT_NULL(store.find(1, cfg::Provider::kOpenLigaDb, 30));
   doc["matchID"] = 40;
   doc["leagueSeason"] = 2026;
-  TEST_ASSERT_TRUE(
-      planner.acceptsMatch(doc.as<ArduinoJson::JsonVariantConst>()));
-  TEST_ASSERT_TRUE(plan::Planner::consume(
-      doc.as<ArduinoJson::JsonVariantConst>(), &planner));
+  TEST_ASSERT_TRUE(test_support::accepts(
+      doc.as<ArduinoJson::JsonVariantConst>(), planner, entry().primary));
+  TEST_ASSERT_TRUE(test_support::consume(
+      doc.as<ArduinoJson::JsonVariantConst>(), planner, entry().primary));
   TEST_ASSERT_NOT_NULL(store.find(1, cfg::Provider::kOpenLigaDb, 40));
   planner.finish(true, now());
 }
@@ -661,8 +666,7 @@ int main() {
       test_protected_own_rows_can_evict_live_candidate_without_losing_buffer_events);
   RUN_TEST(
       test_rejected_row_never_appends_its_events_to_the_previous_candidate);
-  RUN_TEST(
-      test_shared_olg_filter_skips_legitimate_other_competitions_and_seasons);
+  RUN_TEST(test_olg_discovery_filters_other_competitions_and_explicit_seasons);
   RUN_TEST(
       test_event_payload_begins_with_first_body_row_after_first_send_admission);
   RUN_TEST(

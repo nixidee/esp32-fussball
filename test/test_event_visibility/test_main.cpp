@@ -15,7 +15,7 @@ StoredMatch& row(uint32_t id) {
   match.flags = kMatchOwn;
   match.phase = Phase::kLive;
   match.kickoff = kClock.utc - 1800;
-  auto* result = store.upsert(match, kClock, "Home", "Away");
+  auto* result = store.upsert(match, kClock);
   TEST_ASSERT_NOT_NULL(result);
   return *result;
 }
@@ -23,7 +23,6 @@ void add(unsigned count, uint32_t first) {
   for (unsigned i = 0; i < count; ++i) {
     StoredEvent event;
     event.identity = first + i;
-    event.revision = event.identity;
     event.minute = i + 1;
     event.player.assign("Scorer");
     store.addEvent(event);

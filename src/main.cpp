@@ -23,7 +23,6 @@
 #include "freertos/task.h"
 #include "health_service.h"
 #include "hw_target.h"
-#include "image_service.h"
 #include "network_service.h"
 #include "ota_service.h"
 #include "safe_area.h"
@@ -36,11 +35,6 @@
 namespace {
 
 constexpr const char* kTag = "boot";
-
-// Profile input levels feed semantic policy; changes also retain boot logging.
-constexpr uint32_t kInputPollMs = cfg::kAppPollMs;
-// Time for LVGL to render the boot screen before its memory use is logged.
-constexpr uint32_t kFirstRenderWaitMs = 200;
 
 void logHeap(const char* when) {
   // Internal 8-bit capable heap: the budget that matters on boards without
@@ -180,7 +174,7 @@ void logInputChanges(InputStates& active) {
 // Set in the event bus task, consumed by the application loop.
 std::atomic<bool> settings_changed{false};
 
-void onSettingsChanged(events::Event, events::Payload, void*) {
+void onSettingsChanged(events::Event, void*) {
   settings_changed.store(true, std::memory_order_release);
 }
 
@@ -193,16 +187,14 @@ void runDiagnosticLoop() {
   // Subscribe before the first read so that no change is missed.
   ESP_ERROR_CHECK(events::subscribe(events::Event::kSettingsChanged,
                                     onSettingsChanged, nullptr));
-  timekeeping::applySettings();
-  // Legacy image files and dead image references are removed once, outside
-  // the OTA trial, so a rollback still finds the previous firmware's files.
-  bool images_maintained = false;
+  timekeeping::configureZone(settings::clockZone());
   while (true) {
-    vTaskDelay(pdMS_TO_TICKS(kInputPollMs));
+    vTaskDelay(pdMS_TO_TICKS(cfg::kAppPollMs));
     logInputChanges(active);
     if (settings_changed.exchange(false, std::memory_order_acq_rel)) {
-      timekeeping::applySettings();
-      health::applySettings();
+      timekeeping::configureZone(settings::clockZone());
+      const auto diagnostic = settings::diagnosticSettings();
+      health::configureConsole(diagnostic.enabled, diagnostic.interval_s);
       network::applySettings();
       // No football::refresh(): the provider worker applies the new data
       // generation itself and starts only the changed competitions afresh.
@@ -210,9 +202,9 @@ void runDiagnosticLoop() {
     health::poll();
     timekeeping::poll();
     network::poll();
+    web::poll();
     ui::poll();
-    ota::poll(network::healthy() && web::healthy() && ui::healthy());
-    if (!images_maintained) images_maintained = images::maintain();
+    ota::poll(ui::healthy());
   }
 }
 
@@ -238,7 +230,7 @@ extern "C" void app_main() {
   files::runDeviceTest();
   logHeap("after file service init");
 
-  timekeeping::init();
+  timekeeping::init(settings::clockZone());
   timekeeping::runDeviceTest();
   logHeap("after time service init");
 
@@ -250,7 +242,7 @@ extern "C" void app_main() {
                                   hw::kTarget.wiring.backlight != hw::kNoPin))
       ESP_LOGE(kTag,
                "start screen failed: lock timeout or content did not fit");
-    vTaskDelay(pdMS_TO_TICKS(kFirstRenderWaitMs));
+    vTaskDelay(pdMS_TO_TICKS(cfg::kFirstRenderWaitMs));
     display::logMemory();
   } else {
     ESP_LOGE(kTag, "display not started (%s), running headless",
@@ -258,7 +250,8 @@ extern "C" void app_main() {
   }
   logHeap("after display init");
 
-  health::init();
+  const auto diagnostic = settings::diagnosticSettings();
+  health::init(diagnostic.enabled, diagnostic.interval_s);
   health::runDeviceTest();
   ESP_ERROR_CHECK(health::startLoopWatchdog());
   const auto network_error = network::init();
@@ -270,8 +263,9 @@ extern "C" void app_main() {
   const auto web_error = web::init();
   if (web_error != ESP_OK)
     ESP_LOGE(kTag, "Web init: %s", esp_err_to_name(web_error));
-  ota::startupHealth(network_error == ESP_OK && web_error == ESP_OK &&
-                     err == ESP_OK && files::state() == files::State::kMounted);
+  // Network/Web, clock synchronization and storage availability may recover
+  // independently. Trial validity tests the local display and live app loop.
+  ota::startupHealth(err == ESP_OK);
 
   runDiagnosticLoop();
 }

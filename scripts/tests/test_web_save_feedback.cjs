@@ -1,80 +1,325 @@
 'use strict';
-// Production Web script with supplied real-codec DTO fixtures and in-memory HTTP.
-// Usage: node scripts/tests/test_web_save_feedback.cjs fixtures.json [result.json]
-// No server, target allocator, device or browser acceptance is implied.
-const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict'),crypto=require('node:crypto');
-assert(process.argv[2],'Supply the current settings/schema/competition/policy codec fixture JSON');
-const root=path.resolve(__dirname,'../..'),html=fs.readFileSync(path.join(root,'web/index.html'),'utf8'),fixtureBytes=fs.readFileSync(process.argv[2]),fixture=JSON.parse(fixtureBytes),script=html.match(/<script>([\s\S]*?)<\/script>/)[1],boundary=script.lastIndexOf("\nsetInterval(()=>load('status',false),5000)");assert(boundary>0);
-const copy=x=>JSON.parse(JSON.stringify(x)),elements=new Map(),events={},delays=[];
-function element(id){if(!elements.has(id)){let markup='',text='';elements.set(id,{id,get innerHTML(){return markup},set innerHTML(v){markup=v;text=v.replace(/<[^>]*>/g,'')},get textContent(){return text},set textContent(v){text=v;markup=v},value:'',dataset:{},style:{},attributes:{},hidden:false,disabled:false,classList:{toggle(){}},querySelector(selector){return element(id+' '+selector)},querySelectorAll(){return[]},remove(){},firstElementChild:{style:{}},close(){this.open=false},showModal(){this.open=true},focus(){},setAttribute(k,v){this.attributes[k]=v},isConnected:true});}return elements.get(id);}
-let backend,calls,mode,failed,policyReads,readBlock;
-function response(status,data){return{ok:status>=200&&status<300,status,json:async()=>copy(data)}}
-function reject(call,code='busy',status=409){call.status=status;call.code=code;failed=true;return response(status,{code,error:'synthetic '+code})}
-async function fetchApi(url,options){const endpoint=url.split('/api/v1/')[1],method=options.method||'GET',body=options.body===undefined?undefined:JSON.parse(options.body),call={endpoint,method,status:200};calls.push(call);
- if(method==='GET'){
-  if(endpoint==='screen-settings'){
-   if(backend.acks.policy)policyReads++;
-   if(mode==='foreign-final-read'&&policyReads===3){backend.policy.frame_crest=!backend.policy.frame_crest;backend.generation++;}
-   const afterGeneral=backend.acks.settings>0,afterPolicy=backend.acks.policy>0;
-   if(!failed&&(mode==='preflight'||mode==='general-after-ack'&&afterGeneral||mode==='policy-after-ack'&&afterPolicy||mode==='final-read'&&afterPolicy&&policyReads===3))return reject(call);
-   if(mode==='read-always-busy'||mode==='partial-read-busy'&&afterGeneral||mode==='policy-read-busy'&&afterPolicy||mode==='final-read-busy'&&afterPolicy&&(readBlock||policyReads===3)){
-    if(mode==='final-read-busy')readBlock=true;return reject(call);
-   }
-   if(mode==='read-memory'&&afterPolicy)return reject(call,'memory',503);
-   return response(200,{...backend.policy,generation:backend.generation});
+// Actual current client, events and C++ schema/config fixture. Atomic Apply
+// replaces retired per-record partial-write expectations; correlated response
+// loss, read-only retries, imports and accessible feedback remain covered.
+const fs = require('node:fs'), assert = require('node:assert/strict'),
+      {harness} = require('./web_config_harness.cjs');
+let h, U, element, results = [];
+const copy = x => JSON.parse(JSON.stringify(x)),
+      dirty = () => copy(U.changes()).map(c => c.path);
+function style(severity) {
+  if (severity === 'info') {
+    assert.equal(element('toast').className, 'toast');
+    assert.equal(element('toast').attributes.role, 'status');
+    assert.match(element('toast').innerHTML, /aria-hidden="true"/);
+    assert.match(element('toast').textContent, /Bestätigung:/);
+    return;
   }
-  if(endpoint==='settings')return response(200,backend.settings);
-  if(endpoint==='competitions')return response(200,{competitions:backend.competitions});
-  if(endpoint==='session'){
-   if(mode==='session-error')return reject(call,'internal',503);
-   return response(200,{valid:mode!=='session-expired',password_set:mode==='session-expired'});
-  }
-  throw Error('Unhandled GET '+endpoint);
- }
- assert.equal(method,'PUT','Read retry or verification sent a non-PUT mutation');assert(!JSON.stringify(body).includes('_screenKey'));
- if(endpoint==='screen-settings'&&['before-put','partial-general-policy-put'].includes(mode))return reject(call);
- if(endpoint==='teams'&&mode==='import-teams-failure')return reject(call,'internal',503);
- if(endpoint==='settings'){
-  Object.assign(backend.settings,copy(body));backend.acks.settings++;backend.generation=(backend.generation+1)>>>0;
-  if(mode==='foreign-after-general'){backend.policy.frame_crest=!backend.policy.frame_crest;backend.generation++;}
-  if(mode==='unconfirmed-settings')throw Error('Lost acknowledgement');
- }else if(endpoint==='competitions'){
-  backend.competitions=body.competitions.map((c,i)=>({...copy(c),id:c.id||200+i,incarnation:c.id?c.incarnation:900+i}));backend.acks.competitions++;backend.generation=(backend.generation+1)>>>0;
-  if(mode==='bad-receipt')return response(200,{competitions:backend.competitions.map(c=>({...c,incarnation:0}))});
-  return response(200,{competitions:backend.competitions});
- }else if(endpoint==='screen-settings'){
-  assert.equal(body.generation,backend.generation);backend.policy=copy(body);backend.acks.policy++;backend.generation=(backend.generation+1)>>>0;
- }else if(endpoint==='teams'){backend.names=copy(body.short_names);backend.acks.names++;}
- else throw Error('Unhandled write '+endpoint);
- return response(200,{ok:true});
+  assert.equal(U.S.saveNotice.severity, severity);
+  const html = element('savebarIn').innerHTML;
+  assert(html.includes('notice ' + (severity === 'warning' ? 'warn' : 'err')));
+  assert(html.includes(
+      'role="' + (severity === 'error' ? 'alert' : 'status') + '"'));
+  assert.match(html, /aria-hidden="true"/);
+  assert.match(html, severity === 'warning' ? /Warnung:/ : /Fehler:/);
+  assert.equal(element('toast').innerHTML, '');
 }
-const context={console,TextEncoder,TextDecoder,Blob,AbortController,Uint8Array,DataView,ArrayBuffer,Map,Set,Date,Promise,Math,JSON,Number,String,Object,Error,Array,RegExp,structuredClone,scrollY:0,scrollTo(){},setTimeout(fn,ms){delays.push(ms);const timer=setTimeout(fn,ms<1000?0:ms);if(ms>=1000)timer.unref();return timer},clearTimeout,document:{getElementById:element,querySelectorAll(){return[]},querySelector(){return null},addEventListener(name,fn){events[name]=fn},documentElement:{dataset:{}},createElement(type){return element('new-'+type)}},URL,localStorage:{getItem(){return'auto'},setItem(){}},location:{host:'fixture.local',hostname:'fixture.local',protocol:'http:',assign(){}},window:{addEventListener(){}},fetch:fetchApi,confirm:()=>true};
-vm.createContext(context);vm.runInContext(script.slice(0,boundary)+'\nglobalThis.UI={S,W,ACT,changes,save,writeModel,readModel,fresh,validate,renderBar,bindSystem,refreshSave,toast};render=()=>renderBar();renderHeader=()=>{};paintErrors=()=>{};',context,{filename:'web/index.html'});const U=context.UI;
-function reset(which='success'){mode=which;failed=false;policyReads=0;readBlock=false;calls=[];delays.length=0;elements.clear();backend={settings:copy(fixture.settings),competitions:copy(fixture.competitions.competitions),policy:copy(fixture['screen-settings']),generation:fixture['screen-settings'].generation,acks:{settings:0,competitions:0,policy:0,names:0},names:[]};Object.assign(U.S,{schema:copy(fixture.schema),status:{settings_source:'stored',competitions_source:'stored',screen_policy_source:'stored'},images:{items:[],used:0},session:{valid:true,password_set:false},token:'synthetic',page:'display',saving:false});U.fresh({...copy(backend.settings),competitions:copy(backend.competitions),screen_policy:copy(backend.policy)});}
-async function click(action='save'){const button={dataset:{act:action},disabled:false,isConnected:true,closest(selector){return selector==='[data-act]'?this:null}};await events.click({target:button,preventDefault(){}})}
-const dirty=()=>copy(U.changes()).map(c=>c.path),writes=()=>calls.filter(c=>c.method==='PUT'),policyEdit=()=>U.S.draft.screen_policy.frame=!U.S.draft.screen_policy.frame;
-function assertStyle(severity){if(severity==='info'){assert.equal(element('toast').className,'toast');assert.equal(element('toast').attributes.role,'status');assert.match(element('toast').innerHTML,/aria-hidden="true"/);assert.match(element('toast').textContent,/Bestätigung:/);return;}assert.equal(U.S.saveNotice.severity,severity);const html=element('savebarIn').innerHTML;assert(html.includes('notice '+(severity==='warning'?'warn':'err')));assert(html.includes('role="'+(severity==='error'?'alert':'status')+'"'));assert.match(html,/aria-hidden="true"/);assert.match(html,severity==='warning'?/Warnung:/:/Fehler:/);assert.equal(element('toast').innerHTML,'','Persistent save feedback must not be obscured by a duplicate toast')}
-const results=[];
-async function test(name,fn){reset();await fn();results.push({name,passed:true,acks:copy(backend.acks),dirty:dirty(),notice:copy(U.S.saveNotice||null),requests:copy(calls)});console.log('PASS '+name)}
-async function importBackup(){const backup={night_brightness:20,screen_policy:copy(backend.policy),competitions:copy(backend.competitions),short_names:[{provider:0,id:40,name:'FCB'}]};backup.screen_policy.frame=true;const text=JSON.stringify(backup);U.bindSystem();await element('importFile').onchange({target:{value:'fixture',files:[{size:Buffer.byteLength(text),text:async()=>text}]}});assert.equal(writes().length,0);const confirm=element('dialog [data-act=confirm]');assert.equal(typeof confirm.onclick,'function');await confirm.onclick({target:confirm});}
-(async()=>{
- for(const which of['general-after-ack','policy-after-ack','final-read','preflight'])await test(which+' retries only the busy read and confirms once',async()=>{mode=which;if(which==='general-after-ack')U.S.draft.night_brightness=20;else policyEdit();await click();assertStyle('info');assert.equal(writes().length,1);assert.equal(dirty().length,0);assert.equal(U.S.saveNotice,null);assert(delays.includes(250));});
- await test('before-put stays red and retains the entire draft',async()=>{mode='before-put';policyEdit();await click();assertStyle('error');assert.equal(backend.acks.policy,0);assert.deepEqual(dirty(),['screen_policy.frame']);assert.equal(writes().length,1);assert.equal(element('savebar').hidden,false)});
- await test('partial general/policy PUT failure acknowledges only the general record',async()=>{mode='partial-general-policy-put';U.S.draft.night_brightness=20;policyEdit();await click();assertStyle('error');assert.equal(backend.acks.settings,1);assert.equal(backend.acks.policy,0);assert.deepEqual(dirty(),['screen_policy.frame']);assert.match(U.S.saveNotice.message,/Ein Teil wurde gespeichert/)});
- await test('healthy save is a neutral confirmation',async()=>{policyEdit();await click();assertStyle('info');assert.equal(element('savebar').hidden,true);assert.equal(writes().length,1)});
- await test('exhausted post-ack read stays amber with a persistent read-only action',async()=>{mode='policy-read-busy';policyEdit();await click();assertStyle('warning');assert.equal(backend.acks.policy,1);assert.equal(dirty().length,0);assert.equal(element('savebar').hidden,false);assert(element('savebarIn').innerHTML.includes('data-act="saveRefresh"'));assert(!element('savebarIn').innerHTML.includes('data-act="save"'));assert.equal(calls.filter(c=>c.code==='busy').length,3);assert.deepEqual(delays.filter(x=>x<1000),[250,500]);assert.equal(writes().length,1)});
- await test('read-only refresh preserves edits made after acknowledgement',async()=>{mode='policy-read-busy';policyEdit();await click();U.S.draft.night_brightness=21;mode='success';const before=writes().length;await click('saveRefresh');assert.equal(writes().length,before);assert.equal(U.S.draft.night_brightness,21);assert.deepEqual(dirty(),['night_brightness']);assert.equal(U.S.saveNotice,null);assertStyle('info')});
- await test('persistent preflight busy stays red and sends no write',async()=>{mode='read-always-busy';policyEdit();await click();assertStyle('error');assert.equal(writes().length,0);assert.equal(calls.length,3);assert.deepEqual(dirty(),['screen_policy.frame'])});
- await test('partial post-ack read warning leaves the uncommitted policy for a later save',async()=>{mode='partial-read-busy';U.S.draft.night_brightness=20;policyEdit();await click();assertStyle('warning');assert.deepEqual(dirty(),['screen_policy.frame']);assert.equal(backend.acks.settings,1);assert.equal(backend.acks.policy,0);assert.match(U.S.saveNotice.message,/Ein Teil wurde gespeichert/);mode='success';await click('saveRefresh');assert.equal(writes().length,1);await click();assert.equal(backend.acks.settings,1);assert.equal(backend.acks.policy,1);assert.equal(dirty().length,0)});
- await test('non-busy read errors remain red without retry',async()=>{mode='read-memory';policyEdit();await click();assertStyle('error');assert.equal(calls.filter(c=>c.code==='memory').length,1);assert.equal(backend.acks.policy,1);assert.match(U.S.saveNotice.message,/Speicherbestätigungen/)});
- for(const which of['session-error','session-expired'])await test(which+' remains actionable after confirmed writes',async()=>{mode=which;policyEdit();await click();assertStyle('error');assert.equal(backend.acks.policy,1);assert.equal(dirty().length,0);assert.equal(element('savebar').hidden,false);assert.equal(writes().length,1)});
- await test('foreign policy after own general acknowledgement still blocks policy PUT',async()=>{mode='foreign-after-general';U.S.draft.night_brightness=20;policyEdit();await click();assertStyle('error');assert.equal(backend.acks.settings,1);assert.equal(backend.acks.policy,0);assert.match(U.S.server.message,/WEB S01/);assert.deepEqual(dirty(),['screen_policy.frame'])});
- await test('malformed competition identity receipt is not accepted or followed by policy PUT',async()=>{mode='bad-receipt';U.S.draft.competitions[0].team_name='Edited team';await click();assertStyle('error');assert.equal(backend.acks.competitions,1);assert.equal(U.S.saved.competitions[0].team_name,fixture.competitions.competitions[0].team_name);assert(dirty().some(x=>x.startsWith('competitions')));assert.equal(backend.acks.policy,0)});
- await test('foreign final readback is rejected rather than replacing the policy baseline',async()=>{mode='foreign-final-read';const expected=U.S.saved.screen_policy.frame_crest;policyEdit();await click();assertStyle('error');assert.equal(backend.acks.policy,1);assert.equal(U.S.saved.screen_policy.frame_crest,expected);assert.match(U.S.server.message,/WEB S01/)});
- await test('lost write acknowledgement stays red and is never automatically repeated',async()=>{mode='unconfirmed-settings';U.S.draft.night_brightness=20;await click();assertStyle('error');assert.equal(backend.acks.settings,1);assert.equal(writes().length,1);assert.deepEqual(dirty(),['night_brightness']);assert.match(U.S.saveNotice.message,/nicht bestätigt/)});
- await test('partial import leaves only uncommitted names and closes its confirmation',async()=>{mode='import-teams-failure';await importBackup();assertStyle('error');assert.deepEqual(dirty(),['short_names']);assert.equal(element('dialog').open,false);assert.deepEqual(copy(U.S.pendingNames),[{provider:0,id:40,name:'FCB'}]);const accepted=copy(backend.acks);mode='success';await click();assert.equal(backend.acks.settings,accepted.settings);assert.equal(backend.acks.competitions,accepted.competitions);assert.equal(backend.acks.policy,accepted.policy);assert.equal(backend.acks.names,1);assert.equal(dirty().length,0)});
- await test('completed import with pending readback stays amber and refresh sends only GET',async()=>{mode='final-read-busy';await importBackup();assertStyle('warning');assert.equal(backend.acks.names,1);assert.equal(dirty().length,0);assert.equal(element('dialog').open,false);const count=writes().length;mode='success';await click('saveRefresh');assert.equal(writes().length,count);assertStyle('info');assert.equal(U.S.saveNotice,null)});
- await test('blocked import retains all pending parts and names with no acknowledgement',async()=>{mode='read-always-busy';await importBackup();assertStyle('error');assert.equal(writes().length,0);assert(dirty().includes('short_names'));assert(dirty().includes('night_brightness'));assert(dirty().includes('screen_policy.frame'));assert.equal(element('dialog').open,false)});
- await test('severity is conveyed by text icon role and translated labels',()=>{for(const [severity,word]of[['error','Error'],['warning','Warning'],['info','Confirmation']]){U.S.draft.language=1;U.toast('Example',severity);assert.match(element('toast').innerHTML,/aria-hidden="true"/);assert(element('toast').textContent.includes(word+':'));assert.equal(element('toast').attributes.role,severity==='error'?'alert':'status')}for(const key of['Status erneut prüfen','Gespeichert. Die Nachprüfung ist noch offen. Status erneut prüfen; Speichern muss nicht wiederholt werden.','Ein Teil wurde gespeichert. Die Nachprüfung ist noch offen; übrige Änderungen bleiben im Entwurf.'])assert(U.W[key],key)});
- const summary={scope:'Production script, supplied current-codec fixture, synthetic in-memory HTTP; no browser/device/resource acceptance',source_sha256:crypto.createHash('sha256').update(html).digest('hex'),fixture_sha256:crypto.createHash('sha256').update(fixtureBytes).digest('hex'),passed:results.length,results};if(process.argv[3])fs.writeFileSync(process.argv[3],JSON.stringify(summary,null,2)+'\n');console.log(results.length+' focused save feedback cases passed');
-})().catch(error=>{console.error(error);process.exitCode=1});
+async function test(name, run) {
+  h = harness(process.argv[2]);
+  ({U, element} = h);
+  await run();
+  results.push({name, passed: true, requests: copy(h.calls), dirty: dirty()});
+  console.log('PASS ' + name);
+}
+const edit = () => {
+  U.S.draft.screen_policy.frame = true;
+};
+async function importDraft() {
+  const backup = {
+    version: h.data.schema.config_version,
+    desired: copy(h.state.config.desired),
+    adopted_names: {
+      format: h.data.schema.names_format,
+      version: h.data.schema.names_source_version,
+      clubs: [{
+        key: 'club',
+        de: 'FC Bayern',
+        en: 'Bayern',
+        short: 'FCB',
+        league: 'league',
+        ids: {espn: [40]},
+        aliases: ['original']
+      }],
+      exceptions: [{provider: 2, id: 40, name: ''}]
+    }
+  };
+  backup.desired.settings.night_brightness = 20;
+  backup.desired.screens.frame = true;
+  const text = JSON.stringify(backup);
+  U.bindSystem();
+  await element('importFile').onchange({
+    target: {
+      value: 'fixture',
+      files: [{size: Buffer.byteLength(text), text: async () => text}]
+    }
+  });
+  const confirm = element('dialog [data-act=confirm]');
+  assert.equal(typeof confirm.onclick, 'function');
+  await confirm.onclick({target: confirm});
+  return backup;
+}
+(async () => {
+  await test(
+      'healthy atomic save gives a neutral confirmation and clears all changes',
+      async () => {
+        edit();
+        await h.click();
+        style('info');
+        assert.equal(h.state.writes, 1);
+        assert.equal(dirty().length, 0);
+        assert.deepEqual(copy(U.validate(U.S.draft)), []);
+        assert.equal(U.S.pendingApply, null);
+        assert.equal(element('savebar').hidden, true);
+      });
+  await test(
+      'acknowledged write retries only busy verification GETs', async () => {
+        h.state.mode = 'busy-after';
+        edit();
+        await h.click();
+        style('warning');
+        assert.equal(h.state.writes, 1);
+        assert.equal(dirty().length, 0);
+        assert(U.S.pendingApply.accepted);
+        assert.equal(h.calls.filter(c => c.code === 'busy').length, 3);
+        assert.deepEqual(h.delays.filter(x => x < 1000), [250, 500]);
+        assert(
+            element('savebarIn').innerHTML.includes('data-act="saveRefresh"'));
+        assert(!element('savebarIn').innerHTML.includes('data-act="save"'));
+      });
+  await test(
+      'read-only refresh preserves edits made after acknowledgement',
+      async () => {
+        h.state.mode = 'busy-after';
+        edit();
+        await h.click();
+        U.S.draft.night_brightness = 21;
+        h.state.mode = 'ok';
+        await h.click('saveRefresh');
+        assert.equal(h.state.writes, 1);
+        assert.equal(U.S.draft.night_brightness, 21);
+        assert.deepEqual(dirty(), ['night_brightness']);
+        assert.equal(U.S.saveNotice, null);
+        style('info');
+      });
+  await test(
+      'busy once during verification retries GET then confirms once',
+      async () => {
+        edit();
+        h.state.mode = 'busy-once';
+        await h.click();
+        style('info');
+        assert.equal(h.state.writes, 1);
+        assert.equal(h.calls.filter(c => c.code === 'busy').length, 1);
+        assert(h.delays.includes(250));
+      });
+  await test(
+      'explicit rejection remains red and preserves every draft section',
+      async () => {
+        h.state.mode = 'reject';
+        edit();
+        U.S.draft.night_brightness = 20;
+        U.S.draft.competitions.push(h.entry());
+        const before = copy(h.state.config);
+        await h.click();
+        style('error');
+        assert.equal(h.state.writes, 1);
+        assert.deepEqual(h.state.config, before);
+        for (const field
+                 of ['night_brightness', 'competitions', 'screen_policy.frame'])
+          assert(dirty().includes(field));
+        assert.equal(U.S.pendingApply, null);
+      });
+  await test(
+      'unknown NVS result blocks every resend and keeps the full draft',
+      async () => {
+        h.state.mode = 'unknown';
+        edit();
+        await h.click();
+        style('error');
+        assert(U.S.pendingApply && !U.S.pendingApply.accepted);
+        assert.match(U.S.saveNotice.message, /Speicherergebnis unklar/);
+        h.state.mode = 'ok';
+        await h.click();
+        assert.equal(h.state.writes, 1);
+        assert(U.S.pendingApply);
+        assert.deepEqual(dirty(), ['screen_policy.frame']);
+      });
+  await test(
+      'lost acknowledgement resolves by exact Apply ID using GET only',
+      async () => {
+        h.state.mode = 'lost';
+        edit();
+        await h.click();
+        style('error');
+        assert.equal(h.state.writes, 1);
+        assert(U.S.pendingApply && !U.S.pendingApply.accepted);
+        h.state.mode = 'ok';
+        await h.click('saveRefresh');
+        style('info');
+        assert.equal(h.state.writes, 1);
+        assert.equal(U.S.pendingApply, null);
+        assert.equal(dirty().length, 0);
+      });
+  await test(
+      'malformed aggregate receipt is unconfirmed until exact GET resolves it',
+      async () => {
+        h.state.mode = 'bad-receipt';
+        edit();
+        await h.click();
+        style('error');
+        assert.equal(h.state.writes, 1);
+        assert(U.S.pendingApply && !U.S.pendingApply.accepted);
+        h.state.mode = 'ok';
+        await h.click('saveRefresh');
+        assert.equal(h.state.writes, 1);
+        assert.equal(U.S.pendingApply, null);
+        assert.equal(dirty().length, 0);
+      });
+  await test(
+      'non-busy verification failures remain red without read retry or mutation',
+      async () => {
+        edit();
+        await U.writeModel();
+        h.state.mode = 'memory-read';
+        try {
+          await U.refreshSave();
+          assert.fail();
+        } catch (error) {
+          assert.equal(error.code, 'memory');
+        }
+        style('error');
+        assert.equal(h.calls.filter(c => c.code === 'memory').length, 1);
+        assert.equal(h.state.writes, 1);
+        assert(U.S.pendingApply.accepted);
+        assert.match(U.S.saveNotice.message, /Gespeichert/);
+      });
+  await test(
+      'session error after exact readback never claims the accepted save was rejected',
+      async () => {
+        h.state.hook = call => call.endpoint === 'session' ?
+            h.response(
+                503,
+                {code: 'service_failed', error: 'controlled session failure'}) :
+            undefined;
+        edit();
+        await h.click();
+        style('error');
+        assert.equal(h.state.writes, 1);
+        assert.equal(dirty().length, 0);
+        assert.match(U.S.saveNotice.message, /Gespeichert/);
+        assert(!U.S.saveNotice.message.includes('Speichern wurde abgelehnt'));
+      });
+  await test(
+      'import stages all sections and full metadata without any write',
+      async () => {
+        const backup = await importDraft();
+        assert.equal(h.state.writes, 0);
+        assert.equal(element('dialog').open, false);
+        assert.equal(U.S.draft.night_brightness, 20);
+        assert.equal(U.S.draft.screen_policy.frame, true);
+        assert.deepEqual(
+            copy(U.S.pendingNames),
+            copy(U.validateAdoptedNames(backup.adopted_names)));
+        assert(dirty().includes('adopted_names'));
+      });
+  await test(
+      'rejected imported configuration retains its complete names and other changes',
+      async () => {
+        const backup = await importDraft();
+        h.state.mode = 'reject';
+        await h.click();
+        style('error');
+        assert.equal(h.state.writes, 1);
+        assert.deepEqual(
+            copy(U.S.pendingNames),
+            copy(U.validateAdoptedNames(backup.adopted_names)));
+        assert(dirty().includes('night_brightness'));
+        assert(dirty().includes('screen_policy.frame'));
+      });
+  await test(
+      'imported Apply is one write and acknowledged verification never resends metadata',
+      async () => {
+        await importDraft();
+        h.state.mode = 'busy-after';
+        await h.click();
+        style('warning');
+        assert.equal(h.state.writes, 1);
+        assert.equal(U.S.pendingNames, null);
+        const sent = h.calls.find(c => c.method === 'PUT').body;
+        assert(sent.adopted_names.texts);
+        assert.equal(
+            sent.adopted_names.version, h.data.schema.names_wire_version);
+        h.state.mode = 'ok';
+        await h.click('saveRefresh');
+        assert.equal(h.state.writes, 1);
+        assert.equal(dirty().length, 0);
+        style('info');
+      });
+  await test(
+      'current export includes complete adopted collection in its one envelope',
+      async () => {
+        h.state.names = {
+          format: h.data.schema.names_format,
+          version: h.data.schema.names_source_version,
+          clubs: [{
+            key: 'club',
+            de: 'Verein',
+            ids: {espn: [40]},
+            aliases: ['original']
+          }],
+          exceptions: []
+        };
+        await U.exportSettings();
+        const exported = JSON.parse(await h.state.blob.text());
+        assert.equal(exported.version, h.data.schema.config_version);
+        assert.deepEqual(exported.desired, h.state.config.desired);
+        assert.deepEqual(exported.adopted_names, h.state.names);
+        assert.equal(h.state.writes, 0);
+      });
+  await test('severity is conveyed by text icon role and translated labels', () => {
+    for (const [severity, word] of [
+             ['error', 'Error'], ['warning', 'Warning'],
+             ['info', 'Confirmation']]) {
+      U.S.draft.language = 1;
+      U.toast('Example', severity);
+      assert.match(element('toast').innerHTML, /aria-hidden="true"/);
+      assert(element('toast').textContent.includes(word + ':'));
+      assert.equal(
+          element('toast').attributes.role,
+          severity === 'error' ? 'alert' : 'status');
+    }
+    for (
+        const text of
+            ['Status erneut prüfen',
+             'Gespeichert. Die Nachprüfung ist noch offen. Status erneut prüfen; Speichern muss nicht wiederholt werden.',
+             'Speicherergebnis unklar. Nicht erneut speichern. Status prüfen; bei unklarem Speicherzustand Gerät neu starten.'])
+      assert(U.W[text], text);
+  });
+  if (process.argv[3])
+    fs.writeFileSync(
+        process.argv[3],
+        JSON.stringify(
+            {
+              scope:
+                  'Actual script/current-codec fixture, controlled HTTP/DOM; no browser/device evidence',
+              passed: results.length,
+              results
+            },
+            null, 2) +
+            '\n');
+  console.log(
+      results.length + ' current save-feedback/import/export cases passed');
+})().catch(error => {
+  console.error(error);
+  process.exitCode = 1
+});

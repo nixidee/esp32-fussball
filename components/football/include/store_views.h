@@ -15,10 +15,6 @@
 #include "match_store.h"
 #include "settings_model.h"
 
-namespace football::persist {
-class ShortNames;  // football_files.h
-}
-
 namespace football::view {
 
 // The provider whose matches a competition shows, the own club's id there
@@ -34,7 +30,7 @@ struct Source {
 class Shown {
  public:
   // Adds an active entry (inactive ones are skipped).
-  void add(const settings::Competition& entry);
+  void add(const settings::CompetitionRoute& entry);
   // Adds a source directly (demo).
   void add(const Source& source);
   const Source* source(uint8_t competition) const;
@@ -49,7 +45,7 @@ class Shown {
 
 // Store indices in kickoff order.
 struct List {
-  std::array<uint8_t, cfg::kStoreMatches> index{};
+  std::array<MatchIndex, cfg::kStoreMatches> index{};
   uint16_t count = 0;
 };
 
@@ -67,7 +63,7 @@ ConferencePage conferencePage(const MatchStore& store, const List& list,
 // The actual redistributed kickoff-order page containing a store row,
 // independently of One-page activity ranking; pinned row -> 0, absent -> -1.
 int conferencePageOf(const MatchStore& store, const List& list,
-                     const ConferenceRequest& request, uint8_t store_index);
+                     const ConferenceRequest& request, MatchIndex store_index);
 
 // The own match of the Web UI overview: a running one first, else the one
 // with the kickoff closest to 'utc' (unknown kickoffs last); -1 when none.
@@ -79,17 +75,12 @@ uint16_t matchCount(const MatchStore& store, const Shown& shown,
 // Which side of a match is the own club (team id = source club).
 void ownSides(const MatchStore& store, const StoredMatch& match,
               const Shown& shown, bool& home, bool& away);
-// Display name of a side: the owner's replacement from 'names', else the
-// directory's short name, else the detail slot's full name; "" when unknown.
+// Borrow the original26-byte provider fallback from the shared directory;
+// "" when unknown. Adopted visible labels resolve outside the football lock.
 const char* teamName(const MatchStore& store, const StoredMatch& match,
-                     bool home, const persist::ShortNames* names = nullptr);
-// Full name of a side with match details, else teamName().
-const char* fullName(const MatchStore& store, const StoredMatch& match,
-                     bool home, const persist::ShortNames* names = nullptr);
-// Team name of a table row: the owner's replacement, else the directory's
-// short name; "" when unknown.
-const char* rowName(const MatchStore& store, const StoredRow& row,
-                    const persist::ShortNames* names = nullptr);
+                     bool home);
+// Borrow the same original directory fallback for a table row; "" if absent.
+const char* rowName(const MatchStore& store, const StoredRow& row);
 
 // Rows of the table of 'competition' in stored order and the own row
 // (-1 = none).
@@ -97,8 +88,17 @@ struct Table {
   std::array<uint8_t, cfg::kStoreTableRows> row{};
   uint8_t count = 0;
   int own = -1;
+  uint8_t group = kNoIndex, label = kNoIndex;
 };
-Table table(const MatchStore& store, uint8_t competition);
+struct TableGroups {
+  std::array<uint8_t, cfg::kStoreTableGroups> ordinal{};
+  uint8_t count = 0;
+};
+TableGroups tableGroups(const MatchStore& store, uint8_t competition);
+// Unspecified group prefers the own club's group, else the first. Explicit
+// ordinals, including zero, address exactly one provider table.
+Table table(const MatchStore& store, uint8_t competition,
+            uint8_t group = kNoIndex);
 
 // Shown events of a detailed match (removal markers left out) in match order:
 // regular time before the shootout, then by minute and added minute; an event
@@ -109,5 +109,13 @@ struct Events {
   uint8_t count = 0;
 };
 Events events(const MatchStore& store, const StoredMatch& match);
+// All reported, retained shootout attempts; separate from the twelve
+// highlights. Pool exhaustion remains visible through match flags and
+// competition notice.
+struct Shootout {
+  std::array<uint8_t, cfg::kStoreEvents> index{};
+  uint8_t count = 0;
+};
+Shootout shootout(const MatchStore& store, const StoredMatch& match);
 
 }  // namespace football::view

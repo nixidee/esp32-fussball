@@ -5,10 +5,10 @@
 
 #include <cstring>
 
+#include "../provider_adapter_support.h"
 #include "../test_match_store/recorded.h"
 #include "demo_scenarios.h"
 #include "screen_selection.h"
-#include "store_mappers.h"
 #include "store_views.h"
 
 namespace {
@@ -17,7 +17,7 @@ namespace demo = football::demo;
 namespace selection = football::selection;
 namespace policy = settings::screen_policy;
 MatchStore store, recorded_store;
-settings::Competitions routes;
+settings::CompetitionRoutes routes;
 demo::Bindings bindings;
 policy::Policy options;
 Clock apply(demo::Scenario scenario, uint8_t step) {
@@ -59,7 +59,7 @@ void test_own_phase_focus_and_following_day_result_use_real_selector() {
 }
 
 void test_concurrent_owned_competitions_use_order_without_faking_ownership() {
-  settings::Competition saved;
+  settings::CompetitionRoute saved;
   saved.id = demo::kFirstCompetition;
   saved.incarnation = 1;
   TEST_ASSERT_TRUE(routes.entries.push(saved));
@@ -73,8 +73,8 @@ void test_concurrent_owned_competitions_use_order_without_faking_ownership() {
   TEST_ASSERT_TRUE(find(401884777, demo::kSecondCompetition).isOwn());
   TEST_ASSERT_EQUAL_UINT8(demo::kFirstCompetition,
                           selection::select(input(clock)).focus.competition);
-  options.competitions[0] = {1, demo::kFirstCompetition, false};
-  options.competitions[1] = {2, demo::kSecondCompetition, false};
+  routes.entries[0].club.own_special = false;
+  routes.entries[1].club.own_special = false;
   TEST_ASSERT_EQUAL(policy::Phase::kOtherGames,
                     selection::select(input(clock)).phase);
   TEST_ASSERT_TRUE(find(401884775).isOwn());
@@ -102,7 +102,7 @@ void test_no_club_ordinary_single_keeps_same_provider_names_and_available_events
   const auto clock = apply(demo::Scenario::kOrdinary, 4);
   const auto facts = input(clock);
   const auto selected = selection::select(facts);
-  TEST_ASSERT_TRUE(routes.entries[1].primary.team.empty());
+  TEST_ASSERT_EQUAL_UINT32(0, routes.entries[1].club.team);
   const auto single = selection::single(facts, selected, routes.entries[1]);
   TEST_ASSERT_EQUAL_UINT32(401884777, single.match.id);
   const auto& ordinary = find(401884777, demo::kSecondCompetition);
@@ -120,8 +120,8 @@ void test_no_club_ordinary_single_keeps_same_provider_names_and_available_events
       recorded_store.find(map.competition, map.provider, 401884777);
   TEST_ASSERT_NOT_NULL(recorded_match);
   TEST_ASSERT_EQUAL_STRING(
-      view::fullName(recorded_store, *recorded_match, true),
-      view::fullName(store, ordinary, true));
+      view::teamName(recorded_store, *recorded_match, true),
+      view::teamName(store, ordinary, true));
   const auto shown = view::events(store, ordinary);
   const auto original = view::events(recorded_store, *recorded_match);
   TEST_ASSERT_EQUAL_UINT8(original.count, shown.count);
@@ -162,42 +162,39 @@ void test_five_conference_matches_stay_reachable_without_single_allocation() {
   TEST_ASSERT_EQUAL_UINT8(5, first.row_count + second.row_count);
 }
 
-void test_cup_keeps_extra_time_shootout_totals_and_explicit_event_overflow() {
+void test_cup_keeps_scores_and_all_reported_attempts_separate_from_highlights() {
   auto clock = apply(demo::Scenario::kCup, 1);
   const auto& extra = find(401875181, demo::kSecondCompetition);
   TEST_ASSERT_EQUAL(Phase::kExtraTime, extra.phase);
-  TEST_ASSERT_FALSE(extra.regulation.valid());
-  TEST_ASSERT_FALSE(extra.halftime.valid());
   clock = apply(demo::Scenario::kCup, 2);
   const auto& first_shots = find(401875181, demo::kSecondCompetition);
   TEST_ASSERT_EQUAL(Phase::kPenalties, first_shots.phase);
   const auto first_events = view::events(store, first_shots);
-  unsigned first_attempts = 0, prior_goals = 0;
+  const auto first_attempts = view::shootout(store, first_shots);
+  unsigned prior_goals = 0;
   for (unsigned i = 0; i < first_events.count; ++i) {
     const auto& event = store.eventAt(first_events.index[i]);
-    first_attempts += (event.flags & kEventShootout) != 0;
     prior_goals += event.type == EventType::kGoal;
   }
-  TEST_ASSERT_EQUAL_UINT(2, first_attempts);
+  TEST_ASSERT_EQUAL_UINT(2, first_attempts.count);
   TEST_ASSERT_EQUAL_UINT(2, prior_goals);
   clock = apply(demo::Scenario::kCup, 4);
   const auto& final = find(401875181, demo::kSecondCompetition);
   TEST_ASSERT_EQUAL(Phase::kFinished, final.phase);
   TEST_ASSERT_EQUAL_UINT8(2, final.shootout.home);
   TEST_ASSERT_EQUAL_UINT8(4, final.shootout.away);
-  TEST_ASSERT_TRUE(final.flags & kMatchEventsTruncated);
-  TEST_ASSERT_TRUE(store.notices(demo::kSecondCompetition) & kNoticeEvents);
+  // Owner requirement: all reported shots are separate from12 highlights;
+  // this14-event body fits the existing pool and must not claim truncation.
+  TEST_ASSERT_FALSE(final.flags & kMatchEventsTruncated);
+  TEST_ASSERT_FALSE(store.notices(demo::kSecondCompetition) & kNoticeEvents);
   const auto shown = view::events(store, final);
-  TEST_ASSERT_EQUAL_UINT8(12, shown.count);
-  unsigned attempts = 0;
-  for (unsigned i = 0; i < shown.count; ++i) {
-    const auto& event = store.eventAt(shown.index[i]);
-    if (event.flags & kEventShootout) {
-      ++attempts;
-      TEST_ASSERT_EQUAL(EventType::kPenaltyGoal, event.type);
-    }
-  }
-  TEST_ASSERT_TRUE(attempts > 0);  // no unreported missed attempts fabricated
+  TEST_ASSERT_EQUAL_UINT8(8, shown.count);
+  const auto attempts = view::shootout(store, final);
+  TEST_ASSERT_EQUAL_UINT8(6, attempts.count);
+  for (unsigned i = 0; i < attempts.count; ++i)
+    TEST_ASSERT_EQUAL(EventType::kPenaltyGoal,
+                      store.eventAt(attempts.index[i]).type);
+  // No unreported missed attempts are fabricated.
 }
 
 void test_verified_round_keeps_later_rescheduled_fixture_in_same_content() {
@@ -252,13 +249,13 @@ void test_clock_is_deterministic_goal_flash_uses_real_mono_and_invalid_is_noop()
   TEST_ASSERT_EQUAL_STRING("", demo::stepTitle(demo::Scenario::kOwn, 255));
 }
 
-void test_saved_order_and_exact_policy_associations_drive_projected_own_matches() {
-  settings::Competition saved;
+void test_saved_order_and_club_preferences_drive_projected_own_matches() {
+  settings::CompetitionRoute saved;
   saved.id = 47;
   saved.incarnation = 103;
   saved.primary.provider = cfg::Provider::kOpenLigaDb;
   saved.primary.competition.assign("bl1");
-  saved.primary.team.assign("80");
+  saved.club.team = 80;
   TEST_ASSERT_TRUE(routes.entries.push(saved));
   saved.id = 12;
   saved.incarnation = 101;
@@ -268,13 +265,8 @@ void test_saved_order_and_exact_policy_associations_drive_projected_own_matches(
   saved.id = 93;
   saved.incarnation = 111;
   TEST_ASSERT_TRUE(routes.entries.push(saved));
-  options.competitions[0] = {101, 12, true};
-  options.competitions[1] = {103, 47, false};
-  const auto phase = policy::index(policy::Phase::kOwn);
-  const auto sport = screen::sportIndex(screen::Type::kLiveSingle);
-  options.expanded[phase] |= 1u << sport;
-  options.overrides[phase][sport][1] = {27, policy::kAutomatic,
-                                        policy::kOverrideFields};
+  routes.entries[0].club.own_special = false;
+  routes.entries[1].club.own_special = true;
   bindings = demo::configure(routes, demo::Scenario::kOwn, true);
   TEST_ASSERT_TRUE(bindings[0].saved);
   TEST_ASSERT_TRUE(bindings[1].saved);
@@ -290,20 +282,10 @@ void test_saved_order_and_exact_policy_associations_drive_projected_own_matches(
   const auto* first = store.find(47, cfg::Provider::kEspn, 401884775);
   TEST_ASSERT_NOT_NULL(first);
   TEST_ASSERT_TRUE(first->isOwn());
-  const auto rule = policy::resolve(options, policy::Phase::kOwn,
-                                    screen::Type::kLiveSingle, 47, 103);
-  TEST_ASSERT_FALSE(rule.enabled);
-  TEST_ASSERT_TRUE(rule.automatic);
-  TEST_ASSERT_EQUAL_UINT16(27, rule.visit_s);
-  const auto eligible = policy::eligibility(options, routes);
-  TEST_ASSERT_FALSE(
-      eligible.allows(policy::Phase::kOwn, screen::Type::kLiveSingle, 0));
-  TEST_ASSERT_TRUE(
-      eligible.allows(policy::Phase::kOwn, screen::Type::kLiveSingle, 1));
 }
 
 void test_one_saved_entry_has_explicit_unbound_collision_free_second_dataset() {
-  settings::Competition saved;
+  settings::CompetitionRoute saved;
   saved.id = demo::kSecondCompetition;
   saved.incarnation = 73;
   TEST_ASSERT_TRUE(routes.entries.push(saved));
@@ -320,16 +302,10 @@ void test_one_saved_entry_has_explicit_unbound_collision_free_second_dataset() {
                           selection::select(input(clock)).focus.competition);
   TEST_ASSERT_NOT_NULL(
       store.find(bindings[1].competition, cfg::Provider::kEspn, 401884777));
-  const auto shared = options.shared[policy::index(policy::Phase::kOwn)]
-                                    [screen::index(screen::Type::kLiveSingle)];
-  TEST_ASSERT_TRUE(shared == policy::resolve(options, policy::Phase::kOwn,
-                                             screen::Type::kLiveSingle,
-                                             bindings[1].competition,
-                                             bindings[1].incarnation));
 }
 
 void test_uncommitted_presets_never_claim_a_saved_demo_binding() {
-  settings::Competition preset;
+  settings::CompetitionRoute preset;
   preset.id = 5;
   preset.incarnation = 123;
   TEST_ASSERT_TRUE(routes.entries.push(preset));
@@ -366,13 +342,12 @@ int main() {
   RUN_TEST(
       test_five_conference_matches_stay_reachable_without_single_allocation);
   RUN_TEST(
-      test_cup_keeps_extra_time_shootout_totals_and_explicit_event_overflow);
+      test_cup_keeps_scores_and_all_reported_attempts_separate_from_highlights);
   RUN_TEST(test_verified_round_keeps_later_rescheduled_fixture_in_same_content);
   RUN_TEST(test_synthetic_break_respects_owner_switch_and_empty_has_no_data);
   RUN_TEST(
       test_clock_is_deterministic_goal_flash_uses_real_mono_and_invalid_is_noop);
-  RUN_TEST(
-      test_saved_order_and_exact_policy_associations_drive_projected_own_matches);
+  RUN_TEST(test_saved_order_and_club_preferences_drive_projected_own_matches);
   RUN_TEST(
       test_one_saved_entry_has_explicit_unbound_collision_free_second_dataset);
   RUN_TEST(test_uncommitted_presets_never_claim_a_saved_demo_binding);

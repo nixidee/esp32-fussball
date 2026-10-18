@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -90,44 +91,33 @@ Status status();
 bool filePath(const Status& selection, char* out, std::size_t capacity);
 
 struct Entry {
-  std::size_t bytes;
-  bool present;
+  std::size_t bytes = 0;
+  uint16_t revision = 0;
+  bool present = false;
 };
-// Library ids only; every other id is not present.
-Entry info(uint8_t id);
-// Bit n set = library image n exists.
-settings::ImageMask present();
-
-// Replacement of a stock role; bytes 0 and replaced false = factory image.
-struct Role {
-  std::size_t bytes;
-  bool replaced;
+// One complete bounded read projection. ENOENT is an absent image; any other
+// metadata failure rejects the projection instead of inventing free space or
+// an absent replacement. Callers must use the value only after ESP_OK.
+struct Inventory {
+  std::array<Entry, cfg::kImageLibraryMax> library{};
+  std::array<Entry, cfg::kStockImageCount> replacements{};
+  std::size_t count = 0, bytes = 0;
 };
-Role role(cfg::StockImage stock);
-
-// Library images present, and the bytes counted against the image budget:
-// library files plus role replacements (OQ-154).
-struct Usage {
-  std::size_t count;
-  std::size_t bytes;
-};
-Usage usage();
-// Changes whenever the file of library image 'id' is replaced, deleted or
-// wiped (wraps at 65536) and starts from a random value at every boot; 0 for
-// every other id. Browsers use it as '?r=' to tell cached versions apart.
-uint16_t revisionOf(uint8_t id);
-// The same for the image a stock role shows (replacement or factory file).
-uint16_t roleRevision(cfg::StockImage stock);
+esp_err_t inventory(Inventory& out);
+// Entry revisions change on replace/delete/wipe, wrap at 65536 and start at
+// a random boot offset. Browsers use '?r=' to distinguish cached versions.
 // Path of the file (VFS, not LVGL) of a library image or, for id 0, of the
-// stock image 'stock'. False if the image does not exist or does not fit.
-bool filePath(uint8_t id, cfg::StockImage stock, char* out,
-              std::size_t capacity);
+// stock image 'stock'. A role falls back to its factory file only when its
+// replacement is absent. Metadata I/O failures remain errors, never absence.
+esp_err_t filePath(uint8_t id, cfg::StockImage stock, char* out,
+                   std::size_t capacity);
 
 // Id 0 uses the lowest absent id that is neither a saved desired reference
 // nor in excluded (e.g. unsaved browser draft references). A valid explicit
 // library id writes that exact id, including restoring a missing desired
 // file; excluded and saved references do not prevent this. No free id or
-// no quota left: ESP_ERR_NO_MEM; invalid id: ESP_ERR_INVALID_ARG. Unavailable
+// no quota/workspace left: files::kStorageFull; invalid id:
+// ESP_ERR_INVALID_ARG. ESP_ERR_NO_MEM means actual RAM exhaustion. Unavailable
 // during the OTA trial. Publishing never changes settings references.
 esp_err_t begin(uint8_t id, std::size_t size, settings::ImageMask excluded = 0);
 // Upload of the replacement of a stock role; the factory file stays.
@@ -140,7 +130,12 @@ void abort();
 
 // Real delete: references in the settings (screens, slides) are
 // replaced or removed and saved first, then the file is deleted.
-esp_err_t remove(uint8_t id);
+struct DeleteResult {
+  bool references_cleared = false, settings_saved = false;
+  bool file_deleted = false, already_missing = false, outcome_unknown = false;
+  uint32_t settings_revision = 0;
+};
+esp_err_t remove(uint8_t id, DeleteResult* result = nullptr);
 // Copies library image 'id' as the replacement of 'stock' (OQ-156); the
 // library image stays. Budget and storage reserve as for an upload.
 esp_err_t copyToRole(uint8_t id, cfg::StockImage stock);
@@ -148,14 +143,10 @@ esp_err_t copyToRole(uint8_t id, cfg::StockImage stock);
 esp_err_t resetRole(cfg::StockImage stock);
 // Deletes every library file and both replacements (OQ-157); the caller
 // resets the settings.
-esp_err_t removeAll();
-
-// Outside the OTA trial, once: removes the legacy named files (OQ-73).
-// Missing desired references stay unchanged for repair/retry. True when done
-// (or nothing to do); false while files are unavailable, the trial runs,
-// another heavy operation owns admission, or a removal failed. App task; failed
-// writes retry after cfg::kImageMaintenanceRetryMs without blocking admission.
-bool maintain();
+struct DeleteAllResult {
+  uint8_t deleted = 0, already_missing = 0;
+};
+esp_err_t removeAll(DeleteAllResult* result = nullptr);
 
 // Explicit full storage reset, including recovery from damaged LittleFS.
 // Caller owns the heavy-operation admission; unavailable during OTA trial.

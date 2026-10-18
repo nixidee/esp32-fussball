@@ -4,6 +4,7 @@
 #include "app_config.h"
 #include "esp_err.h"
 #include "hw_profile.h"
+#include "input_policy.h"
 #include "screen_policy.h"
 namespace ui {
 // Why the current screen is shown (Web UI overview, no text: the page
@@ -26,12 +27,15 @@ struct Status {
   uint8_t phase = static_cast<uint8_t>(settings::screen_policy::Phase::kIdle);
   uint8_t automatic_entries = 0;
 };
-// `backlight` false: the panel cannot dim, so night mode dims the colours.
+// Night mode controls only a connected backlight; colours remain unchanged.
 esp_err_t init(const hw::DisplayProfile& display, std::size_t inputs,
                bool backlight);
 // Draws the start screen once the display runs, before init(); the next
-// poll() continues it. False: lock timeout or the screen did not fit.
+// poll() continues it. `backlight` enables the saved day/night PWM brightness.
+// False: lock timeout or the screen did not fit.
 bool showStartScreen(const hw::DisplayProfile& display, bool backlight);
+// Physical inputs and admitted Web commands share this one bounded FIFO.
+esp_err_t submit(Action, uint32_t expected_generation);
 void input(std::size_t index, bool active);
 void poll();
 bool healthy();

@@ -7,7 +7,6 @@ idf_component_register(
     ".."
     "../include"
   PRIV_REQUIRES
-    core
     display
     esp_app_format
     esp_driver_gpio

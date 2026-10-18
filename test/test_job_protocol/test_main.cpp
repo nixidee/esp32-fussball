@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 
+#include "../provider_adapter_support.h"
 #include "../test_match_store/recorded.h"
 #include "app_config.h"
 #include "football_model.h"
@@ -48,6 +49,9 @@ constexpr int64_t kKickoff = 30 * 60;
 constexpr uint32_t kGapS = cfg::kRequestGapMs / 1000;
 
 MatchStore store;
+settings::CompetitionRoutes configured_routes;
+settings::screen_policy::Policy configured_policy;
+settings::screen_policy::Eligibility eligibility;
 Planner planner;
 Scheduler scheduler;
 settings::ProviderPlans plans;
@@ -57,7 +61,7 @@ Clock at(int64_t dt) { return {kBase + dt, static_cast<uint32_t>(kBoot + dt)}; }
 
 // ESPN calendar of the 2026/27 Bundesliga around the own match (agent).
 const char* kDays =
-    R"({"eventDate":{"dates":["2026-10-09T07:00Z","2026-10-10T07:00Z",)"
+    R"({"type":"day","season":{"$ref":"https://sports.core.api.espn.com/v2/sports/soccer/leagues/ger.1/seasons/2026"},"startDate":"2026-07-01T04:00Z","endDate":"2027-07-01T03:59Z","eventDate":{"dates":["2026-10-09T07:00Z","2026-10-10T07:00Z",)"
     R"("2026-10-11T07:00Z","2026-10-16T07:00Z","2026-10-17T07:00Z",)"
     R"("2026-10-18T07:00Z","2026-10-23T07:00Z","2026-10-24T07:00Z",)"
     R"("2026-10-25T07:00Z","2026-10-30T07:00Z"]}})";
@@ -65,49 +69,40 @@ const char* kSummary = R"({"boxscore":{},"keyEvents":[]})";
 
 // The recorded scoreboard of the own match day, scheduled or (as the
 // provider would report it after the kickoff) in the first half.
-std::string scoreboard(bool running) {
+std::string scoreboard(bool running, const Request& request = {}) {
   std::string body = kEspnUpcoming;
-  if (!running) return body;
-  const std::string pre =
-      R"("displayClock":"0'","type":{"name":"STATUS_SCHEDULED","state":"pre")";
-  body.replace(body.find(pre), pre.size(),
-               R"("displayClock":"10'","type":{"name":"STATUS_FIRST_HALF",)"
-               R"("state":"in")");
+  if (running) {
+    const std::string pre =
+        R"("displayClock":"0'","type":{"name":"STATUS_SCHEDULED","state":"pre")";
+    body.replace(body.find(pre), pre.size(),
+                 R"("displayClock":"10'","type":{"name":"STATUS_FIRST_HALF",)"
+                 R"("state":"in")");
+  }
+  JsonDocument doc;
+  TEST_ASSERT_FALSE(deserializeJson(doc, body));
+  doc["leagues"][0]["slug"] = "ger.1";
+  doc["leagues"][0]["season"]["year"] = 2026;
+  for (auto row : doc["events"].as<ArduinoJson::JsonArray>()) {
+    row["season"]["year"] = 2026;
+    row["league"]["slug"] = "ger.1";
+  }
+  if (request.spec.operation == football::provider::Operation::kOwnFixtures) {
+    doc["requestedSeason"]["year"] = 2026;
+    doc["team"]["id"] = request.spec.team;
+  } else if (request.spec.from && request.spec.from / 86400 !=
+                                      static_cast<uint32_t>(kBase) / 86400) {
+    // The recorded fixture belongs to October16 only; another calendar day
+    // returns an explicit empty scoreboard of this same source and season.
+    doc["events"].to<ArduinoJson::JsonArray>();
+  }
+  body.clear();
+  serializeJson(doc, body);
   return body;
 }
 
-// The first array under 'key' at any depth (as fetchJson finds it).
-JsonArrayConst find(JsonVariantConst v, const char* key) {
-  if (v.is<ArduinoJson::JsonObjectConst>()) {
-    for (auto pair : v.as<ArduinoJson::JsonObjectConst>()) {
-      if (pair.key() == key && pair.value().is<JsonArrayConst>())
-        return pair.value().as<JsonArrayConst>();
-      const JsonArrayConst inner = find(pair.value(), key);
-      if (!inner.isNull()) return inner;
-    }
-  } else if (v.is<JsonArrayConst>()) {
-    for (JsonVariantConst item : v.as<JsonArrayConst>()) {
-      const JsonArrayConst inner = find(item, key);
-      if (!inner.isNull()) return inner;
-    }
-  }
-  return {};
-}
-
-// Streams 'body' as fetchJson would for 'r'; false as fetchJson's
-// ESP_ERR_INVALID_RESPONSE (unreadable body, missing array, consumer
-// refusal).
-bool feed(const Request& r, const std::string& body) {
-  JsonDocument doc;
-  if (deserializeJson(doc, body)) return false;
-  JsonVariantConst root = doc.as<JsonVariantConst>();
-  if (r.array == nullptr) return Planner::consume(root, &planner);
-  const JsonArrayConst list =
-      r.array[0] == '\0' ? root.as<JsonArrayConst>() : find(root, r.array);
-  if (list.isNull()) return r.optional;
-  for (JsonVariantConst element : list)
-    if (!Planner::consume(element, &planner)) return false;
-  return true;
+bool feed(const Request& request, const std::string& body) {
+  return football::test_support::feed(planner, request.spec, body).status ==
+         football::provider::Status::kOk;
 }
 
 // What the device and the provider do with one prepared request.
@@ -118,15 +113,16 @@ struct Answer {
 
 // The ESPN responses for 'r' (bodies above).
 Answer espn(const Request& r, bool running) {
-  const std::string url = r.url;
+  const std::string url = football::test_support::http(r).url;
   if (url.find("calendar/ondays") != std::string::npos)
     return {Fetch::kOk, kDays};
   if (url.find("/standings") != std::string::npos)
     return {Fetch::kOk, kEspnTable};
   if (url.find("/summary") != std::string::npos) return {Fetch::kOk, kSummary};
-  if (url.find("/scoreboard") != std::string::npos)
-    return {Fetch::kOk, scoreboard(running)};
-  TEST_FAIL_MESSAGE(r.url);
+  if (url.find("/scoreboard") != std::string::npos ||
+      r.spec.operation == football::provider::Operation::kOwnFixtures)
+    return {Fetch::kOk, scoreboard(running, r)};
+  TEST_FAIL_MESSAGE(football::test_support::http(r).url);
   return {};
 }
 
@@ -212,7 +208,7 @@ void setEspnSource() {
   entry.id = 3;
   entry.primary.provider = cfg::Provider::kEspn;
   entry.primary.competition.assign("ger.1");
-  entry.primary.team.assign("125");
+  entry.club.team = 125;
 }
 
 }  // namespace
@@ -224,6 +220,14 @@ void setUp() {
   plans = settings::providerPlansDefault();
   for (auto& p : plans) p.limit = {};
   setEspnSource();
+  entry.incarnation = 1;
+  configured_routes.clear();
+  configured_routes.entries.push(entry);
+  eligibility = settings::screen_policy::eligibility(configured_policy,
+                                                     configured_routes);
+  // Match the real worker's coherent routes/eligibility context. Fixtures and
+  // live classification remain prerequisites; table/Single demand is explicit.
+  planner.context(configured_routes, eligibility);
 }
 void tearDown() {}
 
@@ -278,7 +282,7 @@ void test_events_without_an_own_slot_wait_for_their_interval() {
     m.home = store.team(9, cfg::Provider::kEspn, 2 * m.id, "Home");
     m.away = store.team(9, cfg::Provider::kEspn, 2 * m.id + 1, "Away");
     m.flags = football::kMatchOwn;
-    TEST_ASSERT_NOT_NULL(store.upsert(m, at(kKickoff), "Home", "Away"));
+    TEST_ASSERT_NOT_NULL(store.upsert(m, at(kKickoff)));
   }
   auto respond = [&](const Request& r, const Job&, int64_t) {
     return espn(r, true);
@@ -288,7 +292,7 @@ void test_events_without_an_own_slot_wait_for_their_interval() {
   replay(from, until, trace, respond);
   const auto* own = store.find(entry.id, cfg::Provider::kEspn, 401884770);
   TEST_ASSERT_NOT_NULL(own);
-  TEST_ASSERT_FALSE(own->own < cfg::kStoreOwnMatches);
+  TEST_ASSERT_FALSE(own->detail < cfg::kStoreOwnMatches);
   TEST_ASSERT_TRUE(startsOf(trace, cfg::DataType::kEvents).empty());
   // One turn per events interval, no more.
   const uint32_t events_interval =
@@ -398,7 +402,11 @@ void test_failing_provider_backs_off_up_to_900_s_in_the_live_window() {
     return espn(r, true);
   };
   // Running own match in the store (live window until kickoff + 240 min).
-  football::MapContext c{entry.id, cfg::Provider::kEspn, 125, at(0)};
+  football::MapContext c;
+  c.competition = entry.id;
+  c.provider = cfg::Provider::kEspn;
+  c.club = 125;
+  c.clock = at(0);
   JsonDocument doc;
   deserializeJson(doc, scoreboard(true));
   for (JsonVariantConst e : doc["events"].as<JsonArrayConst>())
@@ -429,11 +437,16 @@ void test_failing_provider_backs_off_up_to_900_s_in_the_live_window() {
 // job starting the backoff again at its own first failure.
 void test_table_and_live_table_back_off_as_one_request() {
   auto respond = [&](const Request& r, const Job&, int64_t) {
-    if (std::string(r.url).find("/standings") != std::string::npos)
+    if (std::string(football::test_support::http(r).url).find("/standings") !=
+        std::string::npos)
       return Answer{Fetch::kOk, "<html>502 Bad Gateway</html>"};
     return espn(r, true);
   };
-  football::MapContext c{entry.id, cfg::Provider::kEspn, 125, at(0)};
+  football::MapContext c;
+  c.competition = entry.id;
+  c.provider = cfg::Provider::kEspn;
+  c.club = 125;
+  c.clock = at(0);
   JsonDocument doc;
   deserializeJson(doc, scoreboard(true));
   for (JsonVariantConst e : doc["events"].as<JsonArrayConst>())

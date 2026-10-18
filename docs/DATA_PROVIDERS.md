@@ -8,7 +8,7 @@ Related documents:
 - [DATA_MODEL.md](DATA_MODEL.md) — what the device stores, which provider
   fills which field, where it is shown.
 - [DATA_FLOW.md](DATA_FLOW.md) — which requests the firmware sends today, how
-  it maps, combines, caches and publishes the data, and its request bounds.
+  it maps, retains RAM facts and publishes the data, and its request bounds.
 - [API.md](API.md) — the device's own REST API (not a provider).
 
 All checks were made on **2026-10-13** with public requests from a desktop
@@ -16,7 +16,7 @@ machine unless stated otherwise. Provider plans, coverage, identifiers and
 limits change; recheck before relying on a value.
 
 
-The [planned screen-system redesign](UI.md#planned-screen-system-redesign)
+The [current screen system](UI.md#current-screens-and-automatic-sequence)
 requires the same available information for ordinary and own Single screens,
 known schedule coverage for a configurable long-break gap, and trustworthy
 period/added-time/shootout provenance. These capabilities are not implemented
@@ -26,8 +26,13 @@ remain visibly estimated. ESPN complete attempts were found in historical
 summary shootout arrays, not just scored-goal lists; live completeness and
 request frequency still require proof. API-Football/football-data detail and
 coverage remain provider-dependent. Never infer a miss from an absent goal or
-claim live support from historical replies. Current adapters/limits below are
-unchanged. [OpenLigaDB schema](https://api.openligadb.de/swagger/v1/swagger.json),
+claim live support from historical replies. The reference/research sections below retain their check dates. Current typed
+adapters stream through one grammar; full-season retention uses two passes,
+and explicit ESPN seasons use verified season references rather than an ignored
+scoreboard query. See [current acquisition](DATA_FLOW.md#3-request-plans) for
+implemented requests and [bounds](DATA_FLOW.md#8-request-bounds) for current
+transport ceilings. Current public replay and synthetic keyed-provider fixtures
+do not establish current keyed live-data coverage. [OpenLigaDB schema](https://api.openligadb.de/swagger/v1/swagger.json),
 [football-data live duration](https://docs.football-data.org/general/v4/overtime.html).
 
 
@@ -528,11 +533,13 @@ the free plan, league ids and `coverage`, events in `fixtures?id=` and
 `shortName` and `tla` in real responses, the real `stage` values.
 
 
-## Public response recheck — 2026-10-17
+## Historical public response recheck — 2026-10-17
 
-Current public responses were replayed through the exact production streaming
-kernel, filters, mappers and canonical store on the host. This is separate from
-actual device transport, target heap and complete request planning.
+At that checkpoint, the captured public replies were replayed through the then
+current filtered parser/mappers/store on the host. The measurements below
+precede the streaming typed-adapter cutover and its1-MiB full-season bound;
+they describe that historical implementation, not current resource limits.
+They do not establish device transport, target heap or complete request planning.
 
 | Response | Body bytes | Host parser peak bytes | Result |
 |---|---:|---:|---|
@@ -566,9 +573,10 @@ Keyed-provider real responses, suspension/no-kickoff live replies and automatic
 coverage acquisition remain unverified. Parser success alone never proves that
 an endpoint returned every fixture of the required interval.
 
-### Coverage-binding replay and limitations — 2026-10-17
+### Historical coverage-binding replay — 2026-10-17
 
-Later replays use the active raw metadata observer and exact production filter.
+At that historical checkpoint, later replays used the raw metadata observer
+and its production filter.
 The OpenLigaDB relegation2025 body is3321B and contains two actual May21–25
 kickoffs; only that interval is Complete. Its successful empty/full-season
 endpoint does not establish arbitrary surrounding dates. The299845B league
@@ -579,9 +587,33 @@ Partial. The host cup parser peak at this later filter/observer checkpoint is
 12258B; it is not a target TLS/heap measurement. Real keyed-provider responses,
 justified suspension and missing-kickoff bodies remain unverified.
 
-Production coverage binds stable competition/incarnation/source/season identities,
-invalidates contradictory ordinary rows, and fences persisted Complete evidence
-before a sent match request. Discovery shares actual request limits and the
-persist-before-send sixteen-credit daily guard, independent of filesystem loss.
-Public replies prove the documented source limitations; controlled proof/recovery
-fixtures and the synthetic Demo do not make incomplete providers complete.
+### Current acquisition and operational guards
+
+Current acquisition uses the shared streaming JSON Reader and typed provider
+facts. It retains no filtered JSON document, stored provider body or persisted
+schedule proof. A dedicated1-MiB full-season transport bound admits the captured
+299845-byte OpenLigaDB season; parser workspace is bounded independently of
+response length. League/cup fixture retention uses the previous/current/next
+complete rounds plus the previous own game and next three own games. Full-season
+index and admission passes are separate requests, each charged through the
+normal scheduler and durable request budgets.
+
+Current coverage binds stable competition/incarnation/source/season identities
+in RAM and invalidates contradictory ordinary rows before display admission.
+Extra discovery shares normal request limits and a persist-before-send guard:
+one new run per UTC day, at most sixteen actual requests per run. Its36-byte
+current-only NVS record contains two counters and the active credit-lifetime
+marker. Route/season traversal and source fingerprints remain in RAM; reboot
+starts traversal anew with remaining durable credits, and cannot refill a run
+at midnight. A source change retires the current run and forfeits its remaining
+credits before another source can send. ESPN has no extra discovery lane:
+calendar markers support ordinary retention but cannot prove an empty interval,
+so schedule-break evidence remains Unknown. A successful cup table response
+with an explicitly empty primary collection is Complete, distinct from missing,
+failed or unsupported data.
+
+The adapter also declares logical dataset support. OpenLigaDB fixture goals and
+ESPN summary events are supported; this integration maps no API-Football or
+football-data.org events, which are explicitly Unavailable. Real keyed-provider
+response/state acceptance and physical heap/stack reserves remain unverified;
+controlled replays and Demo do not make incomplete sources complete.

@@ -4,6 +4,7 @@
 #include <string_view>
 
 #include "app_config.h"
+#include "value_utils.h"
 
 namespace football {
 // Why a provider operation failed, or why a competition's data are not
@@ -44,12 +45,8 @@ template <std::size_t N>
 struct Text {
   char data[N + 1]{};
   void assign(std::string_view text) {
-    std::size_t count = text.size() < N ? text.size() : N;
-    while (count < text.size() && count > 0 &&
-           (static_cast<unsigned char>(text[count]) & 0xc0) == 0x80)
-      --count;
-    std::memset(data, 0, sizeof(data));
-    std::memcpy(data, text.data(), count);
+    const auto count = values::utf8PrefixBytes(text, N);
+    values::copyPadded(data, sizeof(data), {text.data(), count});
   }
   bool empty() const { return data[0] == 0; }
   bool operator==(const Text&) const = default;
@@ -80,6 +77,15 @@ enum class Phase : uint8_t {
   // An ongoing match is interrupted. This is distinct from a postponed
   // fixture: its previously justified live window may remain active.
   kSuspended
+};
+// Provider-reported period; elapsed minutes alone do not establish it.
+enum class Period : uint8_t {
+  kUnknown,
+  kFirstHalf,
+  kSecondHalf,
+  kExtraFirstHalf,
+  kExtraSecondHalf,
+  kShootout
 };
 enum class EventType : uint8_t {
   kGoal,
@@ -125,9 +131,5 @@ uint16_t errorStatus(int status);
 // Stable lower-case code of a match phase (REST API).
 const char* phaseName(Phase phase);
 int64_t parseUtc(const char* text);
-// Phase of an API-Football short status or a football-data.org v4 match
-// status (all eleven values of its lookup table); kUnknown otherwise.
-// Suspended remains distinct from postponed; awarded maps to abandoned.
-Phase statusPhase(const char* status);
 uint32_t fingerprint(std::string_view value);
 }  // namespace football

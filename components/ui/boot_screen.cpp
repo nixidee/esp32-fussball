@@ -38,8 +38,10 @@ lv_obj_t* addLabel(lv_obj_t* parent, const char* text, int32_t width,
                    uint32_t color) {
   lv_obj_t* label = lv_label_create(parent);
   if (label == nullptr) return nullptr;
+  lv_obj_remove_style_all(label);
   lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_WRAP);
   lv_obj_set_width(label, width);
+  lv_obj_set_style_text_font(label, LV_FONT_DEFAULT, 0);
   lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
   lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
   lv_label_set_text(label, text);
@@ -73,12 +75,6 @@ bool showBootScreen(const BootScreenModel& model,
   lv_obj_t* text = lv_obj_create(screen);
   if (text == nullptr) return false;
   lv_obj_remove_style_all(text);
-  lv_obj_set_size(text, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-  lv_obj_set_flex_flow(text, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_flex_align(text, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
-                        LV_FLEX_ALIGN_CENTER);
-  lv_obj_set_style_pad_row(text, ring_gap, 0);
-  lv_obj_center(text);
 
   int32_t text_width = size * cfg::kBootTextWidthPercent / 100;
   const std::array<lv_obj_t*, 3> labels{
@@ -97,12 +93,21 @@ bool showBootScreen(const BootScreenModel& model,
   // measured band, checking its corners after each strictly smaller width.
   // Diagnostics and the screen background are deliberately not content.
   while (true) {
+    int32_t height = 0;
+    for (lv_obj_t* label : labels) {
+      lv_obj_set_width(label, text_width);
+      lv_obj_update_layout(label);
+      lv_obj_set_pos(label, 0, height);
+      height += lv_obj_get_height(label) + ring_gap;
+    }
+    lv_obj_set_size(text, text_width, height - ring_gap);
+    lv_obj_center(text);
     lv_obj_update_layout(text);
     lv_area_t bounds;
     lv_obj_get_coords(text, &bounds);
-    const geometry::Rect content{
-        bounds.x1, bounds.y1, lv_area_get_width(&bounds),
-        lv_area_get_height(&bounds)};
+    const geometry::Rect content{bounds.x1, bounds.y1,
+                                 lv_area_get_width(&bounds),
+                                 lv_area_get_height(&bounds)};
     if (safe_area.contains(content)) return true;
     const geometry::HorizontalSpan span =
         safe_area.spanForBand(content.y, content.height);
@@ -112,7 +117,6 @@ bool showBootScreen(const BootScreenModel& model,
       return false;
     }
     text_width = span.width;
-    for (lv_obj_t* label : labels) lv_obj_set_width(label, text_width);
   }
 }
 

@@ -165,12 +165,6 @@ class Scheduler {
   // The jobs of slot 'slot' start fresh (its competition's source
   // changed): as for a slot whose id changes.
   void forget(uint8_t slot);
-  // Data restored from a competition file: the non-live job 'type' in slot
-  // 'slot' (competition 'id') counts as started 'age_s' seconds before
-  // monotonic second 'now_s', also before boot. A slot with another id
-  // starts fresh first. Live data types are not seeded.
-  void seed(uint8_t slot, uint8_t id, cfg::DataType type, uint32_t age_s,
-            uint32_t now_s);
   // Window limits from the provider plans and the global limit (next()
   // applies them too; a changed limit forgets its counted requests).
   void configure(const settings::ProviderPlans& plans,
@@ -227,5 +221,13 @@ Factors degrade(const std::array<uint32_t, kClassCount>& demand, uint32_t left);
 // is invented. False for an unknown time basis, unjustified suspension,
 // finished without final-whistle time, postponed, cancelled or abandoned.
 bool liveWindow(const StoredMatch& match, uint32_t& start, uint32_t& end);
+
+// Freshness of one shown source/data type. Actual failures and incomplete
+// acquisitions remain local to that data type. Fixtures also age while one
+// of this source's matches is in its existing live window. UTC 0 disables
+// only the live-window age check; monotonic timestamps remain 64-bit.
+bool datasetStale(const MatchStore& store, uint8_t competition,
+                  MatchStore::Dataset dataset, int64_t utc, int64_t now_ms,
+                  cfg::Provider provider);
 
 }  // namespace football::schedule

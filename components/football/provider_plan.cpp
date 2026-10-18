@@ -12,69 +12,18 @@
 namespace football::plan {
 namespace {
 
-using ArduinoJson::JsonArrayConst;
-using ArduinoJson::JsonVariantConst;
 using cfg::DataType;
 using cfg::Provider;
 
 constexpr uint32_t kDayS = 86400;
-// Encoded components: three bytes per input byte plus the terminator.
-constexpr std::size_t kCompetitionUrl = 3 * cfg::kCompetitionIdMaxBytes + 1;
-constexpr std::size_t kSeasonUrl = 3 * cfg::kSeasonMaxBytes + 1;
-constexpr std::size_t kTeamUrl = 3 * cfg::kTeamIdMaxBytes + 1;
-
-constexpr const char* kOpenLigaDb = "https://api.openligadb.de/";
-constexpr const char* kEspnSite =
-    "https://site.api.espn.com/apis/site/v2/sports/soccer/";
-constexpr const char* kApiFootball = "https://v3.football.api-sports.io/";
-constexpr const char* kFootballData =
-    "https://api.football-data.org/v4/competitions/";
-
 std::size_t index(DataType type) { return static_cast<std::size_t>(type); }
 
-uint32_t hash(uint32_t h, std::string_view text) {
-  for (const char c : text) {
-    h ^= static_cast<unsigned char>(c);
-    h *= 16777619u;
-  }
-  return h;
-}
 uint32_t sourceKey(uint8_t id, const settings::Source& s) {
   const char head[2] = {static_cast<char>(id), static_cast<char>(s.provider)};
-  uint32_t h = hash(2166136261u, {head, 2});
-  h = hash(h, s.competition.view());
-  h = hash(hash(h, "/"), s.season.view());
-  h = hash(hash(h, "/"), s.team.view());
+  uint32_t h = values::fnv1a32({head, 2});
+  h = values::fnv1a32(s.competition.view(), h);
+  h = values::fnv1a32(s.season.view(), values::fnv1a32("/", h));
   return h == 0 ? 1 : h;
-}
-bool sameLeague(std::string_view a, std::string_view b) {
-  if (a.size() != b.size()) return false;
-  for (std::size_t i = 0; i < a.size(); ++i) {
-    char x = a[i], y = b[i];
-    if (x >= 'A' && x <= 'Z') x = static_cast<char>(x - 'A' + 'a');
-    if (y >= 'A' && y <= 'Z') y = static_cast<char>(y - 'A' + 'a');
-    if (x != y) return false;
-  }
-  return true;
-}
-void date(int64_t utc, const char* format, char (&out)[16]) {
-  const time_t stamp = static_cast<time_t>(utc);
-  std::tm d{};
-  gmtime_r(&stamp, &d);
-  strftime(out, sizeof(out), format, &d);
-}
-void format(Request* out, const char* text, ...) {
-  if (out == nullptr) return;
-  va_list args;
-  va_start(args, text);
-  vsnprintf(out->url, sizeof(out->url), text, args);
-  va_end(args);
-}
-void set(Request* out, Sink sink, const char* array, bool optional = false) {
-  if (out == nullptr) return;
-  out->sink = sink;
-  out->array = array;
-  out->optional = optional;
 }
 // Providers whose URLs need the season: the current one when none is set.
 // Events (ESPN's match summary) never do.
@@ -89,12 +38,14 @@ bool seasonStale(const SourceState& state, int64_t utc) {
 bool needsSeason(Provider provider, DataType type) {
   if (type == DataType::kEvents) return false;
   if (provider == Provider::kApiFootball) return true;
-  return provider == Provider::kOpenLigaDb && type != DataType::kFixtures;
+  return provider == Provider::kOpenLigaDb;
 }
 // Expected requests per run of each data type at 'utc' ('known': the state
 // belongs to this source).
-void costs(const settings::Source& s, const SourceState& state, bool known,
-           int64_t utc, std::array<uint8_t, cfg::kDataTypeCount>& cost) {
+void costs(const settings::CompetitionRoute& entry, const SourceState& state,
+           bool known, int64_t utc,
+           std::array<uint8_t, cfg::kDataTypeCount>& cost) {
+  const auto& s = entry.primary;
   const bool season = !s.season.empty() || (known && !state.season.empty());
   for (std::size_t t = 0; t < cfg::kDataTypeCount; ++t)
     cost[t] =
@@ -104,13 +55,20 @@ void costs(const settings::Source& s, const SourceState& state, bool known,
       seasonStale(state, utc))
     cost[index(DataType::kFixtures)] = 2;
   if (s.provider == Provider::kOpenLigaDb) {
-    cost[index(DataType::kFixtures)] = s.team.empty() ? 2 : 3;
     cost[index(DataType::kLive)] = 2;  // change date, round when changed
-  } else if (s.provider == Provider::kEspn) {
+  }
+  if (s.provider == Provider::kEspn) {
     // Match days, then one scoreboard per day (a week before the first).
     cost[index(DataType::kFixtures)] = static_cast<uint8_t>(
-        1 + (known && state.day_count ? state.day_count : 7));
-  }
+        1 + (known && state.fixtures.count ? state.fixtures.count : 7) +
+        (entry.club.team ? 2 : 0));
+  } else
+    cost[index(DataType::kFixtures)] = static_cast<uint8_t>(
+        2 + (needsSeason(s.provider, DataType::kFixtures) && !season ? 1 : 0));
+  if ((s.provider == Provider::kApiFootball ||
+       s.provider == Provider::kOpenLigaDb) &&
+      s.season.empty() && known && seasonStale(state, utc))
+    cost[index(DataType::kFixtures)] = 3;
 }
 uint8_t bit(DataType type) { return static_cast<uint8_t>(1u << index(type)); }
 
@@ -134,52 +92,17 @@ SourceState::Mark* findMark(SourceState& state, uint32_t round) {
 
 }  // namespace
 
-void encode(std::string_view in, char* out, std::size_t size) {
-  if (size == 0) return;
-  std::size_t at = 0;
-  for (const char ch : in) {
-    const auto c = static_cast<unsigned char>(ch);
-    const bool plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                       (c >= '0' && c <= '9') || c == '-' || c == '.' ||
-                       c == '_' || c == '~';
-    if (at + (plain ? 1 : 3) >= size) break;
-    if (plain)
-      out[at++] = static_cast<char>(c);
-    else
-      at += static_cast<std::size_t>(snprintf(out + at, 4, "%%%02X", c));
-  }
-  out[at] = '\0';
-}
-
 std::size_t matchdayDays(const uint32_t* days, std::size_t count, int64_t utc,
-                         uint32_t* out, std::size_t capacity) {
-  // Last day of the matchday starting at 'first'.
-  auto last = [&](std::size_t first) {
-    while (first + 1 < count && !matchday::starts(days[first], days[first + 1]))
-      ++first;
-    return first;
-  };
-  std::size_t i = 0;
-  while (i < count) {
-    const std::size_t end = last(i);
-    if (static_cast<int64_t>(days[end]) + kDayS > utc) break;
-    i = end + 1;
-  }
-  std::size_t written = 0;
-  for (int matchday = 0; matchday < 2 && i < count; ++matchday) {
-    const std::size_t end = last(i);
-    for (; i <= end; ++i)
-      if (written < capacity) out[written++] = days[i];
-  }
-  return written;
+                         uint32_t* out, std::size_t capacity, bool* complete) {
+  return matchday::retainedDays(days, count, utc, out, capacity, complete);
 }
 
 uint32_t changeHash(std::string_view text) {
-  const uint32_t h = hash(2166136261u, text);
+  const uint32_t h = values::fnv1a32(text);
   return h == 0 ? 1 : h;
 }
 
-void Planner::context(const settings::Competitions& competitions,
+void Planner::context(const settings::CompetitionRoutes& competitions,
                       const settings::screen_policy::Eligibility& eligibility,
                       DateContext dates, bool break_proven) {
   competitions_ = &competitions;
@@ -206,6 +129,7 @@ void Planner::reset() {
   current_ = nullptr;
   store_ = nullptr;
   response_details_.clear();
+  retention_index_.reset();
 }
 
 void Planner::forget(uint8_t slot) {
@@ -214,34 +138,7 @@ void Planner::forget(uint8_t slot) {
   states_[slot] = {};
 }
 
-Resolved Planner::saved(uint8_t slot,
-                        const settings::Competition& entry) const {
-  Resolved out;
-  if (slot >= cfg::kCompetitionMax) return out;
-  const auto& state = states_[slot];
-  if (state.key != sourceKey(entry.id, entry.primary)) return out;
-  out.season = state.season;
-  out.season_utc = state.season_utc;
-  out.round = state.round;
-  out.days = state.days;
-  out.day_count = state.day_count;
-  return out;
-}
-
-void Planner::restore(uint8_t slot, const settings::Competition& entry,
-                      const Resolved& resolved) {
-  if (slot >= cfg::kCompetitionMax || resolved.day_count > kEspnDays) return;
-  auto& state = states_[slot];
-  state = {};
-  state.key = sourceKey(entry.id, entry.primary);
-  state.season = resolved.season;
-  state.season_utc = resolved.season_utc;
-  state.round = resolved.round;
-  state.days = resolved.days;
-  state.day_count = resolved.day_count;
-}
-
-void Planner::wanted(uint8_t slot, const settings::Competition* entry,
+void Planner::wanted(uint8_t slot, const settings::CompetitionRoute* entry,
                      const MatchStore& store, const Clock& clock,
                      schedule::Wanted& out,
                      const selection::Selection* current_selection) const {
@@ -287,12 +184,13 @@ void Planner::wanted(uint8_t slot, const settings::Competition* entry,
       }
     }
   }
-  costs(s, state, state.key == sourceKey(entry->id, s), clock.utc, out.cost);
+  costs(*entry, state, state.key == sourceKey(entry->id, s), clock.utc,
+        out.cost);
 }
 
 bool Planner::request(const schedule::Job& job,
-                      const settings::Competition& entry, MatchStore& store,
-                      const Clock& clock, Request& out) {
+                      const settings::CompetitionRoute& entry,
+                      MatchStore& store, const Clock& clock, Request& out) {
   current_ = nullptr;
   if (job.slot >= cfg::kCompetitionMax) return false;
   if (job.type == DataType::kEvents && eligibility_ != nullptr &&
@@ -319,7 +217,7 @@ bool Planner::request(const schedule::Job& job,
   map_ = {};
   map_.competition = entry.id;
   map_.provider = s.provider;
-  map_.club = decimalId(s.team.view());
+  map_.club = entry.club.team;
   map_.clock = clock;
   return begin(store, clock, out);
 }
@@ -329,37 +227,44 @@ bool Planner::begin(MatchStore& store, const Clock& clock, Request& out) {
   auto& progress = state.progress[index(type_)];
   if (progress.step == 0 && progress.at == 0) {
     // A new run.
-    if (type_ == DataType::kFixtures &&
-        source_.provider == Provider::kApiFootball &&
+    if (type_ == DataType::kFixtures && source_.season.empty() &&
         seasonStale(state, clock.utc))
       state.season = {};  // resolved again once a day (OQ-259)
     if (type_ == DataType::kLive) liveItems(store, clock.utc);
     // A fixtures run stores every match: its notices are settled when it
     // completes (OQ-311).
-    if (type_ == DataType::kFixtures)
-      store.beginRun(map_.competition, kNoticeFixtures);
+    if (type_ == DataType::kFixtures) store.beginFixtureRun(map_.competition);
   }
   out = {};
+  retain_admission_ = false;
   if (!build(&out)) {
     progress = {};
     current_ = nullptr;
     return false;
   }
   sink_ = out.sink;
+  retention_index_.reset();
+  retained_rows_ = {};
+  response_failure_ = provider::Status::kOk;
+  response_sources_ = true;
+  own_seen_ = 0;
+  response_rows_ = 0;
+  response_round_ = static_cast<uint8_t>(out.spec.round);
+  response_label_ = kNoIndex;
+  response_round_known_ = true;
+  response_whole_ = false;
   found_round_ = 0;
   found_change_ = 0;
   found_season_ = {};
-  scan_count_ = scan_blocks_ = 0;
-  scan_done_ = false;
   response_details_.clear();
-  map_.observe_names = nullptr;
+  map_.observe_match = nullptr;
   map_.observe_events = nullptr;
-  if (sink_ == Sink::kMatches && eligibility_ != nullptr &&
-      competitions_ != nullptr) {
+  if ((sink_ == Sink::kMatches || sink_ == Sink::kOwnMatches) &&
+      eligibility_ != nullptr && competitions_ != nullptr) {
     // Allocate only after the first body row arrives. The settings first-send
     // fence has then been released, so its heap cannot overlap this payload.
-    map_.observe_names = observeNames;
-    map_.names_context = this;
+    map_.observe_match = observeMatch;
+    map_.match_context = this;
     map_.observe_events = observeEvent;
     map_.events_context = this;
   }
@@ -388,201 +293,112 @@ const StoredMatch* Planner::eventsRow() const {
 }
 
 bool Planner::build(Request* out) {
+  using provider::Operation;
   auto& state = *current_;
   auto& progress = state.progress[index(type_)];
-  const auto& s = source_;
-  const Provider p = s.provider;
+  const auto provider = source_.provider;
+  const auto season =
+      source_.season.empty() ? state.season.view() : source_.season.view();
+  auto set = [&](Operation operation, Sink sink) {
+    if (out) {
+      out->spec = {};
+      out->spec.source = {provider, source_.competition.view(), season};
+      out->spec.operation = operation;
+      out->sink = sink;
+    }
+    return true;
+  };
   discover_ = filter_ = false;
-  season_number_ = 0;
-  char league[kCompetitionUrl], season[kSeasonUrl], team[kTeamUrl];
-  encode(s.competition.view(), league, sizeof(league));
-  encode(s.team.view(), team, sizeof(team));
-  const auto season_text =
-      s.season.empty() ? state.season.view() : s.season.view();
-  encode(season_text, season, sizeof(season));
-
   if (progress.step == 0) {
-    if (needsSeason(p, type_) && season_text.empty()) {
-      if (p == Provider::kOpenLigaDb) {
-        // The current round's matches carry the season (about 18 KB).
-        format(out, "%sgetmatchdata/%s", kOpenLigaDb, league);
-        set(out, Sink::kMatches, "");
-        discover_ = true;
-      } else {
-        format(out, "%sleagues?id=%s&current=true", kApiFootball, league);
-        set(out, Sink::kSeason, "response");
-      }
+    if (needsSeason(provider, type_) && season.empty()) {
+      discover_ = provider == Provider::kOpenLigaDb;
+      set(Operation::kCurrentSeason,
+          discover_ ? Sink::kMatches : Sink::kSeason);
       return true;
     }
     progress = {1, 0};
   }
-
-  if (p == Provider::kOpenLigaDb) {
-    switch (type_) {
-      case DataType::kTable:
-      case DataType::kLiveTable:
-        if (progress.step != 1) return false;
-        format(out, "%sgetbltable/%s/%s", kOpenLigaDb, league, season);
-        set(out, Sink::kTable, "");
-        return true;
-      case DataType::kFixtures:
-        if (progress.step == 1) {
-          // Current round; its rows give the current season and round.
-          format(out, "%sgetmatchdata/%s", kOpenLigaDb, league);
-          set(out, Sink::kMatches, "");
-          discover_ = true;
-          filter_ = !s.season.empty();
-          season_number_ = static_cast<int>(decimalId(s.season.view()));
-          return true;
-        }
-        if (progress.step == 2) {
-          if (state.round > 0 && !season_text.empty()) {
-            format(out, "%sgetmatchdata/%s/%s/%u", kOpenLigaDb, league, season,
-                   static_cast<unsigned>(state.round) + 1);
-            set(out, Sink::kMatches, "");
-            return true;
-          }
-          progress = {3, 0};
-        }
-        if (progress.step == 3 && !s.team.empty()) {
-          // The club's fixtures within the horizon, also catch-up fixtures
-          // outside the two rounds; other competitions' rows are skipped.
-          const unsigned weeks = (cfg::kFixtureHorizonDays + 6) / 7;
-          format(out, "%sgetmatchesbyteamid/%s/%u/%u", kOpenLigaDb, team, weeks,
-                 weeks);
-          set(out, Sink::kMatches, "");
-          filter_ = true;
-          season_number_ = static_cast<int>(decimalId(season_text));
-          return true;
-        }
-        progress = {4, 0};
-        return false;
-      case DataType::kLive: {
-        if (progress.at >= state.live_count) return false;
-        const uint32_t round = state.live[progress.at] != 0
-                                   ? state.live[progress.at]
-                                   : state.round;
-        if (round == 0) {
-          // The current round is unknown: its matches give it.
-          format(out, "%sgetmatchdata/%s", kOpenLigaDb, league);
-          set(out, Sink::kMatches, "");
-          discover_ = true;
-          filter_ = !s.season.empty();
-          season_number_ = static_cast<int>(decimalId(s.season.view()));
-          return true;
-        }
-        format(out,
-               progress.step == 1 ? "%sgetlastchangedate/%s/%s/%lu"
-                                  : "%sgetmatchdata/%s/%s/%lu",
-               kOpenLigaDb, league, season, static_cast<unsigned long>(round));
-        if (progress.step == 1)
-          set(out, Sink::kChange, nullptr);
-        else
-          set(out, Sink::kMatches, "");
-        return true;
-      }
-      case DataType::kEvents: return false;
+  if (type_ == DataType::kFixtures && provider != Provider::kEspn) {
+    if (progress.step == 1) {
+      filter_ = true;
+      return set(Operation::kFixtures, Sink::kIndex);
+    }
+    if (progress.step == 2) {
+      filter_ = true;
+      retain_admission_ = true;
+      return set(Operation::kFixtures, Sink::kMatches);
     }
     return false;
   }
-
-  if (p == Provider::kEspn) {
-    char day[16];
-    const char* with = s.season.empty() ? "" : "season=";
-    const char* season_query = s.season.empty() ? "" : season;
-    switch (type_) {
-      case DataType::kTable:
-      case DataType::kLiveTable:
-        if (progress.step != 1) return false;
-        // Cups answer without "entries": an empty table, not a failure.
-        format(out,
-               "https://site.web.api.espn.com/apis/v2/sports/soccer/%s/"
-               "standings%s%s%s",
-               league, s.season.empty() ? "" : "?", with, season_query);
-        set(out, Sink::kTable, "entries", true);
-        return true;
-      case DataType::kFixtures:
-        if (progress.step == 1) {
-          format(out,
-                 "https://sports.core.api.espn.com/v2/sports/soccer/leagues/"
-                 "%s/calendar/ondays",
-                 league);
-          set(out, Sink::kDays, "dates");
-          return true;
-        }
-        if (progress.at >= state.day_count) return false;
-        date(state.days[progress.at], "%Y%m%d", day);
-        format(out, "%s%s/scoreboard?dates=%s%s%s", kEspnSite, league, day,
-               s.season.empty() ? "" : "&", with, season_query);
-        set(out, Sink::kMatches, "events");
-        return true;
-      case DataType::kLive:
-        if (progress.at >= state.live_count) return false;
-        if (state.live[progress.at] == 0) {
-          // No stored match day: the provider's next day with a match.
-          format(out, "%s%s/scoreboard", kEspnSite, league);
-        } else {
-          date(state.live[progress.at], "%Y%m%d", day);
-          format(out, "%s%s/scoreboard?dates=%s", kEspnSite, league, day);
-        }
-        set(out, Sink::kMatches, "events");
-        return true;
-      case DataType::kEvents:
-        if (progress.step != 1 || event_match_ == 0) return false;
-        format(out, "%s%s/summary?event=%lu", kEspnSite, league,
-               static_cast<unsigned long>(event_match_));
-        set(out, Sink::kEvents, "keyEvents", true);
-        if (out != nullptr) out->body = cfg::kProviderSummaryBodyBytes;
-        return true;
+  if (provider == Provider::kOpenLigaDb) {
+    if (type_ == DataType::kTable || type_ == DataType::kLiveTable)
+      return progress.step == 1 && set(Operation::kTable, Sink::kTable);
+    if (type_ != DataType::kLive || progress.at >= state.live_count)
+      return false;
+    const uint32_t round =
+        state.live[progress.at] ? state.live[progress.at] : state.round;
+    if (!round) {
+      discover_ = true;
+      filter_ = !source_.season.empty();
+      return set(Operation::kCurrentRound, Sink::kMatches);
     }
-    return false;
+    set(progress.step == 1 ? Operation::kLastChange : Operation::kFixtures,
+        progress.step == 1 ? Sink::kChange : Sink::kMatches);
+    if (out) out->spec.round = round;
+    return true;
   }
-
-  // Generic test sources: one request per run.
-  if (progress.step != 1) return false;
-  char from[16], to[16];
-  const int64_t utc = map_.clock.utc;
-  const bool live = type_ == DataType::kLive;
-  const int64_t span = live ? 0 : cfg::kFixtureHorizonDays * int64_t{kDayS};
-  date(utc - span, "%Y-%m-%d", from);
-  // football-data.org v4 excludes the dateTo day (v4 changelog, checked
-  // 2026-10-16); API-Football's 'to' includes it.
-  date(utc + span + (p == Provider::kFootballData ? kDayS : 0), "%Y-%m-%d", to);
-  if (p == Provider::kApiFootball) {
-    switch (type_) {
-      case DataType::kTable:
-      case DataType::kLiveTable:
-        format(out, "%sstandings?league=%s&season=%s", kApiFootball, league,
-               season);
-        set(out, Sink::kTable, "response");
-        return true;
-      case DataType::kFixtures:
-      case DataType::kLive:
-        format(out, "%sfixtures?league=%s&season=%s&from=%s&to=%s",
-               kApiFootball, league, season, from, to);
-        set(out, Sink::kMatches, "response");
-        return true;
-      case DataType::kEvents: return false;
-    }
-    return false;
-  }
-  const char* first = s.season.empty() ? "" : "?season=";
-  const char* then = s.season.empty() ? "" : "&season=";
-  switch (type_) {
-    case DataType::kTable:
-    case DataType::kLiveTable:
-      format(out, "%s%s/standings%s%s", kFootballData, league, first, season);
-      set(out, Sink::kTable, "standings");
+  if (provider == Provider::kEspn) {
+    if (type_ == DataType::kTable || type_ == DataType::kLiveTable)
+      return progress.step == 1 && set(Operation::kTable, Sink::kTable);
+    if (type_ == DataType::kEvents) {
+      if (progress.step != 1 || !event_match_) return false;
+      set(Operation::kSummary, Sink::kEvents);
+      if (out) out->spec.match = event_match_;
       return true;
-    case DataType::kFixtures:
-    case DataType::kLive:
-      format(out, "%s%s/matches?dateFrom=%s&dateTo=%s%s%s", kFootballData,
-             league, from, to, then, season);
-      set(out, Sink::kMatches, "matches");
+    }
+    if (type_ == DataType::kFixtures && progress.step == 1) {
+      set(Operation::kCalendarDays, Sink::kDays);
+      if (out && source_.season.empty()) out->spec.source.season = {};
       return true;
-    case DataType::kEvents: return false;
+    }
+    if (type_ == DataType::kFixtures && progress.step == 2 &&
+        progress.at >= state.fixtures.count)
+      progress.step = map_.club ? 3 : 5;
+    if (type_ == DataType::kFixtures &&
+        (progress.step == 3 || progress.step == 4)) {
+      filter_ = true;
+      set(Operation::kOwnFixtures,
+          progress.step == 3 ? Sink::kOwnIndex : Sink::kOwnMatches);
+      if (out) out->spec.team = map_.club;
+      return true;
+    }
+    if ((type_ == DataType::kFixtures && progress.step >= 5) ||
+        (type_ == DataType::kLive && progress.at >= state.live_count))
+      return false;
+    set(Operation::kFixtures, Sink::kMatches);
+    filter_ = true;
+    if (out)
+      out->spec.from = type_ == DataType::kLive
+                           ? state.live[progress.at]
+                           : state.fixtures.calendar_data.days[progress.at];
+    return true;
   }
-  return false;
+  if (progress.step != 1 || type_ == DataType::kEvents) return false;
+  if (type_ == DataType::kTable || type_ == DataType::kLiveTable)
+    return set(Operation::kTable, Sink::kTable);
+  set(Operation::kFixtures, Sink::kMatches);
+  if (out) {
+    const int64_t span = type_ == DataType::kLive
+                             ? 0
+                             : cfg::kFixtureHorizonDays * int64_t{kDayS};
+    out->spec.from = static_cast<uint32_t>(
+        std::max<int64_t>(1, map_.clock.utc - span) / kDayS * kDayS);
+    out->spec.to = static_cast<uint32_t>(
+        std::min<int64_t>(UINT32_MAX - kDayS, map_.clock.utc + span) / kDayS *
+            kDayS +
+        kDayS - 1);
+  }
+  return true;
 }
 
 void Planner::liveItems(const MatchStore& store, int64_t utc) {
@@ -605,9 +421,9 @@ void Planner::liveItems(const MatchStore& store, int64_t utc) {
     } else if (source_.provider == Provider::kEspn) {
       // The provider day holding the kickoff, else the next match day.
       uint32_t day = 0;
-      for (uint8_t d = 0; d < state.day_count; ++d)
-        if (state.days[d] <= m.kickoff && m.kickoff < state.days[d] + kDayS)
-          day = state.days[d];
+      for (uint8_t d = 0; d < state.fixtures.count; ++d)
+        if (state.fixtures.calendar_data.days[d] / kDayS == m.kickoff / kDayS)
+          day = state.fixtures.calendar_data.days[d];
       add(day);
     }
   }
@@ -618,78 +434,194 @@ void Planner::liveItems(const MatchStore& store, int64_t utc) {
   if (source_.provider == Provider::kEspn && state.live_count == 0) add(0);
 }
 
-bool Planner::consume(JsonVariantConst element, void* planner) {
-  return static_cast<Planner*>(planner)->consumeElement(element);
+bool Planner::acceptsMatch(const provider::Fixture& row) const {
+  return (sink_ == Sink::kMatches || sink_ == Sink::kOwnMatches ||
+          sink_ == Sink::kIndex || sink_ == Sink::kOwnIndex) &&
+         (!filter_ || row.source_matches);
 }
-
-void Planner::addDay(uint32_t day) {
-  if (scan_done_ || (scan_count_ > 0 && day <= scan_[scan_count_ - 1])) return;
-  if (scan_count_ > 0 && matchday::starts(scan_[scan_count_ - 1], day)) {
-    // The matchday before 'day' is complete.
-    if (static_cast<int64_t>(scan_[scan_count_ - 1]) + kDayS <= map_.clock.utc)
-      scan_count_ = 0;  // it has ended
-    else if (++scan_blocks_ == 2) {
-      scan_done_ = true;
-      return;
+bool Planner::consume(const provider::Fixture& row,
+                      std::span<const provider::Event> events) {
+  if (!row.source_matches) response_sources_ = false;
+  if (sink_ == Sink::kIndex || sink_ == Sink::kOwnIndex) {
+    if (!retention_index_)
+      retention_index_.reset(new (std::nothrow) retention::Index(
+          map_.club, map_.clock.utc, dates_));
+    if (!retention_index_) {
+      response_failure_ = provider::Status::kNoMemory;
+      return false;
+    }
+    if (!retention_index_->observe(row)) {
+      response_failure_ = provider::Status::kTooLarge;
+      return false;
+    }
+    return true;
+  }
+  if (discover_) {
+    found_round_ = std::max<int>(found_round_, row.facts.round);
+  }
+  if (!acceptsMatch(row)) return true;
+  if (retain_admission_ || sink_ == Sink::kOwnMatches) {
+    const auto& selected = current_->fixtures;
+    const auto own =
+        std::find(selected.own.begin(), selected.own.end(), row.facts.id);
+    if (own != selected.own.end())
+      own_seen_ |= 1u << static_cast<unsigned>(own - selected.own.begin());
+    if (sink_ == Sink::kOwnMatches) {
+      if (own == selected.own.end()) return true;
+    } else {
+      const int round =
+          selected.roundIndex(row.facts.round, row.round_label.data);
+      if (round >= 0) ++retained_rows_[round];
+      if (!selected.contains(row.facts.round, row.round_label.data,
+                             row.facts.kickoff, row.facts.id))
+        return true;
     }
   }
-  if (scan_count_ < scan_.size()) scan_[scan_count_++] = day;
-}
-
-bool Planner::acceptsMatch(JsonVariantConst row) const {
-  if (sink_ != Sink::kMatches) return false;
-  if (map_.provider != Provider::kOpenLigaDb || !filter_) return true;
-  const char* shortcut = row["leagueShortcut"] | "";
-  return sameLeague(shortcut, source_.competition.view()) &&
-         (season_number_ == 0 || (row["leagueSeason"] | 0) == season_number_);
-}
-
-bool Planner::consumeElement(JsonVariantConst row) {
-  switch (sink_) {
-    case Sink::kMatches:
-      if (map_.provider == Provider::kOpenLigaDb) {
-        if (discover_) {
-          const int round = row["group"]["groupOrderID"] | 0;
-          if (round > 0 && round < 256 && round > found_round_)
-            found_round_ = round;
-          if (row["leagueSeason"].is<int>()) {
-            char text[cfg::kSeasonMaxBytes + 1];
-            snprintf(text, sizeof(text), "%d", row["leagueSeason"].as<int>());
-            found_season_.assign(text);
-          }
-        }
+  ++response_rows_;
+  if (row.facts.round) {
+    if (response_round_ && response_round_ != row.facts.round)
+      response_round_known_ = false;
+    else
+      response_round_ = row.facts.round;
+  } else
+    response_round_known_ = false;
+  map_.round = 0;
+  map_.round_label = kNoIndex;
+  if (current_->fixtures.calendar)
+    for (uint8_t i = 0; i < current_->fixtures.calendar_data.stage_count; ++i) {
+      const auto& stage = current_->fixtures.calendar_data.stages[i];
+      if (row.facts.kickoff >= stage.from && row.facts.kickoff <= stage.to) {
+        map_.round = stage.number;
+        map_.round_label = stage.label;
+        break;
       }
-      if (!acceptsMatch(row)) return true;
-      storeMatch(row, *store_, map_);  // a row without id is skipped
-      return true;
-    case Sink::kTable: storeTableRow(row, *store_, map_); return true;
-    case Sink::kChange:
-      if (!row.is<const char*>()) return false;
-      found_change_ = changeHash(row.as<const char*>());
-      return true;
-    case Sink::kDays: {
-      const int64_t day = parseUtc(row | "");
-      if (day > 0 && day < INT64_C(0x100000000))
-        addDay(static_cast<uint32_t>(day));
-      return true;
     }
-    case Sink::kEvents:
-      if (const auto* m = eventsRow()) storeSummaryEvent(row, *store_, *m);
-      return true;
-    case Sink::kSeason:
-      for (JsonVariantConst item : row["seasons"].as<JsonArrayConst>())
-        if (item["current"].as<bool>() && item["year"].is<int>()) {
-          char text[cfg::kSeasonMaxBytes + 1];
-          snprintf(text, sizeof(text), "%d", item["year"].as<int>());
-          found_season_.assign(text);
-        }
-      return true;
+  const bool stored = storeMatch(row, events, *store_, map_);
+  if (!stored) response_failure_ = provider::Status::kTooLarge;
+  if (!row.source_matches || !row.time_definite) response_round_known_ = false;
+  if (auto* match =
+          store_->find(map_.competition, map_.provider, row.facts.id)) {
+    if (type_ == DataType::kFixtures)
+      store_->markFixture(map_.competition, map_.provider, row.facts.id);
+    if (response_label_ == kNoIndex) response_label_ = match->label;
+  }
+  return stored;
+}
+bool Planner::consume(const provider::TableRow& row) {
+  const bool stored = storeTableRow(row, *store_, map_);
+  if (!stored) response_failure_ = provider::Status::kTooLarge;
+  return stored;
+}
+bool Planner::consume(const provider::TableGroup& group) {
+  return store_->appendGroup(group.key.data, group.label.data, group.ordinal);
+}
+bool Planner::consume(const provider::Event& event) {
+  if (const auto* match = eventsRow())
+    storeSummaryEvent(event, *store_, *match);
+  return true;
+}
+bool Planner::consumeDay(uint32_t day) {
+  if (!retention_index_)
+    retention_index_.reset(new (std::nothrow) retention::Index(
+        map_.club, map_.clock.utc, dates_, true));
+  if (!retention_index_) {
+    response_failure_ = provider::Status::kNoMemory;
+    return false;
+  }
+  if (!retention_index_->observeDay(day)) {
+    response_failure_ = provider::Status::kTooLarge;
+    return false;
+  }
+  return true;
+}
+bool Planner::consumeCalendarRound(const provider::CalendarRound& round) {
+  if (!retention_index_)
+    retention_index_.reset(new (std::nothrow) retention::Index(
+        map_.club, map_.clock.utc, dates_, true));
+  if (!retention_index_) {
+    response_failure_ = provider::Status::kNoMemory;
+    return false;
+  }
+  if (!retention_index_->observeRound(round)) {
+    response_failure_ = provider::Status::kTooLarge;
+    return false;
+  }
+  return true;
+}
+bool Planner::consumeText(std::string_view text) {
+  found_change_ = changeHash(text);
+  return true;
+}
+bool Planner::response(const provider::ParseResult& parsed) {
+  if (response_failure_ != provider::Status::kOk) return false;
+  const auto& metadata = parsed.metadata;
+  response_whole_ = parsed.status == provider::Status::kOk &&
+                    parsed.primary_seen && parsed.document_complete &&
+                    !parsed.early_stopped && !metadata.invalid &&
+                    !metadata.duplicate;
+  if (!metadata.season.empty()) found_season_.assign(metadata.season.data);
+  found_round_ = std::max<int>(found_round_, metadata.round);
+  if (sink_ == Sink::kIndex || sink_ == Sink::kOwnIndex) {
+    if (response_failure_ != provider::Status::kOk) return false;
+    if (!response_whole_ || !metadata.metadata_complete ||
+        !metadata.source_matches) {
+      response_failure_ = provider::Status::kRejected;
+      return false;
+    }
+    if (!retention_index_)
+      retention_index_.reset(new (std::nothrow) retention::Index(
+          map_.club, map_.clock.utc, dates_));
+    if (!retention_index_) response_failure_ = provider::Status::kNoMemory;
+    if (response_failure_ != provider::Status::kOk) return false;
+    if (!(sink_ == Sink::kIndex ? retention_index_->select(current_->fixtures)
+                                : retention_index_->own(current_->fixtures))) {
+      response_failure_ = provider::Status::kRejected;
+      return false;
+    }
+  }
+  if (retain_admission_ && response_whole_)
+    if (!metadata.metadata_complete || !metadata.source_matches ||
+        !response_sources_) {
+      response_failure_ = provider::Status::kRejected;
+      return false;
+    }
+  if (retain_admission_ && response_whole_)
+    for (uint8_t i = 0; i < current_->fixtures.count; ++i)
+      if (retained_rows_[i] != current_->fixtures.expected[i]) {
+        response_failure_ = provider::Status::kRejected;
+        return false;
+      }
+  if ((sink_ == Sink::kOwnMatches || retain_admission_) && response_whole_)
+    for (std::size_t i = 0; i < current_->fixtures.own.size(); ++i)
+      if (current_->fixtures.own[i] && !(own_seen_ & (1u << i))) {
+        response_failure_ = provider::Status::kRejected;
+        return false;
+      }
+  if (sink_ == Sink::kDays) {
+    if (!response_whole_ || !metadata.metadata_complete ||
+        !metadata.source_matches) {
+      response_failure_ = provider::Status::kRejected;
+      return false;
+    }
+    if (response_failure_ != provider::Status::kOk) return false;
+    if (!retention_index_)
+      retention_index_.reset(new (std::nothrow) retention::Index(
+          map_.club, map_.clock.utc, dates_, true));
+    if (!retention_index_) {
+      response_failure_ = provider::Status::kNoMemory;
+      return false;
+    }
+    if (!retention_index_->select(current_->fixtures, store_,
+                                  map_.competition)) {
+      response_failure_ = provider::Status::kTooLarge;
+      store_->flag(map_.competition, kNoticeMatches, true);
+      return false;
+    }
   }
   return true;
 }
 
-void Planner::observeNames(const StoredMatch& match, std::string_view home,
-                           std::string_view away, void* context) {
+void Planner::observeMatch(const StoredMatch& match, void* context) {
   auto& planner = *static_cast<Planner*>(context);
   auto& response = planner.response_details_;
   response.receiving = -1;
@@ -747,8 +679,6 @@ void Planner::observeNames(const StoredMatch& match, std::string_view home,
   candidate.truncated = false;
   candidate.match = {match.id, match.competition, match.provider};
   candidate.kickoff = match.kickoff;
-  candidate.home.assign(home);
-  candidate.away.assign(away);
   response.receiving = static_cast<int8_t>(which);
 }
 
@@ -810,9 +740,8 @@ void Planner::finishDetails(bool ok, const Clock& clock) {
         chosen_index = i;
       }
   if (chosen != nullptr) {
-    auto* target =
-        store_->ensureDetail(match->competition, match->provider, match->id,
-                             clock, chosen->home.data, chosen->away.data);
+    auto* target = store_->ensureDetail(match->competition, match->provider,
+                                        match->id, clock);
     if (target != nullptr && store_->beginEvents(*target, false, clock.utc)) {
       for (uint8_t i = 0; i < chosen->count; ++i)
         store_->addEvent(response_details_.events->candidates[chosen_index][i]);
@@ -838,8 +767,20 @@ void Planner::finishDetails(bool ok, const Clock& clock) {
 Step Planner::finish(bool ok, const Clock& clock) {
   if (current_ == nullptr) return Step::kDone;
   if (sink_ == Sink::kTable) store_->commitTable(ok);
+  if (sink_ == Sink::kMatches || sink_ == Sink::kOwnMatches) {
+    store_->datasetResult(map_.competition, MatchStore::Dataset::kFixtures,
+                          ok && response_whole_);
+    if (response_round_known_ && response_round_)
+      store_->roundResult(
+          map_.competition, response_round_, response_label_, response_rows_,
+          static_cast<uint32_t>(std::max<int64_t>(0, clock.utc)),
+          ok && response_whole_);
+  }
+  if (sink_ == Sink::kEvents)
+    store_->datasetResult(map_.competition, MatchStore::Dataset::kEvents, ok);
   if (sink_ == Sink::kEvents) store_->endEvents(ok);
   finishDetails(ok, clock);
+  retention_index_.reset();
   return advance(ok, clock);
 }
 
@@ -854,6 +795,7 @@ void Planner::release() {
   if (sink_ == Sink::kTable) store_->commitTable(false);
   if (sink_ == Sink::kEvents) store_->endEvents(false);
   response_details_.clear();
+  retention_index_.reset();
   current_ = nullptr;
 }
 
@@ -913,11 +855,12 @@ Step Planner::advance(bool ok, const Clock& clock) {
                            : 0;
     if (found_round_ > 0) state.round = static_cast<uint8_t>(found_round_);
     progress = {1, 0};
-  } else if (p == Provider::kOpenLigaDb && type_ == DataType::kFixtures) {
+  } else if (p != Provider::kEspn && type_ == DataType::kFixtures) {
     if (progress.step == 1) {
-      if (found_round_ > 0) state.round = static_cast<uint8_t>(found_round_);
       if (source_.season.empty() && !found_season_.empty())
         state.season = found_season_;
+      if (state.fixtures.current >= 0)
+        state.round = state.fixtures.rounds[state.fixtures.current].number;
     }
     ++progress.step;
   } else if (p == Provider::kOpenLigaDb && type_ == DataType::kLive) {
@@ -949,21 +892,48 @@ Step Planner::advance(bool ok, const Clock& clock) {
     }
   } else if (p == Provider::kEspn && type_ == DataType::kFixtures) {
     if (progress.step == 1) {
-      state.day_count = static_cast<uint8_t>(
-          matchdayDays(scan_.data(), scan_count_, clock.utc, state.days.data(),
-                       state.days.size()));
+      if (source_.season.empty() && !found_season_.empty())
+        state.season = found_season_;
       progress = {2, 0};
-    } else {
+    } else if (progress.step == 2) {
       ++progress.at;
-    }
+    } else
+      ++progress.step;
   } else if (p == Provider::kEspn && type_ == DataType::kLive) {
     ++progress.at;
   } else {
     ++progress.step;
   }
   if (!build(nullptr)) {
-    if (type_ == DataType::kFixtures)
+    if (type_ == DataType::kFixtures) {
+      store_->retain(map_.competition, state.fixtures, clock.utc, dates_);
+      if (!state.fixtures.calendar)
+        for (uint8_t i = 0; i < state.fixtures.count; ++i) {
+          const auto& key = state.fixtures.rounds[i];
+          const auto label =
+              key.label.empty() ? kNoIndex : store_->label(key.label.data);
+          store_->roundResult(
+              map_.competition, key.number, label, state.fixtures.expected[i],
+              static_cast<uint32_t>(std::max<int64_t>(0, clock.utc)), true);
+        }
+      else
+        for (uint8_t i = 0; i < state.fixtures.calendar_data.stage_count; ++i) {
+          const auto& stage = state.fixtures.calendar_data.stages[i];
+          uint16_t count = 0;
+          for (std::size_t m = 0; m < store_->matchCount(); ++m) {
+            const auto& match = store_->match(m);
+            count += match.competition == map_.competition &&
+                     match.round == stage.number &&
+                     match.label == stage.label &&
+                     (match.flags & kMatchRefresh);
+          }
+          store_->roundResult(
+              map_.competition, stage.number, stage.label, count,
+              static_cast<uint32_t>(std::max<int64_t>(0, clock.utc)), true);
+        }
       store_->settleRun(map_.competition, kNoticeFixtures);
+      store_->collect();
+    }
     return end(Step::kDone);
   }
   current_ = nullptr;

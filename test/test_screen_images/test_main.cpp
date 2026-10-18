@@ -6,9 +6,7 @@
 #include <cstdint>
 
 #include "screen_policy.h"
-#include "screen_record.h"
 #include "settings_model.h"
-#include "settings_record.h"
 
 namespace {
 using settings::ImageMask;
@@ -37,8 +35,7 @@ void explicit_delete_removes_every_occurrence_and_only_the_selected_id() {
   policy.slide_count = 5;
   policy.shared[0][0].visit_s = 123;
   policy.frame = true;
-  policy.competitions[0] = {800, 23, false};
-  policy.overrides[4][2][0] = {234, 0, 7};
+  policy.per_competition[4] = 1u << 2;
   Policy expected = policy;
   expected.appearance[0].image = 0;
   expected.slides = {3, 5, 0, 0, 0};
@@ -94,16 +91,6 @@ void policy_cleanup_rejects_invalid_library_references_consistently() {
   TEST_ASSERT_FALSE(settings::dropMissingImages(policy, bit(2)));
 }
 
-void candidate_and_record_heap_chains_fit_the_delegated_two_kib_ceiling() {
-  // This actual own allocation excludes NVS/allocator internals. The general
-  // settings record no longer participates in image-reference cleanup.
-  TEST_ASSERT_LESS_THAN_size_t(
-      2048, sizeof(Policy) + settings::screen_record::kRecordBytes + 64);
-  printf(
-      "Own cleanup allocation chain: Policy %zu + record %zu bytes "
-      "(before allocator/NVS overhead)\n",
-      sizeof(Policy), settings::screen_record::kRecordBytes);
-}
 }  // namespace
 
 void setUp() { policy = Policy{}; }
@@ -115,6 +102,5 @@ int main() {
   RUN_TEST(repair_filters_all_missing_ids_stably_and_keeps_duplicate_survivors);
   RUN_TEST(retained_images_leave_every_policy_value_unchanged);
   RUN_TEST(policy_cleanup_rejects_invalid_library_references_consistently);
-  RUN_TEST(candidate_and_record_heap_chains_fit_the_delegated_two_kib_ceiling);
   return UNITY_END();
 }

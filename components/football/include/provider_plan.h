@@ -42,8 +42,6 @@
 
 #pragma once
 
-#include <ArduinoJson.h>
-
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -51,7 +49,9 @@
 #include <string_view>
 
 #include "app_config.h"
+#include "fixture_retention.h"
 #include "match_store.h"
+#include "provider_adapter.h"
 #include "request_scheduler.h"
 #include "screen_selection.h"
 #include "settings_model.h"
@@ -59,32 +59,27 @@
 
 namespace football::plan {
 
-inline constexpr std::size_t kUrlBytes = 320;
 // ESPN match days kept per source: the current and the next matchday.
-inline constexpr std::size_t kEspnDays = 8;
+inline constexpr std::size_t kEspnDays = cfg::kFixtureCalendarDays;
 // Rounds or match days one live run checks.
 inline constexpr std::size_t kLiveItems = 3;
 
 // Where the elements of a response go.
 enum class Sink : uint8_t {
-  kMatches,  // storeMatch(); OpenLigaDB rows also give season and round
-  kTable,    // storeTableRow() between beginTable() and commitTable()
-  kChange,   // OpenLigaDB change date (one JSON string)
-  kDays,     // ESPN match days (calendar/ondays "dates")
-  kSeason,   // API-Football current season (/leagues "response")
-  kEvents,   // storeSummaryEvent() between beginEvents() and endEvents()
+  kMatches,   // storeMatch(); OpenLigaDB rows also give season and round
+  kTable,     // storeTableRow() between beginTable() and commitTable()
+  kChange,    // OpenLigaDB change date (one JSON string)
+  kDays,      // ESPN match days (calendar/ondays "dates")
+  kSeason,    // API-Football current season (/leagues "response")
+  kEvents,    // storeSummaryEvent() between beginEvents() and endEvents()
+  kIndex,     // compact complete-season index; no fixture admission
+  kOwnIndex,  // explicit own schedule; no competition-round completeness
+  kOwnMatches,
 };
 
 struct Request {
-  char url[kUrlBytes]{};
-  // Array whose elements are streamed (fetchJson): "" a top-level array,
-  // nullptr the whole document.
-  const char* array = "";
-  // The array may be absent (a cup without table): not a failure.
-  bool optional = false;
+  provider::RequestSpec spec;
   Sink sink = Sink::kMatches;
-  // Most body bytes read (fetchJson body_limit).
-  std::size_t body = cfg::kProviderBodyBytes;
 };
 
 // Result of finish().
@@ -129,8 +124,7 @@ struct SourceState {
   std::array<Mark, kLiveItems> marks{};
   // ESPN match days (UTC start of each provider day) of the current and the
   // next matchday, ascending.
-  std::array<uint32_t, kEspnDays> days{};
-  uint8_t day_count = 0;
+  retention::Selection fixtures;
   // The live run in progress: its rounds (OpenLigaDB) or match days (ESPN,
   // 0 = the scoreboard without date), and the change date just checked.
   std::array<uint32_t, kLiveItems> live{};
@@ -143,32 +137,20 @@ struct SourceState {
   std::array<Progress, cfg::kDataTypeCount> progress{};
 };
 
-// What a source resolved that a competition file keeps (football_files.h):
-// its current season (with the UTC second of its resolution), OpenLigaDB
-// round and ESPN match days.
-struct Resolved {
-  settings::Bytes<cfg::kSeasonMaxBytes> season;
-  uint32_t season_utc = 0;
-  uint8_t round = 0;
-  std::array<uint32_t, kEspnDays> days{};
-  uint8_t day_count = 0;
-};
-
 // One complete response retains the closest candidate in each selection class.
 // The final selector alone commits it; the protected own bank is unchanged.
 struct ResponseDetails {
   struct Candidate {
     selection::MatchKey match;
     uint32_t kickoff = 0;
-    Text<cfg::kNameBytes> home, away;
     uint8_t count = 0;
     bool truncated = false;
   };
-  // Only the event payload is transient heap memory. Candidate identity, names
+  // Only the event payload is transient heap memory. Candidate identity
   // and duplicate detection belong to the existing worker-owned planner, so a
   // simultaneous bounded settings request stays inside the shared heap limit.
   struct EventBuffer {
-    std::array<std::array<StoredEvent, cfg::kMatchEvents>, 2> candidates{};
+    std::array<std::array<StoredEvent, cfg::kStoreOtherEvents>, 2> candidates{};
   };
   std::array<Candidate, 2> candidates{};
   std::array<uint32_t, cfg::kStoreMatches> seen{};
@@ -179,30 +161,23 @@ struct ResponseDetails {
   // Reset only live metadata; do not create a full metadata stack temporary.
   void clear();
 };
-static_assert(sizeof(ResponseDetails::EventBuffer) <= 2016);
-static_assert(sizeof(ResponseDetails) <= 1216);
+static_assert(sizeof(ResponseDetails::EventBuffer) <= 7680);
+static_assert(sizeof(ResponseDetails) <= 2368);
 
 class Planner {
  public:
   // Borrowed coherent worker snapshot; never a full retained policy copy.
-  void context(const settings::Competitions& competitions,
+  void context(const settings::CompetitionRoutes& competitions,
                const settings::screen_policy::Eligibility& eligibility,
                DateContext dates = {}, bool break_proven = false);
   void reset();
   // The source state of slot 'slot' starts afresh (its data was dropped).
   void forget(uint8_t slot);
-  // The resolved part of a source state; empty when the state does not
-  // belong to the current source of 'entry'.
-  Resolved saved(uint8_t slot, const settings::Competition& entry) const;
-  // Restores a saved source state for the current source of 'entry' (as
-  // after its requests); a run in progress starts over.
-  void restore(uint8_t slot, const settings::Competition& entry,
-               const Resolved& resolved);
   // Scheduler inputs of slot 'slot' (entry null, inactive or without
   // competition: unused) at 'clock': exact Single summaries are held until
   // their match has started; an API-Football fixtures run whose season
   // is due for resolution costs its /leagues request too (OQ-264).
-  void wanted(uint8_t slot, const settings::Competition* entry,
+  void wanted(uint8_t slot, const settings::CompetitionRoute* entry,
               const MatchStore& store, const Clock& clock,
               schedule::Wanted& out,
               const selection::Selection* selected = nullptr) const;
@@ -210,13 +185,20 @@ class Planner {
   // prepares the streaming into 'store' (a table request begins the
   // staging). False when the run has nothing (more) to request: the run is
   // complete without a request.
-  bool request(const schedule::Job& job, const settings::Competition& entry,
-               MatchStore& store, const Clock& clock, Request& out);
-  // Shared source/season filter for match rows before any external observer.
-  // Club fixture endpoints may legitimately contain other competitions.
-  bool acceptsMatch(ArduinoJson::JsonVariantConst element) const;
-  // fetchJson consumer for the prepared request; 'planner' is this.
-  static bool consume(ArduinoJson::JsonVariantConst element, void* planner);
+  bool request(const schedule::Job& job,
+               const settings::CompetitionRoute& entry, MatchStore& store,
+               const Clock& clock, Request& out);
+  // Typed response callbacks; the worker serialises each mutation.
+  bool acceptsMatch(const provider::Fixture&) const;
+  bool consume(const provider::Fixture&, std::span<const provider::Event>);
+  bool consume(const provider::TableRow&);
+  bool consume(const provider::TableGroup&);
+  bool consume(const provider::Event&);
+  bool consumeDay(uint32_t);
+  bool consumeCalendarRound(const provider::CalendarRound&);
+  bool consumeText(std::string_view);
+  bool response(const provider::ParseResult&);
+  provider::Status responseFailure() const { return response_failure_; }
   // Ends the prepared request; 'ok' = the response was complete. A failure
   // ends the run (the next run starts from its first request).
   Step finish(bool ok, const Clock& clock);
@@ -238,7 +220,6 @@ class Planner {
 
  private:
   Step advance(bool ok, const Clock& clock);
-  bool consumeElement(ArduinoJson::JsonVariantConst element);
   // Starts the prepared request of the current run (current_, source_,
   // type_, map_ set): a new run's preparation, the URL, the streaming
   // state. False when the run has nothing (more) to request.
@@ -249,16 +230,20 @@ class Planner {
   void liveItems(const MatchStore& store, int64_t utc);
   // The stored row of the events run's match (event_match_), null if gone.
   const StoredMatch* eventsRow() const;
-  void addDay(uint32_t day);
-  static void observeNames(const StoredMatch&, std::string_view,
-                           std::string_view, void*);
+  static void observeMatch(const StoredMatch&, void*);
   static void observeEvent(const StoredEvent&, void*);
   void finishDetails(bool ok, const Clock& clock);
-  const settings::Competitions* competitions_ = nullptr;
+  const settings::CompetitionRoutes* competitions_ = nullptr;
   const settings::screen_policy::Eligibility* eligibility_ = nullptr;
   DateContext dates_;
   bool break_proven_ = false;
   ResponseDetails response_details_;
+  std::unique_ptr<retention::Index> retention_index_;
+  std::array<uint16_t, cfg::kRetainedRounds> retained_rows_{};
+  provider::Status response_failure_ = provider::Status::kOk;
+  bool retain_admission_ = false;
+  bool response_sources_ = true;
+  uint8_t own_seen_ = 0;
 
   std::array<SourceState, cfg::kCompetitionMax> states_{};
   // The prepared request: its source, data type and consume context.
@@ -269,32 +254,22 @@ class Planner {
   MapContext map_;
   Sink sink_ = Sink::kMatches;
   uint32_t event_match_ = 0;  // exact selected match of an events run
-  bool discover_ = false;     // OpenLigaDB rows: note season and round
-  bool filter_ = false;       // OpenLigaDB rows: only this league and season
-  int season_number_ = 0;     // filter season, 0 = any
+  uint16_t response_rows_ = 0;
+  uint8_t response_round_ = 0, response_label_ = kNoIndex;
+  bool response_round_known_ = true, response_whole_ = false;
+  bool discover_ = false;  // OpenLigaDB rows: note season and round
+  bool filter_ = false;    // OpenLigaDB rows: only this league and season
   int found_round_ = 0;
   uint32_t found_change_ = 0;
   settings::Bytes<cfg::kSeasonMaxBytes> found_season_;
-  // ESPN match days while streaming: the days from the first matchday that
-  // has not ended, up to the end of the one after it.
-  std::array<uint32_t, 2 * kEspnDays> scan_{};
-  uint8_t scan_count_ = 0, scan_blocks_ = 0;
-  bool scan_done_ = false;
 };
 
-// One URL path or query component: every byte outside the RFC 3986
-// unreserved set is percent-encoded (OpenLigaDB shortcuts may contain
-// spaces or umlauts). 'out' holds 'size' bytes including the terminator;
-// input that does not fit is cut at a whole escape.
-void encode(std::string_view in, char* out, std::size_t size);
-
-// Days of the current and the next matchday from ascending provider day
-// starts, grouped by matchday::starts(); the current one is the first whose
-// last provider day has not ended at 'utc' (results of a held matchday are
-// final and stay stored, so it is not fetched again, OQ-272). At most
-// 'capacity' days. Returns the number written.
+// Days of the previous/current/next derived matchday from ascending provider
+// day markers under the shared matchday rule. At a season boundary only
+// existing neighbours remain. At most capacity days; overflow is explicit.
 std::size_t matchdayDays(const uint32_t* days, std::size_t count, int64_t utc,
-                         uint32_t* out, std::size_t capacity);
+                         uint32_t* out, std::size_t capacity,
+                         bool* complete = nullptr);
 
 // FNV-1a hash of a change date text (0 is never returned).
 uint32_t changeHash(std::string_view text);

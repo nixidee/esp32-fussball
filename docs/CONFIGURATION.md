@@ -1,25 +1,26 @@
 # Configuration
 
-Implementation state: 0.1.0-dev, 2026-10-17 (settings format 11, competition record format 4, screen-policy record format 1). The current settings groups are
-connected to the device services and offline Web UI. The current C6 build
-compiles; new fields, persistence interruptions and runtime controls still
-require acceptance. Historical core-service tests do not certify this extension.
+Implementation checkpoint: 2026-10-18. General settings, competitions and screen
+policy now belong to one AppConfig and one current-format NVS record. Football
+provider data is RAM-only. Adopted names remain separate; one common Apply references and activates the
+exact immutable names version. Host checks do not establish physical
+C6 runtime, OTA or power-interruption acceptance.
 
-The [planned screen-system redesign](UI.md#planned-screen-system-redesign)
-replaces situation-to-single-screen defaults with configurable timed sequences,
-separates crest from slideshow, adds competition-specific rules and a picture
-frame mode, and replaces the whole-matchday own-game switch. Those are confirmed
-behaviors being integrated. The existing settings service now owns a dedicated
-complete screen-policy snapshot and record, avoiding rule copies in network and
-provider settings. The active controller uses this policy. Replaced display fields have been removed from the general record and API.
-The screen policy is their single owner.
+The display configuration has shared rules for five situations and six screen
+types, one common type order, appearance and timing options. Each competition
+owns its optional fieldwise display overrides and selected-club preferences.
+There is no second identity-association matrix. Switching back to shared rules
+keeps dormant overrides; an explicit `false` remains different from inheritance.
+The UI receives a compact normalized programme for the current situation, with
+only enabled entries and their effective duration/automatic flag. Disabled
+entries remain stored in their competition, not in the active programme.
 
-The service loads/saves the policy, REST/Web exposes it, and the controller
-uses its own coherent snapshot. Its five-phase/six-type
-snapshot is 964 B on C6 and its explicit version-1 record is 912 B. During this development
-redesign settings may restart from defaults/presets; compatibility migration is
-reconsidered after alpha/beta. Existing image files need not be deleted. No
-agent inspection of the secrets file is required for firmware presets.
+The global Policy is260B and its encoded payload216B. Competition preferences
+add80B per configured competition, inside the same AppConfig. The current
+aggregate record has a maximum2618B payload-plus-header. Development updates
+start from defaults/presets; legacy migration is reconsidered after alpha.
+Existing image files need not be deleted. Firmware presets require no agent
+inspection of the secrets file.
 
 ## Three sources, one place each
 
@@ -28,72 +29,171 @@ agent inspection of the secrets file is required for firmware presets.
 | Hardware facts | `boards/`, `displays/`, `targets/` | yes |
 | Software defaults, limits and enums | `include/app_config.h` | yes |
 | Personal bootstrap presets | `include/secrets.h` | no |
-| Runtime configuration | NVS namespace `settings`, key `record` | device only |
-| Competitions | NVS namespace `settings`, key `competitions` | device only |
-| Screen policy | NVS namespace `settings`, key `screen_policy` | device only |
-| Owner's team short names | LittleFS `short_names.bin` | device only, in the export |
+| General configuration, competitions and screen policy | one NVS `settings/app_config` record, plus exact adopted-names reference/revision/apply ID | device only |
+| Adopted club names and provider/ID exceptions | LittleFS `names_a.bin` / `names_b.bin`, exact AppConfig reference | device only; complete collection export/import |
 
-The owner requested a maintained club-name catalogue beside app_config.h and
-the secrets file in include/. Proposed source: include/team_names.json, covering
-Bundesliga,2.Bundesliga,3.Liga and German Regionalligen, with German/English/
-short names and optional provider IDs. The selected JSON shape uses direct
-de/en/short fields per club, with provider IDs grouped under ids;
-the file and new mapping/import format are not implemented. Missing catalogue
-values must retain usable provider fallbacks. This must extend the existing
-names mechanism, with a separately bounded device memory/storage design.
+The maintained source catalogue [include/team_names.json](../include/team_names.json)
+exists beside `app_config.h`: 147 clubs covering Bundesliga, second Bundesliga,
+third division and all five German Regionalligen, in 47,451 source bytes. Its
+version-1 JSON has direct `de`, `en` and `short` fields, a stable `key`, retained
+`league` metadata and `aliases`. Provider IDs are arrays under `ids.espn` and
+`ids.openligadb`; an unknown identity is `[]`. Preferred CSV names remain
+unchanged. Of the preferred English texts, 71 are literally attested by the
+checked ESPN responses; the other 76 remain unverified as ESPN English forms.
+Provider spellings retained as aliases do not require changing those preferences.
+See [DATA_MODEL.md](DATA_MODEL.md#49-club-name-source-catalogue) for the evidence
+limits and distinction between name and identity verification.
 
-The template `include/secrets.h.example` is tracked. A stored record overrides
-bootstrap presets; omitted appended fields use their initial preset/default.
+The firmware embeds a deterministic, pointer-free read-only catalogue with
+12,767 B of complete source payload, plus its fingerprint, stream code and
+alignment. `GET /api/v1/team-names/preset` streams the original JSON values
+through bounded buffers and returns `X-Team-Names-Source` with the source
+SHA256. USB/OTA and rollback supply the source belonging to the running app.
+There is no catalogue heap tree, LittleFS/NVS source copy or `uploadfs`
+requirement. Reading this source never adopts a club or changes user values.
+The combined DE/EN/short editor and complete collection import/export use the
+common application draft. Reading the source never saves or groups competitions.
+
+### Adopted names owner
+
+Football provider fallback labels are volatile26/3-byte values. Both adopted
+languages, short names, shared club identities, complete provider bindings,
+aliases, league metadata and explicit ID exceptions belong to one durable
+collection, limited to16,384B including header, indices and CRC. Missing fields
+and present-empty strings remain different. Identity keys are full UTF-8,
+nonempty and at most63B; labels never establish identity by themselves.
+
+NVS AppConfig stores the exact names reference: slot, generation, length and
+CRC. `names_a.bin` and `names_b.bin` are the two immutable version paths. A changed
+collection is staged only in the inactive slot, checked completely, synchronized
+and closed. One verified NVS commit publishes all settings and that exact names
+reference. Settings-only saves do not open or rewrite names. An uncertain NVS
+write preserves both versions and blocks further mutation until recovery/reboot.
+Startup reads only the referenced version; missing/corrupt names report an error
+without making unrelated settings unusable. There is no legacy lookup,
+migration, repair journal, source archive or automatic preset adoption.
+
+The device caches only adopted fields needed by the current visible projection.
+A missing override uses fresh provider fallback on every view; an explicit empty
+short remains empty. Reads and source preparation happen outside repository and
+LVGL locks. The cache is bounded by visible output, not adopted-club count.
+
+### Names formats and resource costs
+
+The `components/names/` owner contains the catalogue, adopted collection codec,
+file publication and effective visible labels. Its dependency on football is
+limited to pure provider/value contracts; the football service does no names I/O.
+
+The immutable source JSON remains `football-team-names` version1 with full text
+values. Its importer checks the entire UTF-8 input before adopting a complete
+prefix of at most26B for DE/EN and3B for shorts. Long source values therefore do
+not fail merely because they need clipping. Keys, provider IDs, aliases and
+league metadata are never clipped. No original-user/provider text archive is
+created. Optional provider-original acquisition is separate from durable names.
+
+Adopted collection JSON is version2. Its `texts` object holds every unique text
+once, under a positive collection-local ID; club fields, aliases and exception
+names use those numeric references. Empty strings have an explicit reference;
+absent club fields stay absent. IDs are1..16,384; they are not provider identities.
+Dictionary values must be unique and referenced. Adopted DE/EN/short references
+already meet26/3. Export streams the checked pool and uses its offsets as local
+IDs; import accepts arbitrary object order and resolves forward references.
+Both formats preserve all provider-ID arrays, aliases and explicit exceptions.
+
+The importer has one temporary32-KiB arena plus112B scalar/index metadata
+(32,880B requested on the C6),
+allocated only under shared heavy admission. Packed rows, sorted delta-coded
+bindings, prefix-compressed keys and the deduplicated text pool share that
+arena; there is no JSON tree, full-body copy, second wire image or resident
+saved-club model. OOM is an explicit failure with the old reference retained.
+The final existing FNS2 writer enforces the complete16-KiB file ceiling.
+The full147-club source currently imports to10,900B; this fixture contains no
+ID exceptions and does not establish an unlimited arbitrary-club capacity.
+
+Collection export prepares one request-only grouping index before HTTP output.
+It visits each binding and alias a bounded number of times, rather than scanning
+all of them again for every club. Reverse-linked groups preserve numeric ID and
+alias order. Text stays in the referenced file and streams once through the
+shared dictionary; there is no second file image or saved-club model.
+
+For `C` clubs, `B` total provider bindings and `A` aliases, requested index heap
+is `2*(5*C+B+A)` bytes, or zero when there are no bindings/aliases. The existing
+wire costs at least11B/club,2B/binding and4B/alias, so index heap is below the
+16-KiB file ceiling without adding a row cap. The147-club preset needs2,272B;
+the exact16,384B grouped regression needs9,600B. Its actual POSIX reads total
+34,635 calls including preparation and output; the previous alias loop alone
+required960,000 lookups. These are host I/O counts, not C6 timings.
+
+`AdoptedExport` is a136B C6 stack lease, including the existing116B open-reader
+owner. It holds the immutable file from prepare through checked write/close,
+then frees the transient index on scope exit. Allocation/read failure before
+output produces a normal HTTP error; later I/O/close failure aborts the stream
+without a success terminator. Export and import do not overlap under heavy
+admission; backup export also owns its existing AppConfig snapshot. No resident
+RAM, filesystem quota, task or schema is added by this index.
+
+The streamed Apply transport ceiling is1,057,792B. Its conservative64x wire
+allowance accounts for fully escaped63B keys despite disk prefix compression;
+a club costs at least12 wire bytes and fewer than640 JSON bytes, while other
+sections expand by less than7x. Shared texts avoid quadratic repetition. This
+ceiling allocates no body buffer and does not extend the request deadline;
+large real WiFi transfers remain device acceptance work.
+
+Names staging uses actual filesystem occupancy and the one shared replacement
+workspace, with no unused future image quota or second reserve charge. Checked
+I/O still handles allocation/metadata failures. Image quotas and partitions stay
+unchanged. Football matches/tables/events/coverage are RAM-only; names do not
+scan or evict another owner's files. Ordinary restart/power loss preserves
+adopted names. Trial firmware refuses persistent changes. The confirmed factory
+reset deletes adopted versions; the immutable firmware catalogue survives.
+
+The template `include/secrets.h.example` is tracked. An exact current stored
+record overrides bootstrap presets. Missing or partial record fields invalidate
+the record; omitted bootstrap preset fields use their software defaults.
 An invalid preset is skipped and its field name is logged without its value.
-Settings are typed fixed storage in `components/settings/`; the NVS adapter
-is `components/core/settings_store.cpp`. The competitions
-are a separate store with its own record and REST endpoint
-(`/api/v1/competitions`, see [API.md](API.md)); the settings JSON does not
-carry them. Successful save/reset of either store increments the settings
-generation and posts a short change notification after publishing the model
-and its version together under the existing settings mutex. Readers can copy
-both in one operation; no second model is retained. A second counter, the
-provider-data generation, increments on saves only when a value provider data
-depends on changes: a competition's id, position, active flag or its source
-(provider, competition, season, club), either provider key, the ESPN opt-in or demo mode. Only that counter discards
-fetched data and interrupts a running provider request: the data of the
-changed, removed or paused competitions, of the competitions that use a
-provider whose key or ESPN opt-in changed, or all data after a change of
-demo mode. Reset additionally forces data invalidation even if the initial
-provider values already match; if they change, both invalidations advance
-the counter. These counters are version markers, not save counts.
-Display names, screen-policy rules and every display,
-network or time setting keep the shown data and request nothing. A changed
-match window, request limit or interval applies with the next scheduling
-decision: a job whose due time under the new value has passed runs then, the
-others keep their due times. Only the Web UI's refresh action makes every job
-due at once.
+Settings are typed fixed storage in `components/settings/`; the NVS adapter is
+`components/settings/settings_store.cpp`. A single AppConfig contains general
+settings, the ordered competition list, display rules and the adopted-names
+reference. `GET/PUT /api/v1/config` reads/applies that complete revision. General
+settings, competitions and screens use nested pure codecs, not separate HTTP
+writes. The browser retains one shared draft until Apply is acknowledged.
 
-## Optional bootstrap
+A competition has three distinct parts:
 
-Copy `include/secrets.h.example` to `include/secrets.h` if first setup should
-already know the network or club. Every key is optional. Without credentials
-the setup AP starts; without an enabled competition the stock image is shown.
-Presets are compiled into the firmware, so a personal binary must also be
-treated as containing personal credentials.
+- source: provider, provider competition identifier and season;
+- club: optional numeric team identity, selected label, own-game handling and
+  explicit group membership;
+- display: nullable enable/automatic/duration overrides for each situation and
+  sporting screen type.
 
-Supported keys are `SECRET_WIFI_SSID`, `SECRET_WIFI_PASSWORD`,
-`SECRET_AP_PASSWORD`, `SECRET_HOSTNAME`, `SECRET_TIME_ZONE`,
-`SECRET_ADMIN_PASSWORD`, `SECRET_API_FOOTBALL_KEY`,
-`SECRET_FOOTBALL_DATA_KEY`, `SECRET_DEFAULT_PROVIDER`,
-`SECRET_DEFAULT_COMPETITION`, `SECRET_DEFAULT_TEAM_ID` and
-`SECRET_DEFAULT_SEASON`. Provider values are `openligadb`, `api-football`,
-`espn` or `football-data`. ESPN additionally requires explicit runtime opt-in.
-A settings or competitions change through the REST API is refused
-(`conflict` at `competitions[i].primary.provider`) while the source of an
-active competition uses ESPN without the opt-in, or API-Football/football-data.org without a
-key. The check runs against the other store's saved state, so switching one
-competition from one keyed provider to another is done in two saves: first
-enable the new provider, then change the competition. A stored
-record from older firmware that breaks this rule still loads unchanged; the
-affected source is then not requested until the key or opt-in is saved.
-Competition/team IDs always belong to that provider. A season is a provider
-season, rather than a year inferred from the device's calendar.
+Numeric team0 means no selected club;1..4,294,967,295 are exact provider team
+identities. Preset text is validated before conversion, including leading
+zeros; JSON and records use the numeric value. Competition identifiers remain
+provider text. The season belongs to that provider, not the device calendar.
+
+Groups are derived only from explicit nonzero `club.group` memberships1..8.
+No independent group list or group name is stored. The heading uses the first
+member's selected club label. The group takes its highest member priority;
+member order stays the configured competition order. Renaming a club never
+changes membership. Changing a selected club leaves its visible membership for
+explicit review in the editor.
+
+Successful Apply publishes the entire configuration with its revision. A
+separate provider-data generation changes for relevant provider/source inputs;
+club labels, appearance and display rules do not erase same-source data.
+Runtime routes project only identity/source/club facts and omit the attached
+80B display preferences. The UI projection omits network credentials and
+provider request plans. Appearance-only changes preserve the current manual
+visit and navigation position. A new competition receives its device identity
+and incarnation in the configuration owner after revision admission.
+
+Network retains a291-byte projection containing only raw Wi-Fi credentials,
+AP password, hostname, NTP server and antenna choice, replacing its704-byte
+general settings snapshot. Main injects the configured immutable time-zone
+reference and four-byte diagnostic preferences into their services. These
+readers preserve raw SSID bytes and do not read unrelated credentials or screen
+rules. The additional requested-zone pointer supports the same timed retry
+after an allocation failure. Linked target deltas remain a separate measurement.
 
 Former `SECRET_WIFI_SSID_1`/`SECRET_WIFI_PASSWORD_1` and `SECRET_TIMEZONE`
 names deliberately stop the build. The time-zone preset is a supported
@@ -103,9 +203,9 @@ location label, such as `Europe/Berlin`, rather than a POSIX rule.
 
 The Web UI reads `GET /api/v1/schema`; it does not maintain another defaults
 table. Every rejected value is answered with the name of its field and the
-reason (see [API.md](API.md)). Partial settings requests retain omitted fields, including secrets.
+reason (see [API.md](API.md)). Apply requires all desired sections; omitted secrets retain their values.
 Unknown keys, incorrect types, malformed array lengths and invalid values
-are rejected before a whole-model save.
+are rejected before one coherent configuration publication.
 
 | Group / field | Default | Accepted range or meaning |
 |---|---|---|
@@ -119,9 +219,11 @@ are rejected before a whole-model save.
 | API-Football / football-data keys | empty | up to 96 / 64 printable non-space ASCII bytes |
 | Competitions | empty list; a preset competition (with or without club) creates one entry | ordered list of up to eight entries, each active or paused, each with a stable id 1–255 assigned by the device; the order is the display order: Matchday and Table show the competitions one after another in this order |
 | Competition screen rules | inherited per phase | enable, automatic participation and visit time live in the dedicated policy; each override field can independently inherit |
-| Competition source | OpenLigaDB | one source per competition: provider, competition ID and club ID up to 32 bytes of any text without control characters and without a space at either end (requests percent-encode them); season empty (current season) or up to 16 decimal digits for OpenLigaDB, four digits for other providers |
-| Display names | empty | competition and club name stored when picked from a provider list, up to 32 bytes, no control characters |
+| Competition source | OpenLigaDB | one source per competition: provider; competition ID up to 32 bytes without control characters or a space at either end (requests percent-encode it); season empty (current season) or up to 16 decimal digits for OpenLigaDB, four digits for other providers |
+| Selected club | none | numeric team0 (none) or1..4,294,967,295, selected label up to32 bytes, own-game handling, explicit group0 (none) or1..8 |
+| Display names | empty | competition and selected-club labels stored when picked from a provider list, up to32 bytes, no control characters; provider fallback26/3 and adopted names remain separate |
 | ESPN / demo / browser diagnostics | off | explicit switches |
+| Overview screenshot (`overview_screenshot`) | off (`false`) | saved boolean; adds the screenshot trigger to Overview. Capture remains available under Debug independently of this preference |
 | Sporting types / image types / backgrounds | enabled / disabled / on | six separate type styles; an empty automatic sequence is allowed |
 | Background / text / accent | `#101820` / `#ffffff` / `#49cba0` | RGB colours per screen |
 | Text scale | 100% | 70–130%, selects bounded compiled font roles |
@@ -136,10 +238,10 @@ are rejected before a whole-model save.
 | Sporting visit time | Single/Conference/Matchday 30 s, Table 60 s | 15–43,200 s; divided across pages, effective total at least 5 s per page; no independent page clocks |
 | Images / Crest | Images visit 60 s, Crest visit 15 s; images initially disabled | image time 15 s (3–3,600); up to five library images, crest separate; enabled Images visit must be an exact multiple of image time |
 | Image library | empty | up to ten uploaded JPEGs (ids 1–10); screen backgrounds and slides refer to them. Selected missing files keep their ids reserved for explicit restoration; new uploads skip saved references and the current browser's draft references. Id 0 is the stock image of the role (crest or background): its replacement when one exists, else the factory image. The crest is not a setting; it is always the crest role. Replacements count towards the shared 320 KB image budget but not towards the ten library ids |
-| Brightness / night brightness | 100% / 10% | 0–100%; hardware dimming requires a backlight pin |
+| Brightness / night brightness | 100% / 10% | 0–100%; controls are offered only with a controllable backlight pin; 0 switches the backlight off |
 | Rotation | 0 | 0–3 quarter turns |
 | Language | German | German or English |
-| Night mode / window | on / 23:00–07:00 | local civil time; equal endpoints mean empty; requires valid clock |
+| Night mode / window | on / 23:00–07:00 | backlight-capable targets only; local civil time; equal endpoints mean empty; requires valid clock |
 | IP badge | 60 seconds, top | 0–4000 seconds, 0 permanent; setup AP permanent by default |
 | Own and other display windows | each before/after 30 min | four independent 0–180-minute policy values; no whole-matchday own-retention switch |
 | Daily request cap per provider | 0 / 100 / 0 / 0 requests | 0–65535 per provider; 0 = no daily cap (no counter, no storage write); a cap counts every attempted request through durable reservations and resets at 00:00 UTC |
@@ -179,12 +281,11 @@ uses the season named after the current year from `kSeasonStartMonth`
 OpenLigaDB report the current season. A season typed in the setup wizard's
 season field is stored with the competition; picking from the current list
 leaves it empty. WiFi modem sleep is fixed off by `kWifiPowerSave`.
-On the current C6 without a backlight pin, night mode switches to the night
-background (`kNightBackground`), shows images at 20 % opacity and mixes
-every text, pill and rim colour towards the night background; night
-brightness sets that mix as an amount of light (colour value =
-level^(1/2.2), so 10 % keeps about 35 % of each colour). A profile with a
-backlight pin keeps the colours and dims the backlight instead. A changed
+Night mode changes only the hardware backlight brightness. Background,
+text, pills, rims and images keep their normal colours and opacity. The
+current C6 has no backlight pin, so brightness and night controls are not
+offered and stored brightness/night values have no effect. The common
+settings model retains those fields for backlight-capable targets. A changed
 value is not evidence of the physical brightness on the device.
 Display design constants (compile time, `app_config.h`): font role sizes per
 size class (`kTextRolePx`, caption/body/title/score; size classes split at
@@ -194,6 +295,15 @@ slideshow dots, `kGoalFlashS` (120 s), how long a Konferenz row stays
 highlighted after a goal, `kStatusPillS` (5 s), how long the status pill is
 shown after a status change, and `kStatusPillOpa` (204 of 255), the opacity
 of its background.
+Display resource constants also live there: `kDisplayDrawBufferFraction` 12,
+`kDisplaySpiQueueDepth` 10, `kDisplayClearRows` 8 and the 256-byte best-effort
+port-context probe. The LVGL port explicitly uses priority 4, 7168 stack bytes,
+no core affinity, 500 ms maximum sleep, 5 ms tick and internal/default stack
+capabilities, preserving the current port values. The renderer uses 72 draw
+items (bytes derived from its item type) and 1280 text bytes. JPEG validation
+uses 4096 aligned bytes under heavy-operation admission; the installed TJPGD
+profile has 512-byte input blocks, RGB888 output and fast-decode mode 1.
+These are resource choices and codec facts, not additional user settings.
 Request timing constants (compile time, `app_config.h`): `kRequestGapMs`
 (2 s between any two request starts), `kLiveLeadMinutes` (30, live data is
 requested from this long before kickoff), `kExpectedMatchMinutes` (110,
@@ -219,15 +329,36 @@ initial/runtime hostname acknowledgement and SNTP initialization) and
 network phases/resources remain active while only failed work is repeated.
 These compile-time delays do not require Internet/SNTP for local readiness.
 
-`kImageMaintenanceRetryMs` (10,000 ms) delays another startup-maintenance
-attempt after legacy-image removal fails. Maintenance no longer removes
-references just because a file is missing. `kImageSourceRetryMs` (10,000 ms)
+`kImageSourceRetryMs` (10,000 ms)
 retries the desired image after file/source/decode failure; a new file
 revision is checked immediately. `kImageValidationTimeoutMs` (1,000 ms)
 bounds each admitted full-file/fallback-resolution pass, reusing the existing
 JPEG workspace. A longer candidate chain resumes in a later ordinary app
 poll. Waiting for exclusive-operation admission is nonblocking and does not
-hold that admission during the delay. None is a user setting.
+hold that admission during the delay. `kImageTempFile` names the one replacement
+temporary file. `kImageReserveBytes` (40,960 B) is a shared replacement workspace:
+admission requires actual available space of at least the larger of that value
+and the candidate size. The candidate consumes the workspace; no second reserve
+or unused future image quota is charged. Checked I/O still decides whether the
+operation completes. None is a user setting.
+
+Image ID exhaustion, the image-byte quota and insufficient replacement workspace
+report `storage_full` (HTTP507). Actual POSIX `ENOSPC` at open/write/sync/close/
+rename keeps the same capacity result. Actual `ENOMEM` reports `memory` (also
+HTTP507); other syscall failures report an I/O error. The common portable files
+boundary classifies errno once; its single project-local application code
+`files::kStorageFull` is `0x7f000001`, outside the SDK component ranges and within
+signed32 `esp_err_t`. It changes no quota or persistent format. Checked sync/close
+preserves the first failure instead of allowing cleanup to overwrite its errno.
+Names candidates and the JPEG validator use this same distinction: failure
+never replaces the active referenced version. JPEG validation preserves its
+first stdio error through checked close, with the existing absolute deadline
+taking precedence when the operation has expired. Its1B error classification
+replaces its previous1B failure flag; actual C6 Validation size stays24B and
+the shared JPEG work buffer is unchanged. The candidate's1B failure status replaces its previous1B
+boolean; actual C6 candidate size remains140B, with no new resident state, heap
+allocation or filesystem bytes. The final linked Flash delta is measured in the
+integrated target build, not inferred from source size.
 
 Lists never contain empty entries: an entry exists or the list is shorter.
 Crest displays its dedicated role; Images uses the policy library list. Neither
@@ -241,60 +372,44 @@ its own destructive semantics. Image errors never automatically save settings.
 The on-demand screenshot has compile-time limits in `app_config.h`:
 `kScreenshotRows = 20` and `kScreenshotDeadlineMs = 5000`. The port also
 limits capture to half the configured watchdog window, keeping shorter
-watchdog profiles safe. These are not saved settings; no record format,
-NVS entry, image quota or LittleFS allocation changes. The active 240×240
+watchdog profiles safe. These limits are not saved settings. The separate
+`overview_screenshot` preference occupies one boolean byte in the aggregate
+AppConfig's general payload; it creates no additional NVS key and changes neither image quota nor
+LittleFS allocation. The active 240×240
 C6 requests one temporary 9,600 B internal RGB565 strip plus allocator
 metadata, released after success or cancellation. See [API.md](API.md) for
 the wire protocol and [WEB_UI.md](WEB_UI.md) for access and download behavior.
 
-Current general format is **11**, explicitly little-endian, not a structure
-memory dump. Its complete fixed record is **700 bytes**. Text occupies a length
-byte plus fixed capacity. The reader remains bounded to2048B.
+The current application envelope is version **1**, explicitly little-endian.
+It has one 8-byte version/length/CRC32 header, then revision u32, last-apply ID
+u64, exact names reference (slot u8, generation u32, length u16, CRC32 u32), the
+693-byte general payload, variable competition payload (6 +209 bytes per
+entry) and216-byte global screen-policy payload. At eight competitions the whole
+record is **2618 bytes**. The screen rules, general fields and list retain
+separate typed sections but no separate NVS commit.
 
-| Offset | Size | Field |
-|---|---|---|
-| 0 | 8 | format u16, payload length u16, CRC32 over header first4B and payload |
-| 8 | 227 | WiFi SSID, station/AP passwords, hostname, each length-prefixed |
-| 234 | 4 | antenna, console flag, console interval u16 |
-| 238 | 97 | timezone label and NTP server |
-| 335 | 227 | admin/API-Football/football-data secrets |
-| 562 | 20 | six flags, language/day/night brightness/rotation, five u16 input/night/badge times |
-| 582 | 8 | input roles |
-| 590 | 104 | four request plans: three u16 limits plus five u32 intervals each |
-| 694 | 6 | global three u16 request limits |
+The decoder accepts only exact current lengths and validates the entire model,
+provider access, stable competition identities, attached display preferences and
+names reference. Truncated, unknown-version, corrupt or invalid records select setup
+defaults; no legacy record or shorter trailing-field migration is loaded.
+Reading never repairs or writes a record. An unreadable record refuses writes.
 
-Competition format **4** uses the same8B header, then next-id u8,
-next-incarnation u32 and count u8. Each entry is156B: id1, incarnation4,
-active1, source84, competition name33 and club name33. Maximum eight entries
-produce **1262B**, empty14B. The reader remains bounded to4096B. There is no
-screen mask. Policy bindings use both id and incarnation.
+One settings writer serializes Apply, snapshots, section adapters and explicit
+image-reference cleanup. Save validates the caller's expected revision, writes
+one complete blob, commits and verifies readback before publishing the complete
+RAM config and matching generation. A section edit preserves the other sections
+and last-apply ID. Provider-data generation advances only when its inputs change.
+Deleting a competition removes its attached display preferences in that same
+commit. Changed names are staged and validated first; the same NVS commit
+selects their exact slot/generation/length/CRC before coherent activation.
+Settings-only Apply never opens or rewrites the names file.
 
-Older general formats1–10 and competition formats1–3 select initial values
-and report `outdated`; development settings may reset. Unknown future formats,
-length/CRC corruption or invalid values are rejected. Decoding never rewrites
-persistent state. Images stay separate. A missing field-boundary tail may keep
-initial values; a partial field fails. Records remain stored until an explicit
-save/reset. An unreadable competition identity history blocks unsafe saves.
-
-The screen-policy record is independently versioned and CRC-protected. It has
-an eight-byte header and 904-byte payload (912 bytes total). A successful save
-publishes one complete policy and advances only the UI/settings generation,
-so it does not cancel an admitted provider response. Saving a stale generation
-is rejected. Competition overrides bind both id and incarnation: edit/reorder
-keeps them; deletion and id reuse cannot transfer them to another entry.
-Unmatched bindings are pruned in RAM, without an automatic write to a third
-record. A fallback preset does not establish a stored identity: save the
-competition record before persisting bound overrides. Trial boot derives these
-values in RAM and does not migrate or rewrite the older records.
-
-A whole record is written and committed before RAM settings change. NVS
-provides atomic blob replacement; interruption acceptance remains a separate
-physical test. Loading checks size, length, CRC, format and value limits.
-Damaged/unknown records select initial values and remain stored until save
-or reset. An unreadable record prevents saving data that was never checked.
-The REST status reports which of these cases applies (`settings_source`);
-the Web UI shows it as a warning on the overview and asks for confirmation
-before the first save overwrites a rejected or damaged record.
+A write/commit/readback error may have reached NVS. It keeps the old coherent
+RAM snapshot, reports `outcome_unknown` and refuses further writes until reboot
+or explicit recovery. Immediate readback of old data is not proof of rollback.
+A subsequent boot can load the old or new complete record; it cannot mix three
+separately committed sections. Physical power-interruption acceptance remains
+an owner-flashed device test.
 
 The established NVS startup recovery erases the entire NVS partition only
 for `NO_FREE_PAGES` or `NEW_VERSION_FOUND`, with an error log. That also
@@ -303,16 +418,21 @@ retain RAM defaults and refuse persistent saves.
 
 ## Reset and firmware updates
 
-System reset always clears the `settings` namespace (settings and
-competition record), the request counters, the kept football data and the
-owner's team short names, and restarts. User images
-are retained unless the explicit image-deletion option is selected; that
-option deletes the library and the crest and background replacements, so both
-roles show their factory images again. The separate
-full image-storage repair option formats LittleFS, including stock files.
-It requires explicit confirmation and never follows automatically from a
-mount fault. Stock files then need initial USB `uploadfs`; custom files can
-be uploaded through the Web UI.
+The existing confirmed factory reset clears settings/competitions, request
+counters and adopted names. Image-only deletion remains
+an explicit option: it removes the library and crest/background replacements.
+Full storage repair is the same reset workflow with `format_storage`; it
+intentionally deletes setup and every LittleFS file, including stock assets.
+A standalone repair confirmation cannot authorize that reset and returns an
+actionable factory-reset-required error instead of formatting.
+
+Settings and counter reset must succeed before deletion/formatting. Full format
+is the explicit deletion step when LittleFS cannot mount; a mount fault never
+automatically formats it. Each failed stage reports completed side effects,
+and only complete success schedules restart. There is no RAM/NVS restoration
+of adopted names. The firmware name source survives formatting; stock images
+still use their established USB restoration path, and custom images can be
+uploaded again through the Web UI.
 
 There is no input gesture that resets settings; the reset is available in
 the Web UI only.
@@ -326,101 +446,121 @@ reserved requests are lost on reboot, and a backward clock correction never
 reopens a day. A later UTC day starts a new count. A record that cannot be
 stored refuses that provider's request rather than bypassing the cap. A
 damaged or unreadable record blocks only its own provider for the current
-day; the next UTC day writes a new record. The single 24-byte record of
-earlier firmware (key `credits`) is read once for API-Football while that
-provider has no record of its own and removed when the first new record is
-stored. The settings reset in the Web UI also erases every counter, so a
+day; the next UTC day writes a new record. There is no older counter-format fallback or migration. The settings reset in the Web UI also erases every counter, so a
 damaged counter can always be cleared without a serial tool. This is a local
 limit, not a guarantee against other devices sharing the provider quota or
 IP address.
 
-Routine firmware OTA preserves LittleFS. The browser OTA gate accepts an
-image whose declared settings format is equal to or newer than the running one
-and refuses an older one, because an older image could not read the stored
-record. Format-9 firmware is accepted by browser OTA from format-3 to format-8
-firmware, but it does not read the older settings and competitions: they are
-reported as outdated and must be set up again (or imported from a backup). (Historical: the first
-format-3 image had to be installed by USB, because the format-2 firmware's
-gate demanded an equal format.) A USB downgrade to older firmware selects its
-initial values once a newer format has been saved. Trial firmware refuses
-settings, competition and image writes (and the removal of legacy image
-files) until local boot acceptance, and loading writes nothing, so automatic
+Routine firmware OTA preserves LittleFS. The current92-byte image descriptor
+is version2 and declares the aggregate application format1. Firmware and browser
+check the same descriptor version, target, partition layout and minimum aggregate
+format. A descriptor1/general-record image is obsolete and rejected. A newer
+aggregate format can be installed but development formats start fresh; no
+settings, competition or backup conversion is implied. Current-version export
+and import remain the supported way to transfer configuration and adopted names.
+Trial firmware refuses
+settings, competition and image writes until local boot acceptance, and loading
+writes nothing, so automatic
 rollback can still read the untouched record and files. Rollback does not undo shared
 storage after an accepted image has subsequently saved new settings.
 
-The first format-3 boot removes the earlier fixed-name image files (crest,
-five slides, four backgrounds) once, outside a trial; they are not migrated
-and must be uploaded again into the library.
+There is no startup legacy-image migration or removal pass in current firmware.
 
-## Kept football data
+## Football data lifetime and adopted names
 
-The football service keeps each active competition's data in a LittleFS
-file `comp_<id>.bin` and the owner's team short names in
-`short_names.bin` (format: [DATA_MODEL.md](DATA_MODEL.md#48-competition-files-and-short-names),
-write rules: [DATA_FLOW.md](DATA_FLOW.md#kept-data)). They are not
-settings and have no NVS record; the settings export carries the short
-names (not the competition files), and an import replaces them. Constants in
-`include/app_config.h`:
+The football service keeps provider data only in RAM. Boot and Demo exit
+acquire it afresh through normal provider limits and readiness. No competition
+cache, schedule-evidence file, persisted completion time or next-game checkpoint
+exists. Request counters and the discovery run/request guard remain in NVS.
 
-| Constant | Value | Meaning |
-|---|---|---|
-| `kCompetitionFileGapS` | 600 s | at least this long between two writes of one competition file |
-| `kFootballFilesBytes` | 48 KiB | all football files together, counted in whole blocks |
-| `kFsBlockBytes` | 4096 B | LittleFS block size used for that count |
-| `kShortNamesMax` | 48 | short names over all competitions, 26 bytes each |
+Adopted names use the independent bounded16-KiB collection described above;
+AppConfig's exact reference selects one of two immutable versions. Complete
+collection import replaces the names draft and common Apply publishes it with
+configuration. No48-row short-name transfer limit, football quota, cache
+write gap, eviction or persisted schedule path belongs to this flow.
 
-Images come first: a write also leaves free on the filesystem the part of
-the image library quota (`kImageTotalBytes`, 320 KiB) that images do not use
-yet, in whole blocks, plus the image reserve (`kImageReserveBytes`, 40 KiB).
-Future images are counted as one block-rounded total, not per file, so an
-image upload near the quota can still find a few blocks fewer than its own
-check expects. An 18-team league with an own match takes one block
-(about 3 KB); a full short-name table 1,548 bytes including its 12-byte header. Routine OTA keeps the
-files; the first boot of an update writes none.
+## SDK configuration
+
+Shared SDK options live in `sdkconfig.defaults`; target-specific options live
+in the selected `targets/*.sdkconfig.defaults`. Generated `sdkconfig.*` files
+are build outputs. The build fingerprints the inputs, regenerates a stale
+configuration and checks every explicit option against the generated result.
+
+Continuous mDNS browsing is disabled. The network service uses only hostname
+registration, HTTP-service advertising and mDNS startup, with no browse calls.
+The local mDNS component's Kconfig explicitly supports disabling browsing for
+advertisers, and its CMake excludes `mdns_browser.c` and `mdns_cache.c` under
+this option. Hostname/HTTP advertising and `.local` DNS resolution stay enabled.
+
+LVGL GRID and FLEX are disabled. Product scenes own their geometry; the
+developer colour test positions its three wrapped labels from their measured
+heights and checks the whole content band against SafeArea. Its red/green rings,
+white title/detail and blue version remain. Automatic themes are disabled:
+scenes/rings clear generic styles, images have no theme-specific styles, root
+backgrounds and label font/colour/alignment are explicit. Observer bindings
+are disabled because no subject/observer APIs are used. RGB888 remains enabled
+because JPEG supplies that format before conversion to the RGB565 display.
+
+The log tag cache and linked list are disabled; product code never changes
+individual tag levels. The global dynamic level and INFO threshold remain
+enabled, including direct calls from independently compiled SDK libraries.
+The only linked tag setter is WiFi startup, which sets four tags to the existing
+INFO default. Periodic health reporting and browser diagnostics keep their own
+controls. Disabling dynamic levels as well would bypass the runtime threshold
+in this SDK, so it is deliberately retained. This removes unused tag lookup
+machinery; it does not disable logs, warnings, errors or product diagnostics.
+
+In the C6 link before these two disables on 2026-10-18, the browse/cache objects
+contained 6,442 B of linked code/constant/initialized data and 13 B of BSS; GRID
+contained 3,469 B and no BSS. These are attributed predecessor payloads, not a
+measured net saving: conditional code, alignment and link optimization can
+change the final delta. The final matched totals below include the combined
+change; they do not attribute a separate exact saving to each switch. Neither
+option adds a buffer, task, heap allocation or filesystem data. The subsequent
+theme/FLEX/observer/tag-cache predecessor object sizes likewise are not net
+savings. The final whole-image values below include their combined result. Wireless
+security, TLS verification and the trusted-root bundle are unchanged.
 
 ## Resources and acceptance
 
-Current C6 compiler ABI: Model704B (formerly832), Competitions1260B
-(formerly1292), Policy964B. General and competition records are700B and at most
-1262B; the policy record is912B. Settings owns one policy snapshot and UI owns
-one coherent snapshot; effective competition routes are borrowed while the
-repository mutex is held. There is no UI competition-store copy.
+Final C6 compiler layout: Model704B, Competitions1708B, RuntimeRoutes1060B,
+Policy260B, AppConfig2704B, UiConfig448B (including derived Program206B),
+PreparedContent116B, ViewModel2044B, shared JSON Reader48B/Writer64B.
+WebSettings131B, NetworkSettings291B and ProviderSettings284B are the narrow
+consumer copies. The previous full general/policy owners and independent
+competition-rule matrix are retired. These types are included in linked
+static RAM when resident; do not add their sizes again to the linker total.
 
-General save allocates700B, competition save up to1262B, policy save912B, plus
-NVS internals. REST input DOM is released before encoding policy. NVS replacement
-space, power interruption, fragmentation and the20KiB partition remain device
-acceptance; payload sizes do not prove these reserves. Reset/migration behavior
-is separate from preserving existing image files.
+The exact-current NVS application record is at most2618B (earlier aggregate
+checkpoint2882B). Internal read/modify/Apply helpers may request one2704B
+candidate plus2618B wire; common HTTP Apply releases the optional32880B names
+import arena before the NVS wire allocation. During import the candidate and
+arena request35584B plus allocator overhead; there is no body/DOM copy.
+Names export uses its separate bounded grouping index described above.
 
-The strict complete policy request is at most8121B, within8192B HTTP input.
-The JSON allocator cap stays24576B. Policy GET/PUT and the full provider response/completion lifecycle now share
-the existing heavy-operation token; discovery also acquires it before allocating
-state. Busy requests leave the draft/save unchanged and can be retried.
-Canonical API logical growth is5545B (6536B with conservative moving-realloc
-accounting), disjoint from2016B event staging or532B discovery plus816B fence.
-Actual ROM allocator overhead, fragmentation and runtime reserves remain device
-acceptance, not certified by host pointer sizes or one fixture.
+The matching C6 build on2026-10-18 measures linkedFlash1,732,486B,
+staticRAM174,200B, binary1,733,248B and embedded Webgzip89,818B. The
+pre-consolidation baseline was1,766,298/161,012/1,767,056/80,187B respectively:
+net−33,812/+13,188/−33,808/+9,631B. Safe SDK/font/code retirement savings are
+included in these totals; isolated object payloads above are not additive.
 
-The earlier 238-byte layout passed C6 store selectors on 2026-10-09 and
-30 reset-button interruptions; supply removal remains untested. The host
-tests (`pio test -e native -f test_settings`) cover the current layout and
-the competition record layout, the rejection of older formats as outdated,
-id assignment, the request plans, the input-role rules, the longest records,
-list limits and the image reference cleanup. They do not certify device
-behaviour: the outdated report after an update from a device with an older
-record, full/corrupt storage, real power loss, resets and OTA
-rollback still require tests on the device. Current store selectors remain
-available in `app_config.h`, normally `kNone`.
+The unchanged1,835,008B OTA slot has101,760B free. Its85%limit is1,559,756B;
+the binary exceeds it by173,492B. This acceptance criterion fails and has not
+been waived. No partition/image quota/security reduction is implied.
 
+One provider working workspace requests8064B; index pass adds3136B, while the
+separate fixture-admission pass adds7680B ordinary-event storage. Those two
+extras do not overlap:11200B or15744B before TLS/HTTP/allocator overhead.
+Heavy admission serializes that path with names, image validation and OTA.
+Normal JPEG rendering in the fixed LVGL pool and ordinary status576B can still
+overlap provider traffic. JPEG validation uses4096B; device screenshot uses
+one9600B internal strip. The two DMA draw buffers total19200B at240×240.
+None of these allocation bounds proves an observed peak or free reserve.
 
-## Image-reference cleanup across records
-
-An explicit library deletion cleans only that image id from both the general
-record and the screen policy before deleting the file. Repair cleans every
-missing library reference after formatting. Disabled styles still reserve their
-desired images; selected slide duplicates are removed completely and surviving
-order is preserved. Each successfully written record is published immediately
-and advances the UI generation. The existing writer remains held until explicit
-unlink completes, so a concurrent save cannot reintroduce the reference in
-between. The two NVS records and filesystem operation are not one transaction;
-partial completion is reported and the browser keeps unconfirmed edits.
+Current task stacks remain provider12800B, HTTP10240B, LVGL7168B,
+events2304B, DNS2048B and debug4096B. Individual compiler frames exclude callees,
+SDK paths and actual task high water. Physical free heap/largest block,
+fragmentation, all-task25%usable-stack headroom, C6 font-decode CPU, NVS garbage
+collection/power interruption, LCD/SPI completion, OTA/rollback and longrun
+acceptance require owner-flashed hardware. Current live keyed-provider states
+also remain unverified. A fitting build is not full acceptance.

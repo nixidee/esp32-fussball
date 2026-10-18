@@ -170,6 +170,7 @@ void captureFlush(lv_display_t* display, const lv_area_t* area,
   }
   // Exactly once, even on rejected geometry, timeout, disconnect or abort.
   // It owns the byte swap and the normal SPI flush-ready lifecycle.
+  sceneFlushStarted(display);
   normal_flush(display, area, pixels);
 }
 

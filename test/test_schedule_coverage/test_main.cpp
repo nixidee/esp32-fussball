@@ -14,20 +14,18 @@ namespace {
 namespace c = football::coverage;
 constexpr uint32_t kDay = 86400;
 constexpr uint32_t kNow = 1792238400;
-c::EvidenceArray evidence, decoded;
-settings::Competitions competitions;
+c::EvidenceArray evidence;
+settings::CompetitionRoutes competitions;
 c::Discovery discovery, rebooted;
 c::DiscoveryRecord proposed, restored_guard;
-std::array<uint8_t, c::record::kRecordBytes> bytes, second_bytes;
 
-settings::Competition& addCompetition(uint8_t id) {
-  settings::Competition entry;
+settings::CompetitionRoute& addCompetition(uint8_t id) {
+  settings::CompetitionRoute entry;
   entry.id = id;
   entry.incarnation = 100 + id;
   entry.primary.competition.assign("bl1");
   entry.primary.season.assign("2026");
   competitions.entries.push(entry);
-  competitions.next_incarnation = 101 + id;
   return competitions.entries[competitions.entries.size() - 1];
 }
 
@@ -58,8 +56,7 @@ void longGap(unsigned slot = 0) {
           kNow + 40 * kDay);
 }
 
-void complete_stream_evidence_does_not_depend_on_the_224_display_rows() {
-  static_assert(cfg::kStoreMatches == 224);
+void complete_stream_evidence_does_not_depend_on_display_capacity() {
   addCompetition(1);
   const auto key = c::identity(competitions.entries[0]);
   c::bind(evidence[0], key);
@@ -69,22 +66,24 @@ void complete_stream_evidence_does_not_depend_on_the_224_display_rows() {
                      c::Proof::kFullSeason);
   // Both actual neighbours arrive AFTER the display store's row capacity.
   // The proof still observes them through its own compact stream reduction.
-  for (unsigned row = 0; row < 306; ++row) {
-    const uint32_t kickoff = row < 304    ? kNow - 60 * kDay + row
-                             : row == 304 ? kNow - 30 * kDay
-                                          : kNow + 30 * kDay;
+  for (unsigned row = 0; row < cfg::kStoreMatches + 82; ++row) {
+    const uint32_t kickoff =
+        row < cfg::kStoreMatches + 80    ? kNow - 60 * kDay + row
+        : row == cfg::kStoreMatches + 80 ? kNow - 30 * kDay
+                                         : kNow + 30 * kDay;
     all.observe(kickoff);
     if (row < cfg::kStoreMatches) truncated.observe(kickoff);
   }
-  const auto& result = all.finish(kNow, complete(306));
+  const auto& result = all.finish(kNow, complete(cfg::kStoreMatches + 82));
   TEST_ASSERT_EQUAL(c::Completeness::kComplete, result.completeness);
   TEST_ASSERT_EQUAL_UINT32(kNow - 30 * kDay, result.previous);
   TEST_ASSERT_EQUAL_UINT32(kNow + 30 * kDay, result.next);
   TEST_ASSERT_EQUAL(c::Reason::kNone, c::accept(evidence[0], key, result));
   TEST_ASSERT_EQUAL(c::Verdict::kBreak,
                     c::assess(evidence, competitions, kNow, 21).verdict);
-  TEST_ASSERT_EQUAL(c::Completeness::kPartial,
-                    truncated.finish(kNow, complete(306)).completeness);
+  TEST_ASSERT_EQUAL(
+      c::Completeness::kPartial,
+      truncated.finish(kNow, complete(cfg::kStoreMatches + 82)).completeness);
 }
 
 void every_active_competition_counts_even_without_club_or_enabled_screens() {
@@ -162,11 +161,15 @@ void source_and_incarnation_changes_never_reuse_another_competitions_proof() {
   auto& competition = addCompetition(1);
   longGap();
   const auto hash = c::identity(competition).source;
-  competition.primary.team.assign("40");
+  competition.club.team = 40;
+  TEST_ASSERT_EQUAL(hash, c::identity(competition).source);
+  TEST_ASSERT_EQUAL(c::Verdict::kBreak,
+                    c::assess(evidence, competitions, kNow, 21).verdict);
+  competition.primary.season.assign("2027");
   TEST_ASSERT_NOT_EQUAL(hash, c::identity(competition).source);
   TEST_ASSERT_EQUAL(c::Reason::kIdentity,
                     c::assess(evidence, competitions, kNow, 21).reason);
-  competition.primary.team.assign("");
+  competition.primary.season.assign("2026");
   ++competition.incarnation;
   TEST_ASSERT_EQUAL(c::Reason::kIdentity,
                     c::assess(evidence, competitions, kNow, 21).reason);
@@ -327,12 +330,6 @@ void normal_contradiction_stays_unknown_until_the_affected_season_is_reproved() 
           kNow + 40 * kDay, kNow, "2027");
   TEST_ASSERT_EQUAL(c::Verdict::kUnknown,
                     c::assess(evidence, competitions, kNow, 21).verdict);
-  TEST_ASSERT_EQUAL_UINT32(
-      bytes.size(), c::record::encode(evidence, discovery.stored(), bytes));
-  TEST_ASSERT_EQUAL(c::record::DecodeResult::kOk,
-                    c::record::decode(bytes, decoded, restored_guard));
-  TEST_ASSERT_EQUAL(c::Verdict::kUnknown,
-                    c::assess(decoded, competitions, kNow, 21).verdict);
   putSpan(0, kNow - 15 * kDay, kNow + kDay, kNow - 40 * kDay, kNow + 40 * kDay);
   TEST_ASSERT_EQUAL(c::Verdict::kNoBreak,
                     c::assess(evidence, competitions, kNow, 21).verdict);
@@ -359,12 +356,6 @@ void missing_refresh_metadata_cannot_be_cleared_by_another_seasons_success() {
           kNow + 40 * kDay, kNow, "2027");
   TEST_ASSERT_EQUAL(c::Verdict::kUnknown,
                     c::assess(evidence, competitions, kNow, 21).verdict);
-  TEST_ASSERT_EQUAL_UINT32(
-      bytes.size(), c::record::encode(evidence, discovery.stored(), bytes));
-  TEST_ASSERT_EQUAL(c::record::DecodeResult::kOk,
-                    c::record::decode(bytes, decoded, restored_guard));
-  TEST_ASSERT_EQUAL(c::Verdict::kUnknown,
-                    c::assess(decoded, competitions, kNow, 21).verdict);
   longGap();
   TEST_ASSERT_EQUAL(c::Verdict::kBreak,
                     c::assess(evidence, competitions, kNow, 21).verdict);
@@ -386,24 +377,14 @@ void sixteen_device_requests_and_one_new_daily_run_require_persist_then_commit()
       ++stored;
       discovery.commitRequest(proposed);
     }
-    auto progress = discovery.stored().progress;
-    progress.route = i % cfg::kCompetitionMax;
-    progress.season = i % cfg::kCoverageMaxSeasons;
-    TEST_ASSERT_TRUE(discovery.stage(progress, proposed));
-    discovery.commitProgress(proposed);
   }
   TEST_ASSERT_GREATER_THAN_UINT32(0, stored);
   TEST_ASSERT_EQUAL(c::Discovery::Admission::kUsedUp,
                     discovery.request(proposed));
   TEST_ASSERT_EQUAL(c::Discovery::Admission::kActive,
                     discovery.start(101, proposed));
-  auto progress = discovery.stored().progress;
-  progress.season = cfg::kCoverageMaxSeasons;
-  TEST_ASSERT_FALSE(discovery.stage(progress, proposed));
-  progress.season = 0;
-  progress.active = false;
-  TEST_ASSERT_TRUE(discovery.stage(progress, proposed));
-  discovery.commitProgress(proposed);
+  TEST_ASSERT_TRUE(discovery.finish(proposed));
+  discovery.commitFinish(proposed);
   TEST_ASSERT_EQUAL(c::Discovery::Admission::kUsedUp,
                     discovery.start(100, proposed));
   TEST_ASSERT_EQUAL(c::Discovery::Admission::kUsedUp,
@@ -468,72 +449,28 @@ void retrying_a_successful_start_commit_cannot_replenish_request_credits() {
   discovery.commitStart(first_start);
   TEST_ASSERT_EQUAL(c::Discovery::Admission::kUsedUp,
                     discovery.request(proposed));
-  auto progress = discovery.stored().progress;
-  progress.active = false;
-  TEST_ASSERT_TRUE(discovery.stage(progress, proposed));
-  discovery.commitProgress(proposed);
+  TEST_ASSERT_TRUE(discovery.finish(proposed));
+  discovery.commitFinish(proposed);
   discovery.commitStart(first_start);
-  TEST_ASSERT_FALSE(discovery.stored().progress.active);
+  TEST_ASSERT_FALSE(discovery.stored().active);
   TEST_ASSERT_EQUAL(c::Discovery::Admission::kUsedUp,
                     discovery.start(100, proposed));
 }
 
-void codec_is_bounded_crc_checked_and_candidate_only_without_snapshot_copy() {
-  addCompetition(1);
-  longGap();
-  discovery.load(football::budget::Load::kMissing);
-  TEST_ASSERT_EQUAL(c::Discovery::Admission::kStore,
-                    discovery.start(100, proposed));
-  discovery.commitStart(proposed);
-  TEST_ASSERT_EQUAL_UINT32(
-      bytes.size(), c::record::encode(evidence, discovery.stored(), bytes));
-  TEST_ASSERT_EQUAL(c::record::DecodeResult::kOk,
-                    c::record::decode(bytes, decoded, restored_guard));
-  TEST_ASSERT_EQUAL_UINT32(
-      bytes.size(), c::record::encode(decoded, restored_guard, second_bytes));
-  TEST_ASSERT_EQUAL_MEMORY(bytes.data(), second_bytes.data(), bytes.size());
-  bytes[20] ^= 1;
-  decoded[0].incarnation = 777;
-  restored_guard.progress.run_day = 888;
-  TEST_ASSERT_EQUAL(c::record::DecodeResult::kChecksum,
-                    c::record::decode(bytes, decoded, restored_guard));
-  TEST_ASSERT_EQUAL_UINT32(777, decoded[0].incarnation);
-  TEST_ASSERT_EQUAL_UINT32(888, restored_guard.progress.run_day);
-  bytes = second_bytes;
-  constexpr auto count_at = c::record::kHeaderBytes +
-                            cfg::kCompetitionMax * c::record::kEvidenceBytes +
-                            12 + 8;
-  bytes[count_at] = cfg::kCoverageRequestsPerRun + 1;
-  settings::seal(bytes, c::record::kVersion);
-  TEST_ASSERT_EQUAL(c::record::DecodeResult::kInvalid,
-                    c::record::decode(bytes, decoded, restored_guard));
-  bytes.fill(0xa5);
-  restored_guard.requests.reserved = cfg::kCoverageRequestsPerRun + 1;
-  TEST_ASSERT_EQUAL_UINT32(0,
-                           c::record::encode(evidence, restored_guard, bytes));
-  TEST_ASSERT_EQUAL_HEX8(0xa5, bytes.front());
-  TEST_ASSERT_EQUAL_HEX8(0xa5, bytes.back());
-  TEST_ASSERT_EQUAL(c::record::DecodeResult::kLength,
-                    c::record::decode(std::span<const uint8_t>(bytes).first(7),
-                                      decoded, restored_guard));
-}
 }  // namespace
 
 void setUp() {
   evidence = {};
-  decoded = {};
   competitions.clear();
   proposed = {};
   restored_guard = {};
   discovery.load(football::budget::Load::kMissing);
   rebooted.load(football::budget::Load::kMissing);
-  bytes.fill(0);
-  second_bytes.fill(0);
 }
 void tearDown() {}
 int main(int, char**) {
   UNITY_BEGIN();
-  RUN_TEST(complete_stream_evidence_does_not_depend_on_the_224_display_rows);
+  RUN_TEST(complete_stream_evidence_does_not_depend_on_display_capacity);
   RUN_TEST(
       every_active_competition_counts_even_without_club_or_enabled_screens);
   RUN_TEST(complete_empty_competition_needs_other_real_global_neighbours);
@@ -564,7 +501,5 @@ int main(int, char**) {
   RUN_TEST(reboot_loses_unused_reservations_and_never_replenishes_a_run);
   RUN_TEST(corrupt_discovery_guard_cannot_be_saved_as_fresh_or_restarted_today);
   RUN_TEST(retrying_a_successful_start_commit_cannot_replenish_request_credits);
-  RUN_TEST(
-      codec_is_bounded_crc_checked_and_candidate_only_without_snapshot_copy);
   return UNITY_END();
 }

@@ -1,7 +1,6 @@
-// Current general settings acceptance. The exact pre-cutover suite is
-// archived in dated legacy-settings evidence. Superseded screen settings
-// assertions moved to policy/sequence tests; surviving general checks remain.
-// Current formats are general11/competitions4; no development migration.
+// Current model, exact payload and aggregate-codec checks. Raw SSIDs and
+// field validation complement the actual NVS-owner fault replay; these host
+// checks do not establish device acceptance or power-interruption behavior.
 
 #include <unity.h>
 
@@ -12,6 +11,7 @@
 #include <string_view>
 #include <vector>
 
+#include "app_config_record.h"
 #include "settings_model.h"
 #include "settings_record.h"
 
@@ -19,37 +19,31 @@ namespace {
 
 using settings::Competition;
 using settings::Competitions;
-using settings::decode;
 using settings::DecodeResult;
-using settings::encode;
 using settings::Field;
 using settings::fieldBit;
 using settings::FieldMask;
 using settings::initialCompetitions;
 using settings::initialValues;
-using settings::kHeaderBytes;
-using settings::kMaxCompetitionRecordBytes;
-using settings::kMaxRecordBytes;
 using settings::Model;
 using settings::Presets;
 using settings::RequestLimit;
 using settings::Source;
 
-// A record has exactly its used length (both records vary in length).
+// A payload has exactly its used length; only the aggregate has a header.
 using Record = std::vector<uint8_t>;
 
-// Offsets of the record, header included, written out independently of the
-// implementation. The core comes first.
-constexpr std::size_t kSsidAt = 8;
-constexpr std::size_t kPasswordAt = 41;
-constexpr std::size_t kApPasswordAt = 106;
-constexpr std::size_t kHostnameAt = 170;
-constexpr std::size_t kAntennaAt = 234;
-constexpr std::size_t kStatusLogAt = 235;
-constexpr std::size_t kIntervalAt = 236;
-constexpr std::size_t kTimeZoneAt = 238;
-constexpr std::size_t kNtpServerAt = 271;
-constexpr std::size_t kCoreBytes = 335;
+// Bare general-payload positions, specified independently of the codec.
+constexpr std::size_t kSsidAt = 0;
+constexpr std::size_t kPasswordAt = 33;
+constexpr std::size_t kApPasswordAt = 98;
+constexpr std::size_t kHostnameAt = 162;
+constexpr std::size_t kAntennaAt = 226;
+constexpr std::size_t kStatusLogAt = 227;
+constexpr std::size_t kIntervalAt = 228;
+constexpr std::size_t kTimeZoneAt = 230;
+constexpr std::size_t kNtpServerAt = 263;
+constexpr std::size_t kCoreBytes = 327;
 // Current record wire positions are specified independently of the codec.
 constexpr std::size_t kAdminAt = kCoreBytes;
 constexpr std::size_t kApiKeyAt = kAdminAt + 65;
@@ -59,7 +53,7 @@ constexpr std::size_t kLanguageAt = kScalarsAt + 6;
 constexpr std::size_t kScrollResetAt = kScalarsAt + 10;
 constexpr std::size_t kPlansBytes =
     cfg::kProviderCount * (6 + 4 * cfg::kDataTypeCount) + 6;
-constexpr std::size_t kStoreNextIdAt = kHeaderBytes;
+constexpr std::size_t kStoreNextIdAt = 0;
 constexpr std::size_t kStoreCountAt = kStoreNextIdAt + 1 + 4;
 constexpr std::size_t kStoreEntryAt = kStoreCountAt + 1;
 
@@ -85,7 +79,7 @@ Competition competition(cfg::Provider provider, std::string_view id,
   entry.primary.provider = provider;
   entry.primary.competition.assign(id);
   entry.primary.season.assign(season);
-  entry.primary.team.assign(team);
+  entry.club.team = values::positiveUint32(team);
   return entry;
 }
 
@@ -97,7 +91,7 @@ Competitions withLists() {
   entry.id = 1;
   entry.incarnation = 1;
   entry.competition_name.assign("Bundesliga");
-  entry.team_name.assign("FC Test");
+  entry.club.name.assign("FC Test");
   competitions.entries.push(entry);
   competitions.next_id = 2;
   competitions.next_incarnation = 2;
@@ -128,9 +122,9 @@ Competitions fullCompetitions() {
     entry.primary.provider = cfg::Provider::kOpenLigaDb;
     entry.primary.competition.assign(std::string(32, 'c'));
     entry.primary.season.assign(std::string(16, '9'));
-    entry.primary.team.assign(std::string(32, 't'));
+    entry.club.team = UINT32_MAX;
     entry.competition_name.assign(std::string(32, 'N'));
-    entry.team_name.assign(std::string(32, 'T'));
+    entry.club.name.assign(std::string(32, 'T'));
     entry.incarnation = i + 1;
     competitions.entries.push(entry);
   }
@@ -140,14 +134,15 @@ Competitions fullCompetitions() {
 }
 
 Record encoded(const Model& model) {
-  std::array<uint8_t, kMaxRecordBytes> buffer{};
-  const std::size_t used = encode(model, buffer);
+  std::array<uint8_t, settings::kModelPayloadBytes> buffer{};
+  const std::size_t used = settings::encodeModelPayload(model, buffer);
   return Record(buffer.begin(), buffer.begin() + used);
 }
 
 Record encodedCompetitions(const Competitions& competitions) {
-  std::array<uint8_t, kMaxCompetitionRecordBytes> buffer{};
-  const std::size_t used = settings::encodeCompetitions(competitions, buffer);
+  std::array<uint8_t, settings::kMaxCompetitionPayloadBytes> buffer{};
+  const std::size_t used =
+      settings::encodeCompetitionPayload(competitions, buffer);
   return Record(buffer.begin(), buffer.begin() + used);
 }
 
@@ -158,12 +153,12 @@ uint32_t readU32(const uint8_t* at) {
 
 DecodeResult decodeInto(std::span<const uint8_t> record, Model& model,
                         Field* invalid = nullptr) {
-  return decode(record, model, invalid);
+  return settings::decodeModelPayload(record, model, invalid);
 }
 
 DecodeResult decodeStore(std::span<const uint8_t> record,
                          Competitions& competitions) {
-  return settings::decodeCompetitions(record, competitions);
+  return settings::decodeCompetitionPayload(record, competitions);
 }
 
 // Record with one payload byte changed and a valid header, so the value
@@ -171,7 +166,6 @@ DecodeResult decodeStore(std::span<const uint8_t> record,
 Record withByte(const Model& model, std::size_t at, uint8_t value) {
   Record record = encoded(model);
   record[at] = value;
-  settings::seal(record);
   return record;
 }
 
@@ -179,7 +173,6 @@ Record storeWithByte(const Competitions& competitions, std::size_t at,
                      uint8_t value) {
   Record record = encodedCompetitions(competitions);
   record[at] = value;
-  settings::seal(record, cfg::kCompetitionsFormatVersion);
   return record;
 }
 
@@ -256,8 +249,7 @@ void testListContainer() {
   TEST_ASSERT_FALSE(a == b);
 }
 
-// OQ-200/OQ-209/OQ-247: the competitions have their own record with stable
-// stable identities and one source each.
+// Competition payloads preserve stable identities and attached preferences.
 
 void testRoundTrip() {
   const Model original = sample();
@@ -315,200 +307,61 @@ void testRoundTrip() {
   TEST_ASSERT_TRUE(loaded_store == Competitions{});
 }
 
-void testShorterRecordKeepsInitialValues() {
-  const Model stored = sample();
-  Record record = encoded(stored);
-
-  // Without the last field of the core (ntp_server).
-  const auto without_ntp = std::span(record).first(kNtpServerAt);
-  settings::seal(without_ntp);
-  Model loaded = defaults();
-  TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(without_ntp, loaded));
-  TEST_ASSERT_TRUE(loaded.time_zone == stored.time_zone);
-  TEST_ASSERT_TRUE(loaded.ntp_server.view() == "pool.ntp.org");
-
-  // A record of the firmware before the time fields (238 B).
-  record = encoded(stored);
-  const auto before_time = std::span(record).first(kTimeZoneAt);
-  settings::seal(before_time);
-  loaded = defaults();
-  TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(before_time, loaded));
-  TEST_ASSERT_EQUAL_UINT16(600, loaded.debug_status_interval_s);
-  TEST_ASSERT_TRUE(loaded.time_zone.view() == "Europe/Berlin");
-  TEST_ASSERT_TRUE(loaded.ntp_server.view() == "pool.ntp.org");
-
-  // Without the interval and every later field.
-  record = encoded(stored);
-  const auto without_interval = std::span(record).first(kIntervalAt);
-  settings::seal(without_interval);
-  loaded = defaults();
-  TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(without_interval, loaded));
-  TEST_ASSERT_TRUE(loaded.hostname == stored.hostname);
-  TEST_ASSERT_TRUE(loaded.external_antenna);
-  TEST_ASSERT_EQUAL_UINT16(30, loaded.debug_status_interval_s);
-  TEST_ASSERT_TRUE(loaded.time_zone.view() == "Europe/Berlin");
-
-  // Header only: every field keeps its initial value.
-  record = encoded(stored);
-  const auto header_only = std::span(record).first(kHeaderBytes);
-  settings::seal(header_only);
-  loaded = defaults();
-  TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(header_only, loaded));
-  TEST_ASSERT_TRUE(loaded == defaults());
-
-  // A record that ends after the core keeps the initial secrets; one that
-  // ends after the scalar values keeps later general settings.
-  Model initial = initialValues({.admin_password = "preset-admin"});
-  Model later = stored;
-  later.language = 1;
-  record = encoded(later);
-  const auto before_secrets = std::span(record).first(kAdminAt);
-  settings::seal(before_secrets);
-  loaded = initial;
-  TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(before_secrets, loaded));
-  TEST_ASSERT_TRUE(loaded.hostname == stored.hostname);
-  TEST_ASSERT_TRUE(loaded.admin_password.view() == "preset-admin");
-  TEST_ASSERT_EQUAL_UINT8(0, loaded.language);
-}
-
-void testPartialFieldIsRejected() {
-  const Model original = sample();
-  for (const std::size_t size :
-       {kSsidAt + 1, kPasswordAt - 1, kHostnameAt + 10, kIntervalAt + 1,
-        kTimeZoneAt + 5, kNtpServerAt + 1, kCoreBytes - 1,
-        kAdminAt + 10,          // inside the admin password
-        kApiKeyAt + 5,          // inside a provider key
-        kScrollResetAt + 1}) {  // inside a 16-bit value
-    Record record = encoded(original);
-    const auto cut = std::span(record).first(size);
-    settings::seal(cut);
-    Model loaded = defaults();
-    TEST_ASSERT_EQUAL(DecodeResult::kPartialField, decodeInto(cut, loaded));
-    TEST_ASSERT_TRUE(loaded == defaults());
+// Optional-tail compatibility was retired with the standalone development
+// records. Every current payload requires all fields and rejects any tail.
+void testPayloadsRejectEveryTruncationAndTrailingByte() {
+  const auto model = encoded(sample());
+  for (std::size_t size = 0; size < model.size(); ++size) {
+    auto scratch = defaults();
+    TEST_ASSERT_EQUAL(DecodeResult::kLengthMismatch,
+                      decodeInto(std::span(model).first(size), scratch));
   }
-}
-
-void testLongerRecordIgnoresTail() {
-  const Model original = sample();
-  Record record = encoded(original);
-  record.insert(record.end(), 20, 0xA5);
-  settings::seal(record);
-  Model loaded = defaults();
-  TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(record, loaded));
-  TEST_ASSERT_TRUE(loaded == original);
-
-  // Largest accepted record, and one byte more.
-  record = encoded(original);
-  record.resize(cfg::kSettingsMaxRecordBytes, 0);
-  settings::seal(record);
-  loaded = defaults();
-  TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(record, loaded));
-  TEST_ASSERT_TRUE(loaded == original);
-  record.push_back(0);
-  settings::seal(record);
-  loaded = defaults();
-  TEST_ASSERT_EQUAL(DecodeResult::kTooLong, decodeInto(record, loaded));
-  TEST_ASSERT_TRUE(loaded == defaults());
-
-  // The same for the competition record.
-  const Competitions store = withLists();
-  record = encodedCompetitions(store);
-  record.insert(record.end(), 20, 0xA5);
-  settings::seal(record, cfg::kCompetitionsFormatVersion);
-  Competitions loaded_store;
-  TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeStore(record, loaded_store));
-  TEST_ASSERT_TRUE(loaded_store == store);
-  record.resize(cfg::kCompetitionsMaxRecordBytes, 0);
-  settings::seal(record, cfg::kCompetitionsFormatVersion);
-  loaded_store = {};
-  TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeStore(record, loaded_store));
-  TEST_ASSERT_TRUE(loaded_store == store);
-  record.push_back(0);
-  settings::seal(record, cfg::kCompetitionsFormatVersion);
-  loaded_store = {};
-  TEST_ASSERT_EQUAL(DecodeResult::kTooLong, decodeStore(record, loaded_store));
-  TEST_ASSERT_TRUE(loaded_store == Competitions{});
+  auto longer = model;
+  longer.push_back(0);
+  auto scratch = defaults();
+  TEST_ASSERT_EQUAL(DecodeResult::kLengthMismatch, decodeInto(longer, scratch));
+  const auto store = encodedCompetitions(withLists());
+  for (std::size_t size = 0; size < store.size(); ++size) {
+    Competitions entries;
+    TEST_ASSERT_EQUAL(DecodeResult::kLengthMismatch,
+                      decodeStore(std::span(store).first(size), entries));
+  }
+  longer = store;
+  longer.push_back(0);
+  Competitions entries;
+  TEST_ASSERT_EQUAL(DecodeResult::kLengthMismatch,
+                    decodeStore(longer, entries));
 }
 
 void testDamagedHeaders() {
-  const Model original = sample();
-  Model loaded = defaults();
-
-  Record record = encoded(original);
-  TEST_ASSERT_EQUAL(
-      DecodeResult::kTooShort,
-      decodeInto(std::span(record).first(kHeaderBytes - 1), loaded));
-  TEST_ASSERT_EQUAL(DecodeResult::kTooShort, decodeInto({}, loaded));
-
-  record[2] ^= 0x01;  // length field
-  TEST_ASSERT_EQUAL(DecodeResult::kLengthMismatch, decodeInto(record, loaded));
-
-  record = encoded(original);
-  record[kHostnameAt + 1] ^= 0x20;  // payload byte, CRC kept
-  TEST_ASSERT_EQUAL(DecodeResult::kChecksumMismatch,
-                    decodeInto(record, loaded));
-
-  record = encoded(original);
-  record[5] ^= 0x80;  // CRC byte
-  TEST_ASSERT_EQUAL(DecodeResult::kChecksumMismatch,
-                    decodeInto(record, loaded));
-
-  record = encoded(original);
-  record[0] = 2;  // version changed, CRC kept
-  TEST_ASSERT_EQUAL(DecodeResult::kChecksumMismatch,
-                    decodeInto(record, loaded));
-
-  // Older development formats are no longer read: the device starts
-  // with the initial values ("outdated").
-  record = encoded(original);
-  for (uint16_t version = 1; version < cfg::kSettingsFormatVersion; ++version) {
-    settings::seal(record, version);
-    TEST_ASSERT_EQUAL(DecodeResult::kOutdatedVersion,
-                      decodeInto(record, loaded));
+  namespace record = settings::app_record;
+  settings::AppConfig config;
+  config.model = sample();
+  std::array<uint8_t, record::kMaxBytes> bytes{};
+  const auto size = record::encode(config, bytes);
+  TEST_ASSERT_NOT_EQUAL(0, size);
+  settings::AppConfig scratch;
+  for (std::size_t length = 0; length < size; ++length)
+    TEST_ASSERT_NOT_EQUAL(
+        DecodeResult::kOk,
+        record::decode(std::span(bytes).first(length), scratch));
+  for (std::size_t at = 0; at < size; ++at) {
+    auto bad = bytes;
+    bad[at] ^= 0x80;
+    TEST_ASSERT_NOT_EQUAL(DecodeResult::kOk,
+                          record::decode(std::span(bad).first(size), scratch));
   }
-  // Version 0 and newer versions are unknown.
-  for (const uint16_t version :
-       {uint16_t{0}, uint16_t{cfg::kSettingsFormatVersion + 1},
-        uint16_t{0xFFFF}}) {
-    settings::seal(record, version);
+  for (const uint16_t version : {0, 2, 4, 11, 65535}) {
+    auto bad = bytes;
+    record::seal(std::span(bad).first(size), version);
     TEST_ASSERT_EQUAL(DecodeResult::kUnknownVersion,
-                      decodeInto(record, loaded));
+                      record::decode(std::span(bad).first(size), scratch));
   }
-  TEST_ASSERT_TRUE(loaded == defaults());
-
-  // Older competition development formats are no longer read.
-  const Competitions store = withLists();
-  Competitions loaded_store;
-  record = encodedCompetitions(store);
-  TEST_ASSERT_EQUAL(
-      DecodeResult::kTooShort,
-      decodeStore(std::span(record).first(kHeaderBytes - 1), loaded_store));
-  record[3] ^= 0x01;
-  TEST_ASSERT_EQUAL(DecodeResult::kLengthMismatch,
-                    decodeStore(record, loaded_store));
-  record = encodedCompetitions(store);
-  record[kStoreEntryAt + 5] ^= 0x01;
-  TEST_ASSERT_EQUAL(DecodeResult::kChecksumMismatch,
-                    decodeStore(record, loaded_store));
-  record = encodedCompetitions(store);
-  settings::seal(record, 1);
-  TEST_ASSERT_EQUAL(DecodeResult::kOutdatedVersion,
-                    decodeStore(record, loaded_store));
-  for (const uint16_t version :
-       {uint16_t{0}, uint16_t{cfg::kCompetitionsFormatVersion + 1},
-        uint16_t{8}}) {
-    record = encodedCompetitions(store);
-    settings::seal(record, version);
-    TEST_ASSERT_EQUAL(DecodeResult::kUnknownVersion,
-                      decodeStore(record, loaded_store));
-  }
-  // A settings record is no competition record.
-  TEST_ASSERT_EQUAL(DecodeResult::kUnknownVersion,
-                    decodeStore(encoded(original), loaded_store));
-  TEST_ASSERT_TRUE(loaded_store == Competitions{});
+  std::array<uint8_t, record::kMaxBytes + 1> oversized{};
+  TEST_ASSERT_EQUAL(DecodeResult::kTooLong, record::decode(oversized, scratch));
 }
 
-void testInvalidStoredValuesRejectWholeRecord() {
+void testInvalidPayloadValuesRejectDecode() {
   const Model original = sample();
   struct Case {
     std::size_t at;
@@ -541,7 +394,6 @@ void testInvalidStoredValuesRejectWholeRecord() {
                       decodeInto(record, loaded, &invalid));
     TEST_ASSERT_EQUAL_STRING(settings::fieldName(c.field),
                              settings::fieldName(invalid));
-    TEST_ASSERT_TRUE(loaded == defaults());
   }
 
   // Interval 4 s (little-endian 04 00) and 3601 s (11 0E).
@@ -549,14 +401,12 @@ void testInvalidStoredValuesRejectWholeRecord() {
     Record record = encoded(original);
     record[kIntervalAt] = static_cast<uint8_t>(seconds);
     record[kIntervalAt + 1] = static_cast<uint8_t>(seconds >> 8);
-    settings::seal(record);
     Model loaded = defaults();
     Field invalid = Field::kWifiSsid;
     TEST_ASSERT_EQUAL(DecodeResult::kInvalidValue,
                       decodeInto(record, loaded, &invalid));
     TEST_ASSERT_EQUAL_STRING("debug_status_interval_s",
                              settings::fieldName(invalid));
-    TEST_ASSERT_TRUE(loaded == defaults());
   }
 }
 
@@ -766,8 +616,8 @@ void testViolationNamesListPath() {
   expectViolation(store, "competitions[0].primary.competition", "required");
 
   store = withLists();
-  store.entries[0].primary.team.assign("bad\tid");
-  expectViolation(store, "competitions[0].primary.team", "invalid");
+  store.entries[0].club.name.assign("bad\tid");
+  expectViolation(store, "competitions[0].club.name", "invalid");
 
   store = withLists();
   store.entries[0].primary.provider = static_cast<cfg::Provider>(4);
@@ -814,10 +664,6 @@ void testViolationFitsPathBuffer() {
   TEST_ASSERT_TRUE(result.path.size() + 1 <= cfg::kFieldPathBytes);
 }
 
-// OQ-122: the own-match screen is no choice while other matches run. A
-// stored record from earlier firmware keeps all values and shows the
-// Konferenz instead; new input with that value is rejected.
-
 void testRequestPlans() {
   const Model initial = defaults();
   // The documented provider limits (app_config.h, checked 2026-10-13):
@@ -850,22 +696,14 @@ void testRequestPlans() {
   TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(record, loaded));
   TEST_ASSERT_TRUE(loaded == stored);
 
-  // A current record that ends before the plans keeps the initial ones;
-  // one that ends inside a value is partial.
-  Record cut = record;
-  cut.resize(record.size() - kPlansBytes);
-  settings::seal(cut);
-  loaded = defaults();
-  TEST_ASSERT_EQUAL(DecodeResult::kOk, decodeInto(cut, loaded));
-  TEST_ASSERT_TRUE(loaded.providers == initial.providers);
-  TEST_ASSERT_TRUE(loaded.global_limit == RequestLimit{});
-  for (const std::size_t missing : {kPlansBytes - 7, std::size_t{1}}) {
-    cut = record;
-    cut.resize(record.size() - missing);
-    settings::seal(cut);
+  // Provider plans are mandatory in the current payload, including an exact
+  // whole-plan truncation; no missing tail can silently restore defaults.
+  for (const std::size_t missing :
+       {kPlansBytes, kPlansBytes - 7, std::size_t{1}}) {
     loaded = defaults();
-    TEST_ASSERT_EQUAL(DecodeResult::kPartialField, decodeInto(cut, loaded));
-    TEST_ASSERT_TRUE(loaded == defaults());
+    TEST_ASSERT_EQUAL(
+        DecodeResult::kLengthMismatch,
+        decodeInto(std::span(record).first(record.size() - missing), loaded));
   }
 
   // Intervals 10 s to 7 days; a window needs both values.
@@ -894,12 +732,10 @@ void testRequestPlans() {
   // A stored interval out of range rejects the record: football-data.org's
   // events interval, right before the global limit.
   Record bad = encoded(stored);
-  const std::size_t events = bad.size() - 6 - 4;
+  const std::size_t events = bad.size() - 1 - 6 - 4;
   for (std::size_t i = 0; i < 4; ++i) bad[events + i] = 0;
-  settings::seal(bad);
   loaded = defaults();
   TEST_ASSERT_EQUAL(DecodeResult::kInvalidValue, decodeInto(bad, loaded));
-  TEST_ASSERT_TRUE(loaded == defaults());
 }
 
 void testInputRoles() {
@@ -967,7 +803,7 @@ void testValidateLists() {
 
   // OQ-195: a competition without an own club (no team).
   Competitions store = withLists();
-  store.entries[0].primary.team.assign("");
+  store.entries[0].club.team = 0;
   TEST_ASSERT_TRUE(settings::validate(store));
 
   store = withLists();
@@ -989,7 +825,7 @@ void testValidateLists() {
   store.entries[0].competition_name.assign("a\nb");  // control character
   TEST_ASSERT_TRUE(invalid(store));
   store = withLists();
-  store.entries[0].team_name.assign("a\x7f");
+  store.entries[0].club.name.assign("a\x7f");
   TEST_ASSERT_TRUE(invalid(store));
 }
 
@@ -1124,7 +960,7 @@ void testSameProviderData() {
   const Competitions store = withLists();
   Competitions changed = store;
   changed.entries[0].competition_name.assign("Erste Liga");
-  changed.entries[0].team_name.assign("Other name");
+  changed.entries[0].club.name.assign("Other name");
   changed.next_id = 7;
   TEST_ASSERT_TRUE(settings::sameProviderData(store, changed));
 
@@ -1132,8 +968,8 @@ void testSameProviderData() {
   changed.entries[0].primary.season.assign("");
   TEST_ASSERT_FALSE(settings::sameProviderData(store, changed));
   changed = store;
-  changed.entries[0].primary.team.assign("6");
-  TEST_ASSERT_FALSE(settings::sameProviderData(store, changed));
+  changed.entries[0].club.team = 6;
+  TEST_ASSERT_TRUE(settings::sameProviderData(store, changed));
   changed = store;
   changed.entries[0].active = false;
   TEST_ASSERT_FALSE(settings::sameProviderData(store, changed));
@@ -1200,7 +1036,7 @@ void testPresetsCreateCompetition() {
   TEST_ASSERT_TRUE(entry.active);
   TEST_ASSERT_TRUE(entry.primary.provider == cfg::Provider::kFootballData);
   TEST_ASSERT_TRUE(entry.primary.competition.view() == "BL1");
-  TEST_ASSERT_TRUE(entry.primary.team.view() == "5");
+  TEST_ASSERT_EQUAL_UINT32(5, entry.club.team);
   TEST_ASSERT_TRUE(entry.primary.season.view() == "2025");
   TEST_ASSERT_TRUE(settings::validate(store));
   // The settings model holds no competitions; the presets set no plan.
@@ -1264,11 +1100,9 @@ int main() {
   RUN_TEST(testDefaults);
   RUN_TEST(testListContainer);
   RUN_TEST(testRoundTrip);
-  RUN_TEST(testShorterRecordKeepsInitialValues);
-  RUN_TEST(testPartialFieldIsRejected);
-  RUN_TEST(testLongerRecordIgnoresTail);
+  RUN_TEST(testPayloadsRejectEveryTruncationAndTrailingByte);
   RUN_TEST(testDamagedHeaders);
-  RUN_TEST(testInvalidStoredValuesRejectWholeRecord);
+  RUN_TEST(testInvalidPayloadValuesRejectDecode);
   RUN_TEST(testWifiPasswordLimits);
   RUN_TEST(testApPasswordLimits);
   RUN_TEST(testHostnameLimits);

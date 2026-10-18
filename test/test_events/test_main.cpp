@@ -1,6 +1,5 @@
 // Host acceptance for the event catalog and the queue admission of the event
-// bus (docs/ARCHITECTURE.md): coalesced state events, bounded UI slots and a
-// queue that state events can never overflow.
+// bus: coalesced state notifications with one guaranteed slot per kind.
 
 #include <unity.h>
 
@@ -27,15 +26,14 @@ void testCatalog() {
   for (Event event : kStateEvents) {
     TEST_ASSERT_TRUE(events::isStateEvent(event));
   }
-  TEST_ASSERT_FALSE(events::isStateEvent(Event::kUiAction));
-  TEST_ASSERT_EQUAL_UINT(kStateEventCount + cfg::kEventUiActionSlots,
-                         kQueueLength);
+  TEST_ASSERT_FALSE(events::isStateEvent(static_cast<Event>(255)));
+  TEST_ASSERT_EQUAL_UINT(kStateEventCount, kQueueLength);
 }
 
 void testEventNamesAreDistinct() {
   constexpr Event kAll[] = {Event::kSettingsChanged, Event::kNetworkState,
-                            Event::kDataUpdated,     Event::kOtaState,
-                            Event::kTimeChanged,     Event::kUiAction};
+                            Event::kDataUpdated, Event::kOtaState,
+                            Event::kTimeChanged};
   for (std::size_t i = 0; i < std::size(kAll); ++i) {
     TEST_ASSERT_NOT_EQUAL(0,
                           std::strcmp("unknown", events::eventName(kAll[i])));
@@ -71,39 +69,13 @@ void testStateEventsAreIndependent() {
   TEST_ASSERT_FALSE(admission.admit(Event::kTimeChanged));
 }
 
-void testUiSlotsAreBounded() {
+void testAllStateKindsAlwaysFitAndInvalidKindsDoNotShiftBits() {
   Admission admission;
-  for (std::size_t i = 0; i < cfg::kEventUiActionSlots; ++i) {
-    TEST_ASSERT_TRUE(admission.admit(Event::kUiAction));
-  }
-  TEST_ASSERT_FALSE(admission.admit(Event::kUiAction));
-  admission.release(Event::kUiAction);
-  TEST_ASSERT_TRUE(admission.admit(Event::kUiAction));
-  TEST_ASSERT_FALSE(admission.admit(Event::kUiAction));
-}
-
-void testUnmatchedUiReleaseKeepsBound() {
-  Admission admission;
-  admission.release(Event::kUiAction);
-  for (std::size_t i = 0; i < cfg::kEventUiActionSlots; ++i) {
-    TEST_ASSERT_TRUE(admission.admit(Event::kUiAction));
-  }
-  TEST_ASSERT_FALSE(admission.admit(Event::kUiAction));
-}
-
-void testStateEventsFindRoomWithFullUiSlots() {
-  // Every admitted event is one queue entry; with all UI slots taken each
-  // state kind can still be admitted, and the total never exceeds the queue.
-  Admission admission;
+  TEST_ASSERT_FALSE(admission.admit(static_cast<Event>(255)));
+  admission.release(static_cast<Event>(255));
   std::size_t admitted = 0;
-  for (std::size_t i = 0; i < 2 * cfg::kEventUiActionSlots; ++i) {
-    if (admission.admit(Event::kUiAction)) ++admitted;
-  }
-  for (int round = 0; round < 3; ++round) {
-    for (Event event : kStateEvents) {
-      if (admission.admit(event)) ++admitted;
-    }
-  }
+  for (unsigned round = 0; round < 3; ++round)
+    for (const auto event : kStateEvents) admitted += admission.admit(event);
   TEST_ASSERT_EQUAL_UINT(kQueueLength, admitted);
 }
 
@@ -119,8 +91,6 @@ int main() {
   RUN_TEST(testStateEventCoalesces);
   RUN_TEST(testReleaseAllowsStateEventAgain);
   RUN_TEST(testStateEventsAreIndependent);
-  RUN_TEST(testUiSlotsAreBounded);
-  RUN_TEST(testUnmatchedUiReleaseKeepsBound);
-  RUN_TEST(testStateEventsFindRoomWithFullUiSlots);
+  RUN_TEST(testAllStateKindsAlwaysFitAndInvalidKindsDoNotShiftBits);
   return UNITY_END();
 }

@@ -51,6 +51,24 @@ int minuteAt(time_t utc) {
   return local.tm_hour * 60 + local.tm_min;
 }
 
+void testGregorianDateBoundaries() {
+  using timekeeping::daysFromCivil;
+  using timekeeping::validCivilDate;
+  TEST_ASSERT_EQUAL_INT64(0, daysFromCivil(1970, 1, 1));
+  TEST_ASSERT_EQUAL_INT64(-1, daysFromCivil(1969, 12, 31));
+  TEST_ASSERT_EQUAL_INT64(11016, daysFromCivil(2000, 2, 29));
+  TEST_ASSERT_EQUAL_INT64(47847, daysFromCivil(2101, 1, 1));
+  TEST_ASSERT_EQUAL_INT64(2932896, daysFromCivil(9999, 12, 31));
+  TEST_ASSERT_FALSE(validCivilDate(1900, 2, 29));
+  TEST_ASSERT_TRUE(validCivilDate(2000, 2, 29));
+  TEST_ASSERT_FALSE(validCivilDate(2100, 2, 29));
+  TEST_ASSERT_TRUE(validCivilDate(2400, 2, 29));
+  TEST_ASSERT_FALSE(validCivilDate(2026, 0, 1));
+  TEST_ASSERT_FALSE(validCivilDate(2026, 13, 1));
+  TEST_ASSERT_FALSE(validCivilDate(2026, 4, 31));
+  TEST_ASSERT_FALSE(validCivilDate(2026, 1, 0));
+}
+
 void testFindZone() {
   const cfg::TimeZone* berlin = findZone("Europe/Berlin");
   TEST_ASSERT_NOT_NULL(berlin);
@@ -166,6 +184,7 @@ void tearDown() {}
 
 int main() {
   UNITY_BEGIN();
+  RUN_TEST(testGregorianDateBoundaries);
   RUN_TEST(testFindZone);
   RUN_TEST(testTableEntries);
   RUN_TEST(testRulesMatchIanaDatabase);

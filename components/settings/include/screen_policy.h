@@ -9,7 +9,9 @@
 
 namespace settings {
 struct Competitions;
-}
+struct Competition;
+struct CompetitionRoutes;
+}  // namespace settings
 
 namespace settings::screen_policy {
 
@@ -49,13 +51,12 @@ struct Override {
   bool operator==(const Override&) const noexcept = default;
 };
 
-struct Association {
-  // The competition service assigns incarnation and owns its lifetime.
-  // Reusing a small id must receive a different nonzero incarnation.
-  uint32_t incarnation = 0;
-  uint8_t id = 0;  // id=0 and incarnation=0 denote an unused slot.
-  bool own_special = true;
-  bool operator==(const Association&) const noexcept = default;
+// The competition owns its preferences: identity cannot drift into a second
+// association table. Null/field-presence semantics retain dormant overrides.
+struct CompetitionPreferences {
+  std::array<std::array<Override, screen::kSportTypeCount>, kPhaseCount>
+      overrides{};
+  bool operator==(const CompetitionPreferences&) const noexcept = default;
 };
 
 struct Appearance {
@@ -71,8 +72,6 @@ struct Appearance {
 
 using PhaseRules = std::array<Rule, screen::kTypeCount>;
 using SharedRules = std::array<PhaseRules, kPhaseCount>;
-using CompetitionRules = std::array<Override, cfg::kCompetitionMax>;
-using SportRules = std::array<CompetitionRules, screen::kSportTypeCount>;
 
 constexpr SharedRules initialRules() noexcept {
   static_assert(std::size(cfg::kScreenAutomaticDefault) == kPhaseCount);
@@ -90,17 +89,8 @@ constexpr SharedRules initialRules() noexcept {
   return rules;
 }
 
-struct Policy {
-  // Build bounded snapshots in place; avoid a complete constant template per
-  // global instance in firmware flash.
-  Policy() noexcept {}
-  std::array<Association, cfg::kCompetitionMax> competitions{};
-  SharedRules shared = initialRules();
-  std::array<SportRules, kPhaseCount> overrides{};
-  // One bit per sportIndex(), not per stored Type identity.
-  std::array<uint8_t, kPhaseCount> expanded{};
+struct Options {
   std::array<Appearance, screen::kTypeCount> appearance{};
-  std::array<screen::Type, screen::kTypeCount> order = cfg::kScreenOrderDefault;
   std::array<uint8_t, cfg::kSlideMax> slides{};
   uint16_t break_days = cfg::kScreenBreakDaysDefault;
   uint16_t own_before_min = cfg::kMatchWindowDefaultMinutes;
@@ -119,6 +109,15 @@ struct Policy {
   bool frame = cfg::kScreenFrameDefault;
   bool frame_crest = cfg::kScreenFrameCrestDefault;
   bool automatic_break = cfg::kScreenBreakDefault;
+  bool only_one_own_single = cfg::kOnlyOneOwnSingleDefault;
+  bool operator==(const Options&) const noexcept = default;
+};
+
+struct Policy : Options {
+  SharedRules shared = initialRules();
+  // One sportIndex bit per phase: activate retained competition overrides.
+  std::array<uint8_t, kPhaseCount> per_competition{};
+  std::array<screen::Type, screen::kTypeCount> order = cfg::kScreenOrderDefault;
   bool operator==(const Policy&) const noexcept = default;
 };
 
@@ -137,8 +136,7 @@ enum class Field : uint8_t {
   kNone,
   kShared,
   kOverride,
-  kExpanded,
-  kCompetition,
+  kPerCompetition,
   kOrder,
   kAppearance,
   kSlides,
@@ -169,8 +167,6 @@ enum class Property : uint8_t {
   kVisit,
   kValues,
   kFields,
-  kId,
-  kIncarnation,
   kColour,
   kText,
   kAccent,
@@ -190,13 +186,40 @@ struct Error {
 bool validate(const Policy& policy, Error* error = nullptr,
               const Limits& limits = {}) noexcept;
 
-// Unknown, removed or reincarnated identities inherit shared values. Expansion
-// off ignores, and never changes, its retained overrides.
-Rule resolve(const Policy& policy, Phase phase, screen::Type type,
-             uint8_t competition_id = 0, uint32_t incarnation = 0) noexcept;
-std::size_t associationIndex(const Policy& policy, uint8_t competition_id,
-                             uint32_t incarnation) noexcept;
-bool expanded(const Policy& policy, Phase phase, screen::Type type) noexcept;
+// Resolve the shared fields with the preferences of this exact competition.
+// A null competition resolves the global image/shared rule only.
+Rule resolve(const Policy&, Phase, screen::Type,
+             const Competition* competition = nullptr) noexcept;
+bool perCompetition(const Policy&, Phase, screen::Type) noexcept;
+bool validate(const CompetitionPreferences&, Error* error = nullptr,
+              uint8_t competition = 0) noexcept;
+
+struct CompetitionOrder {
+  std::array<uint8_t, cfg::kCompetitionMax> slots{};
+  uint8_t count = 0;
+};
+// Explicit group blocks inherit the earliest member's priority. Members keep
+// their configured order; text and provider names never establish membership.
+CompetitionOrder competitionOrder(const Competitions&) noexcept;
+CompetitionOrder competitionOrder(const CompetitionRoutes&) noexcept;
+
+struct ProgramEntry {
+  Rule rule;
+  screen::Type type = screen::Type::kCrest;
+  uint8_t competition = 0;
+  bool operator==(const ProgramEntry&) const noexcept = default;
+};
+inline constexpr std::size_t kProgramMax =
+    screen::kSportTypeCount * cfg::kCompetitionMax + 2;
+struct Program {
+  std::array<ProgramEntry, kProgramMax> entries{};
+  uint8_t count = 0;
+  bool operator==(const Program&) const noexcept = default;
+};
+// The one normalized effective list. Disabled entries are absent; manual-only
+// sport entries remain present with automatic=false. Images are global.
+void program(const Policy&, const Competitions&, Phase, Program&) noexcept;
+static_assert(sizeof(ProgramEntry) == 6 && sizeof(Program) <= 208);
 
 // Small derived values for classification/provider consumers. They never own
 // the complete rule matrix or retain a Policy pointer. Bits follow the current
@@ -208,6 +231,7 @@ struct SelectionRules {
   uint16_t other_after_min = cfg::kMatchWindowDefaultMinutes;
   uint8_t own_special = 0;
   bool automatic_break = cfg::kScreenBreakDefault;
+  bool only_one_own_single = cfg::kOnlyOneOwnSingleDefault;
 };
 struct Eligibility {
   SelectionRules selection;
@@ -221,10 +245,13 @@ struct Eligibility {
            (enabled[index(phase)][slot] & (1u << screen::index(type)));
   }
 };
-SelectionRules selectionRules(const Policy& policy,
-                              const Competitions& competitions) noexcept;
+SelectionRules selectionRules(const Options&, const Competitions&) noexcept;
+SelectionRules selectionRules(const Options&,
+                              const CompetitionRoutes&) noexcept;
 Eligibility eligibility(const Policy& policy,
                         const Competitions& competitions) noexcept;
+Eligibility eligibility(const Policy&, const CompetitionRoutes&,
+                        const Competitions* configured = nullptr) noexcept;
 static_assert(sizeof(SelectionRules) <= 12 && sizeof(Eligibility) <= 56);
 
 // Also used by manual-only sport entries while automatic subpage rotation is

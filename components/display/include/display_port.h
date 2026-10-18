@@ -32,6 +32,17 @@ bool lock(uint32_t timeout_ms);
 bool ready();
 void unlock();
 
+struct SceneCompletion {
+  uint32_t token = 0;
+  int64_t at_ms = 0;
+  bool valid = false;
+};
+// A new token forces a real redraw, including visually identical pages. Caller
+// holds the LVGL lock. Completion requires the final stripe's SPI interrupt;
+// accepting a scene or decoding a JPEG alone does not acknowledge it.
+void sceneAccepted(uint32_t token);
+SceneCompletion sceneCompletion();
+
 // Logs the LVGL memory pool usage (takes the lock itself with a short
 // timeout and skips the log if LVGL is busy). Does nothing if init() has not
 // succeeded.

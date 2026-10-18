@@ -1,283 +1,917 @@
-"use strict";
+'use strict';
+// Current aggregate API and actual C++ schema fixture. Retained general UI,
+// diagnostics, network and image assertions from the earlier suite are mapped
+// to their current owners. Legacy backup conversion/ShortNames and the removed
+// global screen arrays are intentionally retired. Common Apply receipt/fault
+// coverage lives in test_web_common_apply and test_web_save_feedback; attached
+// programme/appearance controls live in test_web_screen_policy.
+const fs = require('node:fs'), path = require('node:path'),
+      assert = require('node:assert/strict');
+const {harness} = require('./web_config_harness.cjs');
+let h, U, context, events, element, model, passed = 0;
+function setup() {
+  h = harness(process.argv[2]);
+  ({U, context, events, element} = h);
+  model = h.model();
+}
+const networkFaultStatus = (step = 'mdns') => ({
+  ready: false,
+  step,
+  error: 257,
+  error_name: 'ESP_ERR_NO_MEM',
+  code: step === 'mdns'     ? 'NET E11' :
+      step === 'portal_dns' ? 'NET E10' :
+                              'NET E09',
+  retry_ms: 12000
+});
+const imageFaultStatus = (actual = 'factory', reason = 'invalid') => ({
+  active: true,
+  pending: false,
+  id: 2,
+  role: 'background',
+  actual,
+  failed: 'library',
+  reason,
+  error: 263,
+  error_name: 'ESP_ERR_INVALID_RESPONSE',
+  code: 'IMG E03',
+  revision: 12,
+  attempt: 34,
+  retry_ms: 12000
+});
+const copy = () => structuredClone(model),
+      errs = (m, sec = {}) => U.validate(m, sec);
+function entry(id = 'bl1', key = 1) {
+  const row = h.entry(key, key);
+  row.primary.competition = id;
+  return row;
+}
+function test(name, fn) {
+  setup();
+  fn();
+  passed++;
+  console.log('PASS ' + name);
+}
 
-// Host-only regression checks for the actual embedded Web UI source.
-// Run: node scripts/tests/test_web_ui.cjs
-// The DOM, network and clock scheduling below are stubs. These checks do not
-// establish browser layout, real provider behaviour or device acceptance.
-// No packages, production-function copies or generated /tmp harness are used.
-
-const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
-
-const html=fs.readFileSync(path.join(__dirname,'../../web/index.html'),'utf8');
-const script=html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
-assert(script,'The production HTML must contain its embedded script');
-// Definitions and event registration are evaluated; autonomous polling is not.
-const startupAt=script.lastIndexOf("\nsetInterval(()=>load('status',false),5000)");
-assert(startupAt>=0,'The test loader must locate the autonomous polling boundary');
-const expose="\nglobalThis.UI={S,ED,W,CAUSE,networkFailure,imageFailure,slidesShown,imageOptions,libraryEntries,openEditor,uploadImage,deleteImage,deleteAllImages,ACT,reconcileImages,liveContent,heapMinimum,taskMinimum,firmwareUsage,get,set,validate,payload,changes,compSaved,mergeBaseline,pruneMissing,moveCompetition,removeCompetition,decodeFirmware,jpegBaseline,imageAllowance,validateImport,importLegacy,importNames,openNames,bindSystem,overview,competitions,displayPage,imagesPage,settingsPage,systemPage,editorPage,raw,load,render,renderHeader,renderBar,paintStatus,authenticate,mutate,pageOf,waitForDevice,save};\n";
-let passed=0;
-const pass=name=>{passed++;console.log('PASS',name)};
-
-const elements=new Map(),events={};const element=id=>{if(!elements.has(id))elements.set(id,{id,innerHTML:'',textContent:'',value:'',dataset:{},style:{},hidden:false,disabled:false,classList:{toggle(){}},querySelector(){return element(id+'-child')},querySelectorAll(){return[]},remove(){elements.delete(id)},firstElementChild:{style:{}},close(){this.open=false},showModal(){this.open=true},focus(){},setAttribute(){},isConnected:true});return elements.get(id);};
-const context={console,TextEncoder,TextDecoder,URL,Blob,AbortController,Uint8Array,DataView,ArrayBuffer,Map,Set,Date,Promise,Math,JSON,Number,String,Object,Error,Array,RegExp,scrollY:0,scrollTo(){},setTimeout:(fn,ms)=>setTimeout(fn,Math.min(ms,1)),clearTimeout,document:{getElementById:element,querySelectorAll(){return[]},querySelector(){return null},addEventListener(name,fn){events[name]=fn},documentElement:{dataset:{}},createElement(type){return element('new-'+type)}},localStorage:{getItem(){return'auto'},setItem(){}},location:{host:'fussball.local',hostname:'fussball.local',protocol:'http:',assign(){}},window:{addEventListener(){}},fetch:async()=>{throw Error('network')}};vm.createContext(context);vm.runInContext(script.slice(0,startupAt)+expose,context,{filename:'web/index.html'});const U=context.UI;
-// Synthetic bounded configuration; no user settings or secrets are read.
-const model={wifi_ssid:'',hostname:'fussball',time_zone:'Europe/Berlin',ntp_server:'pool.ntp.org',language:0,idle_screen:2,matchday_screen:1,own_match_screen:0,competitions:[],slides:[],screens:Array.from({length:4},()=>({enabled:true,background:true,colour:0x101820,text:0xffffff,accent:0x49cba0,text_scale:100,image:0})),external_antenna:false,debug_status_log:true,debug_status_interval_s:30,espn_opt_in:false,demo:false,backgrounds:true,night_enabled:true,ip_badge_ap_permanent:true,ip_badge_bottom:false,browser_debug:false,brightness:100,night_brightness:10,rotation:0,visible_matches:4,table_window:5,manual_return_s:60,scroll_reset_s:20,scroll_repeat_ms:250,slideshow_s:15,night_start:1380,night_end:420,ip_badge_s:60,window_before:30,window_after:30,providers:Array.from({length:4},(_,i)=>({daily_requests:i===1?100:0,window_requests:0,window_s:0,intervals:{fixtures:28800,table:14400,live:60,live_table:600,events:600}})),global_limit:{daily_requests:0,window_requests:0,window_s:0},wifi_password_set:true,ap_password_set:false,admin_password_set:false,api_football_key_set:false,football_data_key_set:false};
-U.S.schema={version:3,max_body:8192,width:240,height:240,round:true,antenna:true,backlight:false,image_max:32768,image_quota:327680,image_reserve:40960,ota_max:0x1c0000,selection_text_max:48,selection_country_default:'Germany',bounds:{brightness:[0,100],daily_requests:[0,65535],window_requests:[0,65535],window_s:[0,43200],interval_s:[10,604800],night_brightness:[0,100],visible_matches:[1,4],table_window:[1,7]},limits:{competitions:3,slides:5,images:10,screens:4},providers:['openligadb','api-football','espn','football-data'],data_types:['fixtures','table','live','live_table','events'],competition_screens:['own_match','conference','matchday','table'],text:{wifi_ssid:32,hostname:63,time_zone:32,ntp_server:63,wifi_password:64,ap_password:63,admin_password:64,api_football_key:96,football_data_key:64,competitions:{competition:32,season:16,team:32,competition_name:32,team_name:32}},time_zones:['Europe/Berlin'],text_scale:[70,130],defaults:structuredClone(model)};
-U.S.saved=structuredClone(model);U.S.draft=structuredClone(model);U.S.images={items:[],used:0,quota:327680,max:10};U.S.status={version:'0.1',target:'xiao_esp32c6_gc9a01',layout:'4mb_ota_littlefs_v1',firmware_id:'a'.repeat(64),ip:'192.0.2.1',ap_ip:'192.168.4.1',ap:false,network:'connected',last_update_ms:0,screen:0,screen_reason:'idle',provider_busy:true,provider_started:true,own_match:{present:false},fs_used:100000,fs_total:524288};U.S.session={password_set:false,valid:true};
-const test=(name,fn)=>{fn();pass(name)},copy=()=>structuredClone(model),errs=(m,sec={})=>U.validate(m,sec),entry=(id='bl1',key=1)=>({id:key,active:true,primary:{provider:0,competition:id,season:'',team:'65'},competition_name:'Bundesliga',team_name:'FC'});
-test('valid representative settings',()=>assert.equal(errs(model).length,0));
-test('diagnostics distinguish lifetime interval and unavailable heap minima',()=>{assert.deepEqual(Array.from(U.heapMinimum({heap_min_scope:'lifetime',heap_min:40960})),['Kleinster freier Speicher seit Start','40.0 KB']);assert.equal(U.heapMinimum({heap_min_scope:'interval',heap_min:32768})[0],'Kleinster freier Speicher im Messintervall');for(const s of [{heap_min_scope:'unavailable',heap_min:null},{heap_min_scope:'lifetime',heap_min:null},{heap_min:40960}])assert.equal(U.heapMinimum(s)[1],'Nicht verfügbar');});
-test('diagnostics show usable stack capacity and leave unknown capacity explicit',()=>{assert.equal(U.taskMinimum({name:'provider',stack_min_free:3200,stack_usable_bytes:12800}),'provider: 3200 B / 12800 B (25.0 %)');assert.equal(U.taskMinimum({name:'',id:7,stack_min_free:1000,stack_usable_bytes:0}),'#7: 1000 B / Nicht verfügbar');assert.equal(U.taskMinimum({name:'x',stack_min_free:null,stack_usable_bytes:1000}),'x: Nicht verfügbar / 1000 B');});
-test('diagnostics show firmware slot occupancy without converting unknown bytes to zero',()=>{const cap=U.S.schema.ota_max;U.S.schema.ota_max=2000;assert.equal(U.firmwareUsage({app_bytes:1700}),'1.7 KB / 2.0 KB (85.0 %)');assert.equal(U.firmwareUsage({app_bytes:null}),'Nicht verfügbar');U.S.schema.ota_max=0;assert.equal(U.firmwareUsage({app_bytes:1700}),'Nicht verfügbar');U.S.schema.ota_max=cap;});
-
-test('top-level setter and nested setter',()=>{const m=copy();U.set(m,'hostname','test');U.set(m,'screens[1].text_scale',120);assert.equal(m.hostname,'test');assert.equal(m.screens[1].text_scale,120)});
-test('empty numeric input remains empty via event',()=>{events.input({target:{dataset:{path:'brightness',kind:'num'},type:'number',value:''}});assert.equal(U.S.draft.brightness,'');assert(errs(U.S.draft).some(e=>e.path==='brightness'));U.S.draft.brightness=100});
-test('save lock rejects pending edit events',()=>{U.S.saving=true;events.input({target:{dataset:{path:'hostname'},type:'text',value:'lost'}});assert.equal(U.S.draft.hostname,'fussball');U.S.saving=false});
-test('UTF-8 byte length enforced',()=>{const m=copy();m.wifi_ssid='ä'.repeat(17);assert(errs(m).some(e=>e.path==='wifi_ssid'))});
-// Requirement change 2026-10-14: a competition may be followed without a club;
-// the competition stays required.
-test('paused competition still requires competition; club optional',()=>{const m=copy(),x=entry();x.active=false;x.primary.competition='';m.competitions=[x];assert(errs(m).some(e=>e.path==='competitions[0].primary.competition'));x.primary.competition='bl1';x.primary.team='';assert.equal(errs(m).length,0)});
-// Spec change 2026-10-13: an empty season is the current season for every
-// provider, API-Football included (resolved by the device).
-test('API-Football empty season allowed (current season)',()=>{const m=copy(),x=entry();x.primary.provider=1;x.primary.season='';m.competitions=[x];assert.equal(errs(m).length,0);x.active=false;assert.equal(errs(m).length,0);x.primary.season='25';assert(errs(m).some(e=>e.path==='competitions[0].primary.season'))});
-test('secret empty-edit keeps; explicit clear removes; no values in change list',()=>{U.S.sec={wifi_password:{mode:'change',value:''}};assert(!('wifi_password'in U.payload()));assert.equal(U.changes().length,0);U.S.sec.wifi_password={mode:'change',value:'verysecret'};assert(U.changes().every(x=>!JSON.stringify(x).includes('verysecret')));U.S.sec.wifi_password={mode:'clear',value:''};assert.equal(U.payload().wifi_password,'');U.S.sec={}});
-test('no screen enabled rejected',()=>{const m=copy();m.screens.forEach(s=>s.enabled=false);assert(errs(m).some(e=>e.path==='screens'))});
-test('API header spaces rejected',()=>assert(errs(model,{api_football_key:{mode:'change',value:'abc def'}}).some(e=>e.path==='api_football_key')));
-test('competition ids unique',()=>{const m=copy();m.competitions=[entry('a'),entry('b')];assert(errs(m).some(e=>e.path==='competitions[1].id'));m.competitions[1].id=0;assert.equal(errs(m).length,0)});
-// State operations are isolated from full DOM rebuilding in this host test.
-// The six actual page generators are exercised separately below.
-vm.runInContext('render=()=>{}',context);
-test('competition move swaps the order',()=>{U.S.draft.competitions=[entry('a',1),entry('b',2)];U.moveCompetition(0,1);assert.equal(U.S.draft.competitions[0].primary.competition,'b')});
-test('image-side saved merge preserves unrelated draft leaf and arrays',()=>{U.S.saved=copy();U.S.draft=copy();U.S.draft.hostname='draft';U.S.draft.slides=[1,2];const n=copy();n.brightness=80;U.mergeBaseline(n);assert.equal(U.S.draft.hostname,'draft');assert.equal(U.S.draft.brightness,80);assert.deepEqual(Array.from(U.S.draft.slides),[1,2])});
-test('missing images pruned without unrelated draft loss',()=>{U.S.draft.screens[0].image=2;U.S.draft.screens[1].image=1;U.pruneMissing(U.S.draft,new Set([2]));assert.equal(U.S.draft.screens[1].image,0);assert.equal(U.S.draft.screens[0].image,2);assert.deepEqual(Array.from(U.S.draft.slides),[2]);assert.equal(U.S.draft.hostname,'draft')});
-test('replacement counts old file for filesystem reserve but excludes it for library quota',()=>{U.S.editor={id:1};U.S.images={items:[{id:1,bytes:20000}],used:327000};U.S.status.fs_total=524288;U.S.status.fs_used=450000;assert.equal(U.imageAllowance(),20680);U.S.status.fs_used=480000;assert.equal(U.imageAllowance(),3328);U.S.editor=null});
-test('baseline JPEG accepted; progressive rejected',()=>{assert(U.jpegBaseline(Uint8Array.from([255,216,255,192,0,17])));assert(!U.jpegBaseline(Uint8Array.from([255,216,255,194,0,17])))});
-function firmware(){const a=new Uint8Array(1024),v=new DataView(a.buffer),write=(o,s)=>a.set(new TextEncoder().encode(s),o);a[0]=0xe9;v.setUint32(32,0xabcd5432,true);v.setUint32(288,0x46424c31,true);v.setUint32(292,1,true);write(48,'test');write(296,'xiao_esp32c6_gc9a01');write(344,'4mb_ota_littlefs_v1');v.setUint32(376,3,true);a.fill(0x31,176,208);return a;}
-test('OTA target/layout/format/size and full ELF identity validated',()=>{const a=firmware();assert.equal(U.decodeFirmware(a.buffer,U.S.status,3,0x1c0000,100000).id,'31'.repeat(32));a[296]=88;assert.throws(()=>U.decodeFirmware(a.buffer,U.S.status,3,0x1c0000,100000));assert.throws(()=>U.decodeFirmware(firmware().buffer,U.S.status,3,90000,100000));const b=firmware();new DataView(b.buffer).setUint32(376,2,true);assert.throws(()=>U.decodeFirmware(b.buffer,U.S.status,3,0x1c0000,100000))});
-U.S.saved=copy();U.S.draft=copy();U.S.images={items:[],used:0,quota:327680,max:10};
-test('strict import rejects unknown key and scalar type',()=>{assert.throws(()=>U.validateImport({hostnme:'typo'}));assert.throws(()=>U.validateImport({brightness:'10'}));assert.throws(()=>U.validateImport({competitions:[{primary:{provider:0,competition:'bl1',team:'65',surprise:1}}]}))});
-test('redacted import keeps secret; partial settings patch allowed',()=>{const m=U.validateImport({wifi_password_set:false,brightness:50});assert.equal(m.brightness,50);assert.equal(m.wifi_password_set,true)});
-test('import checks shape and UTF-8/name constraints',()=>{assert.throws(()=>U.validateImport({competitions:[null]}));assert.throws(()=>U.validateImport({screens:[]}));assert.throws(()=>U.validateImport({wifi_ssid:'ä'.repeat(17)}))});
-test('six production page functions render both languages without simulator data',()=>{for(const language of[0,1]){U.S.draft.language=language;for(const[name,fn]of Object.entries({overview:U.overview,competitions:U.competitions,display:U.displayPage,images:U.imagesPage,settings:U.settingsPage,system:U.systemPage})){const html=fn();assert(html.includes('<h1>'),name);assert(!/S\.mock|1948|Mockup|Heimnetz|Beispielmotiv/.test(html),name)}}U.S.draft.language=0});
-test('all three automatic screen fields map to display page',()=>{for(const p of['idle_screen','matchday_screen','own_match_screen'])assert.equal(U.pageOf(p),'display')});
-test('display page follows the firmware screen order with matchday card and table step',()=>{const saved=U.S.draft,schema=U.S.schema;U.S.schema=Object.assign(structuredClone(schema),{screen_order:[0,1,4,2,3],limits:Object.assign({},schema.limits,{screens:5}),bounds:Object.assign({},schema.bounds,{table_page_s:[3,600]})});const m=copy();m.screens.push(structuredClone(m.screens[1]));m.table_page_s=8;U.S.draft=m;for(const language of[0,1]){m.language=language;const html=U.displayPage(),at=i=>html.indexOf(`data-field="screens[${i}]"`);assert([0,1,4,2,3].every((i,k,a)=>at(i)>=0&&(k===0||at(a[k-1])<at(i))));assert(html.includes('data-path="table_page_s"'));assert.equal(html.split('data-path="visible_matches"').length,2)}assert.equal(U.pageOf('table_page_s'),'display');m.screens[1].enabled=false;assert(!/id="f-visible_matches"[^>]*disabled/.test(U.displayPage()));m.screens[4].enabled=false;assert(/id="f-visible_matches"[^>]*disabled/.test(U.displayPage()));U.S.draft=saved;U.S.schema=schema});
-test('competition details switch the screens; own match needs a club',()=>{const saved=U.S.draft;U.S.draft=copy();const c=entry();c.screens={own_match:true,conference:true,matchday:false,table:true};U.S.draft.competitions=[c];U.S.open=0;let html=U.competitions();for(const k of U.S.schema.competition_screens)assert(html.includes(`data-path="competitions[0].screens.${k}"`));assert(!/id="f-competitions-0--screens-own_match"[^>]*disabled/.test(html));assert(!html.includes('Liefert die Tabelle'));c.primary.team='';html=U.competitions();assert(/id="f-competitions-0--screens-own_match"[^>]*disabled/.test(html));U.S.open=null;U.S.draft=saved});
-test('imported screen switches keep the default for absent keys',()=>{const m=U.validateImport({competitions:[{primary:{provider:0,competition:'bl1',season:'',team:'65'},screens:{table:false}}]});assert.deepEqual({...m.competitions[0].screens},{own_match:true,conference:true,matchday:true,table:false});assert.throws(()=>U.validateImport({competitions:[{primary:{provider:0,competition:'bl1'},screens:{table:1}}]}))});
-test('failed status dominates header connection state',()=>{U.S.errors.status='offline';U.renderHeader();assert(element('connection').textContent.includes('nicht erreichbar'));assert.equal(element('connection').className,'chip err');delete U.S.errors.status});
-// Requirement change 2026-10-14: limits per day and per time window replace
-// the minimum spacing; a window needs both values or none.
-test('request limits are checked per provider',()=>{const m=copy();m.providers[2].window_requests=10;m.providers[3].daily_requests=65536;m.providers[0].intervals.live=5;const e=errs(m).map(x=>x.path);assert.deepEqual([...e].sort(),['providers[0].intervals.live','providers[2].window_s','providers[3].daily_requests'])});
-test('global limit window needs both values',()=>{const m=copy();m.global_limit.window_s=60;assert.deepEqual([...errs(m).map(x=>x.path)],['global_limit.window_requests']);m.global_limit.window_requests=30;assert.equal(errs(m).length,0)});
-test('request limit change is listed per provider',()=>{U.S.draft.providers[1].daily_requests=50;assert.deepEqual([...U.changes().map(r=>r.path)],['providers[1].daily_requests']);U.S.draft.providers[1].daily_requests=100});
-test('every provider card has day and window limits',()=>{const html=U.settingsPage();for(let i=0;i<4;i++)for(const k of['daily_requests','window_requests','window_s'])assert(html.includes(`data-path="providers[${i}].${k}"`));assert(!html.includes('api_daily_budget')&&!html.includes('request_spacing_s'))});
-test('imported provider rows replace only their first entries and given keys',()=>{const p=U.validateImport({providers:[{window_requests:9,window_s:60},{intervals:{live:30}}]}).providers;assert.deepEqual([p[0].daily_requests,p[0].window_requests,p[0].window_s,p[1].daily_requests,p[1].intervals.live,p[1].intervals.fixtures,p[2].window_s],[0,9,60,100,30,28800,0]);assert.throws(()=>U.validateImport({providers:[{},{},{},{},{}]}));assert.throws(()=>U.validateImport({providers:[{daily_requests:'5'}]}));assert.throws(()=>U.validateImport({providers:[{spacing:5}]}));assert.throws(()=>U.validateImport({providers:[{intervals:{often:5}}]}))});
-test('import takes short names off the settings and checks their shape',()=>{const data={brightness:50,short_names:[{provider:0,id:40,name:'FCB'}]};assert.deepEqual(U.importNames(data),[{provider:0,id:40,name:'FCB'}]);assert(!('short_names' in data));assert.equal(U.importNames({brightness:1}),null);assert.throws(()=>U.importNames({short_names:{}}));assert.throws(()=>U.importNames({short_names:[null]}));assert.throws(()=>U.importNames({short_names:[{provider:0,id:1,name:'x',extra:1}]}))});
-// F-WEB-05 / OQ-78: every invalid short name stops the import before any write (bounds from the schema, like PUT /teams).
-test('import rejects every invalid short name kind',()=>{const bounds={short_names_max:U.S.schema.short_names_max,short_name_max:U.S.schema.short_name_max};Object.assign(U.S.schema,{short_names_max:48,short_name_max:26});const bad=x=>assert.throws(()=>U.importNames({short_names:x}),JSON.stringify(x).slice(0,60)),ok={provider:0,id:40,name:'FCB'};for(const x of[{...ok,provider:99},{...ok,provider:'0'},{...ok,id:0},{...ok,id:4294967296},{...ok,id:'40'},{provider:0,name:'FCB'},{...ok,name:''},{provider:0,id:40},{...ok,name:7},{...ok,name:'x'.repeat(27)},{...ok,name:'ä'.repeat(14)},{...ok,name:'F\u0001B'}])bad([x]);bad([ok,{...ok,name:'Bayern'}]);bad(Array.from({length:49},(_,i)=>({...ok,id:i+1})));assert.equal(U.importNames({short_names:Array.from({length:48},(_,i)=>({...ok,id:i+1,name:'x'.repeat(26)}))}).length,48);assert.equal(U.importNames({short_names:[{...ok,id:4294967295,name:'ä'.repeat(13)},{...ok,provider:3}]}).length,2);assert.deepEqual(U.importNames({short_names:[]}),[]);assert.equal(U.importNames({short_names:null}),null);Object.assign(U.S.schema,bounds)});
-test('older backup daily budget becomes the API-Football cap',()=>{const data={api_daily_budget:250,crest_image:3};assert.equal(U.importLegacy(data).length,2);assert.equal(JSON.stringify(data),'{"providers":[{},{"daily_requests":250}]}');assert.deepEqual([...U.validateImport(data).providers.map(p=>p.daily_requests)],[0,250,0,0])});
-test('format 7 backup: limit lists, spacing and list positions converted; fallbacks and pairs ignored',()=>{const old=entry();delete old.id;old.fallback_active=true;old.fallback={provider:3,competition:'BL1',season:'',team:'10'};const data={daily_requests:[0,80],request_spacing_s:[5,6],competitions:[old],fixture_pairs:[{active:true,swapped:false,competition:0,primary_id:'1',secondary_id:'2'}]};const notes=U.importLegacy(data);assert.equal(notes.length,2);assert(notes.includes('Ersatzquellen und Spielzuordnungen der älteren Sicherung wurden ignoriert. Jeder Wettbewerb hat eine Quelle.'));assert(!('daily_requests' in data)&&!('request_spacing_s' in data)&&!('fixture_pairs' in data));assert.equal(data.competitions[0].id,1);assert(!('fallback' in data.competitions[0])&&!('fallback_active' in data.competitions[0]));const m=U.validateImport(data);assert.deepEqual([...m.providers.map(p=>p.daily_requests)],[0,80,0,0]);assert.equal(m.competitions[0].primary.competition,'bl1')});
-// OQ-248/OQ-258: a format-8 backup's core-data interval is dropped with a note; the other intervals stay.
-test('format 8 backup: core-data interval ignored with a note',()=>{const data={providers:[{intervals:{core:3600,live:30}},{daily_requests:80},{intervals:{core:7200}}]};const notes=U.importLegacy(data);assert.deepEqual([...notes],['Das Abrufintervall für Stammdaten der älteren Sicherung wurde ignoriert. Vereinsnamen kommen jetzt mit Spielplan und Tabelle.']);const m=U.validateImport(data);assert.deepEqual([m.providers[0].intervals.live,m.providers[0].intervals.fixtures,m.providers[1].daily_requests],[30,28800,80]);assert(m.providers.every(p=>!('core' in p.intervals)));assert.equal(U.importLegacy({providers:[{intervals:{live:30}}]}).length,0)});
-// OQ-253: records of an older firmware are discarded; the overview says so.
-test('outdated settings and competitions are reported',()=>{const saved=U.S.status;U.S.status={...saved,settings_source:'outdated',competitions_source:'outdated'};U.paintStatus();const html=element('warnings').innerHTML;assert(html.includes('Einstellungen stammen aus einer älteren Firmware'));assert(html.includes('Wettbewerbe stammen aus einer älteren Firmware'));U.S.status=saved});
-test('every firmware failure key has a Web cause and action',()=>{const src=fs.readFileSync(path.join(__dirname,'../../components/football/football_model.cpp'),'utf8'),body=src.slice(src.indexOf('const char* causeKey('),src.indexOf('uint8_t causeNumber(')),keys=[...body.matchAll(/return "([a-z_]+)";/g)].map(m=>m[1]);assert(keys.length>=18);for(const k of keys){const c=U.CAUSE[k];assert(c&&c[0]&&c[1],k);for(const text of c)assert(U.W[text],text)}});
-test('failing competitions show cause, action, code and other providers',()=>{const saved=U.S.saved,status=U.S.status;U.S.saved={...structuredClone(model),api_football_key_set:true,competitions:[{...entry('ucl',1),competition_name:'Champions League'},entry('bl1',2)]};U.S.status={...status,time_valid:true,own_match:{present:true,competition:2,home:'FC',away:'SV',phase:'scheduled',kickoff:1760536800},last_update_ms:5000,uptime_s:60,competitions:[{id:1,matches:32,provider:'openligadb',cause:'unmaintained',code:'OLG E16',error_provider:'openligadb',last_update_ms:5000},{id:2,matches:0,provider:'api-football',cause:'auth',code:'APF E08·403',error_provider:'api-football',http:403}]};U.paintStatus();const html=element('competitionStatus').innerHTML;for(const text of['Anbieter trägt keine Ergebnisse ein.','Andere aktivierte Anbieter: API-Football','Fehlercode: OLG E16','Gespeicherten Schlüssel unter Einstellungen prüfen.','Fehlercode: APF E08·403','tag warn','tag err'])assert(html.includes(text),text);assert(!/Geräteprotokoll/.test(html+element('warnings').innerHTML));assert(element('statusPreview').innerHTML.includes('2 Wettbewerbe gestört'));U.S.saved=saved;U.S.status=status});
-// The real page must distinguish working WiFi from a failed local service.
-const networkFaultStatus=(step='mdns')=>({ready:false,step,error:257,error_name:'ESP_ERR_NO_MEM',code:step==='mdns'?'NET E11':step==='portal_dns'?'NET E10':'NET E09',retry_ms:12000});
-test('local network failure keeps working WiFi and gives phase cause action code and retry in both languages',()=>{const status=U.S.status,draft=U.S.draft;U.S.draft=copy();U.S.status={...status,network:'connected',ip:'192.0.2.1',time_valid:true,network_init:networkFaultStatus(),uptime_s:1};for(const [language,phase,cause,action]of[[0,'Namensdienst','Speicher reicht nicht aus.','Im Browser die IP-Adresse des Geräts verwenden.'],[1,'Local name service','Not enough memory.',"Use the device's IP address in the browser."]]){U.S.draft.language=language;U.paintStatus();const text=element('warnings').innerHTML;for(const expected of[phase,cause,action,'NET E11','ESP_ERR_NO_MEM']){assert(U.networkFailure(U.S.status).message.includes(expected),expected);assert(text.includes(expected.replaceAll("'",'&#39;')),expected);}assert.equal(element('connection').textContent,language?'Connected':'Verbunden');assert(element('networkWarning').innerHTML.includes('NET E11'));assert(!text.includes('Kein WLAN'));}assert(U.networkFailure(U.S.status).message.includes('Retry'));U.S.status=status;U.S.draft=draft;});
-test('initial network error replaces startup and recovery uses actual display state without losing a draft',()=>{const status=U.S.status,saved=U.S.saved,draft=U.S.draft;U.S.saved=copy();U.S.saved.competitions=[entry()];U.S.draft=copy();U.S.draft.hostname='unsaved';U.S.status={...status,screen:0,network:'connecting',time_valid:false,ap:false,last_update_ms:0,screen_starting:false,network_init:networkFaultStatus('radio')};let content=U.liveContent();assert.equal(content.start,false);assert.equal(content.v.card.title,'Netzwerkstart gestört');assert(content.v.card.hints.includes('NET E09'));U.S.status={...U.S.status,network:'connected',time_valid:true,network_init:{ready:true,step:'',error:0,error_name:'ESP_OK',code:'',retry_ms:0}};content=U.liveContent();assert.equal(content.start,false);assert.equal(content.v.card.title,'Keine Daten');U.paintStatus();assert(!element('warnings').innerHTML.includes('NET E'));assert.equal(element('networkWarning').innerHTML,'');assert.equal(U.S.draft.hostname,'unsaved');U.S.status=status;U.S.saved=saved;U.S.draft=draft;});
-test('setup network fault retains access instructions and IP',()=>{const status=U.S.status,saved=U.S.saved;U.S.saved=copy();U.S.status={...status,screen:3,screen_reason:'setup',ap:true,ap_ip:'192.168.4.1',network_init:networkFaultStatus('portal_dns')};const {v}=U.liveContent();assert.equal(v.layout,'card');assert.equal(v.card.lines.length,2);assert(v.card.lines[0][0].includes('Mit WLAN verbinden:'));assert(v.card.lines[1][0].includes('Setup-WLAN'));assert(v.card.hints.some(h=>h.includes('NET E10')));assert(v.card.hints.includes('192.168.4.1'));U.S.status=status;U.S.saved=saved;});
-test('local service failure preserves loaded match and existing demo policy and avoids stale-IP advice',()=>{const status=U.S.status,saved=U.S.saved;U.S.saved=copy();U.S.saved.competitions=[entry()];U.S.status={...status,screen:0,network:'connected',ip:'192.0.2.1',time_valid:true,last_update_ms:5000,network_init:networkFaultStatus(),own_match:{present:true,competition:1,home:'FC',away:'SV',phase:'live',home_goals:2,away_goals:1,minute:12}};let {v}=U.liveContent();assert.equal(v.layout,'own');assert.equal(v.own.centre,'2 : 1');assert(v.status.includes('NET E11'));assert(v.status.startsWith('NET E11 ·'));assert(v.pill);U.S.saved.demo=true;assert.equal(U.liveContent().v.status,'Demo');const failure=U.networkFailure({...U.S.status,network:'connecting',ap:false},false);assert(!failure.action.includes('IP'));assert(!failure.message.includes('IP-Adresse'));U.S.status=status;U.S.saved=saved;});
-
-async function asyncTests(){await (async()=>{context.fetch=async()=>({ok:true,json:async()=>({password_set:false,valid:false})});let posts=0;context.fetch=async(_,o)=>({ok:true,json:async()=>o.method==='POST'?(posts++,{token:'silent'}):{password_set:false,valid:false}});await U.authenticate();assert.equal(posts,1);assert.equal(U.S.token,'silent');assert(element('auth').hidden);pass('password-free session opens silently before mutations')})();await(async()=>{context.fetch=async()=>({ok:false,status:403,json:async()=>({code:'origin',error:'origin rejected'})});await assert.rejects(U.raw('settings',{},'PUT'),e=>e.status===403&&e.code==='origin');pass('origin error retained without login prompt')})();await(async()=>{context.fetch=async()=>{throw Error('offline')};const draftBefore=JSON.stringify(U.S.draft);await U.load('status',false);assert.equal(JSON.stringify(U.S.draft),draftBefore);assert(U.S.errors.status);pass('status failure retains unsaved form draft')})();await(async()=>{context.fetch=async()=>({ok:true,json:async()=>({...U.S.status,provider_busy:false})});await U.load('status',false);assert(!U.S.errors.status);pass('status recovery clears error')})();}
-const originalAsyncTests=asyncTests;asyncTests=async()=>{await originalAsyncTests();await(async()=>{const saved=copy();U.S.saved=structuredClone(saved);U.S.draft=structuredClone(saved);U.S.draft.hostname='unsaved';U.S.sec={wifi_password:{mode:'change',value:'pendingsecret'}};context.fetch=async path=>({ok:true,json:async()=>String(path).endsWith('/session')?{password_set:false,valid:true}:String(path).endsWith('/settings')?saved:String(path).endsWith('/competitions')?{competitions:[]}:String(path).endsWith('/images')?{items:[]}:({...U.S.status,uptime_s:1})});await U.waitForDevice({uptime_s:100},false);assert.equal(U.S.draft.hostname,'unsaved');assert.equal(U.S.sec.wifi_password.value,'pendingsecret');pass('reboot preserves unsaved draft and secret edit');await U.waitForDevice({uptime_s:100},true);assert.equal(U.S.draft.hostname,'fussball');assert.equal(Object.keys(U.S.sec).length,0);pass('factory reset explicitly reloads clean draft')})();await(async()=>{const order=async(edit)=>{const saved=copy(),calls=[];U.S.saved=structuredClone(saved);U.S.draft=structuredClone(saved);U.S.sec={};U.S.session={password_set:false,valid:true};U.S.saving=false;edit();context.fetch=async(path,o)=>{const p=String(path);if(o.method==='PUT')calls.push(p.split('/').pop());return {ok:true,json:async()=>p.endsWith('/competitions')?{competitions:o.method==='PUT'?JSON.parse(o.body).competitions.map((c,i)=>({...c,id:i+1})):[]}:p.endsWith('/settings')?saved:p.endsWith('/session')?{password_set:false,valid:true}:{}};};await U.save();return calls;};assert.deepEqual(await order(()=>{U.S.draft.brightness=50;const x=entry();U.S.draft.competitions=[x];}),['competitions','settings']);assert.deepEqual(await order(()=>{const x=entry();x.primary.provider=1;U.S.draft.competitions=[x];U.S.sec={api_football_key:{mode:'change',value:'abc'}};}),['settings','competitions']);assert.deepEqual(await order(()=>{const x=entry();U.S.draft.competitions=[x];}),['competitions']);pass('settings and competition records are written in a dependency-safe order')})()};
-// F-WEB-04: a late team reply belongs to the dialog that asked for it; F-WEB-05: an invalid import sends nothing.
-const step7AsyncTests=asyncTests;asyncTests=async()=>{await step7AsyncTests();await(async()=>{const wait={},reply=(c,name)=>wait[c]({ok:true,json:async()=>({competition:c,max:48,items:[{provider:0,id:c*10,short_name:name,custom:''}]})});context.fetch=path=>new Promise(r=>{wait[Number(String(path).split('competition=').pop())]=r;});const a=U.openNames({id:1,competition_name:'Liga A',primary:{competition:'a'}}),b=U.openNames({id:2,competition_name:'Liga B',primary:{competition:'b'}});reply(2,'Team B');await b;reply(1,'Team A');await a;const html=element('dialog').innerHTML;assert(html.includes('Team B')&&!html.includes('Team A'),'B dialog keeps its own teams');const c=U.openNames({id:3,competition_name:'Liga C',primary:{competition:'c'}});element('dialog-child').onclick();const before=element('dialog').innerHTML;reply(3,'Team C');await c;assert.equal(element('dialog').innerHTML,before,'a closed dialog is not redrawn');pass('late team replies never reach another or a closed dialog')})();await(async()=>{const bounds={short_names_max:U.S.schema.short_names_max,short_name_max:U.S.schema.short_name_max},confirm=context.confirmAction;Object.assign(U.S.schema,{short_names_max:48,short_name_max:26});let requests=0,confirmations=0;context.fetch=async()=>{requests++;return{ok:true,json:async()=>({})}};context.confirmAction=()=>{confirmations++;};U.bindSystem();const file=data=>({target:{value:'x',files:[{size:200,text:async()=>JSON.stringify(data)}]}});await element('importFile').onchange(file({brightness:50,short_names:[{provider:99,id:0,name:''}]}));assert.equal(requests+confirmations,0,'invalid short names: no write, no confirmation');assert(element('toast').className.includes('error'));await element('importFile').onchange(file({brightness:50,short_names:[{provider:0,id:40,name:'FCB'}]}));assert.equal(confirmations,1,'a valid import reaches the confirmation');assert.equal(requests,0);context.confirmAction=confirm;Object.assign(U.S.schema,bounds);pass('an import with invalid short names sends no request')})();};
-// F-WEB-02 / OQ-78: the import validates and sends the same normalized data; older screen lists and the per-request size bound.
-const importAsyncTests=asyncTests;asyncTests=async()=>{await importAsyncTests();await(async()=>{const keep={writeModel:context.writeModel,readModel:context.readModel,authenticate:context.authenticate,confirmAction:context.confirmAction,max:U.S.schema.max_body,saved:U.S.saved,draft:U.S.draft};const saved=copy();saved.screens[3].colour=0x123456;U.S.saved=structuredClone(saved);U.S.draft=structuredClone(saved);let sent=null,run=null;context.writeModel=async(a,b)=>{sent=structuredClone([a,b]);};context.readModel=async()=>structuredClone(saved);context.authenticate=async()=>{};context.confirmAction=(_t,_m,fn)=>{run=fn;};U.bindSystem();const file=data=>({target:{value:'x',files:[{size:JSON.stringify(data).length,text:async()=>JSON.stringify(data)}]}});const older=Array.from({length:3},()=>({enabled:true,background:false,colour:0x202020,text:0xffffff,accent:0x49cba0,text_scale:100,image:0}));await element('importFile').onchange(file({matchday_screen:0,screens:older}));assert(run,'an older three-screen backup reaches the confirmation: '+element('toast').textContent);await run();assert.equal(sent[0].matchday_screen,1,'the converted matchday default is what is sent');assert.equal(sent[0].screens.length,3);assert.equal(U.validateImport(structuredClone(sent[0])).screens[3].colour,0x123456,'the fourth screen keeps its value');run=null;sent=null;U.S.schema.max_body=700;const comps=[1,2,3].map(i=>({...entry('c'+i,i),competition_name:'Wettbewerb '+'x'.repeat(20),team_name:'Verein '+'y'.repeat(20)})),big={hostname:'fussball-wohnzimmer',ntp_server:'pool.ntp.org',wifi_ssid:'z'.repeat(32),brightness:80,screens:older,competitions:comps};assert(JSON.stringify(big).length>700&&JSON.stringify({competitions:comps}).length<=700);await element('importFile').onchange(file(big));assert(run,'every part fits, so the import is offered: '+element('toast').textContent);await run();assert.equal(sent[1].competitions.length,3);assert.equal(sent[0].hostname,'fussball-wohnzimmer');Object.assign(context,{writeModel:keep.writeModel,readModel:keep.readModel,authenticate:keep.authenticate,confirmAction:keep.confirmAction});U.S.schema.max_body=keep.max;U.S.saved=keep.saved;U.S.draft=keep.draft;pass('import sends the validated older-backup conversions; size is checked per request')})();};
-// OQ-326/327/329: preserve content/selection and show actual fallback + diagnosis.
-const imageFaultStatus=(actual='factory',reason='invalid')=>({active:true,pending:false,id:2,role:'background',actual,failed:'library',reason,error:263,error_name:'ESP_ERR_INVALID_RESPONSE',code:'IMG E03',revision:12,attempt:34,retry_ms:12000});
-test('all image failure kinds give translated cause action code fallback and retry',()=>{const status=U.S.status;U.S.status={...status,uptime_s:1};for(const [reason,code]of[['missing','01'],['unavailable','02'],['invalid','03'],['timeout','04'],['source','05'],['decode','06'],['memory','07']])for(const english of[false,true]){const f=U.imageFailure({...U.S.status,image:{...imageFaultStatus(),reason,code:'IMG E'+code}},english);for(const value of['IMG E'+code,english?'Fallback active':'Ersatz aktiv',['unavailable','memory'].includes(reason)?english?'Restart the device':'Gerät neu starten':english?'Under Images':'Unter Bilder',english?'Retry':'Neuer Versuch'])assert(f.message.includes(value),value);assert(f.message.includes(english?'Factory image':'Werksbild'));}assert.equal(U.imageFailure({image:{active:false,reason:'missing'}}),null);assert.equal(U.imageFailure({image:{active:true,reason:''}}),null);U.S.status=status;});
-test('actual image fallback keeps match and both warnings in the existing pill',()=>{const keep={status:U.S.status,saved:U.S.saved,draft:U.S.draft};U.S.saved=copy();U.S.saved.competitions=[entry()];U.S.draft=copy();U.S.draft.hostname='unsaved';U.S.status={...keep.status,screen:0,screen_starting:false,network:'connected',time_valid:true,last_update_ms:5000,network_init:networkFaultStatus(),image:imageFaultStatus(),own_match:{present:true,competition:1,home:'FC',away:'SV',phase:'live',home_goals:2,away_goals:1,minute:12}};for(const language of[0,1]){U.S.saved.language=U.S.draft.language=language;const {v}=U.liveContent();assert.equal(v.layout,'own');assert.equal(v.own.centre,'2 : 1');assert.equal(v.image,'/api/v1/images/file?display=1&r=12-34');assert.equal(v.status,'NET E11 · IMG E03 · Web');assert(v.pill);U.paintStatus();for(const code of['NET E11','IMG E03'])assert(element('warnings').innerHTML.includes(code));assert(element('diagnosticStatus').innerHTML.includes('IMG E03'));assert.equal(U.S.draft.hostname,'unsaved');}U.S.status=keep.status;U.S.saved=keep.saved;U.S.draft=keep.draft;});
-test('all-image failure keeps football and shows persistent crest repair card',()=>{const status=U.S.status,saved=U.S.saved;U.S.saved=copy();U.S.saved.competitions=[entry()];U.S.status={...status,screen:0,screen_starting:false,network:'connected',time_valid:true,last_update_ms:5000,image:imageFaultStatus(''),own_match:{present:true,competition:1,home:'FC',away:'SV',phase:'live',home_goals:2,away_goals:1,minute:12}};let {v}=U.liveContent();assert.equal(v.layout,'own');assert.equal(v.own.centre,'2 : 1');assert.equal(v.image,'');assert(v.status.includes('IMG E03'));U.S.status.screen=3;for(const language of[0,1]){U.S.saved.language=language;v=U.liveContent().v;assert.equal(v.layout,'card');assert.equal(v.card.title,language?'Image unavailable':'Bild nicht verfügbar');assert(v.card.hints.includes('IMG E03'));assert(v.card.hints.includes(language?'Replace image in Web':'Im Web Bild ersetzen'));assert(v.card.hints.includes(language?'Retrying':'Neuer Versuch läuft'));assert.equal(v.image,'');}U.S.status=status;U.S.saved=saved;});
-test('image recovery clears warnings and keeps desired slideshow positions',()=>{const status=U.S.status,saved=U.S.saved,images=U.S.images;U.S.saved=copy();U.S.saved.competitions=[entry()];U.S.saved.slides=[0,2,9,2];U.S.images={items:[]};assert.deepEqual(Array.from(U.slidesShown(U.S.saved)),[0,2,9,2]);U.S.status={...status,screen:3,screen_starting:false,network:'connected',time_valid:true,last_update_ms:5000,uptime_s:60,image:imageFaultStatus('')};U.paintStatus();assert(element('warnings').innerHTML.includes('IMG E03'));U.S.status.image={...imageFaultStatus('library',''),error:0,error_name:'ESP_OK',code:'',attempt:35,retry_ms:0};U.paintStatus();assert(!element('warnings').innerHTML.includes('IMG E03'));assert.equal(element('imageWarning').innerHTML,'');const {v}=U.liveContent();assert.equal(v.layout,'image');assert.equal(v.pages,4);assert.equal(v.image,'/api/v1/images/file?display=1&r=12-35');assert.deepEqual(Array.from(U.S.saved.slides),[0,2,9,2]);U.S.status=status;U.S.saved=saved;U.S.images=images;});
-const imageAsyncTests=asyncTests;asyncTests=async()=>{await imageAsyncTests();await(async()=>{const keep={saved:U.S.saved,draft:U.S.draft,images:U.S.images,fetch:context.fetch,readModel:context.readModel};const saved=copy();saved.slides=[2,9];saved.screens[0].image=9;U.S.saved=structuredClone(saved);U.S.draft=structuredClone(saved);U.S.draft.hostname='unsaved';U.S.draft.screens[1].image=2;context.readModel=async()=>structuredClone(saved);const methods=[];context.fetch=async(path,options)=>{methods.push(options.method);return{ok:true,json:async()=>String(path).endsWith('/images')?{items:[]}:{...U.S.status}};};await U.reconcileImages();assert.deepEqual(Array.from(U.S.draft.slides),[2,9]);assert.equal(U.S.draft.screens[0].image,9);assert.equal(U.S.draft.screens[1].image,2);await U.reconcileImages([2]);assert.deepEqual(Array.from(U.S.draft.slides),[9]);assert.equal(U.S.draft.screens[0].image,9);assert.equal(U.S.draft.screens[1].image,0);assert.equal(U.S.draft.hostname,'unsaved');assert(methods.every(x=>x==='GET'),'reconciliation performs no automatic settings write');U.S.saved=keep.saved;U.S.draft=keep.draft;U.S.images=keep.images;context.fetch=keep.fetch;context.readModel=keep.readModel;pass('image reconciliation preserves missing references and clears only explicitly deleted ids');})();};
-
-// Owner-approved same-ID repair: missing desired IDs remain manageable in the
-// existing gallery/editor. The service upload/delete boundaries are adapted.
-test('missing image gallery includes saved and draft selections even when disabled',()=>{
-  const keep={saved:U.S.saved,draft:U.S.draft,images:U.S.images};
-  try{
-    U.S.saved=copy();U.S.saved.slides=[9,9];U.S.saved.screens[0].image=2;
-    U.S.saved.screens[0].background=false;U.S.saved.screens[0].enabled=false;
-    U.S.draft=copy();U.S.draft.slides=[7];U.S.draft.screens[1].image=9;
-    U.S.draft.screens[1].background=false;U.S.draft.screens[1].enabled=false;
-    U.S.images={items:[{id:1,bytes:1200,revision:3}],used:1200,quota:327680,max:10};
-    assert.deepEqual(Array.from(U.libraryEntries(),x=>x.id),[1,2,7,9]);
-    for(const language of[0,1]){
-      U.S.draft.language=language;const html=U.imagesPage();
-      assert.equal((html.match(/data-act="imageEdit" data-id="9"/g)||[]).length,1,'duplicate references create one repair tile');
-      for(const id of[2,7,9])for(const action of['imageEdit','imageDelete'])
-        assert(html.includes(`data-act="${action}" data-id="${id}"`),'each missing ID retains replace and delete');
-      assert.equal((html.match(new RegExp(language?'File missing':'Datei fehlt','g'))||[]).length,3);
-      assert(html.includes('1 / 10'),'missing selections do not consume file count or quota');
-      assert(html.includes(language?'Background image Your match':'Hintergrundbild Eigenes Spiel'),'disabled saved selection remains listed as a use');
-      assert(!html.includes('/api/v1/images/file?id=9'),'missing tile does not issue a known-failing thumbnail request');
+test(
+    'valid representative settings', () => assert.equal(errs(model).length, 0));
+test(
+    'diagnostics distinguish lifetime interval and unavailable heap minima',
+    () => {
+      assert.deepEqual(
+          Array.from(
+              U.heapMinimum({heap_min_scope: 'lifetime', heap_min: 40960})),
+          ['Kleinster freier Speicher seit Start', '40.0 KB']);
+      assert.equal(
+          U.heapMinimum({heap_min_scope: 'interval', heap_min: 32768})[0],
+          'Kleinster freier Speicher im Messintervall');
+      for (const s
+               of [{heap_min_scope: 'unavailable', heap_min: null},
+                   {heap_min_scope: 'lifetime', heap_min: null},
+                   {heap_min: 40960}])
+        assert.equal(U.heapMinimum(s)[1], 'Nicht verfügbar');
+    });
+test(
+    'diagnostics show usable stack capacity and leave unknown capacity explicit',
+    () => {
+      assert.equal(
+          U.taskMinimum({
+            name: 'provider',
+            stack_min_free: 3200,
+            stack_usable_bytes: 12800
+          }),
+          'provider: 3200 B / 12800 B (25.0 %)');
+      assert.equal(
+          U.taskMinimum(
+              {name: '', id: 7, stack_min_free: 1000, stack_usable_bytes: 0}),
+          '#7: 1000 B / Nicht verfügbar');
+      assert.equal(
+          U.taskMinimum(
+              {name: 'x', stack_min_free: null, stack_usable_bytes: 1000}),
+          'x: Nicht verfügbar / 1000 B');
+    });
+test(
+    'diagnostics show firmware slot occupancy without converting unknown bytes to zero',
+    () => {
+      const cap = U.S.schema.ota_max;
+      U.S.schema.ota_max = 2000;
+      assert.equal(
+          U.firmwareUsage({app_bytes: 1700}), '1.7 KB / 2.0 KB (85.0 %)');
+      assert.equal(U.firmwareUsage({app_bytes: null}), 'Nicht verfügbar');
+      U.S.schema.ota_max = 0;
+      assert.equal(U.firmwareUsage({app_bytes: 1700}), 'Nicht verfügbar');
+      U.S.schema.ota_max = cap;
+    });
+test('top-level setter and nested setter', () => {
+  const m = copy();
+  U.set(m, 'hostname', 'test');
+  U.set(m, 'screen_policy.appearance.conference.text_scale', 120);
+  assert.equal(m.hostname, 'test');
+  assert.equal(m.screen_policy.appearance.conference.text_scale, 120)
+});
+test('empty numeric input remains empty via event', () => {
+  events.input({
+    target:
+        {dataset: {path: 'brightness', kind: 'num'}, type: 'number', value: ''}
+  });
+  assert.equal(U.S.draft.brightness, '');
+  assert(errs(U.S.draft).some(e => e.path === 'brightness'));
+  U.S.draft.brightness = 100
+});
+test('save lock rejects pending edit events', () => {
+  U.S.saving = true;
+  events.input(
+      {target: {dataset: {path: 'hostname'}, type: 'text', value: 'lost'}});
+  assert.equal(U.S.draft.hostname, 'fussball');
+  U.S.saving = false
+});
+test('UTF-8 byte length enforced', () => {
+  const m = copy();
+  m.wifi_ssid = 'ä'.repeat(17);
+  assert(errs(m).some(e => e.path === 'wifi_ssid'))
+});
+test('paused competition still requires competition; club optional', () => {
+  const m = copy(), x = entry();
+  x.active = false;
+  x.primary.competition = '';
+  m.competitions = [x];
+  assert(errs(m).some(e => e.path === 'competitions[0].primary.competition'));
+  x.primary.competition = 'bl1';
+  x.club.team = 0;
+  assert.equal(errs(m).length, 0)
+});
+test('API-Football empty season allowed (current season)', () => {
+  const m = copy(), x = entry();
+  x.primary.provider = 1;
+  x.primary.season = '';
+  m.competitions = [x];
+  assert.equal(errs(m).length, 0);
+  x.active = false;
+  assert.equal(errs(m).length, 0);
+  x.primary.season = '25';
+  assert(errs(m).some(e => e.path === 'competitions[0].primary.season'))
+});
+test(
+    'secret empty-edit keeps; explicit clear removes; no values in change list',
+    () => {
+      U.S.sec = {wifi_password: {mode: 'change', value: ''}};
+      assert(!('wifi_password' in U.payload()));
+      assert.equal(U.changes().length, 0);
+      U.S.sec.wifi_password = {mode: 'change', value: 'verysecret'};
+      assert(U.changes().every(x => !JSON.stringify(x).includes('verysecret')));
+      U.S.sec.wifi_password = {mode: 'clear', value: ''};
+      assert.equal(U.payload().wifi_password, '');
+      U.S.sec = {}
+    });
+test(
+    'API header spaces rejected',
+    () => assert(errs(model, {
+                   api_football_key: {mode: 'change', value: 'abc def'}
+                 }).some(e => e.path === 'api_football_key')));
+test('competition ids unique', () => {
+  const m = copy();
+  m.competitions = [entry('a'), entry('b')];
+  assert(errs(m).some(e => e.path === 'competitions[1].id'));
+  m.competitions[1].id = 0;
+  assert.equal(errs(m).length, 0)
+});
+test('competition move swaps the order', () => {
+  U.S.draft.competitions = [entry('a', 1), entry('b', 2)];
+  U.moveCompetition(0, 1);
+  assert.equal(U.S.draft.competitions[0].primary.competition, 'b')
+});
+test('image-side saved merge preserves unrelated draft leaf and arrays', () => {
+  U.S.saved = copy();
+  U.S.draft = copy();
+  U.S.draft.hostname = 'draft';
+  U.S.draft.screen_policy.slides = [1, 2];
+  const n = copy();
+  n.brightness = 80;
+  U.mergeBaseline(n);
+  assert.equal(U.S.draft.hostname, 'draft');
+  assert.equal(U.S.draft.brightness, 80);
+  assert.deepEqual(Array.from(U.S.draft.screen_policy.slides), [1, 2])
+});
+test('missing images pruned without unrelated draft loss', () => {
+  U.S.draft.screen_policy.slides = [1, 2];
+  U.S.draft.hostname = 'draft';
+  U.S.draft.screen_policy.appearance.single.image = 2;
+  U.S.draft.screen_policy.appearance.conference.image = 1;
+  U.pruneMissing(U.S.draft, new Set([2]));
+  assert.equal(U.S.draft.screen_policy.appearance.conference.image, 0);
+  assert.equal(U.S.draft.screen_policy.appearance.single.image, 2);
+  assert.deepEqual(Array.from(U.S.draft.screen_policy.slides), [2]);
+  assert.equal(U.S.draft.hostname, 'draft')
+});
+test('baseline JPEG accepted; progressive rejected', () => {
+  assert(U.jpegBaseline(Uint8Array.from([255, 216, 255, 192, 0, 17])));
+  assert(!U.jpegBaseline(Uint8Array.from([255, 216, 255, 194, 0, 17])))
+});
+test('strict import rejects unknown key and scalar type', () => {
+  assert.throws(() => U.validateImport({hostnme: 'typo'}));
+  assert.throws(() => U.validateImport({brightness: '10'}));
+  assert.throws(() => U.validateImport({
+    competitions: [{primary: {provider: 0, competition: 'bl1', surprise: 1}}]
+  }))
+});
+test('import checks shape and UTF-8/name constraints', () => {
+  assert.throws(() => U.validateImport({competitions: [null]}));
+  assert.throws(() => U.validateImport({screens: []}));
+  assert.throws(() => U.validateImport({wifi_ssid: 'ä'.repeat(17)}))
+});
+test(
+    'six production page functions render both languages without simulator data',
+    () => {
+      for (const language of [0, 1]) {
+        U.S.draft.language = language;
+        for (const [name, fn] of Object.entries({
+               overview: U.overview,
+               competitions: U.competitions,
+               display: U.displayPage,
+               images: U.imagesPage,
+               settings: U.settingsPage,
+               system: U.systemPage
+             })) {
+          const html = fn();
+          assert(html.includes('<h1>'), name);
+          assert(!/S\.mock|1948|Mockup|Heimnetz|Beispielmotiv/.test(html), name)
+        }
+      }
+      U.S.draft.language = 0
+    });
+test('failed status dominates header connection state', () => {
+  U.S.errors.status = 'offline';
+  U.renderHeader();
+  assert(element('connection').textContent.includes('nicht erreichbar'));
+  assert.equal(element('connection').className, 'chip err');
+  delete U.S.errors.status
+});
+test('request limits are checked per provider', () => {
+  const m = copy();
+  m.providers[2].window_requests = 10;
+  m.providers[3].daily_requests = 65536;
+  m.providers[0].intervals.live = 5;
+  const e = errs(m).map(x => x.path);
+  assert.deepEqual([...e].sort(), [
+    'providers[0].intervals.live', 'providers[2].window_s',
+    'providers[3].daily_requests'
+  ])
+});
+test('global limit window needs both values', () => {
+  const m = copy();
+  m.global_limit.window_s = 60;
+  assert.deepEqual(
+      [...errs(m).map(x => x.path)], ['global_limit.window_requests']);
+  m.global_limit.window_requests = 30;
+  assert.equal(errs(m).length, 0)
+});
+test('request limit change is listed per provider', () => {
+  U.S.draft.providers[1].daily_requests = 50;
+  assert.deepEqual(
+      [...U.changes().map(r => r.path)], ['providers[1].daily_requests']);
+  U.S.draft.providers[1].daily_requests = 100
+});
+test('every provider card has day and window limits', () => {
+  const html = U.settingsPage();
+  for (let i = 0; i < 4; i++)
+    for (const k of ['daily_requests', 'window_requests', 'window_s'])
+      assert(html.includes(`data-path="providers[${i}].${k}"`));
+  assert(
+      !html.includes('api_daily_budget') && !html.includes('request_spacing_s'))
+});
+test(
+    'imported provider rows replace only their first entries and given keys',
+    () => {
+      const p =
+          U.validateImport({
+             providers:
+                 [{window_requests: 9, window_s: 60}, {intervals: {live: 30}}]
+           }).providers;
+      assert.deepEqual(
+          [
+            p[0].daily_requests, p[0].window_requests, p[0].window_s,
+            p[1].daily_requests, p[1].intervals.live, p[1].intervals.fixtures,
+            p[2].window_s
+          ],
+          [0, 9, 60, 100, 30, 28800, 0]);
+      assert.throws(() => U.validateImport({providers: [{}, {}, {}, {}, {}]}));
+      assert.throws(
+          () => U.validateImport({providers: [{daily_requests: '5'}]}));
+      assert.throws(() => U.validateImport({providers: [{spacing: 5}]}));
+      assert.throws(
+          () => U.validateImport({providers: [{intervals: {often: 5}}]}))
+    });
+test('every firmware failure key has a Web cause and action', () => {
+  const src = fs.readFileSync(
+            path.join(
+                __dirname, '../../components/football/football_model.cpp'),
+            'utf8'),
+        body = src.slice(
+            src.indexOf('const char* causeKey('),
+            src.indexOf('uint8_t causeNumber(')),
+        keys = [...body.matchAll(/return "([a-z_]+)";/g)].map(m => m[1]);
+  assert(keys.length >= 18);
+  for (const k of keys) {
+    const c = U.CAUSE[k];
+    assert(c && c[0] && c[1], k);
+    for (const text of c) assert(U.W[text], text)
+  }
+});
+test(
+    'failing competitions show cause, action, code and other providers', () => {
+      const saved = U.S.saved, status = U.S.status;
+      U.S.saved = {
+        ...structuredClone(model),
+        api_football_key_set: true,
+        competitions: [
+          {...entry('ucl', 1), competition_name: 'Champions League'},
+          entry('bl1', 2)
+        ]
+      };
+      U.S.status = {
+        ...status,
+        time_valid: true,
+        own_match: {
+          present: true,
+          competition: 2,
+          home: 'FC',
+          away: 'SV',
+          phase: 'scheduled',
+          kickoff: 1760536800
+        },
+        last_update_ms: 5000,
+        uptime_s: 60,
+        competitions: [
+          {
+            id: 1,
+            matches: 32,
+            provider: 'openligadb',
+            cause: 'unmaintained',
+            code: 'OLG E16',
+            error_provider: 'openligadb',
+            last_update_ms: 5000
+          },
+          {
+            id: 2,
+            matches: 0,
+            provider: 'api-football',
+            cause: 'auth',
+            code: 'APF E08·403',
+            error_provider: 'api-football',
+            http: 403
+          }
+        ]
+      };
+      U.paintStatus();
+      const html = element('competitionStatus').innerHTML;
+      for (const text
+               of ['Anbieter trägt keine Ergebnisse ein.',
+                   'Andere aktivierte Anbieter: API-Football',
+                   'Fehlercode: OLG E16',
+                   'Gespeicherten Schlüssel unter Einstellungen prüfen.',
+                   'Fehlercode: APF E08·403', 'tag warn', 'tag err'])
+        assert(html.includes(text), text);
+      assert(!/Geräteprotokoll/.test(html + element('warnings').innerHTML));
+      assert(element('ownStatus').innerHTML.includes('FC'));
+      assert(element('ownStatus').innerHTML.includes('SV'));
+      U.S.saved = saved;
+      U.S.status = status
+    });
+test(
+    'local network failure keeps working WiFi and gives phase cause action code and retry in both languages',
+    () => {
+      const status = U.S.status, draft = U.S.draft;
+      U.S.draft = copy();
+      U.S.status = {
+        ...status,
+        network: 'connected',
+        ip: '192.0.2.1',
+        time_valid: true,
+        network_init: networkFaultStatus(),
+        uptime_s: 1
+      };
+      for (const [language, phase, cause, action] of [
+               [
+                 0, 'Namensdienst', 'Speicher reicht nicht aus.',
+                 'Im Browser die IP-Adresse des Geräts verwenden.'
+               ],
+               [
+                 1, 'Local name service', 'Not enough memory.',
+                 'Use the device\'s IP address in the browser.'
+               ]]) {
+        U.S.draft.language = language;
+        U.paintStatus();
+        const text = element('warnings').innerHTML;
+        for (const expected
+                 of [phase, cause, action, 'NET E11', 'ESP_ERR_NO_MEM']) {
+          assert(
+              U.networkFailure(U.S.status).message.includes(expected),
+              expected);
+          assert(text.includes(expected.replaceAll('\'', '&#39;')), expected);
+        }
+        assert.equal(
+            element('connection').textContent,
+            language ? 'Connected' : 'Verbunden');
+        assert(element('networkWarning').innerHTML.includes('NET E11'));
+        assert(!text.includes('Kein WLAN'));
+      }
+      assert(U.networkFailure(U.S.status).message.includes('Retry'));
+      U.S.status = status;
+      U.S.draft = draft;
+    });
+test(
+    'initial network error and recovery preserve draft and actual status advice',
+    () => {
+      U.S.draft.hostname = 'unsaved';
+      U.S.status = {
+        ...U.S.status,
+        screen: 0,
+        network: 'connecting',
+        time_valid: false,
+        ap: false,
+        last_update_ms: 0,
+        screen_starting: false,
+        network_init: networkFaultStatus('radio')
+      };
+      U.paintStatus();
+      assert(element('warnings').innerHTML.includes('NET E09'));
+      assert(element('networkWarning').innerHTML.includes('NET E09'));
+      U.S.status = {
+        ...U.S.status,
+        network: 'connected',
+        time_valid: true,
+        network_init: {
+          ready: true,
+          step: '',
+          error: 0,
+          error_name: 'ESP_OK',
+          code: '',
+          retry_ms: 0
+        }
+      };
+      U.paintStatus();
+      assert(!element('warnings').innerHTML.includes('NET E'));
+      assert.equal(element('networkWarning').innerHTML, '');
+      assert.equal(U.S.draft.hostname, 'unsaved');
+      assert(U.previewMarkup().includes('Bildschirmfoto'));
+    });
+test('setup network fault retains access instructions and IP', () => {
+  U.S.status = {
+    ...U.S.status,
+    screen: 3,
+    screen_reason: 'setup',
+    ap: true,
+    ap_ip: '192.168.4.1',
+    network_init: networkFaultStatus('portal_dns')
+  };
+  U.paintStatus();
+  const text = element('setupChecklist').innerHTML;
+  assert(text.includes('WLAN unter Einstellungen'));
+  assert(text.includes('Wettbewerb und Verein'));
+  assert(element('warnings').innerHTML.includes('NET E10'));
+  assert.equal(U.S.status.ap_ip, '192.168.4.1');
+});
+test(
+    'local service failure preserves loaded match and avoids stale-IP advice',
+    () => {
+      U.S.status = {
+        ...U.S.status,
+        network: 'connected',
+        time_valid: true,
+        last_update_ms: 5000,
+        network_init: networkFaultStatus(),
+        own_match: {
+          present: true,
+          competition: 23,
+          home: 'FC',
+          away: 'SV',
+          phase: 'live',
+          home_goals: 2,
+          away_goals: 1,
+          minute: 12
+        }
+      };
+      U.paintStatus();
+      assert(element('ownStatus').innerHTML.includes('2 : 1'));
+      assert(element('networkWarning').innerHTML.includes('NET E11'));
+      const failure = U.networkFailure(
+          {...U.S.status, network: 'connecting', ap: false}, false);
+      assert(!failure.action.includes('IP'));
+      assert(!failure.message.includes('IP-Adresse'));
+    });
+test(
+    'all image failure kinds give translated cause action code fallback and retry',
+    () => {
+      const status = U.S.status;
+      U.S.status = {...status, uptime_s: 1};
+      for (const [reason, code] of [
+               ['missing', '01'], ['unavailable', '02'], ['invalid', '03'],
+               ['timeout', '04'], ['source', '05'], ['decode', '06'],
+               ['memory', '07']])
+        for (const english of [false, true]) {
+          const f = U.imageFailure(
+              {
+                ...U.S.status,
+                image: {...imageFaultStatus(), reason, code: 'IMG E' + code}
+              },
+              english);
+          for (const value
+                   of ['IMG E' + code,
+                       english ? 'Fallback active' : 'Ersatz aktiv',
+                       ['unavailable', 'memory'].includes(reason) ?
+                           english ? 'Restart the device' :
+                                     'Gerät neu starten' :
+                           english ? 'Under Images' :
+                                     'Unter Bilder',
+                       english ? 'Retry' : 'Neuer Versuch'])
+            assert(f.message.includes(value), value);
+          assert(f.message.includes(english ? 'Factory image' : 'Werksbild'));
+        }
+      assert.equal(
+          U.imageFailure({image: {active: false, reason: 'missing'}}), null);
+      assert.equal(U.imageFailure({image: {active: true, reason: ''}}), null);
+      U.S.status = status;
+    });
+test('actual image fallback keeps match and both persistent warnings', () => {
+  U.S.draft.hostname = 'unsaved';
+  U.S.status = {
+    ...U.S.status,
+    screen: 0,
+    screen_starting: false,
+    network: 'connected',
+    time_valid: true,
+    last_update_ms: 5000,
+    network_init: networkFaultStatus(),
+    image: imageFaultStatus(),
+    own_match: {
+      present: true,
+      competition: 23,
+      home: 'FC',
+      away: 'SV',
+      phase: 'live',
+      home_goals: 2,
+      away_goals: 1,
+      minute: 12
     }
-  }finally{Object.assign(U.S,keep);}
+  };
+  for (const language of [0, 1]) {
+    U.S.saved.language = U.S.draft.language = language;
+    U.paintStatus();
+    assert(element('ownStatus').innerHTML.includes('2 : 1'));
+    for (const code of ['NET E11', 'IMG E03'])
+      assert(element('warnings').innerHTML.includes(code));
+    assert(element('diagnosticStatus').innerHTML.includes('IMG E03'));
+    assert.equal(U.S.draft.hostname, 'unsaved');
+  }
 });
-test('a missing selected background remains selected without adding unavailable choices',()=>{
-  const keep={saved:U.S.saved,draft:U.S.draft,images:U.S.images,confirm:context.confirmAction};
-  try{
-    U.S.saved=copy();U.S.draft=copy();U.S.draft.screens[0].image=9;
-    U.S.draft.screens[0].background=false;U.S.draft.slides=[7];
-    U.S.images={items:[{id:1,bytes:1200}],used:1200,quota:327680,max:10};
-    for(const language of[0,1]){
-      U.S.draft.language=language;const html=U.displayPage();
-      const selected=html.match(/<select id="f-screens-0--image"[\s\S]*?<\/select>/)[0];
-      assert(selected.includes(`value="9" selected>${language?'Image 9 · File missing':'Bild 9 · Datei fehlt'}</option>`));
-      assert(!selected.includes('value="7"'),'another missing reference is not offered as a new choice');
-      const add=html.match(/<select id="slideAdd"[\s\S]*?<\/select>/)[0];
-      assert(add.includes('value="1"')&&!add.includes('value="7"')&&!add.includes('value="9"'));
-      let choices='';context.confirmAction=(_title,_message,_run,_word,extra)=>{choices=extra;};
-      U.ACT.roleCopy({dataset:{role:'background'}});
-      assert(choices.includes('value="1"')&&!choices.includes('value="7"')&&!choices.includes('value="9"'),'role copy offers actual files only');
-    }
-    assert.equal(U.S.draft.screens[0].image,9);assert.deepEqual(Array.from(U.S.draft.slides),[7]);
-  }finally{Object.assign(U.S,{saved:keep.saved,draft:keep.draft,images:keep.images});context.confirmAction=keep.confirm;}
-});
-const restoreAsyncTests=asyncTests;asyncTests=async()=>{
-  await restoreAsyncTests();
-  await(async()=>{
-    const keep={saved:U.S.saved,draft:U.S.draft,images:U.S.images,status:U.S.status,editor:U.S.editor,upload:context.authenticatedUpload,fetch:context.fetch};
-    try{
-      U.S.saved=copy();U.S.saved.slides=[9,2,9];U.S.saved.screens[0].image=9;
-      U.S.draft=structuredClone(U.S.saved);U.S.draft.hostname='unsaved';
-      U.S.images={items:[],used:0,quota:327680,max:10};
-      U.S.status={...keep.status,fs_total:524288,fs_used:100000};
-      const saved=structuredClone(U.S.saved),draft=structuredClone(U.S.draft),calls=[];let restored=false;
-      context.authenticatedUpload=async(path,file,progress,headers)=>{calls.push({path,size:file.size,headers});restored=true;progress(100);};
-      context.fetch=async(path,options)=>{assert.equal(options.method,'GET');return{ok:true,json:async()=>String(path).endsWith('/images')?{items:restored?[{id:9,bytes:100,revision:4}]:[],used:restored?100:0,quota:327680,max:10}:{...U.S.status}};};
-      U.openEditor(9);assert.equal(U.S.editor.id,9);assert.equal(U.S.editor.role,null);
-      assert(U.editorPage().includes('Bild 9'),'existing editor identifies desired missing ID');
-      U.ED.blob=new Blob([new Uint8Array(100)]);await U.uploadImage();
-      assert.equal(calls.length,1);assert.equal(calls[0].path,'images/upload');assert.equal(calls[0].headers['X-Image-Id'],9);
-      assert.deepEqual(U.S.saved,saved);assert.deepEqual(U.S.draft,draft,'restoring a file neither saves nor discards a draft');
-      assert.equal(U.S.editor,null);assert.deepEqual(Array.from(U.libraryEntries(),x=>x.id),[9,2]);
-      assert.equal(U.imageOptions('Standard-Hintergrund',9).find(([id])=>id===9)[1],'Bild 9');
-      pass('existing image editor restores a missing ID and preserves saved uses and draft');
-    }finally{Object.assign(U.S,{saved:keep.saved,draft:keep.draft,images:keep.images,status:keep.status,editor:keep.editor});context.authenticatedUpload=keep.upload;context.fetch=keep.fetch;}
-  })();
-  await(async()=>{
-    const keep={saved:U.S.saved,draft:U.S.draft,images:U.S.images,mutate:context.mutate,read:context.readModel,fetch:context.fetch};
-    try{
-      U.S.saved=copy();U.S.saved.slides=[9,2];U.S.saved.screens[0].image=9;
-      U.S.draft=structuredClone(U.S.saved);U.S.draft.hostname='unsaved';U.S.draft.slides.push(7);U.S.draft.screens[1].image=7;
-      U.S.images={items:[],used:0,quota:327680,max:10};const server=structuredClone(U.S.saved),calls=[];
-      context.mutate=async(path,body)=>{calls.push([path,body.id]);assert.equal(body.id,9);server.slides=[2];server.screens[0].image=0;};
-      context.readModel=async()=>structuredClone(server);
-      context.fetch=async(path,options)=>{assert.equal(options.method,'GET');return{ok:true,json:async()=>String(path).endsWith('/images')?U.S.images:U.S.status};};
-      await U.deleteImage(9);
-      assert.deepEqual(calls,[['images/delete',9]]);assert.deepEqual(Array.from(U.S.saved.slides),[2]);
-      assert.deepEqual(Array.from(U.S.draft.slides),[2,7]);assert.equal(U.S.draft.screens[0].image,0);
-      assert.equal(U.S.draft.screens[1].image,7);assert.equal(U.S.draft.hostname,'unsaved');
-      assert.deepEqual(Array.from(U.libraryEntries(),x=>x.id),[2,7]);
-      pass('explicit missing-image delete removes only that ID and preserves other missing draft uses');
-    }finally{Object.assign(U.S,{saved:keep.saved,draft:keep.draft,images:keep.images});Object.assign(context,{mutate:keep.mutate,readModel:keep.read,fetch:keep.fetch});}
-  })();
-  await(async()=>{
-    const keep={saved:U.S.saved,draft:U.S.draft,images:U.S.images,mutate:context.mutate,read:context.readModel,fetch:context.fetch};
-    try{
-      U.S.saved=copy();U.S.saved.slides=[9,2];U.S.saved.screens[0].image=9;U.S.saved.screens[0].background=false;
-      U.S.draft=structuredClone(U.S.saved);U.S.draft.slides=[9,2,7,9];U.S.draft.screens[1].image=3;U.S.draft.screens[2].image=7;U.S.draft.hostname='unsaved';
-      U.S.images={items:[{id:1,bytes:100},{id:3,bytes:100}],used:200,quota:327680,max:10};const server=structuredClone(U.S.saved),calls=[],roles=[];
-      context.mutate=async(path,body)=>{if(path==='images/role'){roles.push(body.role);assert.equal(body.action,'reset');return;}assert.equal(path,'images/delete');calls.push(body.id);if([3,9].includes(body.id))throw Error('keep #'+body.id);server.slides=server.slides.filter(id=>id!==body.id);for(const screen of server.screens)if(screen.image===body.id)screen.image=0;};
-      context.readModel=async()=>structuredClone(server);
-      context.fetch=async(path,options)=>{assert.equal(options.method,'GET');return{ok:true,json:async()=>String(path).endsWith('/images')?U.S.images:U.S.status};};
-      await U.deleteAllImages();
-      assert.deepEqual(calls.slice().sort((a,b)=>a-b),[1,2,3,7,9],'delete all includes each actual, saved-missing and draft-only missing ID exactly once');
-      assert.deepEqual(roles,['crest','background']);assert.deepEqual(Array.from(U.S.draft.slides),[9,9]);
-      assert.equal(U.S.draft.screens[0].image,9);assert.equal(U.S.draft.screens[1].image,3);assert.equal(U.S.draft.screens[2].image,0);
-      assert.equal(U.S.draft.hostname,'unsaved');assert.deepEqual(Array.from(U.S.saved.slides),[9]);
-      for(const id of[3,9])assert(element('deleteResults').textContent.includes('keep #'+id),'partial failure remains visible');
-      pass('delete all includes missing references and retains failed IDs and unrelated unsaved edits');
-    }finally{Object.assign(U.S,{saved:keep.saved,draft:keep.draft,images:keep.images});Object.assign(context,{mutate:keep.mutate,readModel:keep.read,fetch:keep.fetch});}
-  })();
-};
+test(
+    'all-image failure keeps football and actionable persistent repair advice',
+    () => {
+      U.S.status = {
+        ...U.S.status,
+        screen: 3,
+        screen_starting: false,
+        network: 'connected',
+        time_valid: true,
+        last_update_ms: 5000,
+        image: imageFaultStatus(''),
+        own_match: {
+          present: true,
+          competition: 23,
+          home: 'FC',
+          away: 'SV',
+          phase: 'live',
+          home_goals: 2,
+          away_goals: 1,
+          minute: 12
+        }
+      };
+      for (const language of [0, 1]) {
+        U.S.saved.language = U.S.draft.language = language;
+        U.paintStatus();
+        assert(element('ownStatus').innerHTML.includes('2 : 1'));
+        const text = element('imageWarning').innerHTML;
+        assert(text.includes('IMG E03'));
+        assert(text.includes(language ? 'Under Images' : 'Unter Bilder'));
+        assert(text.includes(language ? 'Retry' : 'Neuer Versuch'));
+        assert(U.previewMarkup().includes(
+            language ? 'screenshot' : 'Bildschirmfoto'));
+      }
+    });
+test(
+    'image recovery clears warnings and keeps desired slideshow positions',
+    () => {
+      U.S.saved.screen_policy.slides = [0, 2, 9, 2];
+      U.S.images = {items: []};
+      U.S.status = {
+        ...U.S.status,
+        screen: 3,
+        screen_starting: false,
+        network: 'connected',
+        time_valid: true,
+        last_update_ms: 5000,
+        uptime_s: 60,
+        image: imageFaultStatus('')
+      };
+      U.paintStatus();
+      assert(element('warnings').innerHTML.includes('IMG E03'));
+      U.S.status.image = {
+        ...imageFaultStatus('library', ''),
+        error: 0,
+        error_name: 'ESP_OK',
+        code: '',
+        attempt: 35,
+        retry_ms: 0
+      };
+      U.paintStatus();
+      assert(!element('warnings').innerHTML.includes('IMG E03'));
+      assert.equal(element('imageWarning').innerHTML, '');
+      assert.deepEqual(
+          Array.from(U.S.saved.screen_policy.slides), [0, 2, 9, 2]);
+    });
 
-// OQ-332: auto allocation reserves stored references on the server and only
-// the current browser draft in the optional new-upload header.
-test('ten missing desired IDs reserve every slot while repair actions stay available',()=>{
-  const keep={saved:U.S.saved,draft:U.S.draft,images:U.S.images};
-  try{
-    U.S.saved=copy();U.S.saved.slides=[1,2,3,4,5];
-    U.S.draft=copy();U.S.draft.slides=[6,7,8,9,10];
-    U.S.images={items:[],used:0,quota:327680,max:10};
-    for(const language of[0,1]){
-      U.S.draft.language=language;const html=U.imagesPage();
-      assert(/data-act="imageEdit" data-id="0" disabled/.test(html));
-      assert(html.includes(language?'Free image slots: 0':'Freie Bildplätze: 0'));
-      assert(html.includes(language?'0 / 10 Files':'0 / 10 Dateien'));
-      assert(html.includes(language?'No free image slots. Replace or delete images.':'Keine freien Bildplätze. Bilder ersetzen oder löschen.'));
-      assert(/data-act="imageEdit" data-id="1">/.test(html),'full reservation permits explicit same-ID repair');
-      assert(/data-act="imageDelete" data-id="10">/.test(html),'full reservation permits explicit release');
-    }
-  }finally{Object.assign(U.S,keep);}
+test('names read errors stay actionable while pending or recovery do not claim failure', () => {
+  for (const language of [0,1]) {
+    U.S.saved.language=U.S.draft.language=language;
+    U.S.status={...U.S.status,network:'connected',time_valid:true,
+      names:{pending:false,error:263,code:'NAM E01'}};
+    U.paintStatus();
+    const warning=element('warnings').innerHTML;
+    assert(warning.includes('NAM E01'));
+    assert(warning.includes(language ? 'Under Competitions' : 'Unter Wettbewerbe'));
+    U.S.status.names={pending:true,error:12,code:''}; U.paintStatus();
+    assert(!element('warnings').innerHTML.includes('NAM E01'));
+    U.S.status.names={pending:false,error:0,code:''}; U.paintStatus();
+    assert(!element('warnings').innerHTML.includes('NAM E01'));
+  }
 });
-test('free image slots count actual files and selected IDs once across both models',()=>{
-  const keep={saved:U.S.saved,draft:U.S.draft,images:U.S.images};
-  try{
-    U.S.saved=copy();U.S.saved.slides=[1,9];U.S.draft=copy();U.S.draft.slides=[2,9];
-    U.S.images={items:[{id:1,bytes:100},{id:2,bytes:100},{id:3,bytes:100}],used:300,quota:327680,max:10};
-    const html=U.imagesPage();assert(html.includes('Freie Bildplätze: 6'));
-    assert(html.includes('3 / 10 Dateien'));assert(!/data-act="imageEdit" data-id="0" disabled/.test(html));
-  }finally{Object.assign(U.S,keep);}
+
+test('general and screen fields share contextual help without repeating long prose', () => {
+  const markup=U.settingsPage();
+  const text='Höchstens so viele Abrufe je Tag;';
+  assert(markup.includes('data-act="policyHelp"'));
+  // Each provider retains its complete guidance on the help button, not as a
+  // repeated visible paragraph. Both API boundaries remain schema-derived.
+  assert(!/<div class="help">[^<]*Höchstens so viele Abrufe je Tag;/.test(markup));
+  assert(markup.includes('data-help="'+text));
+  assert(markup.includes('0–65535'));
+  assert(markup.includes('data-path="providers[0].daily_requests"'));
 });
-const reservedAsyncTests=asyncTests;asyncTests=async()=>{
-  await reservedAsyncTests();
-  await(async()=>{
-    const keep={saved:U.S.saved,draft:U.S.draft,images:U.S.images,status:U.S.status,editor:U.S.editor,upload:context.authenticatedUpload,fetch:context.fetch};
-    try{
-      U.S.saved=copy();U.S.saved.slides=[1];U.S.draft=copy();U.S.draft.slides=[2,2,0];U.S.draft.screens[0].image=3;
-      U.S.images={items:[],used:0,quota:327680,max:10};U.S.status={...keep.status,fs_total:524288,fs_used:100000};
-      const calls=[];let changeDuringStatus=true;
-      context.authenticatedUpload=async(path,file,progress,headers)=>{calls.push({path,headers});progress(100);};
-      context.fetch=async(path,options)=>{assert.equal(options.method,'GET');if(String(path).endsWith('/status')&&changeDuringStatus){changeDuringStatus=false;U.S.draft.screens[0].image=5;U.S.draft.screens[0].background=false;U.S.draft.screens[1].image=10;U.S.draft.screens[1].enabled=false;}return{ok:true,json:async()=>String(path).endsWith('/images')?U.S.images:U.S.status};};
-      U.openEditor(0);U.S.draft.slides=[4,0,4];U.ED.blob=new Blob([new Uint8Array(100)]);await U.uploadImage();
-      assert.equal(calls.length,1);assert.equal(calls[0].path,'images/upload');
-      assert.deepEqual({...calls[0].headers},{'X-Image-Reserved':'1072'},'mask uses latest draft IDs4/5/10, not saved ID1 or editor-opening IDs2/3');
-      assert.deepEqual(Array.from(U.S.saved.slides),[1]);assert.deepEqual(Array.from(U.S.draft.slides),[4,0,4]);
-      assert.equal(U.S.draft.screens[0].image,5);assert.equal(U.S.draft.screens[1].image,10);
-      U.S.draft=copy();U.openEditor(0);U.ED.blob=new Blob([new Uint8Array(100)]);await U.uploadImage();
-      assert.deepEqual({...calls[1].headers},{'X-Image-Reserved':'0'},'an empty current draft sends zero; stored refs are the server responsibility');
-      pass('new upload reserves the latest current draft only and sends no other preferences');
-    }finally{Object.assign(U.S,{saved:keep.saved,draft:keep.draft,images:keep.images,status:keep.status,editor:keep.editor});context.authenticatedUpload=keep.upload;context.fetch=keep.fetch;}
-  })();
-  await(async()=>{
-    const keep={saved:U.S.saved,draft:U.S.draft,images:U.S.images,status:U.S.status,editor:U.S.editor,upload:context.authenticatedUpload,fetch:context.fetch};
-    try{
-      U.S.saved=copy();U.S.draft=copy();U.S.draft.slides=[1,2,3,4,5];
-      U.S.images={items:[],used:0,quota:327680,max:10};U.S.status={...keep.status,fs_total:524288,fs_used:100000};
-      const calls=[];context.authenticatedUpload=async(_path,_file,_progress,headers)=>{calls.push(headers);};
-      context.fetch=async(_path,options)=>{assert.equal(options.method,'GET');return{ok:true,json:async()=>String(_path).endsWith('/images')?U.S.images:U.S.status};};
-      for(const[id,role]of[[9,null],[0,'crest'],[0,'background']]){U.openEditor(id,role);U.ED.blob=new Blob([new Uint8Array(100)]);await U.uploadImage();}
-      assert.deepEqual(calls.map(x=>({...x})),[{'X-Image-Id':9},{'X-Image-Role':'crest'},{'X-Image-Role':'background'}]);
-      pass('explicit restore and protected-role uploads never carry the auto-allocation header');
-    }finally{Object.assign(U.S,{saved:keep.saved,draft:keep.draft,images:keep.images,status:keep.status,editor:keep.editor});context.authenticatedUpload=keep.upload;context.fetch=keep.fetch;}
-  })();
-  await(async()=>{
-    const keep={saved:U.S.saved,draft:U.S.draft,images:U.S.images,mutate:context.mutate,read:context.readModel,fetch:context.fetch};
-    try{
-      U.S.saved=copy();U.S.saved.slides=[1,2,3,4,5];U.S.draft=copy();U.S.draft.slides=[6,7,8,9,10];U.S.draft.hostname='unsaved';
-      U.S.images={items:[],used:0,quota:327680,max:10};const server=structuredClone(U.S.saved);
-      assert(/data-act="imageEdit" data-id="0" disabled/.test(U.imagesPage()));
-      context.mutate=async(path,body)=>{assert.equal(path,'images/delete');assert.equal(body.id,1);server.slides=[2,3,4,5];};
-      context.readModel=async()=>structuredClone(server);context.fetch=async(path,options)=>{assert.equal(options.method,'GET');return{ok:true,json:async()=>String(path).endsWith('/images')?U.S.images:U.S.status};};
-      await U.deleteImage(1);const html=U.imagesPage();
-      assert(!/data-act="imageEdit" data-id="0" disabled/.test(html));assert(html.includes('Freie Bildplätze: 1'));
-      assert.deepEqual(Array.from(U.S.saved.slides),[2,3,4,5]);assert.deepEqual(Array.from(U.S.draft.slides),[6,7,8,9,10]);assert.equal(U.S.draft.hostname,'unsaved');
-      pass('explicitly deleting a reserved saved ID makes a new image slot available without discarding a draft');
-    }finally{Object.assign(U.S,{saved:keep.saved,draft:keep.draft,images:keep.images});Object.assign(context,{mutate:keep.mutate,readModel:keep.read,fetch:keep.fetch});}
-  })();
-};
-asyncTests().then(()=>{assert.equal(passed,71);console.log(`${passed} host checks passed; browser and device acceptance remain separate.`)}).catch(e=>{console.error(e);process.exitCode=1});
+
+function firmware() {
+  const a = new Uint8Array(1024), v = new DataView(a.buffer),
+        write = (o, s) => a.set(new TextEncoder().encode(s), o);
+  a[0] = 0xe9;
+  v.setUint32(32, 0xabcd5432, true);
+  v.setUint32(288, 0x46424c31, true);
+  v.setUint32(292, 2, true);
+  write(48, 'test');
+  write(296, 'xiao_esp32c6_gc9a01');
+  write(344, '4mb_ota_littlefs_v1');
+  v.setUint32(376, 1, true);
+  a.fill(0x31, 176, 208);
+  return a;
+}
+test(
+    'OTA aggregate format descriptor target layout size and full ELF identity validated',
+    () => {
+      const a = firmware();
+      assert.equal(
+          U.decodeFirmware(
+               a.buffer, U.S.status, U.S.schema, U.S.schema.ota_max, 100000)
+              .id,
+          '31'.repeat(32));
+      a[296] = 88;
+      assert.throws(
+          () => U.decodeFirmware(
+              a.buffer, U.S.status, U.S.schema, U.S.schema.ota_max, 100000));
+      assert.throws(
+          () => U.decodeFirmware(
+              firmware().buffer, U.S.status, U.S.schema, 90000, 100000));
+      const legacy = firmware();
+      new DataView(legacy.buffer).setUint32(292, 1, true);
+      new DataView(legacy.buffer).setUint32(376, 11, true);
+      assert.throws(
+          () => U.decodeFirmware(
+              legacy.buffer, U.S.status, U.S.schema, U.S.schema.ota_max,
+              100000));
+    });
+test(
+    'replacement excludes old bytes from logical quota and consumes one physical workspace',
+    () => {
+      U.S.editor = {id: 1};
+      U.S.images = {
+        ...U.S.images,
+        items: [{id: 1, bytes: 20000}],
+        used: U.S.schema.image_quota - 680
+      };
+      U.S.status.fs_total = 100000;
+      U.S.status.fs_used = 100000 - U.S.schema.image_reserve;
+      assert.equal(U.imageAllowance(), 20680);
+      U.S.status.fs_used++;
+      assert.equal(U.imageAllowance(), 0);
+    });
+test(
+    'missing gallery retains saved draft and disabled selections without thumbnails',
+    () => {
+      U.S.saved.screen_policy.slides = [9, 9];
+      U.S.saved.screen_policy.appearance.single.image = 2;
+      U.S.saved.screen_policy.appearance.single.background = false;
+      U.S.saved.screen_policy.phases.own.single[0] = false;
+      U.S.draft.screen_policy.slides = [7];
+      U.S.draft.screen_policy.appearance.conference.image = 9;
+      U.S.draft.screen_policy.appearance.conference.background = false;
+      U.S.images = {
+        ...U.S.images,
+        items: [{id: 1, bytes: 1200, revision: 3}],
+        used: 1200
+      };
+      assert.deepEqual(Array.from(U.libraryEntries(), x => x.id), [1, 2, 7, 9]);
+      for (const language of [0, 1]) {
+        U.S.draft.language = language;
+        const html = U.imagesPage();
+        assert.equal(
+            (html.match(/data-act="imageEdit" data-id="9"/g) || []).length, 1);
+        for (const id of [2, 7, 9])
+          for (const action of ['imageEdit', 'imageDelete'])
+            assert(html.includes(`data-act="${action}" data-id="${id}"`));
+        assert.equal(
+            (html.match(
+                 new RegExp(language ? 'File missing' : 'Datei fehlt', 'g')) ||
+             []).length,
+            3);
+        assert(html.includes('1 / 10'));
+        assert(!html.includes('/api/v1/images/file?id=9'));
+        assert(
+            html.includes(language ? 'Background image' : 'Hintergrundbild'));
+      }
+    });
+test(
+    'missing selected background is retained while new choices offer existing files',
+    () => {
+      U.S.draft.screen_policy.appearance.single.image = 9;
+      U.S.draft.screen_policy.appearance.single.background = false;
+      U.S.draft.screen_policy.slides = [7];
+      U.S.images = {...U.S.images, items: [{id: 1, bytes: 1200}], used: 1200};
+      for (const language of [0, 1]) {
+        U.S.draft.language = language;
+        assert.deepEqual(
+            Array.from(U.imageOptions('Standard-Hintergrund', 9), r => r[0]),
+            [0, 1, 9]);
+        U.S.screenAppearance = 'single';
+        const html = U.screenAppearanceMarkup();
+        assert(html.includes('value="9" selected'));
+        assert(!html.includes('value="7"'));
+        let choices = '';
+        context.confirmAction = (_title, _message, _run, _word, extra) => {
+          choices = extra;
+        };
+        U.ACT.roleCopy({dataset: {role: 'background'}});
+        assert(
+            choices.includes('value="1"') && !choices.includes('value="7"') &&
+            !choices.includes('value="9"'));
+      }
+      assert.equal(U.S.draft.screen_policy.appearance.single.image, 9);
+      assert.deepEqual(Array.from(U.S.draft.screen_policy.slides), [7]);
+    });
+test(
+    'ten desired missing IDs reserve all slots while replace and release stay available',
+    () => {
+      U.S.saved.screen_policy.slides = [1, 2, 3, 4, 5];
+      U.S.draft.screen_policy.slides = [6, 7, 8, 9, 10];
+      for (const language of [0, 1]) {
+        U.S.draft.language = language;
+        const html = U.imagesPage();
+        assert(/data-act="imageEdit" data-id="0" disabled/.test(html));
+        assert(html.includes(
+            language ? 'Free image slots: 0' : 'Freie Bildplätze: 0'));
+        assert(html.includes('0 / 10'));
+        assert(/data-act="imageEdit" data-id="1">/.test(html));
+        assert(/data-act="imageDelete" data-id="10">/.test(html));
+      }
+    });
+test(
+    'free slots count actual files and selected IDs once across both models',
+    () => {
+      U.S.saved.screen_policy.slides = [1, 9];
+      U.S.draft.screen_policy.slides = [2, 9];
+      U.S.images = {
+        ...U.S.images,
+        items: [{id: 1, bytes: 100}, {id: 2, bytes: 100}, {id: 3, bytes: 100}],
+        used: 300
+      };
+      const html = U.imagesPage();
+      assert(html.includes('Freie Bildplätze: 6'));
+      assert(html.includes('3 / 10 Dateien'));
+      assert(!/data-act="imageEdit" data-id="0" disabled/.test(html));
+    });
+async function asyncTest(name, run) {
+  setup();
+  await run();
+  passed++;
+  console.log('PASS ' + name);
+}
+(async () => {
+  await asyncTest(
+      'password-free session opens silently before mutations', async () => {
+        let posts = 0;
+        h.state.hook = call => call.endpoint === 'session' ?
+            h.response(
+                200,
+                call.method === 'POST' ? (posts++, {token: 'silent'}) :
+                                         {password_set: false, valid: false}) :
+            undefined;
+        await U.authenticate();
+        assert.equal(posts, 1);
+        assert.equal(U.S.token, 'silent');
+        assert(element('auth').hidden);
+      });
+  await asyncTest(
+      'origin errors retain status and code without prompting login',
+      async () => {
+        h.state.hook = () =>
+            h.response(403, {code: 'origin', error: 'controlled origin'});
+        await assert.rejects(
+            U.raw('config', {}, 'PUT'),
+            e => e.status === 403 && e.code === 'origin');
+      });
+  await asyncTest(
+      'status failure retains unsaved draft and recovery clears its load error',
+      async () => {
+        U.S.draft.hostname = 'unsaved';
+        h.state.hook = call => {
+          if (call.endpoint === 'status') throw Error('offline');
+        };
+        await U.load('status', false);
+        assert.equal(U.S.draft.hostname, 'unsaved');
+        assert(U.S.errors.status);
+        h.state.hook = null;
+        await U.load('status', false);
+        assert(!U.S.errors.status);
+        assert.equal(U.S.draft.hostname, 'unsaved');
+      });
+  await asyncTest(
+      'image reconciliation uses GET only and clears solely explicitly deleted IDs',
+      async () => {
+        U.S.saved.screen_policy.slides = [2, 9];
+        U.S.saved.screen_policy.appearance.single.image = 9;
+        U.S.draft = structuredClone(U.S.saved);
+        U.S.draft.hostname = 'unsaved';
+        U.S.draft.screen_policy.appearance.conference.image = 2;
+        context.readModel = async () => structuredClone(U.S.saved);
+        await U.reconcileImages();
+        assert.deepEqual(Array.from(U.S.draft.screen_policy.slides), [2, 9]);
+        assert.equal(U.S.draft.screen_policy.appearance.single.image, 9);
+        await U.reconcileImages([2]);
+        assert.deepEqual(Array.from(U.S.draft.screen_policy.slides), [9]);
+        assert.equal(U.S.draft.screen_policy.appearance.single.image, 9);
+        assert.equal(U.S.draft.screen_policy.appearance.conference.image, 0);
+        assert.equal(U.S.draft.hostname, 'unsaved');
+        assert(h.calls.every(c => c.method === 'GET'));
+      });
+  await asyncTest(
+      'new upload reserves latest current draft only and sends no settings',
+      async () => {
+        U.S.saved.screen_policy.slides = [1];
+        U.S.draft.screen_policy.slides = [2, 2, 0];
+        U.S.draft.screen_policy.appearance.single.image = 3;
+        const sent = [];
+        context.authenticatedUpload = async (path, file, progress, headers) => {
+          sent.push({path, headers});
+          progress(100);
+        };
+        let changed = false;
+        h.state.hook = call => {
+          if (call.endpoint === 'status' && !changed) {
+            changed = true;
+            U.S.draft.screen_policy.appearance.single.image = 5;
+            U.S.draft.screen_policy.appearance.conference.image = 10;
+          }
+        };
+        await U.openEditor(0);
+        U.S.draft.screen_policy.slides = [4, 0, 4];
+        U.ED.blob = new Blob([new Uint8Array(100)]);
+        await U.uploadImage();
+        assert.equal(sent.length, 1);
+        assert.equal(sent[0].path, 'images/upload');
+        assert.deepEqual({...sent[0].headers}, {'X-Image-Reserved': '1072'});
+        assert.deepEqual(Array.from(U.S.saved.screen_policy.slides), [1]);
+        assert.deepEqual(Array.from(U.S.draft.screen_policy.slides), [4, 0, 4]);
+        assert.equal(U.S.draft.screen_policy.appearance.single.image, 5);
+        assert.equal(h.state.writes, 0);
+      });
+  setup();
+  U.S.status.competitions = [{id: U.S.saved.competitions[0].id, provider:'openligadb',cause:'',datasets:{matches:{state:'complete',cause:'',last_success_ms:3000},table:{state:'partial',cause:'auth',http:403,code:'OLG E08·403',last_success_ms:1000},details:{state:'partial',cause:'bad_response',code:'OLG E12',last_success_ms:0}}}];
+  U.paintStatus();
+  const datasetHtml = element('competitionStatus').innerHTML;
+  assert(datasetHtml.includes('Tabelle') && datasetHtml.includes('Spieldetails'));
+  assert(datasetHtml.includes('OLG E08·403') && datasetHtml.includes('OLG E12'));
+  assert(datasetHtml.includes('Letzter erfolgreicher Abruf') && datasetHtml.includes('Gestört'));
+  passed++; console.log('PASS distinct table/details failures remain visible beside successful fixtures');
+  console.log(
+      passed +
+      ' current UI/diagnostic/image cases passed; no layout/device claim');
+})().catch(error => {
+  console.error(error);
+  process.exitCode = 1
+});

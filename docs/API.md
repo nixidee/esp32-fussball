@@ -1,48 +1,36 @@
 # Device REST API
 
-The device's own HTTP API under `/api/v1`, used by the Web UI and usable by
-other local programs. It is not a football data provider; the providers are
-described in [DATA_PROVIDERS.md](DATA_PROVIDERS.md). The web server, its
-admission and operation bounds and local-HTTP security are described in
-[NETWORK.md](NETWORK.md); the browser workflow in [WEB_UI.md](WEB_UI.md).
-Implementation: `components/web/web_service.cpp`,
-`components/web/settings_json.cpp`, `components/web/screen_json.cpp`.
-
-The [planned screen-system redesign](UI.md#planned-screen-system-redesign)
-requires configuration and status for situations, timed sequences, competition
-scope and picture frame mode, plus the device draw-list preview. A dedicated
-complete screen-policy API is now available in the existing settings service.
-The controller now uses the common policy and sequence; dedicated Web controls
-edit that policy. This does not accept physical layouts, dot placement or final
-rings. Replaced general display fields are rejected; the screen policy owns them. Development
-records start fresh; compatibility migration is reconsidered after alpha/beta.
+The current development API uses one coherent application configuration.
+`GET /config` reads its revision; `PUT /config` applies settings, competitions,
+display preferences and optionally adopted names together. Development formats
+start fresh; no older mutation routes or backup migration are provided.
+All JSON uses one bounded streaming grammar and encoder, without a document
+allocation. Host/build acceptance is separate from browser/device acceptance.
 
 ## Endpoints
 
 | Method and endpoint | Purpose |
 |---|---|
-| GET `/api/v1/status`, `/schema`, `/settings` | Status (screen, own match, competition state, full build identity, heap/task minima), bounds/options and upload limits, redacted settings |
+| GET `/api/v1/status`, `/schema` | Status, screen/competition state, build identity, heap/task minima and bounds/options/upload limits |
 | GET `/api/v1/session` | `{password_set, valid}` for the token the request carries |
-| GET `/api/v1/wifi`, `/selection` | Bounded scan/selection results |
-| GET `/api/v1/competitions` | The competition store: competitions with their ids |
-| GET `/api/v1/teams?competition=ID` | The teams of a competition in the shown data with the owner's short names |
+| GET `/api/v1/wifi`, `/selection?query=ID` | Bounded scan or exactly correlated selection results |
+| GET `/api/v1/teams?competition=ID` | RAM team IDs and compact provider fallback labels; no adopted-name I/O |
+| POST `/api/v1/team-names/originals?competition=ID` | Protected explicit full-original name query using the existing worker; changes no draft or stored names |
+| GET `/api/v1/team-names/preset` | Complete immutable club-name source belonging to the running app; does not adopt names |
 | GET `/api/v1/images`, `/images/file?id=N\|stock=crest\|background[&r=rev]` | Image inventory: library images with per-image revision, and the two roles `crest` and `background` with `replaced`, replacement `bytes` and `revision` (it changes when the role's image changes); the JPEG itself (`stock=` delivers the role's replacement, else its factory image) |
 | POST `/api/v1/session`, `/logout` | Open/close the mutation session |
-| POST or PUT `/api/v1/settings` | Strictly typed settings patch |
-| GET, PUT `/api/v1/screen-settings` | Read or replace the complete dedicated screen policy, guarded by its snapshot generation |
-| POST or PUT `/api/v1/competitions` | Replace the competition list |
-| POST `/api/v1/teams` | Set or remove the owner's short name of one team |
-| PUT `/api/v1/teams` | Replace all of the owner's short names (backup import) |
-| POST `/api/v1/export` | Explicit export of the settings, the competition store and the short names |
+| GET, PUT `/api/v1/config` | Coherent redacted configuration / one protected Apply |
+| GET `/api/v1/team-names` | Adopted collection and exact names reference; no changes |
+| POST `/api/v1/export` | Protected coherent current-version configuration and complete adopted collection export |
 | POST `/api/v1/wifi/scan`, `/data/select`, `/data/refresh` | Start asynchronous scan, provider list or refresh |
+| POST `/api/v1/data/select/cancel` | Cancel only the named selection query |
 | GET, POST `/api/v1/demo` | Read scenario catalogue, current step/test time and runtime competition bindings; select a scenario/step while saved Demo mode is enabled |
-| POST `/api/v1/display` | Quick display action `{"action":"next"\|"ip"}` (same events as the buttons) |
+| POST `/api/v1/display` | Display commands `next`, `ip` and Demo-only `auto_next` |
 | POST `/api/v1/screenshot` | Authenticated forced redraw streamed as raw RGB565 strips; the browser creates the PNG |
 | POST `/api/v1/images/upload`, `/images/delete` | Upload a library image (optional `X-Image-Id` replaces or restores that valid library id; `X-Image-Role: crest\|background` uploads the replacement of that role instead, answer `{"ok":true,"role":…}`) or delete a library image by id |
 | POST `/api/v1/images/role` | `{"role":"crest"\|"background","action":"reset"}` deletes the replacement, so the factory image shows again; `{"role":…,"action":"copy","id":N}` copies library image N as the replacement (the library image stays). Roles cannot be deleted. A replacement counts towards the image budget, not towards the ten library ids |
-| POST `/api/v1/images/repair` | Confirmed image-storage formatting and reference cleanup; preserves other settings and does not restart |
 | POST `/api/v1/ota` | Stream compatible firmware to the inactive slot |
-| POST `/api/v1/reboot`, `/reset` | Reboot or reset settings (also deletes the kept football data and the short names), optionally delete all images or format image storage |
+| POST `/api/v1/reboot`, `/reset` | Reboot or reset settings and adopted names, optionally delete all images or format image storage |
 | WebSocket `/api/v1/debug?token=` | Controlled live status while the Debug tab is open; ends with the session that opened it |
 
 After the first full path, shortened paths in the table retain `/api/v1`.
@@ -61,54 +49,86 @@ references. Firmware uploads ignore image headers, as before.
 
 ## Endpoint details
 
-### Screen policy
+### Images
 
-GET and PUT acquire the existing heavy-operation token before allocating the
-snapshot or receiving/parsing a body. Provider work retains that token through
-response completion and payload cleanup. Busy409 leaves settings unchanged;
-retry the read/save. The Web draft remains available. This serializes temporary
-allocations without another task, queue or higher heap cap.
+Upload and library-to-role copy write one temporary candidate, check every
+read/write/sync/close, validate its actual JPEG bytes and rename only after
+success. The old file remains published on failure. Physical admission uses one
+shared replacement workspace; the library quota remains independent.
 
-`GET /screen-settings` returns the complete policy and its matching `generation`
-under the existing settings mutex. `PUT` requires that full representation,
-including the token (zero is valid before the first save). It requires the usual
-origin/session and is read-only during an OTA trial. Unknown fields, omitted
-fields, wrong types and invalid retained overrides are rejected with an
-actionable field path. A stale token returns 409 `settings_changed`; reload and
-reconcile the draft before retrying. Success returns `{"ok":true}`; read again
-to obtain the saved snapshot/token. This save changes the UI/settings generation,
-not the provider-data generation.
+`POST /images/delete` returns these phase fields on both success and service
+failure: `references_cleared`, `settings_saved`, `settings_revision`,
+`file_deleted`, `already_missing`, `outcome_unknown`. A failed unlink can follow
+a successful reference save; `settings_saved:true` does not claim file deletion.
+An uncertain configuration write sets `outcome_unknown:true` and skips unlink.
+Reload/reboot to establish the durable state before another mutation; never
+automatically resend that deletion. Read-only inventory reconciliation is safe.
 
-Named phases are `own`, `other`, `matchday`, `idle`, `break`; named types are
-`crest`, `images`, `single`, `matchday`, `conference`, `table`. Their names do not
-depend on the editable `order`. Each `phases.<phase>` object has six type rules
-and an `expanded` array of sporting type names. A shared rule is the tuple
-`[enabled, automatic, visit_s]`. Each `competitions[]` item has `id`, service-owned
-`incarnation`, `own_special` and five named phase objects, each with the four
-sporting rule tuples. In an override tuple each `null` independently inherits
-that field. Explicit `false` remains an override. Collapsing expansion retains
-these values. Appearance is stored per type; slides contain library ids only.
-The schema's `screen_policy` describes tuple fields, names and bounds.
-`visible_matches` is shared by Conference and Matchday, minimum2; profile bounds
-set its maximum. A real single fixture still occupies just one row.
+Reset partial-failure responses also include `image_files_deleted` and
+`image_files_already_missing`, counting confirmed per-file outcomes before the
+first failure. They do not imply that the whole reset completed.
 
-Visit time is 15–43,200 seconds; image time is separately 3–3,600 seconds. Enabled
-image visits must be an exact multiple of image time. The four before/after
-buffers are 0–180 minutes; the optional break threshold is 1–366 elapsed days.
-No value is silently rounded. The maximum complete canonical request is 8,121
-bytes, within the unchanged 8,192-byte body limit. The JSON allocator cap remains
-24,576 bytes; target-aware allocation estimates are distinct from host figures.
+### Application configuration and Apply
 
-Bindings are checked against both competition id and incarnation. Save the
-competition record before a policy containing bindings derived from fallback
-presets. A deleted or reused id cannot inherit an unrelated override; a stale
-binding is rejected rather than silently rebound. The common browser draft/save
-and backup flows acknowledge these independent record saves separately. A failed
-later write does not roll back an already confirmed part or mark the remaining
-draft as saved. Image deletion cleans references in both records before unlink;
-the existing settings writer remains held through that unlink. Filesystem repair
-can already have succeeded when a later reference save fails, reported as
-`repair_references` with `storage_formatted:true`.
+`GET /config` returns `{version,revision,apply_id,desired,names_ref}`. `desired`
+contains `settings`, `competitions` and `screens`. Secrets are redacted: presence
+flags are readable; values are returned only by protected explicit export with
+`{"secrets":true}`. Revision and names reference come from the same short lock.
+The 64-bit `apply_id` is a fixed16-character lowercase hexadecimal string,
+preventing browser integer precision loss. Zero denotes no prior Apply.
+
+`PUT /config` requires `{expected_revision,apply_id,desired}` and optionally
+`adopted_names`. A new Apply ID is nonzero. Every section of `desired` is
+required. Omitted secret fields retain their current values; explicit empty
+strings clear them. Raw SSIDs support UTF-8 strings (including escaped NUL)
+or the exact byte-preserving `{base64:"…"}` representation. Field and cross-
+section validation occurs before one NVS publication; the config owner assigns
+new competition identities. `settings_changed`409 rejects a stale revision.
+An OTA trial rejects mutations. Unknown/duplicate keys, malformed Unicode,
+wrong types and trailing input are rejected before publication.
+
+Changed names are validated in an inactive immutable file. One NVS record then
+selects its exact slot/generation/length/CRC. A settings-only Apply does not
+open or rewrite names. A successful answer includes `ok:true` and the complete
+redacted configuration receipt, including assigned IDs and activated revision.
+Network reconfiguration waits for the admitted operation to release its shared
+operation slot. There are no section commits, client write ordering, generation
+arithmetic or partial configuration successes.
+
+A lost response never authorizes resending Apply. Read `/config` and compare
+`apply_id`. `outcome_unknown`503 means NVS may already be durable: both name
+versions are retained, old coherent RAM remains, further saves are refused
+until reboot/recovery. Reading old RAM before reboot does not prove absence.
+The browser retains the complete draft and provides a read-only status action.
+Acknowledged writes are not repeated when a subsequent read is busy.
+
+The schema provides separate `max_body` and `max_apply_body` transport ceilings;
+these are not RAM buffers. One shared pull reader consumes bounded chunks.
+`POST /export` returns `{version,desired,adopted_names}` from a coherent snapshot.
+Current-version import loads the whole result into the common browser draft;
+only Save applies it. Older backups are deliberately unsupported before alpha.
+
+### Screen programmes and competition preferences
+
+`desired.screens` owns common type order, five shared phase rule sets,
+appearance, slideshow IDs, timing windows, image-frame mode and page options.
+Phases are `own`, `other`, `matchday`, `idle`, `break`; screen types are
+`single`, `conference`, `table`, `crest`, `matchday`, `images`.
+Shared tuples are `[enabled,automatic,visit_s]`; `per_competition` activates
+attached sport overrides for a phase. Each competition owns its five-by-four
+sporting override tuples under `display`. Each tuple field may independently
+be `null` to inherit the shared value. Explicit false stays explicit; collapsing
+individual rules retains them for later restoration. There is no independently
+maintained association identity matrix or separate screen generation.
+
+A competition's `primary` owns provider/competition/season. `club` separately
+owns numeric preferred team, selection label, own-special flag and explicit
+group ID. Group0 is ungrouped; equal nonzero group IDs link selected competitions.
+Names and catalogue imports never change this membership. The highest-priority
+member determines block placement and own focus. Options and bounds, including
+hardware backlight capability, are published by `/schema`; no browser default
+copy replaces the configuration model. `overview_screenshot` remains a general
+boolean: it adds the Overview trigger; Debug screenshot remains available.
 
 ### Runtime Demo
 
@@ -176,12 +196,59 @@ flush-ready ownership remain unchanged on success, timeout and disconnect.
 
 ### Display actions and status
 
-`POST /display` keeps its existing `next` and `ip` bodies. Commands are
-queued with the current settings version internally; callers supply no new
-field. A successful settings/competition save discards earlier commands,
-including delayed delivery, while preserving commands issued for the new
-version. Physical gestures already in progress are cancelled too. A full
-action queue still returns 409 `busy`.
+`POST /display` requires an `action` string and `config_revision`, the uint32
+revision returned by the caller's last `GET /config`:
+
+| Body | Effect |
+|---|---|
+| `{"action":"next","config_revision":12}` | Existing manual Next: choose the next manually reachable sporting entry, or browse the next frame image while frame mode is active |
+| `{"action":"ip","config_revision":12}` | Existing temporary IP-address display |
+| `{"action":"auto_next","config_revision":12}` | Demo only: while manual, first return to automatic display; otherwise advance one existing automatic boundary, through subpages/images before the next visit/type/competition |
+
+All three use the common origin, session and JSON-body admission. The body is
+streamed once into a typed command with bounded storage and no JSON document.
+Only `action` and `config_revision` are allowed; duplicate keys (including
+escaped spellings) and unknown keys are rejected before a command can be
+queued. Like the existing quick actions, they remain available during an OTA trial. A missing
+or null `action` returns HTTP 400 `required`; another non-string value returns
+`type`, and an unsupported string returns `invalid`, all with `field:"action"`.
+When runtime Demo is disabled, `auto_next` returns HTTP 409 `demo_disabled`;
+the controller also rejects that action outside Demo.
+
+Missing/null `config_revision` returns HTTP 400 `required`; a non-integer
+JSON value returns `type`, and values outside 0…4294967295 return `range`, with
+`field:"config_revision"`. An old revision returns HTTP 409 `settings_changed`
+without queueing or relabelling the action. Refresh the configuration before
+issuing a new command; do not retry it automatically.
+
+Commands retain that caller revision through the one controller FIFO. A
+successful settings/competition save discards earlier commands, including
+delayed delivery, while preserving commands issued for the new generation.
+Physical gestures already in progress are cancelled too. A full action queue returns HTTP 409 `busy`. Success returns `{"ok":true}` for queue
+admission, not command execution or LCD presentation. An output still awaiting
+its first presentation is not skipped by `auto_next`.
+
+`auto_next` changes runtime navigation only. It preserves saved visit/image
+times, eligibility, competition bindings and the selected Demo scenario/step
+and test UTC. It does not start recurring advancement; send another command
+for another boundary. `POST /demo` remains the separate scenario/step action.
+
+`GET /status` exposes these controller fields:
+
+| Field | Values and meaning |
+|---|---|
+| `screen` | Stable numeric type: `0` Single, `1` Conference, `2` Table, `3` Crest, `4` Matchday, `5` Images; independent of editable sequence order |
+| `screen_reason` | String: `setup`, `manual`, `own_match`, `matchday`, `idle`, `other_games`, `break` or `frame` |
+| `screen_starting` | Boolean: startup-card state in the bound controller snapshot |
+| `screen_manual` | Boolean: the bound navigation state is manual |
+| `screen_frame` | Boolean: the bound navigation state is in picture-frame mode |
+| `screen_phase` | Numeric phase: `0` = `own`, `1` = `other`, `2` = `matchday`, `3` = `idle`, `4` = `break`; setup/frame are represented separately, not extra phase numbers |
+| `screen_automatic_entries` | Number of eligible automatic type/competition entries, computed when the controller binds in Demo outside frame mode. Subpages are not separate entries. Other controller binds write `0` because the count is not computed |
+
+These controller fields come together from one atomic last-bound/poll snapshot.
+They do not acknowledge a completed LCD transfer, and may describe output still
+pending presentation. They are read separately from the football overview;
+the complete status JSON is not one transaction across those two sources.
 
 `GET /status` includes `network_init` alongside the existing connection
 state and IP addresses. These are separate facts: working WiFi can remain
@@ -203,8 +270,9 @@ default event loop), `station_interface`, `ap_interface`, `ap_address`
 `hostname` (current DHCP/mDNS name) and `http_service` (local HTTP
 advertisement), in code order E01–E13. Each retry retains successful
 resources; a failure in one independent service does not restart working
-WiFi. After recovery the active error clears. The existing ten-second OTA
-trial still rejects an initial startup failure even if it later recovers.
+WiFi. After recovery the active error clears. The local OTA trial checks the main loop, display and watchdog. Network,
+HTTP, DNS, SNTP and provider failures remain retryable service faults and do
+not invalidate otherwise healthy firmware.
 
 `GET /status` also includes one coherent `image` object for the currently
 selected display image. It describes content, independently of UI/hardware
@@ -234,13 +302,20 @@ read, seek or close errors. Its current deadline takes priority, including
 when I/O used the remaining time; an already expired deadline avoids file
 I/O entirely. This does not impose a deadline on the SDK's later draw calls.
 
+`GET /images` reads all twelve writable image slots once before sending its
+inventory. Only an absent file is reported as absent; an unreadable metadata
+entry rejects the complete request, so it cannot invent free quota or a factory
+role. The browser retains its last valid inventory and unsaved references.
+
 `GET /images/file?display=1` serves the currently selected actual file,
 including its factory fallback while a damaged replacement still exists.
 It returns the existing missing-file error when no candidate is selected.
 This dynamic response always uses `no-cache`; an optional `r` cache-buster
 does not make it immutable. Existing `id=N` and `stock=crest|background`
 downloads retain their original raw-library/role choice and revisioned
-immutable caching. A read error aborts the chunk stream without a normal
+immutable caching. Role downloads choose the factory file only when the
+replacement is absent; metadata/open I/O errors remain server errors. A read
+or file-close error aborts the chunk stream without a normal
 completion marker, rather than reporting a truncated JPEG as complete.
 
 `GET /wifi` returns `busy` for a queued or running user scan and an
@@ -250,119 +325,157 @@ have priority; a user scan runs with the existing 15-second scan deadline.
 Duplicate user requests return 409 `busy`; a failed or cancelled job is never
 represented as a successful empty scan.
 
-`GET /selection` returns the owner's competition or club list started by
-`POST /data/select`: `busy` while it runs, then `items` (`id`, `name`,
-`season`; at most one page), `more`, `revision` and `error_code` (a cause
-key below; empty after success). After a failure `code` holds the short
-error code and `http` the HTTP status the provider answered with, if any. While `busy`, `wait` says what holds the
-next request of the list and `wait_s` for how many more seconds: `limit`
-(the provider's or the global window limit) or `retry` (the provider
-answered "too many requests" and is paused); `none` with `wait_s` 0 while
-the request runs or only waits for the 2-second device gap. A waiting list
-never blocks the device: the jobs of other providers run meanwhile.
+`POST /data/select` accepts the typed provider/competition/club-list request
+and returns `{"ok":true,"query":"1234567800000001"}`. The opaque16 lower-case
+hex digits preserve all64 identity bits in JavaScript. Its boot nonce and
+positive sequence distinguish this operation from another browser or reboot.
+An explicit busy rejection owns no query; an unacknowledged start is never
+resent automatically.
 
-The schema publishes `ota_max` from the actual inactive OTA slot and
-`selection_text_max` from the shared search/country capacity, and the
-short-name bounds of `PUT /teams`: `short_names_max` (entries over all
-competitions) and `short_name_max` (bytes per name). `firmware_id`
+`GET /selection?query=1234567800000001` returns that same `query`, `busy`,
+`items` (`id`, `name`, `season`; at most one page), `more`, `revision` and
+`error_code`. Missing/malformed IDs are rejected; a superseded, cancelled,
+expired or configuration-stale ID receives409 `changed` before output. Row
+reads recheck both query and result revision; replacement during streaming
+aborts without a final success terminator. It cannot return another query's
+successful list. Provider failure also supplies its cause/code/HTTP status.
+
+While busy, `wait`/`wait_s` describe a window limit or provider pause. Matching
+reads renew the30-second idle lease, so an open editor can retain a long limit
+wait. An abandoned/lost-start query expires without owner polling. Automatic
+work remains eligible between query requests; a request does not hold heavy
+admission while waiting for a limit.
+
+`POST /data/select/cancel` requires `{"query":"1234567800000001"}` and normal
+mutation authentication. Only that query can be cancelled. An active provider
+request retains the single interactive slot until its worker acknowledges
+cancellation; late rows/completion cannot overwrite a replacement. Closing the
+editor by its header, button or Escape cancels its known ID; closing before
+start acknowledgement cancels the eventual returned ID. Results never update
+a closed or replaced editor. Each additional page starts its own correlated
+request using the previous list's source/search parameters.
+
+The schema publishes `ota_max` from the inactive OTA slot, `selection_text_max`,
+`config_version`, `max_apply_body`, the names format/source/wire versions and
+normalized file/text bounds. `operation_deadline_ms` and `socket_timeout_ms`
+come from the same transport configuration as the explicit originals query.
+`firmware_id`
 in status is the full 64-character lowercase hexadecimal ELF SHA256 from the
 app descriptor. It distinguishes builds with equal version strings; it is
 not the shortened hash printed by the panic handler.
-The schema's `screen_policy` names six stable types. Status `screen` is
-Single0, Conference1, Table2, Crest3, Matchday4 or Images5; editable sequence
-order does not change these identities. `screen_reason` includes `other_games`,
-`break` and `frame`. `screen_starting` reports the initial startup card.
+The schema's `screen_policy` names six stable types. Their status identities
+and controller snapshot semantics are listed under
+[Display actions and status](#display-actions-and-status).
 Competition ids/counts in status come from the same published canonical data,
 including Demo routes, rather than a second settings-index lookup. `demo`
 identifies this runtime projection. Demo rows additionally expose `bound` and
-`incarnation`; append saved labels only for exact bound identity. Status and own/
-competition overview come from the same repository read, including inactive rows.
+`incarnation`; append saved labels only for exact bound identity. The football
+overview's own-match and competition fields share one repository read, including
+inactive rows; controller fields use the separate snapshot described above.
 Old `competition_screens`, general `screens`
 and `table_page_s` are removed.
 Status `requests` contains each provider's request attempts since boot,
 including selection requests. It is not a daily usage or remaining-credit
 counter and must not be compared directly with the configured daily caps.
 
-Image repair requires `{"confirm":"repair"}`, same-origin/session admission,
-the heavy-operation token and no OTA trial. It formats LittleFS (including
-stock files), then saves cleaned image references only if necessary. Success
-returns `{"ok":true,"storage_formatted":true}`. A failed reference save after
-formatting returns HTTP 500, `code:"repair_references"` and
-`storage_formatted:true`; the filesystem operation already happened and must
-not be mistaken for a fully successful repair. Neither result resets other
-settings or restarts. USB `uploadfs` restores stock files. The football
-service writes its kept competition data and the short names again after a
-repair.
+Full LittleFS formatting is available only in the existing explicit factory
+reset (`POST /reset` with `confirm:"reset"` and `format_storage:true`). There is
+no standalone repair route or pre-alpha compatibility alias.
+Settings and request counters are reset before formatting. Formatting also works
+when the filesystem cannot mount; it performs the authorized file deletion.
+Only complete success schedules a restart. A failure returns 500 `reset_partial`,
+its failed `stage` and flags describing completed destructive steps; retry the
+confirmed reset to finish. Adopted names are intentionally deleted and the
+immutable app preset survives. There is no RAM/NVS names-restoration rewrite.
+Image-only deletion remains a separate operation.
 
 Status `fs_total` and `fs_used` cover the whole LittleFS partition: images,
-stock files, the kept football data and the short names.
+stock files and adopted names. Football data is RAM-only.
 
-## Short names
+## Club-name firmware source
 
-`GET /teams?competition=ID` lists every team of the competition's matches
-and table rows that the device holds now (all providers):
+`GET /team-names/preset` returns the complete `football-team-names` version1
+source JSON, including original long DE/EN/short texts, keys, league metadata,
+all provider-ID arrays and aliases. `X-Team-Names-Source` is the SHA256 of the
+maintained source file used to build this running app. The JSON values
+round-trip; whitespace/field order need not match that file. USB/OTA and
+rollback select the matching app source automatically, without `uploadfs`.
 
-```json
-{"competition":1,"max":48,"items":[
-  {"provider":0,"id":40,"short_name":"Bayern","custom":"FCB"}]}
-```
+This read never saves or adopts any name. It takes the existing heavy-operation
+admission before streaming and returns retryable409 busy when unavailable.
+The response uses `application/json` and `Cache-Control: no-store`, with no
+whole-catalogue DOM or filesystem copy. Transport failure or the existing
+absolute request deadline aborts a partial stream; no JSON error is appended.
+## Adopted club names
 
-`provider` is the provider index, `id` the provider's team id,
-`short_name` the provider's name and `custom` the owner's replacement
-(`""` = none). `max` is the number of replacements the device keeps over
-all competitions. A competition without data returns an empty list; a
-publication during the read returns 409 `changed`.
+`GET /team-names` returns `{names_ref,adopted_names}` for the exact referenced
+immutable collection. `GET /team-names/preset` returns the complete read-only
+human source catalogue; reading it never adopts names. Runtime provider labels
+are compact original26/3 fallbacks, not a full originals archive. Visible labels
+are resolved outside the football lock; full-name and short-name overrides are
+independent, including explicit empty strings.
 
-`POST /teams` with `{"provider":P,"id":N,"name":"FCB"}` needs the mutation
-session. `name` has at most 26 bytes UTF-8 and no control characters; `""`
-removes the replacement. The change is written to the device at once and
-shows on the display with the next redraw. Errors: 400 for a rejected field,
-409 `busy` while another heavy operation runs, 409 `state` without a
-mounted filesystem or during the first boot of an update, 507
-`storage_full` when the table is full or the file does not fit (the
-previous name stays).
+The collection retains DE/EN, short code, league metadata, aliases, all four
+providers' ID bindings and independent provider/ID exceptions. Source version1
+uses string fields. Adopted version2 uses one `texts` dictionary with positive
+collection-local IDs; club `de/en/short/league`, aliases and exception names
+reference those IDs. The dictionary avoids multiplying a shared long alias in
+JSON. IDs are unique and referenced; missing or unused entries are rejected.
+Names already adopted in version2 obey26/3 UTF-8 byte limits. Source version1
+validates complete original strings before clipping at a Unicode boundary.
+Empty present fields remain distinct from absent fields. Metadata is retained
+in full within the existing16KiB normalized file envelope.
 
-`PUT /teams` with `{"short_names":[{"provider":P,"id":N,"name":"FCB"}]}`
-replaces every replacement at once (the import of a backup; `[]` removes
-all) and writes the file once. It needs the mutation session; at most
-`max` entries, each name 1 to 26 bytes UTF-8 without control characters,
-each team once. A rejected entry returns 400 with its path, for example
-`short_names[3].name`; the other errors are those of `POST /teams`, and
-on any error the previous names stay. `POST /export` returns the same
-`short_names` array next to the settings and the competition store.
+Both this read and a complete settings backup prepare the referenced collection
+and its bounded grouping index before any HTTP bytes. Allocation failure is a
+normal507 `memory` response; metadata/read failure is an error, never an empty
+successful collection. Preparation holds one immutable file handle through
+streaming. Each binding/alias is visited a bounded number of times, independent
+of club count. The file is checked closed before the normal HTTP terminator;
+late I/O/send failure closes the incomplete response without appended JSON.
+
+The browser resolves text references for editing and deduplicates them again
+for Save/export. Collection import, catalogue selection and short exceptions
+change only the shared draft; there is no immediate write endpoint. Full
+collection replacement is available even when the old referenced file is
+unreadable, subject to usable NVS and mounted storage. No names operation
+regroups competitions or matches clubs by equal text. `POST /team-names/originals?competition=ID` with `{}` returns
+`{query,source:{provider,competition,season},items:[{id,name,short_name?}]}`.
+It uses that saved source, resolves an automatic season when required and
+streams complete decoded names. It shares the selector's interactive worker
+slot, actual first-send budget/window gate and one absolute30-second operation
+deadline. There is no automatic adoption, archive or alternate HTTP engine.
+Closing/failed sends cancel ownership; a partial/malformed provider reply closes
+the response without a successful terminator. No JSON error is appended after
+a partial body. Only a fully received/parsed response may enter a browser draft.
+Compact `/teams` fallback labels are never advertised as originals.
+
+Status competition entries also carry `datasets:{matches,table,details}` from
+one coherent RAM snapshot. Each dataset has `state` (unknown/partial/complete/
+unavailable), `last_attempt_ms`, `last_success_ms`, `cause`, `http` and an error
+`code` when needed. Timestamps are64-bit monotonic milliseconds; an actual
+HTTP first-send advances attempt time. A successful fixtures request cannot
+clear an earlier table/details failure or overwrite its success time. The
+competition summary is derived from those independent facts. JSON is sent
+after releasing the football mutex; the HTTP snapshot costs576 transient bytes.
 
 ## Competitions
 
-The competitions live in their own store with its own
-record (see [CONFIGURATION.md](CONFIGURATION.md)); the settings JSON does not
-carry them. `GET /competitions` returns
+`desired.competitions` is the ordered configuration list, at most the schema's
+competition limit. The configuration service assigns IDs and incarnations to
+new entries. Each entry contains `id`, `incarnation`, `active`, `primary`,
+`competition_name`, `club` and `display`. Provider indices correspond to
+`schema.provider_keys`. The source is `{provider,competition,season}`; the
+separate club is `{team,name,own_special,group}`, with numeric team0 meaning no
+preferred club. Changing a club keeps unchanged source data and reclassifies
+own matches; changing provider/competition/season invalidates that source.
 
-```json
-{"competitions":[{"id":1,"incarnation":1,"active":true,
-  "primary":{"provider":0,"competition":"bl1","season":"2025","team":"40"},
-  "competition_name":"1. Bundesliga","team_name":"FC Bayern"}]}
-```
-
-`provider` is the index into the schema's `providers` list (0 `openligadb`,
-1 `api-football`, 2 `espn`, 3 `football-data`). Every competition has a stable id from 1 to 255. The device assigns it when
-an entry is created and never changes it while the entry exists; the
-position in the list sets the within-type order and own focus priority. The
-separate policy controls screens with id/incarnation bindings. Legacy `screens`
-is rejected. The service owns incarnation allocation. `primary` is the competition's only source
-(provider, competition, season, club; the key keeps its name for
-compatibility). At most `limits.competitions` competitions (8) exist
-(schema).
-
-`POST` or `PUT /competitions` takes `{"competitions":[…]}`. The list in the
-body replaces the whole list; without it the list stays. Any other key,
-including `fixture_pairs`, `fallback` or `fallback_active` of earlier
-firmware, is rejected as unknown. In an entry, an absent key takes the value
-of a new entry, and an absent `id` or `id` 0 creates a new entry that the
-device gives the next free id; any other id is kept as given (a restored
-backup keeps its ids) and must be unique in the list. The store is validated as a whole (unique
-ids, usable providers) and saved in one step. The answer is `{"ok":true,
-"competitions":[…]}` with the assigned ids. A rejected body answers 400 with
-the field path, for example `competitions[2].primary.competition`.
+Nonzero equal group IDs express membership chosen in the editor; there is no
+name-based linking. Group blocks use the highest-priority member position;
+members retain configured order. Screen overrides belong to the entry itself,
+so reusing a small ID cannot inherit a removed entry's independent matrix row.
+All changes are validated together with provider access and screen settings by
+one Apply; there is no separate competition write endpoint.
 
 ## Status fields
 
@@ -407,17 +520,18 @@ Largest-block point samples cover only their observation times, not an
 unobserved continuous minimum. Exposing these fields does not prove that the
 limits hold under the required device workload.
 
-`settings_source` says where the current settings come from: `stored` (the
-stored record or the last save), `initial` (no record, or after a reset),
-`outdated` (the stored record has an older format that this firmware no
-longer reads), `rejected` (the stored record has a value outside its limits), `damaged`
-(too long or not decodable), `unreadable` (NVS read error or no memory) or
-`no_storage` (NVS unusable). Every value except `stored` means the initial
-values apply. An `outdated`, `rejected` or `damaged` record is overwritten by
-the next save; `unreadable` and `no_storage` refuse saving until a reset.
-`competitions_source` reports the competition store in the same words; it is
-also `outdated` when no competition record exists and the settings record is
-outdated (older firmware kept the competitions in the settings record).
+`settings_source`, `competitions_source` and `screen_policy_source` report the
+same aggregate configuration owner: `stored` (the stored record or last save),
+`initial` (no record, or after reset), `outdated` (an unsupported record version),
+`rejected` (a decoded value outside its limits), `damaged` (wrong length or not
+decodable), `unreadable` (NVS read error or no memory), `no_storage` (NVS unusable)
+or `outcome_unknown` (a mutation may already be durable). There are no separate
+competition or screen records and no older-record fallback.
+Except for `stored` and `outcome_unknown`, these states use initial values.
+An `outdated`, `rejected` or `damaged` record can be replaced by the next save;
+`unreadable` and `no_storage` refuse saving until reset/recovery.
+`outcome_unknown` retains the previous coherent RAM configuration, blocks further
+writes and requires reboot/recovery to establish the durable record.
 
 `competitions` has one row per competition in list order: `id`, `matches`
 (match count in the published data), `provider` (source of those matches)
@@ -435,12 +549,14 @@ false until the provider service runs; the Web UI then shows "loading"
 instead of an error.
 
 `last_update_ms` is the monotonic time of the oldest last successful
-provider request over the active competitions (0 = none yet). Data kept
-from before a reboot carry their age, so the value can be negative. `data_stale`
-is true while the last request of an active competition failed, or while a shown match is in its live window and the last
-successful match request of its competition is older than the stale limit.
-A competition whose last request failed has a `cause`; it keeps its earlier
-data until a later request succeeds, while the other competitions update.
+provider request over the active competitions (0 = none yet). After reboot no old provider data is restored; zero means no successful request
+in the current boot. `data_stale` is true while an active competition has a
+partial dataset or retains a dataset request failure. It is also true while a
+shown match is in its live window and the last successful match request of its
+competition is missing or older than the stale limit.
+A competition with an unresolved dataset failure has a `cause`; it keeps its
+earlier data until that dataset succeeds, while other datasets and competitions
+can update. A fixtures success cannot clear a table or details failure.
 `unmaintained` is a state, not a failed request: the provider has left
 matches without a result for more than 24 hours after their kickoff.
 `store_full` is a state as well: the requests succeeded, but not all data of
@@ -479,6 +595,21 @@ says why the device is not connected, in the same words as the display card:
 no credentials or AP fallback), `connecting` (scanning, connecting or retry
 backoff) and an empty string while connected.
 
+Malformed JSON includes `json_offset` when the common grammar identifies the
+failure: a zero-based byte position in the original UTF8 request, or its byte
+length for unexpected EOF. It counts bytes, not decoded characters, and never
+echoes request values. Typed field violations continue to identify `field`.
+The Web error includes the position without changing or resending the request.
+
+`storage_full` (HTTP507) means exhausted image IDs, image-byte quota,
+replacement workspace or actual ENOSPC from a checked file operation. `memory`
+(HTTP507) means an allocation/ENOMEM failure; other file I/O faults remain
+`internal` (HTTP500). Quotas/publication are unchanged. Failed write/sync/close/
+rename never publishes a candidate; old active image/names data remains.
+JPEG validation preserves its first stdio error through checked close, while
+an expired absolute deadline still takes precedence as timeout. Partial-delete
+receipts report committed reference cleanup and remaining files separately.
+
 ## Error causes and codes
 
 Every competition row and every selection reports why it failed as a stable
@@ -488,8 +619,9 @@ football-data.org), `E` and the cause number, and the HTTP status after "·"
 when the provider answered with one, e.g. `OLG E10·503`. The display shows
 the code without the HTTP status. Numbers are assigned once and never
 change. The browser translates the key into the cause and the action; the
-firmware has no text of its own beyond the display's short text. A
-successful request clears the cause.
+firmware has no text of its own beyond the display's short text. A successful
+request clears only its dataset's request failure. Another dataset's failure,
+an unmaintained match or a capacity notice retains its own clearing condition.
 
 | No. | Key | Meaning |
 |---|---|---|
@@ -537,8 +669,12 @@ The Host header must name this device (its STA or AP address, `<hostname>.local`
 or the bare hostname, compared case-insensitively; `:80` is accepted) and an
 `Origin` header, if sent, must be `http://` plus that host. GET settings/status
 do not return passwords or API keys; explicit export is a protected mutation.
-Unknown keys, wrong types, excess arrays, embedded NULs and trailing non-space
-JSON bytes are rejected. API keys are not passed into the debug producer.
+Application Apply and small typed commands reject unknown and duplicate keys,
+invalid scalar types, malformed Unicode and trailing non-space bytes. Label
+schemas reject embedded NUL; raw SSID bytes are intentionally separate. The
+same JSON reader/encoder handles settings, screen rules, names and commands;
+there is no body-sized JSON allocation. API keys are not passed into
+the debug producer.
 
 The debug WebSocket takes its token from the URL query because the browser
 WebSocket API cannot set headers. The log line of a rejected request omits the
@@ -551,6 +687,15 @@ upgrade: 403 `origin`, 403 `debug_disabled`, 401 `session` or 409 `busy`.
 The device only sends frames; frames from the browser are read and discarded,
 and the slot is freed when the TCP connection ends.
 
+Each diagnostic frame uses one pinned bounded buffer and queued HTTP-task
+work. Before writing, the server rechecks the original authenticated session,
+connection detachment and the socket's actual WebSocket state. Logout, expiry
+or disabling debug prevents another frame. Closing and reconnecting cannot
+reuse an older queued frame, including with the same token and socket number;
+stale work does not clear or close a newer stream or a public HTTP connection.
+Every partial frame-header/payload write must complete within its socket
+window. Failed queue admission releases the buffer for a later sample.
+
 ## Errors
 
 Before a response body starts, a failed request answers `{"error": "<English text>", "code": "<stable
@@ -561,13 +706,20 @@ a body key (`competition`, `season`, `id`, `role`, `action`, `confirm`) or a hea
 (`X-Image-Id`, `X-Image-Role`). For value errors `code` is the settings reason (`invalid`,
 `range`, `type`, `unknown_key`, `too_long`, `too_many`, `required`,
 `duplicate`, `conflict`, `none_enabled`). Other codes: `origin`
-(403), `session`, `password` (401), `trial`, `busy`, `state`, `changed`, `settings_changed` (409),
+(403), `session`, `password` (401), `trial`, `busy`, `state`, `changed`, `settings_changed`, `demo_disabled` (409),
 `unknown_route`, `not_found` (404), `method` (405), `body_missing`,
 `body_incomplete`, `json`, `size`, `content`, `invalid` (400),
 `body_too_large` (413), `content_type` (415), `timeout` (408), `memory`,
 `storage_full` (507), `screenshot_unavailable` (503), `internal` (500).
 Once a binary stream has started, transfer failures abort the connection
 instead of adding an incompatible JSON body.
+
+All ordinary response fragments share the 30-second request deadline through
+every underlying partial socket send; positive partial progress cannot extend
+that deadline. Screenshot capture keeps its separate five-second C6 cap.
+JSON command media types must be exactly `application/json`, case-insensitively,
+with optional surrounding spaces/tabs and semicolon parameters. Prefixes such
+as `application/jsongarbage` are rejected with415 `content_type`.
 
 "Every 400 names its field" applies to value errors: a settings value, a
 body key or a header that is present but wrong. Errors about the request as a
@@ -580,3 +732,13 @@ connection reset and the connection stays usable. A body above that limit
 (firmware or an oversize image) cannot be drained; the connection is closed
 after the answer and a browser may report a network error instead of the
 message. The Web UI checks the size before uploading for this reason.
+
+### Visible names read status
+
+`GET /status` includes `names:{pending,error,code}` for the overview's visible
+name lookup. Heavy-operation contention is pending with an empty code; a real
+read/close/reference failure returns `NAM E01`. Provider fallback remains
+visible and the Web UI gives collection/backup recovery advice. A failed lookup
+does not publish a complete cache that could hide the failure on the next poll.
+This adds only a4-B local error result and streamed fields, no resident model,
+heap allocation or stored setting.

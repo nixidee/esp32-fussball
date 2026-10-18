@@ -1,5 +1,5 @@
 // Host checks of the per-provider daily request counter (OQ-163, OQ-170):
-// stored record checks, the earlier single record, reservation, day change,
+// current record checks, reservation, day change,
 // a damaged record and a backward clock. They prove only the implementation
 // of these rules, not the owner's device acceptance.
 
@@ -13,7 +13,6 @@
 namespace {
 
 using football::budget::Counter;
-using football::budget::LegacyRecord;
 using football::budget::Load;
 using football::budget::Record;
 using Verdict = football::budget::Counter::Verdict;
@@ -44,31 +43,19 @@ void testRecordChecks() {
   // W94: a record of the wrong length or with another magic is damaged.
   TEST_ASSERT_EQUAL(Load::kDamaged,
                     football::budget::parse(&valid, sizeof(valid) - 1, &out));
-  const Record other{cfg::kBudgetLegacyMagic, kDay, 9};
+  const Record other{cfg::kBudgetRecordMagic ^ 1u, kDay, 9};
   TEST_ASSERT_EQUAL(Load::kDamaged,
                     football::budget::parse(&other, sizeof(other), &out));
 }
 
-void testLegacyRecord() {
-  const LegacyRecord legacy{cfg::kBudgetLegacyMagic, kDay, {1, 42, 3, 4}};
+// Migration of the old combined24-byte record is retired before alpha.
+// Preserve the actual quota requirement using a current provider record.
+void testCurrentStoredCountLimitsToday() {
+  const Record stored{cfg::kBudgetRecordMagic, kDay, 42};
   Record out{};
-  TEST_ASSERT_EQUAL(Load::kValid, football::budget::parseLegacy(
-                                      &legacy, sizeof(legacy), 1, &out));
-  TEST_ASSERT_EQUAL_HEX32(cfg::kBudgetRecordMagic, out.magic);
-  TEST_ASSERT_EQUAL_UINT32(kDay, out.day);
-  TEST_ASSERT_EQUAL_UINT32(42, out.reserved);
-  TEST_ASSERT_EQUAL(Load::kDamaged, football::budget::parseLegacy(
-                                        &legacy, sizeof(legacy) - 4, 1, &out));
-  TEST_ASSERT_EQUAL(Load::kDamaged, football::budget::parseLegacy(
-                                        &legacy, sizeof(legacy), 4, &out));
-  LegacyRecord wrong = legacy;
-  wrong.magic = cfg::kBudgetRecordMagic;
-  TEST_ASSERT_EQUAL(Load::kDamaged, football::budget::parseLegacy(
-                                        &wrong, sizeof(wrong), 1, &out));
-
-  // The migrated count still limits today.
+  TEST_ASSERT_EQUAL(Load::kValid,
+                    football::budget::parse(&stored, sizeof(stored), &out));
   Counter counter;
-  football::budget::parseLegacy(&legacy, sizeof(legacy), 1, &out);
   counter.load(Load::kValid, out);
   TEST_ASSERT_EQUAL_UINT32(3, counter.remaining(45));
   for (int i = 0; i < 3; ++i)
@@ -182,7 +169,7 @@ void tearDown() {}
 int main() {
   UNITY_BEGIN();
   RUN_TEST(testRecordChecks);
-  RUN_TEST(testLegacyRecord);
+  RUN_TEST(testCurrentStoredCountLimitsToday);
   RUN_TEST(testReservationAndCap);
   RUN_TEST(testRebootLosesUnusedReservation);
   RUN_TEST(testNewDayAndBackwardClock);

@@ -1,0 +1,4 @@
+# File service dependency. Exact version, latest stable release in the
+# ESP Component Registry as of 2026-10-09.
+dependencies:
+  joltwallet/littlefs: "1.22.3"

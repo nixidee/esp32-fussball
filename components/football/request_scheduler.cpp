@@ -485,18 +485,6 @@ void Scheduler::clear(uint8_t slot) {
     pending_.reset(i);
   }
 }
-void Scheduler::seed(uint8_t slot, uint8_t id, cfg::DataType type,
-                     uint32_t age_s, uint32_t now_s) {
-  if (slot >= cfg::kCompetitionMax || id == 0 || isLive(type)) return;
-  if (ids_[slot] != id) {
-    clear(slot);
-    ids_[slot] = id;
-  }
-  const int64_t start = int64_t{now_s} - age_s;
-  last_[index(slot, type)] = static_cast<int32_t>(
-      std::clamp<int64_t>(start, INT32_MIN, kNotStarted - 1));
-}
-
 void Scheduler::configure(const settings::ProviderPlans& plans,
                           const settings::RequestLimit& global) {
   for (std::size_t p = 0; p < cfg::kProviderCount; ++p)
@@ -624,6 +612,24 @@ bool liveWindow(const StoredMatch& m, uint32_t& start, uint32_t& end) {
                                                : cfg::kExpectedMatchMinutes) *
                     60u;
   return true;
+}
+
+bool datasetStale(const MatchStore& store, uint8_t competition,
+                  MatchStore::Dataset dataset, int64_t utc, int64_t now_ms,
+                  cfg::Provider provider) {
+  const auto status = store.datasetStatus(competition, dataset);
+  if (status.cause != Cause::kNone || status.state == DatasetState::kPartial)
+    return true;
+  if (dataset != MatchStore::Dataset::kFixtures || utc == 0) return false;
+  for (std::size_t i = 0; i < store.matchCount(); ++i) {
+    const auto& match = store.match(i);
+    uint32_t start = 0, end = 0;
+    if (match.competition == competition && match.provider == provider &&
+        liveWindow(match, start, end) && utc >= start && utc <= end)
+      return status.last_success_ms == 0 ||
+             now_ms - status.last_success_ms > cfg::kDataStaleS * 1000LL;
+  }
+  return false;
 }
 
 }  // namespace football::schedule

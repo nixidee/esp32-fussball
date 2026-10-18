@@ -46,7 +46,7 @@ struct Identity {
 // Hashes every source field with explicit separators/lengths. This is a
 // 64-bit change detector, not a cryptographic authentication claim.
 uint64_t sourceHash(const settings::Source& source) noexcept;
-Identity identity(const settings::Competition& competition) noexcept;
+Identity identity(const settings::CompetitionRoute& competition) noexcept;
 
 struct Span {
   settings::Bytes<cfg::kSeasonMaxBytes> season;
@@ -129,21 +129,16 @@ struct Assessment {
 // No MatchStore argument: eviction or its 224-row capacity cannot prove an
 // empty schedule. Gap is strictly greater than days*24h, independent of DST.
 Assessment assess(const EvidenceArray& evidence,
-                  const settings::Competitions& competitions, uint32_t now_utc,
-                  uint16_t threshold_days) noexcept;
+                  const settings::CompetitionRoutes& competitions,
+                  uint32_t now_utc, uint16_t threshold_days) noexcept;
 
-struct Progress {
-  uint32_t run_day = 0;
-  bool active = false;
-  uint8_t route = 0, season = 0, step = 0;
-};
+// Operational request credits only. Route/season traversal and source binding
+// belong to the worker's RAM and restart from the beginning after reboot.
 struct DiscoveryRecord {
   budget::Record runs{cfg::kBudgetRecordMagic, 0, 0};
   budget::Record requests{cfg::kBudgetRecordMagic, 0, 0};
-  Progress progress{};
-  // Full configured route/order/access fingerprint. A cursor may only resume
-  // against its original inputs; the evidence file uses a current snapshot.
-  uint64_t binding = 0;
+  // The request counter's day is the run's credit lifetime, even at midnight.
+  bool active = false;
 };
 bool validate(const DiscoveryRecord& record) noexcept;
 
@@ -160,9 +155,10 @@ class Discovery {
   // kAllowed is already durably reserved; kStore requires commitRequest.
   Admission request(DiscoveryRecord& proposed) noexcept;
   void commitRequest(const DiscoveryRecord& stored) noexcept;
-  bool stage(const Progress& progress,
-             DiscoveryRecord& proposed) const noexcept;
-  void commitProgress(const DiscoveryRecord& stored) noexcept;
+  // Closing/retiring a run forfeits its remaining credits. Persist first;
+  // failure leaves it active and prevents a replacement run from starting.
+  bool finish(DiscoveryRecord& proposed) const noexcept;
+  void commitFinish(const DiscoveryRecord& stored) noexcept;
   const DiscoveryRecord& stored() const noexcept { return stored_; }
   // A corrupt guard must never be overwritten by a fresh empty one merely
   // because unrelated normal fixtures were saved. Recovery starts a new run
@@ -176,20 +172,11 @@ class Discovery {
 };
 
 namespace record {
-inline constexpr uint16_t kVersion = 2;
+inline constexpr uint16_t kVersion = 3;
 inline constexpr std::size_t kHeaderBytes = 8;
-// Explicit little endian: each evidence header is source u64, incarnation
-// u32, id/provider/season_count/blocked u8. Each span is season length+16
-// bytes, three enum bytes, and five u32s. Then two budget records (3*u32)
-// and progress (run_day u32, active/route/season/step u8). CRC covers header
-// version/length plus payload. No compiler padding is stored.
-inline constexpr std::size_t kSpanBytes = cfg::kSeasonMaxBytes + 1 + 3 + 5 * 4;
-inline constexpr std::size_t kEvidenceBytes =
-    16 + cfg::kCoverageMaxSeasons * kSpanBytes;
-inline constexpr std::size_t kRecordBytes =
-    kHeaderBytes + cfg::kCompetitionMax * kEvidenceBytes + 2 * 12 + 8 + 8;
-inline constexpr std::size_t kGuardBytes = kHeaderBytes + 2 * 12 + 8 + 8;
-static_assert(kRecordBytes <= 1024);
+// Explicit little-endian discovery request/run guard, independently of RAM
+// schedule evidence. CRC covers header version/length plus payload.
+inline constexpr std::size_t kGuardBytes = kHeaderBytes + 2 * 12 + 4;
 enum class DecodeResult : uint8_t {
   kOk,
   kLength,
@@ -197,17 +184,8 @@ enum class DecodeResult : uint8_t {
   kChecksum,
   kInvalid,
 };
+// Only run/request credits persist in the budget NVS namespace.
 // Zero for invalid state/insufficient space; failure leaves out untouched.
-std::size_t encode(const EvidenceArray& evidence, const DiscoveryRecord& guard,
-                   std::span<uint8_t> out,
-                   uint8_t pending_competition = 0) noexcept;
-// Caller-owned candidates may change after a valid header/CRC. No large
-// snapshot temporary: publish neither candidate unless the result is kOk.
-DecodeResult decode(std::span<const uint8_t> bytes, EvidenceArray& evidence,
-                    DiscoveryRecord& guard) noexcept;
-// The authoritative device-wide discovery guard lives in the existing budget
-// NVS namespace, so a formatted/missing evidence file cannot reopen a run.
-// The guard in the evidence file is a non-authoritative transaction snapshot.
 std::size_t encodeGuard(const DiscoveryRecord& guard,
                         std::span<uint8_t> out) noexcept;
 DecodeResult decodeGuard(std::span<const uint8_t> bytes,
