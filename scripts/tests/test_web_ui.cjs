@@ -53,6 +53,14 @@ function test(name, fn) {
   console.log('PASS ' + name);
 }
 
+test('current screen-mode changes show readable choices in the save summary', () => {
+  assert.equal(U.showValue(1, 'screen_policy.conference_mode'), 'Eine Seite');
+  assert.equal(U.showValue(0, 'screen_policy.matchday_mode'), 'Aktueller Spieltag');
+  assert.equal(U.showValue(1, 'screen_policy.matchday_mode'), 'Nächster Spieltag');
+  U.S.draft.language = 1;
+  assert.equal(U.showValue(1, 'screen_policy.conference_mode'), 'One page');
+});
+
 test(
     'valid representative settings', () => assert.equal(errs(model).length, 0));
 test(
@@ -706,7 +714,7 @@ test(
         used: U.S.schema.image_quota - 680
       };
       U.S.status.fs_total = 100000;
-      U.S.status.fs_used = 100000 - U.S.schema.image_reserve;
+      U.S.status.fs_used = 100000 - U.S.schema.replacement_workspace;
       assert.equal(U.imageAllowance(), 20680);
       U.S.status.fs_used++;
       assert.equal(U.imageAllowance(), 0);

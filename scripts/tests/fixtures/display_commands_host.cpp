@@ -50,7 +50,9 @@ DemoStatus demoStatus() {
   return status;
 }
 namespace names {
-esp_err_t resolveVisible(Targets&, uint8_t, VisibleCache&) { return ESP_OK; }
+esp_err_t resolveVisible(Targets&, uint8_t, uint32_t, VisibleCache&) {
+  return ESP_OK;
+}
 }  // namespace names
 }  // namespace football
 namespace ui {
@@ -176,6 +178,7 @@ int failed(httpd_req_t* request, esp_err_t) {
 }
 int success(httpd_req_t*) { return 200; }
 using namespace web;
+#include "command_body.inc"
 #include "display_http.inc"
 
 std::string body(const char* action, uint32_t revision) {

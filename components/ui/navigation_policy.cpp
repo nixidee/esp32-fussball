@@ -169,7 +169,7 @@ const PreparedContent& NavigationContext::prepare(const sequence::Entry& entry,
     out.total = members.count;
     if (members.count == 1) out.single = &data.store.match(members.index[0]);
     for (unsigned i = 0; i < members.count; ++i)
-      if (data.store.match(members.index[i]).isOwn()) {
+      if (data.store.isOwn(data.store.match(members.index[i]))) {
         out.own = members.index[i];
         break;
       }
@@ -183,7 +183,7 @@ const PreparedContent& NavigationContext::prepare(const sequence::Entry& entry,
       int pinned = -1;
       if (context.policy.pin_own_match)
         for (unsigned i = 0; i < members.count && pinned < 0; ++i)
-          if (context.data.store.match(members.index[i]).isOwn())
+          if (data.store.isOwn(data.store.match(members.index[i])))
             pinned = members.index[i];
       football::ConferenceRequest held;
       held.pin_own = context.policy.pin_own_match;
@@ -292,4 +292,67 @@ const PreparedContent& NavigationContext::prepare(const sequence::Entry& entry,
                  static_cast<uint16_t>(std::max(1u, count)), anchor};
   return out;
 }
+uint8_t CalendarFacts::find(int64_t utc) const {
+  for (uint8_t i = 0; i < count; ++i)
+    if (instants[i].utc == utc) return i;
+  return kMissing;
+}
+bool CalendarFacts::civilAt(uint8_t index, std::tm& out) const {
+  if (index >= count) return false;
+  const auto& instant = instants[index];
+  const time_t at = static_cast<time_t>(instant.utc + instant.offset_s);
+  return gmtime_r(&at, &out) != nullptr;
+}
+PresentationFacts presentationFacts(const NavigationState& state,
+                                    NavigationContext& context, int64_t now,
+                                    int64_t fetched_ms, int64_t retry_ms) {
+  PresentationFacts facts;
+  facts.sequence = sequence::view(state, context.input(), now);
+  facts.phase = context.selected.phase;
+  for (const auto& entry : context.data.competitions.entries)
+    facts.active |= entry.active;
+  if (!facts.sequence.empty && screen::sporting(facts.sequence.entry.type)) {
+    const auto mode = state.paged    ? sequence::PageMode::kManualHeld
+                      : state.manual ? sequence::PageMode::kManualAutomatic
+                                     : sequence::PageMode::kAutomatic;
+    facts.page = &context.prepare(state.entry, mode, state.page);
+  }
+  auto& calendar = facts.calendar;
+  const auto& dates = context.data.dates;
+  const auto utc = context.data.clock.utc;
+  const auto capture = [&](int64_t at) -> uint8_t {
+    if (at <= 0) return CalendarFacts::kMissing;
+    const auto known = calendar.find(at);
+    if (known != CalendarFacts::kMissing) return known;
+    if (calendar.count == calendar.instants.size())
+      return CalendarFacts::kMissing;
+    const auto index = calendar.count++;
+    calendar.instants[index] = {at, dates.offset_at
+                                        ? dates.offset_at(at, dates.context)
+                                        : dates.fallback_offset_s};
+    return index;
+  };
+  capture(utc);
+  if (facts.page) {
+    if (facts.page->single) capture(facts.page->single->kickoff);
+    for (unsigned i = 0; i < facts.page->matches.row_count; ++i)
+      capture(context.data.store.match(facts.page->matches.rows[i]).kickoff);
+  }
+  if (utc > 0) {
+    const auto as_of = [&](int64_t fetched) {
+      return fetched ? capture(utc - (now - fetched) / 1000)
+                     : CalendarFacts::kMissing;
+    };
+    calendar.fetched = as_of(fetched_ms);
+    if (facts.page)
+      calendar.dataset = as_of(contentStatus(context.data.store,
+                                             facts.sequence.entry.competition,
+                                             facts.sequence.entry.type, utc)
+                                   .last_success_ms);
+    if (retry_ms > now)
+      calendar.retry = capture(utc + (retry_ms - now + 999) / 1000);
+  }
+  return facts;
+}
+
 }  // namespace ui

@@ -63,7 +63,7 @@ function validateAdoptedNames(input) {
             new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(new TextEncoder().encode(value)) !== value) fail();
         return value;
     };
-    const id = value => { if (!Number.isInteger(value) || value < 1 || value > 4294967295) fail(); };
+    const id = value => { if (!validClubId(value)) fail(); };
     object(input, ['format', 'version', 'clubs', 'exceptions']);
     if (input.format !== S.schema.names_format || input.version !== S.schema.names_source_version || !Array.isArray(input.clubs)) fail();
     if ('exceptions' in input && !Array.isArray(input.exceptions)) fail();
@@ -169,7 +169,7 @@ async function loadOriginalNames(n) {
             (source.season && result.source.season !== source.season) || !Array.isArray(result.items)) throw screenConflict();
         const ids = new Set();
         for (const team of result.items) {
-            if (!Number.isInteger(team.id) || team.id < 1 || team.id > 4294967295 || ids.has(team.id) ||
+            if (!validClubId(team.id) || ids.has(team.id) ||
                 typeof team.name !== 'string' || ('short_name' in team && typeof team.short_name !== 'string')) throw Error(t('Ungültiger Wert'));
             ids.add(team.id);
         }
@@ -323,5 +323,5 @@ function drawNames() {
 function downloadJson(data, filename) {
     const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'}));
     const a = document.createElement('a'); a.href = url; a.download = filename; a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setTimeout(() => URL.revokeObjectURL(url), CLIENT.object_url_release_ms);
 }

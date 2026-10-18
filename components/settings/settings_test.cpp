@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <memory>
 #include <new>
+#include <optional>
 #include <span>
 
 #include "app_config.h"
@@ -34,15 +35,28 @@ constexpr uint16_t kLoopIntervalsS[] = {100, 200};
 
 // Current settings with the non-secret fields changed, so a stored WiFi
 // configuration survives the test.
-Model sampleModel() {
-  Model model = current();
+void sampleValues(AppConfig& config) {
+  auto& model = config.model;
   model.hostname.assign("fussball-test");
   model.external_antenna = !cfg::kExternalAntennaDefault;
   model.debug_status_log = true;
   model.debug_status_interval_s = kSampleIntervalS;
   model.time_zone.assign(kSampleTimeZone);
   model.ntp_server.assign(kSampleNtpServer);
-  return model;
+}
+std::unique_ptr<AppConfig> testCandidate() {
+  auto config = std::unique_ptr<AppConfig>(new (std::nothrow) AppConfig);
+  if (config) snapshot(*config);
+  return config;
+}
+std::optional<uint32_t> configFingerprint(const AppConfig& config) {
+  auto buffer = std::unique_ptr<uint8_t[]>(new (std::nothrow)
+                                               uint8_t[app_record::kMaxBytes]);
+  if (!buffer) return std::nullopt;
+  const auto size = app_record::encode(
+      config, {buffer.get(), app_record::kMaxBytes}, limits());
+  if (!size) return std::nullopt;
+  return crc32({buffer.get(), size});
 }
 
 // Stores a prepared record as it is, bypassing validation.
@@ -74,7 +88,7 @@ void storePrepared(SettingsTest test) {
     return;
   }
   snapshot(*candidate);
-  candidate->model = sampleModel();
+  sampleValues(*candidate);
   const auto used = app_record::encode(
       *candidate, {buffer.get(), app_record::kMaxBytes}, limits());
   if (!used) {
@@ -130,12 +144,12 @@ esp_err_t eraseFillNamespace() {
 }
 
 // Writes values of decreasing size until not even one entry fits.
-void fillNvs() {
+esp_err_t fillNvs() {
   nvs_handle_t handle;
   esp_err_t err = nvs_open(kFillNamespace, NVS_READWRITE, &handle);
   if (err != ESP_OK) {
     ESP_LOGE(kTag, "fill: open failed: %s", esp_err_to_name(err));
-    return;
+    return err;
   }
   static constexpr std::size_t kBlobSizes[] = {1000, 100};
   static const std::array<uint8_t, 1000> filler{};
@@ -153,28 +167,39 @@ void fillNvs() {
     err = nvs_set_u8(handle, key, 0);
     if (err == ESP_OK) ++written;
   } while (err == ESP_OK);
-  nvs_commit(handle);
+  const auto committed = nvs_commit(handle);
   nvs_close(handle);
   ESP_LOGI(kTag, "fill: %u values written, last result %s", written,
            esp_err_to_name(err));
+  return committed == ESP_OK ? err : committed;
 }
 
 void runNvsFull() {
+  auto config = testCandidate();
+  const auto before = config ? configFingerprint(*config) : std::nullopt;
+  if (!before) {
+    ESP_LOGE(kTag, "test allocation/encoding failed before filling NVS");
+    return;
+  }
   eraseFillNamespace();  // leftovers of an interrupted run
   logNvsStats("before fill");
-  fillNvs();
+  const auto filled = fillNvs();
   logNvsStats("after fill");
 
-  const uint32_t before = generation();
-  const Model old_model = current();
-  const esp_err_t err = save(sampleModel());
-  const bool unchanged = generation() == before && current() == old_model;
-  if (err != ESP_OK && unchanged) {
-    ESP_LOGI(kTag, "PASS: save failed (%s), settings unchanged",
-             esp_err_to_name(err));
+  sampleValues(*config);
+  const esp_err_t err = apply(*config, config->revision);
+  snapshot(*config);
+  const auto after = configFingerprint(*config);
+  const bool unchanged = after && *before == *after;
+  if (filled == ESP_ERR_NVS_NOT_ENOUGH_SPACE &&
+      err == ESP_ERR_NVS_NOT_ENOUGH_SPACE && unchanged) {
+    ESP_LOGI(
+        kTag,
+        "PASS: Apply reported NVS_NOT_ENOUGH_SPACE; complete config unchanged");
   } else {
-    ESP_LOGE(kTag, "FAIL: save returned %s, settings %s", esp_err_to_name(err),
-             unchanged ? "unchanged" : "changed");
+    ESP_LOGE(kTag, "FAIL: fill %s, Apply %s, config %s",
+             esp_err_to_name(filled), esp_err_to_name(err),
+             unchanged ? "unchanged" : "changed or unreadable");
   }
 
   const esp_err_t cleanup = eraseFillNamespace();
@@ -190,10 +215,15 @@ void runSaveLoop() {
            static_cast<unsigned>(kSaveLoopPeriodMs),
            static_cast<unsigned>(kLoopIntervalsS[0]),
            static_cast<unsigned>(kLoopIntervalsS[1]));
-  Model model = sampleModel();
+  auto config = testCandidate();
+  if (!config) {
+    ESP_LOGE(kTag, "test allocation failed");
+    return;
+  }
+  sampleValues(*config);
   for (uint32_t i = 0; i < kSaveLoopCount; ++i) {
-    model.debug_status_interval_s = kLoopIntervalsS[i % 2];
-    const esp_err_t err = save(model);
+    config->model.debug_status_interval_s = kLoopIntervalsS[i % 2];
+    const esp_err_t err = apply(*config, config->revision);
     if (err != ESP_OK) {
       ESP_LOGE(kTag, "save loop: save %u failed: %s", static_cast<unsigned>(i),
                esp_err_to_name(err));
@@ -214,7 +244,10 @@ void runDeviceTest() {
              static_cast<unsigned>(cfg::kSettingsTest));
     switch (cfg::kSettingsTest) {
       case SettingsTest::kSaveSample: {
-        const esp_err_t err = save(sampleModel());
+        auto config = testCandidate();
+        if (config) sampleValues(*config);
+        const esp_err_t err =
+            config ? apply(*config, config->revision) : ESP_ERR_NO_MEM;
         ESP_LOGW(kTag, "sample saved: %s; press RST and check the boot log",
                  esp_err_to_name(err));
         break;

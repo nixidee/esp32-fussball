@@ -1,6 +1,5 @@
 #include "image_service.h"
 
-#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -15,6 +14,7 @@
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
+#include "file_candidate.h"
 #include "file_io.h"
 #include "file_service.h"
 #include "freertos/FreeRTOS.h"
@@ -28,9 +28,26 @@ constexpr const char* kTag = "images";
 // Writable files ("slots"): library ids 1..kImageLibraryMax, then one
 // replacement per stock role.
 constexpr uint8_t kSlots = cfg::kImageLibraryMax + cfg::kStockImageCount;
-int temporary = -1;
+files::Candidate staged;
 uint8_t destination = 0;  // slot of the running upload or copy
-std::size_t received = 0, expected = 0;
+const files::Context& fileContext() {
+  static constexpr files::Context value{
+      cfg::kFsBasePath, nullptr, [](void*, files::Usage& out) {
+        const auto error = files::usage(out);
+        if (error == ESP_OK) return true;
+        errno = error == ESP_ERR_NO_MEM ? ENOMEM : EIO;
+        return false;
+      }};
+  return value;
+}
+esp_err_t candidateError() {
+  const auto error = staged.error();
+  return error == EINVAL                    ? ESP_ERR_INVALID_SIZE
+         : error == EILSEQ                  ? ESP_ERR_INVALID_RESPONSE
+         : error == EBADF || error == EBUSY ? ESP_ERR_INVALID_STATE
+         : error == ETIMEDOUT ? ESP_ERR_TIMEOUT
+                              : files::error(files::fromErrno(error));
+}
 std::atomic<uint32_t> changed{0};
 // Successful validation belongs to an unchanged file, not to a screen visit.
 // HTTP writers invalidate/confirm slots atomically; decoder failures invalidate
@@ -62,23 +79,12 @@ uint16_t slotRevision(uint8_t slot) {
   static const uint16_t offset = static_cast<uint16_t>(esp_random());
   return static_cast<uint16_t>(offset + revisions[slot - 1].load());
 }
-void slotFile(uint8_t slot, char* out, std::size_t size) {
-  if (libraryId(slot))
-    snprintf(out, size, "img%u.jpg", static_cast<unsigned>(slot));
-  else
-    snprintf(out, size, "%s",
-             cfg::kRoleImageFiles[slot - cfg::kImageLibraryMax - 1]);
-}
-void path(const char* file, char* out, std::size_t size) {
-  files::buildPath(cfg::kFsBasePath, file, {out, size});
+bool slotFile(uint8_t slot, char* out, std::size_t size) {
+  return files::ownedName({files::FileKind::kImageSlot, slot}, {out, size});
 }
 void slotPath(uint8_t slot, char* out, std::size_t size) {
-  char file[cfg::kFileNameMaxChars + 1];
-  slotFile(slot, file, sizeof(file));
-  path(file, out, size);
-}
-void tempPath(char* out, std::size_t size) {
-  snprintf(out, size, "%s/%s", cfg::kFsBasePath, cfg::kImageTempFile);
+  files::ownedPath(cfg::kFsBasePath, {files::FileKind::kImageSlot, slot},
+                   {out, size});
 }
 std::size_t bytes(const char* p, esp_err_t* error = nullptr) {
   struct stat info{};
@@ -129,14 +135,12 @@ bool selectionName(const Status& value, FileSource source, char* out,
   if (source == FileSource::kLibrary && !libraryId(value.desired_id))
     return false;
   if (source == FileSource::kFactory) {
-    const int count =
-        snprintf(out, capacity, "%s", cfg::kStockImageFiles[value.role]);
-    return count >= 0 && count < static_cast<int>(capacity);
+    return files::ownedName({files::FileKind::kStockImage, value.role},
+                            {out, capacity});
   }
-  slotFile(
+  return slotFile(
       source == FileSource::kLibrary ? value.desired_id : roleSlot(value.role),
       out, capacity);
-  return true;
 }
 bool candidatePath(const Status& value, FileSource source, char* out,
                    std::size_t capacity) {
@@ -225,15 +229,9 @@ esp_err_t unlinkImage(uint8_t slot, bool* deleted = nullptr,
 // the file the slot holds now, the storage reserve with the old file still
 // counted.
 esp_err_t start(uint8_t slot, std::size_t size) {
-  if (temporary >= 0 || ota::trial() ||
-      files::state() != files::State::kMounted)
+  if (staged.busy() || ota::trial() || files::state() != files::State::kMounted)
     return ESP_ERR_INVALID_STATE;
   if (size == 0 || size > cfg::kImageMaxBytes) return ESP_ERR_INVALID_SIZE;
-  // Recover only this service's unpublished file after an interrupted upload.
-  char p[files::kPathBufferBytes];
-  tempPath(p, sizeof(p));
-  if (unlink(p) != 0 && errno != ENOENT)
-    return files::error(files::fromErrno(errno));
   std::size_t total = 0;
   for (uint8_t i = 1; i <= kSlots; ++i) {
     if (i == slot) continue;
@@ -245,42 +243,21 @@ esp_err_t start(uint8_t slot, std::size_t size) {
     if (charge > cfg::kImageTotalBytes - total) return files::kStorageFull;
     total += charge;
   }
-  files::Usage usage{};
   if (size > cfg::kImageTotalBytes - total) return files::kStorageFull;
-  const auto usage_error = files::usage(usage);
-  if (usage_error != ESP_OK) return usage_error;
-  if (usage.used_bytes > usage.total_bytes) return ESP_FAIL;
-  // Reserve is the shared replacement workspace, consumed by this candidate;
-  // it is never charged again as space that must remain untouched afterwards.
-  if (!files::hasReplacementSpace(usage.total_bytes, usage.used_bytes, size))
-    return files::kStorageFull;
-  temporary = ::open(p, O_WRONLY | O_CREAT | O_EXCL, 0600);
-  if (temporary < 0) return files::error(files::fromErrno(errno));
+  if (!staged.begin(fileContext(), {files::FileKind::kImageCandidate, 0}, size))
+    return candidateError();
   destination = slot;
-  received = 0;
-  expected = size;
   return ESP_OK;
-}
-// Close before validation; both fsync and close must succeed.
-esp_err_t close() {
-  if (temporary < 0) return ESP_ERR_INVALID_STATE;
-  const bool complete = received == expected;
-  const bool closed = files::syncAndClose(temporary);
-  if (!closed) return files::error(files::fromErrno(errno));
-  return complete ? ESP_OK : ESP_FAIL;
 }
 // Moves the closed temporary file onto its slot under the display lock.
 esp_err_t publish() {
-  char temp[files::kPathBufferBytes], target[files::kPathBufferBytes];
-  tempPath(temp, sizeof(temp));
-  slotPath(destination, target, sizeof(target));
   const bool rendering = display::ready();
   if (rendering && !display::lock(cfg::kBootScreenLockTimeoutMs))
     return ESP_ERR_TIMEOUT;
   if (rendering) dropCache(destination);
-  const auto err = rename(temp, target) == 0
+  const auto err = staged.publish({files::FileKind::kImageSlot, destination})
                        ? ESP_OK
-                       : files::error(files::fromErrno(errno));
+                       : candidateError();
   if (err == ESP_OK) {
     bump(destination);
     validated.fetch_or(uint32_t{1} << (destination - 1));
@@ -291,7 +268,7 @@ esp_err_t publish() {
 // Return before JPEG validation, releasing the bounded copy frame first.
 __attribute__((noinline)) esp_err_t copyBytes(const char* source,
                                               std::size_t size) {
-  int input = ::open(source, O_RDONLY);
+  int input = files::openRead(source);
   if (input < 0) return files::error(files::fromErrno(errno));
   struct stat info{};
   esp_err_t error =
@@ -361,13 +338,14 @@ esp_err_t filePath(uint8_t id, cfg::StockImage stock, char* out,
   if (error != ESP_OK &&
       !(id == cfg::kStockImageId && error == ESP_ERR_NOT_FOUND))
     return error;
-  char file[cfg::kFileNameMaxChars + 1], p[files::kPathBufferBytes];
-  if (error == ESP_ERR_NOT_FOUND)
-    snprintf(file, sizeof(file), "%s", cfg::kStockImageFiles[stock]);
-  else
-    slotFile(id == cfg::kStockImageId ? roleSlot(stock) : id, file,
-             sizeof(file));
-  path(file, p, sizeof(p));
+  char p[files::kPathBufferBytes];
+  const files::Location location =
+      error == ESP_ERR_NOT_FOUND
+          ? files::Location{files::FileKind::kStockImage, stock}
+          : files::Location{files::FileKind::kImageSlot,
+                            id == cfg::kStockImageId ? roleSlot(stock) : id};
+  if (!files::ownedPath(cfg::kFsBasePath, location, p))
+    return ESP_ERR_INVALID_SIZE;
   const int count = snprintf(out, capacity, "%s", p);
   return count >= 0 && count < static_cast<int>(capacity)
              ? ESP_OK
@@ -532,8 +510,7 @@ Status select(uint8_t id, cfg::StockImage role, char* out,
   return value;
 }
 esp_err_t begin(uint8_t id, std::size_t size, settings::ImageMask excluded) {
-  if (temporary >= 0 || ota::trial() ||
-      files::state() != files::State::kMounted)
+  if (staged.busy() || ota::trial() || files::state() != files::State::kMounted)
     return ESP_ERR_INVALID_STATE;
   if (id != cfg::kStockImageId && !libraryId(id)) return ESP_ERR_INVALID_ARG;
   if (id == cfg::kStockImageId) {
@@ -559,28 +536,38 @@ uint8_t uploadedId() {
   return libraryId(destination) ? destination : cfg::kStockImageId;
 }
 esp_err_t write(const uint8_t* buffer, std::size_t size) {
-  if (temporary < 0 || received > expected || size > expected - received)
-    return ESP_ERR_INVALID_SIZE;
-  if (!files::writeExact(temporary, received, buffer, size))
-    return files::error(files::fromErrno(errno));
-  received += size;
-  return ESP_OK;
+  if (!staged.busy()) return ESP_ERR_INVALID_SIZE;
+  return staged.writeAt(staged.size(), buffer, size) ? ESP_OK
+                                                     : candidateError();
 }
 void abort() {
-  files::closeDescriptor(temporary);
-  char p[files::kPathBufferBytes];
-  tempPath(p, sizeof(p));
-  if (unlink(p) != 0 && errno != ENOENT)
+  if (!staged.abort())
     ESP_LOGW(kTag, "unpublished image cleanup failed (%d)", errno);
 }
 esp_err_t finish(int64_t deadline_ms) {
-  auto err = close();
-  if (err == ESP_ERR_INVALID_STATE) return err;
-  char temp[files::kPathBufferBytes];
-  tempPath(temp, sizeof(temp));
-  if (err == ESP_OK)
-    err = display::validateJpeg(temp, hw::kDisplay.width, hw::kDisplay.height,
-                                deadline_ms);
+  if (!staged.busy()) return ESP_ERR_INVALID_STATE;
+  struct Check {
+    int64_t deadline;
+    esp_err_t result = ESP_OK;
+  } check{deadline_ms};
+  const bool valid = staged.complete(
+      staged.limit(),
+      [](const char* path, void* raw) {
+        auto& check = *static_cast<Check*>(raw);
+        check.result = display::validateJpeg(
+            path, hw::kDisplay.width, hw::kDisplay.height, check.deadline);
+        if (check.result == ESP_OK) return true;
+        errno = check.result == files::kStorageFull        ? ENOSPC
+                : check.result == ESP_ERR_NO_MEM           ? ENOMEM
+                : check.result == ESP_ERR_TIMEOUT          ? ETIMEDOUT
+                : check.result == ESP_ERR_INVALID_RESPONSE ? EILSEQ
+                                                           : EIO;
+        return false;
+      },
+      &check);
+  auto err = valid                    ? ESP_OK
+             : check.result != ESP_OK ? check.result
+                                      : candidateError();
   if (err == ESP_OK && esp_timer_get_time() / 1000 >= deadline_ms)
     err = ESP_ERR_TIMEOUT;
   if (err == ESP_OK) err = publish();
@@ -623,12 +610,12 @@ esp_err_t copyToRole(uint8_t id, cfg::StockImage stock) {
 }
 esp_err_t resetRole(cfg::StockImage stock) {
   if (!stockRole(stock)) return ESP_ERR_INVALID_ARG;
-  if (ota::trial() || temporary >= 0) return ESP_ERR_INVALID_STATE;
+  if (ota::trial() || staged.busy()) return ESP_ERR_INVALID_STATE;
   return unlinkImage(roleSlot(stock));
 }
 esp_err_t removeAll(DeleteAllResult* result) {
   if (result) *result = {};
-  if (ota::trial() || temporary >= 0) return ESP_ERR_INVALID_STATE;
+  if (ota::trial() || staged.busy()) return ESP_ERR_INVALID_STATE;
   for (uint8_t slot = 1; slot <= kSlots; ++slot) {
     bool deleted = false, missing = false;
     const auto err = unlinkImage(slot, &deleted, &missing);
@@ -642,7 +629,7 @@ esp_err_t removeAll(DeleteAllResult* result) {
 }
 uint32_t revision() { return changed.load(); }
 esp_err_t format() {
-  if (ota::trial() || temporary >= 0) return ESP_ERR_INVALID_STATE;
+  if (ota::trial() || staged.busy()) return ESP_ERR_INVALID_STATE;
   const bool rendering = display::ready();
   if (rendering && !display::lock(cfg::kBootScreenLockTimeoutMs))
     return ESP_ERR_TIMEOUT;

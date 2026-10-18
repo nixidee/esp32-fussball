@@ -95,9 +95,10 @@ void bind(const football::Published& data, void* raw) {
   const auto before = nav.entry;
   const auto page_before = nav.page;
   sequence::synchronize(nav, navigation.input(), context.now);
-  Presenter presenter(model, view, policy, nav, presentation, input_count,
-                      &data, &navigation, &context.names, &configuration,
-                      firmware_version);
+  const auto scene = presentationFacts(nav, navigation, context.now,
+                                       data.fetched_ms, data.retry_ms);
+  Presenter presenter(model, view, policy, presentation, input_count, &data,
+                      &scene, &context.names, &configuration, firmware_version);
   context.status_state = presenter.bind(context);
   context.bound = true;
   const auto automatic_entries =
@@ -356,7 +357,7 @@ void poll() {
   if (!context.bound || generation != settings::generation()) return;
   // Selected names only: lookup runs after the repository read has returned.
   const auto names_error = football::names::resolveVisible(
-      context.names, model.language, visible_names);
+      context.names, model.language, generation, visible_names);
   if (generation != settings::generation()) return;
   images::Status selected_image{};
   if (presentation.starting) {
@@ -369,8 +370,8 @@ void poll() {
     images::clearSelection();
   view.image_revision = selected_image.attempt;
   if (!presentation.starting)
-    Presenter(model, view, policy, nav, presentation, input_count, nullptr,
-              nullptr, nullptr, &configuration, firmware_version)
+    Presenter(model, view, policy, presentation, input_count, nullptr, nullptr,
+              nullptr, &configuration, firmware_version)
         .finishStatus(context.status_state, now, selected_image);
   if (names_error != ESP_OK && names_error != ESP_ERR_NOT_FINISHED &&
       view.status[0] == 0) {
@@ -407,8 +408,8 @@ bool showStartScreen(const hw::DisplayProfile& display, bool backlight) {
   profile = display;
   settings::uiSettings(configuration, nav.phase);
   new (&view) ViewModel();
-  Presenter(model, view, policy, nav, presentation, input_count, nullptr,
-            nullptr, nullptr, &configuration, firmware_version)
+  Presenter(model, view, policy, presentation, input_count, nullptr, nullptr,
+            nullptr, &configuration, firmware_version)
       .bindStart(0);
   return draw(cfg::kBootScreenLockTimeoutMs) && good;
 }

@@ -279,9 +279,9 @@ void test_events_without_an_own_slot_wait_for_their_interval() {
     m.provider = cfg::Provider::kEspn;
     m.id = 900 + i;
     m.kickoff = static_cast<uint32_t>(kBase + kKickoff + 60 + 60 * i);
-    m.home = store.team(9, cfg::Provider::kEspn, 2 * m.id, "Home");
+    m.home = store.team(9, cfg::Provider::kEspn, 1000000, "Home");
     m.away = store.team(9, cfg::Provider::kEspn, 2 * m.id + 1, "Away");
-    m.flags = football::kMatchOwn;
+    store.selectClub(9, m.provider, 1000000, at(kKickoff));
     TEST_ASSERT_NOT_NULL(store.upsert(m, at(kKickoff)));
   }
   auto respond = [&](const Request& r, const Job&, int64_t) {

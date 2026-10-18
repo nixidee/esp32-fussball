@@ -93,6 +93,16 @@ int main(){using namespace football;
  assert(store.datasetNotice(1,MatchStore::Dataset::kTable,nowClock().utc)==Cause::kStoreFull);
  assert(store.datasetNotice(1,MatchStore::Dataset::kEvents,nowClock().utc)==Cause::kStoreFull);
  assert(store.datasetNotice(1,MatchStore::Dataset::kFixtures,nowClock().utc)==Cause::kNone);
+ // A successful HTTP finish cannot turn a capacity-truncated table into
+ // complete data; an unrelated Fixtures success does not mask this either.
+ fault={ESP_OK,Cause::kNone,0,true,1500,1600,schedule::Outcome::kOk};runJob(job(cfg::DataType::kTable),model,1,1,1);
+ assert(store.datasetState(1,MatchStore::Dataset::kTable)==DatasetState::kPartial);
+ fault={ESP_OK,Cause::kNone,0,true,1700,1800,schedule::Outcome::kOk};runJob(job(cfg::DataType::kFixtures),model,1,1,1);
+ assert(store.datasetState(1,MatchStore::Dataset::kFixtures)==DatasetState::kComplete);
+ assert(store.datasetState(1,MatchStore::Dataset::kTable)==DatasetState::kPartial);
+ store.flag(1,kNoticeTableTeams,false);
+ fault={ESP_OK,Cause::kNone,0,true,1900,2000,schedule::Outcome::kOk};runJob(job(cfg::DataType::kTable),model,1,1,1);
+ assert(store.datasetState(1,MatchStore::Dataset::kTable)==DatasetState::kComplete);
  const int64_t long_uptime=5000000000LL; // beyond the old49-day uint32ms wrap
  StoredMatch live;live.id=1;live.competition=1;live.provider=route.primary.provider;live.kickoff=nowClock().utc;live.phase=Phase::kLive;
  store.upsert(live,nowClock());

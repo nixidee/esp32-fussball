@@ -69,15 +69,15 @@ void test_concurrent_owned_competitions_use_order_without_faking_ownership() {
   bindings = demo::configure(routes, demo::Scenario::kOwn, true);
   const auto clock =
       demo::apply(store, routes, bindings, demo::Scenario::kOwn, 4, 5000);
-  TEST_ASSERT_TRUE(find(401884775).isOwn());
-  TEST_ASSERT_TRUE(find(401884777, demo::kSecondCompetition).isOwn());
+  TEST_ASSERT_TRUE(store.isOwn(find(401884775)));
+  TEST_ASSERT_TRUE(store.isOwn(find(401884777, demo::kSecondCompetition)));
   TEST_ASSERT_EQUAL_UINT8(demo::kFirstCompetition,
                           selection::select(input(clock)).focus.competition);
   routes.entries[0].club.own_special = false;
   routes.entries[1].club.own_special = false;
   TEST_ASSERT_EQUAL(policy::Phase::kOtherGames,
                     selection::select(input(clock)).phase);
-  TEST_ASSERT_TRUE(find(401884775).isOwn());
+  TEST_ASSERT_TRUE(store.isOwn(find(401884775)));
 }
 
 void test_unknown_kickoff_and_justified_interruption_have_bounded_real_windows() {
@@ -106,7 +106,7 @@ void test_no_club_ordinary_single_keeps_same_provider_names_and_available_events
   const auto single = selection::single(facts, selected, routes.entries[1]);
   TEST_ASSERT_EQUAL_UINT32(401884777, single.match.id);
   const auto& ordinary = find(401884777, demo::kSecondCompetition);
-  TEST_ASSERT_FALSE(ordinary.isOwn());
+  TEST_ASSERT_FALSE(store.isOwn(ordinary));
   TEST_ASSERT_TRUE(store.hasDetail(ordinary));
   ArduinoJson::JsonDocument doc;
   TEST_ASSERT_FALSE(deserializeJson(doc, recorded::kEspnDay));
@@ -149,7 +149,7 @@ void test_five_conference_matches_stay_reachable_without_single_allocation() {
                     selection::select(input(clock)).phase);
   view::List members;
   for (unsigned i = 0; i < store.matchCount(); ++i) {
-    TEST_ASSERT_FALSE(store.match(i).isOwn());
+    TEST_ASSERT_FALSE(store.isOwn(store.match(i)));
     TEST_ASSERT_FALSE(store.hasDetail(store.match(i)));
     members.index[members.count++] = i;
   }
@@ -281,7 +281,7 @@ void test_saved_order_and_club_preferences_drive_projected_own_matches() {
                           selection::select(input(clock)).focus.competition);
   const auto* first = store.find(47, cfg::Provider::kEspn, 401884775);
   TEST_ASSERT_NOT_NULL(first);
-  TEST_ASSERT_TRUE(first->isOwn());
+  TEST_ASSERT_TRUE(store.isOwn(*first));
 }
 
 void test_one_saved_entry_has_explicit_unbound_collision_free_second_dataset() {

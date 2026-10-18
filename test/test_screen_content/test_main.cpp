@@ -39,7 +39,7 @@ void match(uint8_t competition, uint32_t id, int64_t kickoff, uint8_t round,
   row.phase = phase;
   row.home = store.team(competition, row.provider, own ? 40 : id * 2, "Home");
   row.away = store.team(competition, row.provider, id * 2 + 1, "Away");
-  if (own) row.flags = football::kMatchOwn;
+  if (own) store.selectClub(competition, row.provider, 40, {kickoff, 0});
   if (phase == Phase::kFinished) row.finished_at = kickoff + 7200;
   TEST_ASSERT_NOT_NULL(store.upsert(row, {kToday, 10}));
 }
@@ -90,8 +90,8 @@ void test_special_off_own_match_is_ordinary_single_without_own_priority() {
                     content(context, Type::kLiveSingle).kind);
   const auto selected = football::selection::single(
       context.selection, context.selected, competitions.entries[0]);
-  TEST_ASSERT_TRUE(
-      store.find(1, cfg::Provider::kOpenLigaDb, selected.match.id)->isOwn());
+  TEST_ASSERT_TRUE(store.isOwn(
+      *store.find(1, cfg::Provider::kOpenLigaDb, selected.match.id)));
 }
 void test_own_phase_never_exposes_other_competition_single_even_when_unloaded() {
   competition(1);
@@ -140,7 +140,7 @@ void test_special_off_ordinary_own_match_keeps_optional_conference_pin() {
   const auto second =
       context.prepare(entry(Type::kLiveMulti), seq::PageMode::kAutomatic, 1)
           .matches;
-  TEST_ASSERT_TRUE(store.match(first.rows[0]).isOwn());
+  TEST_ASSERT_TRUE(store.isOwn(store.match(first.rows[0])));
   TEST_ASSERT_EQUAL_UINT8(first.rows[0], second.rows[0]);
 }
 void test_one_page_manual_anchor_tracks_the_match_actually_shown_first() {
@@ -240,8 +240,9 @@ void test_table_manual_anchor_uses_actual_clamped_origin_and_reaches_every_row()
   store.beginTable(1);
   for (uint8_t i = 0; i < 8; ++i) {
     football::StoredRow row;
-    row.team = store.team(1, cfg::Provider::kOpenLigaDb, 100 + i, "Club");
-    if (i == 7) row.flags = football::kRowOwn;
+    row.team = store.team(1, cfg::Provider::kOpenLigaDb, i == 7 ? 40 : 100 + i,
+                          "Club");
+    store.selectClub(1, cfg::Provider::kOpenLigaDb, 40, {});
     TEST_ASSERT_TRUE(store.appendRow(row));
   }
   TEST_ASSERT_TRUE(store.commitTable(true));

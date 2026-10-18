@@ -39,7 +39,11 @@ StoredMatch& match(uint8_t competition, uint32_t id, int64_t kickoff,
   m.kickoff = kickoff;
   m.phase = phase;
   m.round = round;
-  if (own) m.flags = kMatchOwn;
+  m.home =
+      store.team(competition, m.provider, own ? 40 : 1000000 + id * 2, "Home");
+  m.away = store.team(competition, m.provider, 1000001 + id * 2, "Away");
+  store.selectClub(competition, m.provider,
+                   competitions.find(competition)->club.team, {seen, 1});
   auto* out = store.upsert(m, {seen, 1});
   TEST_ASSERT_NOT_NULL(out);
   return *out;
@@ -88,7 +92,7 @@ void test_own_special_off_is_an_ordinary_single_without_losing_ownership() {
   const auto selected = sel::select(in);
   TEST_ASSERT_EQUAL(policy::Phase::kOtherGames, selected.phase);
   TEST_ASSERT_EQUAL_UINT32(10, sel::single(in, selected, c).match.id);
-  TEST_ASSERT_TRUE(store.find(1, kProvider, 10)->isOwn());
+  TEST_ASSERT_TRUE(store.isOwn(*store.find(1, kProvider, 10)));
 }
 
 void test_unique_reported_live_beats_prewindow_and_multiple_live_use_club_static() {

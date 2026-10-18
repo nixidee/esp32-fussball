@@ -163,7 +163,7 @@ function imageAllowance() {
     const old = S.editor?.role ? imageRole(S.editor.role).bytes : S.images.items.find(i => i.id === S.editor?.id)?.bytes || 0;
     const library = Math.max(0, S.schema.image_quota - ((S.images.used || 0) - old));
     const free = S.status ? Math.max(0, S.status.fs_total - S.status.fs_used) : 0;
-    return free >= S.schema.image_reserve ? Math.min(library, free, S.schema.image_max) : 0;
+    return free >= S.schema.replacement_workspace ? Math.min(library, free, S.schema.image_max) : 0;
 }
 function jpegBaseline(bytes) {
     if (bytes[0] !== 255 || bytes[1] !== 216)
@@ -235,7 +235,7 @@ function scheduleImage() {
     imageSizeTimer = setTimeout(() => prepareImage().catch(e => {
         if ($('editorError'))
             $('editorError').textContent = e.message;
-    }), 250);
+    }), CLIENT.image_input_debounce_ms);
 }
 function fitImage(fill) {
     if (!ED.bmp)

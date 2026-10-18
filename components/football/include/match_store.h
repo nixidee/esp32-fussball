@@ -31,18 +31,7 @@ using MatchIndex = uint16_t;
 inline constexpr TeamIndex kNoTeam = UINT16_MAX;
 inline constexpr MatchIndex kNoMatch = UINT16_MAX;
 inline constexpr uint8_t kNoIndex = 0xff;
-inline constexpr uint8_t kNoValue = 0xff;
-// Unknown signed table value (goal difference, points).
-inline constexpr int16_t kNoNumber = INT16_MIN;
-
-struct Goals {
-  uint8_t home = kNoValue, away = kNoValue;
-  bool valid() const { return home != kNoValue && away != kNoValue; }
-  bool operator==(const Goals&) const = default;
-};
-
 // Bits of StoredMatch::flags.
-inline constexpr uint8_t kMatchOwn = 0x01;
 inline constexpr uint8_t kMatchEventsTruncated = 0x02;
 // Events were lost to this match's protected event bank (kNoticeEvents
 // stays until no detail match of the competition carries it, OQ-311).
@@ -75,7 +64,6 @@ struct StoredMatch {
   Goals principal, shootout;
   uint8_t flags = 0, estimated = 0;
   uint8_t detail = kNoIndex;  // common detail slot, independent of ownership
-  bool isOwn() const { return (flags & kMatchOwn) != 0; }
 };
 
 struct StoredTeam {
@@ -85,14 +73,10 @@ struct StoredTeam {
   Text<cfg::kTeamShortBytes> short_name;
 };
 
-// Bits of StoredRow::flags.
-inline constexpr uint8_t kRowOwn = 0x01;
-inline constexpr uint8_t kRowPositionEstimated = 0x02;  // list order
-
 struct StoredRow {
   TeamIndex team = kNoTeam;
   uint8_t competition = 0;
-  uint8_t position = kNoValue, played = kNoValue, flags = 0;
+  uint8_t position = kNoValue, played = kNoValue;
   uint8_t group = kNoIndex;  // ordinal within this competition table
   int16_t difference = kNoNumber, points = kNoNumber;
 };
@@ -129,34 +113,14 @@ struct StoredTableGroup {
   uint8_t competition = 0, ordinal = 0, label = kNoIndex;
 };
 struct StoredRound {
-  uint32_t checked_utc = 0;
   uint16_t matches = 0;
   uint8_t competition = 0, number = 0, label = kNoIndex;
   DatasetState state = DatasetState::kUnknown;
 };
 
-// Team of an event relative to its match.
-enum class Side : uint8_t { kUnknown, kHome, kAway };
-
-// Bits of StoredEvent::flags.
-inline constexpr uint8_t kEventRemoved = 0x01;  // withdrawn by the provider
-inline constexpr uint8_t kEventShootout = 0x02;
-// From the detail request (ESPN match summary: substitutions); the detail
-// and the list events each replace only their own events.
-inline constexpr uint8_t kEventDetail = 0x08;
-
-struct StoredEvent {
-  uint32_t identity = 0;
-  uint8_t slot = kNoIndex;  // detail slot holding it, kNoIndex = free
-  EventType type = EventType::kGoal;
-  uint8_t minute = kNoValue, added = kNoValue;
-  Side actor = Side::kUnknown;
-  uint8_t flags = 0;
-  uint8_t ordinal = 0;  // provider order among shootout attempts
-  // Scorer or booked player; for a substitution the player going off, or
-  // both names when the provider does not say who comes on.
-  Text<32> player;
-  Text<32> player_in;  // substitution: the player coming on
+// Only the pool owner adds a slot to the shared event facts.
+struct StoredEvent : EventFacts {
+  uint8_t slot = kNoIndex;
 };
 
 // Bounded events shared by own and ordinary matches; team labels have one
@@ -230,6 +194,11 @@ class MatchStore {
   // banks where capacity permits. No fetch, allocation or source reset.
   void selectClub(uint8_t competition, cfg::Provider provider, uint32_t club,
                   const Clock& clock);
+  // Membership is derived from the current source preference and team keys.
+  // Neither matches nor table rows retain an independent ownership bit.
+  void ownSides(const StoredMatch&, bool& home, bool& away) const;
+  bool isOwn(const StoredMatch&) const;
+  bool isOwn(const StoredRow&) const;
   // Pool index of a round label; kNoIndex for an empty text or a full pool.
   uint8_t label(std::string_view text);
 
@@ -247,7 +216,7 @@ class MatchStore {
   // slot; it does not allocate one automatically. The list stays sorted by
   // kickoff.
   StoredMatch* upsert(const StoredMatch& incoming, const Clock& clock);
-  // Ensures details for this explicit target, without changing its own flag.
+  // Ensures details for this explicit target, without changing club selection.
   // Own targets use their protected nearest-match bank. Ordinary targets use
   // only their separate bank, preferring an older target of the same
   // competition before its farthest target. Ordinary upsert() never allocates
@@ -294,7 +263,7 @@ class MatchStore {
                      int64_t completed_ms, bool complete, Cause cause,
                      uint16_t http = 0);
   void roundResult(uint8_t competition, uint8_t number, uint8_t label,
-                   uint16_t matches, uint32_t checked_utc, bool complete);
+                   uint16_t matches, bool complete);
   // Prune only after a complete authoritative fixture acquisition. The UI
   // result hold remains available beyond this stored union.
   void retain(uint8_t competition, const retention::Selection&, int64_t utc,
@@ -325,7 +294,7 @@ class MatchStore {
   // False if 'match' has no slot.
   bool beginEvents(const StoredMatch& match, bool detail = false,
                    int64_t utc = 0);
-  void addEvent(const StoredEvent& event);
+  void addEvent(const EventFacts& event);
   void endEvents(bool complete = true);
 
   std::size_t matchCount() const { return match_count_; }
@@ -357,6 +326,15 @@ class MatchStore {
   std::size_t teamCount() const;
 
  private:
+  struct SourceStatus {
+    uint32_t club = 0;
+    uint8_t competition = 0;
+    cfg::Provider provider = cfg::kProviderDefault;
+    std::array<DatasetStatus, 3> datasets{};
+  };
+  SourceStatus* source(uint8_t competition);
+  const SourceStatus* source(uint8_t competition) const;
+  bool selected(const SourceStatus&, TeamIndex team) const;
   int matchIndex(uint8_t competition, cfg::Provider provider,
                  uint32_t id) const;
   void removeMatch(std::size_t i);
@@ -366,7 +344,6 @@ class MatchStore {
   std::size_t sortedPosition(const StoredMatch& match) const;
   void dropRows(uint8_t competition);
   void dropGroups(uint8_t competition);
-  void setTableState(uint8_t competition, DatasetState state);
   int takeEvent();
   StoredMatch* detailRow(uint8_t slot);
   void settleEvents(uint8_t competition);
@@ -382,10 +359,6 @@ class MatchStore {
   std::array<StoredRound, cfg::kStoreRounds> rounds_{};
   std::array<StoredTableGroup, cfg::kStoreTableGroups> groups_{};
   std::array<StoredTableGroup, cfg::kStoreTableGroups> stage_groups_{};
-  struct SourceStatus {
-    uint8_t competition = 0;
-    std::array<DatasetStatus, 3> datasets{};
-  };
   std::array<SourceStatus, cfg::kCompetitionMax> sources_{};
   uint8_t round_count_ = 0, group_count_ = 0, staged_groups_ = 0;
   struct Notice {

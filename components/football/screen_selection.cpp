@@ -41,7 +41,7 @@ Window basicWindow(const Input& input, const settings::CompetitionRoute& c,
   if (!belongs(c, m) || input.clock.utc <= 0 || m.phase == Phase::kPostponed ||
       m.phase == Phase::kCancelled || m.phase == Phase::kAbandoned)
     return out;
-  out.own_special = m.isOwn() && ownSpecial(input, c);
+  out.own_special = input.store.isOwn(m) && ownSpecial(input, c);
   const auto before = out.own_special ? input.rules.own_before_min
                                       : input.rules.other_before_min;
   const auto after =
@@ -72,7 +72,7 @@ Window basicWindow(const Input& input, const settings::CompetitionRoute& c,
 
 const settings::CompetitionRoute* ownCompetition(const Input& input,
                                                  const StoredMatch& m) {
-  if (!m.isOwn()) return nullptr;
+  if (!input.store.isOwn(m)) return nullptr;
   const auto* c = input.competitions.find(m.competition);
   return c && belongs(*c, m) && ownSpecial(input, *c) ? c : nullptr;
 }
@@ -144,7 +144,7 @@ Single staticSingle(const Input& input, const settings::CompetitionRoute& c) {
   const StoredMatch* preview = nullptr;
   for (std::size_t i = 0; i < input.store.matchCount(); ++i) {
     const auto& m = input.store.match(i);
-    if (!belongs(c, m) || !m.isOwn()) continue;
+    if (!belongs(c, m) || !input.store.isOwn(m)) continue;
     if (resultHeld(m, input.clock.utc, input.dates) &&
         (!result || m.finished_at > result->finished_at))
       result = &m;

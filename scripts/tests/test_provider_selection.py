@@ -15,16 +15,17 @@ UNIT = r'''
 using namespace football;
 using namespace football::provider;
 struct Input {std::string value;size_t at=0;static int read(void*p){auto&s=*static_cast<Input*>(p);return s.at<s.value.size()?static_cast<unsigned char>(s.value[s.at++]):-1;}};
-struct Rows {std::vector<Selection> selections;std::string encoded;json::Writer writer{{this,[](std::string_view s,void*p){static_cast<Rows*>(p)->encoded+=s;return true;}}};
+struct Rows {std::vector<CompetitionSelection> competitions;std::vector<TeamSelection> teams;size_t count()const{return competitions.size()+teams.size();}std::string encoded;json::Writer writer{{this,[](std::string_view s,void*p){static_cast<Rows*>(p)->encoded+=s;return true;}}};
 OriginalsSink originals{this,[](void*p){return static_cast<Rows*>(p)->writer.object();},[](uint32_t id,void*p){return static_cast<Rows*>(p)->writer.field("id",id);},[](OriginalField f,void*p){auto&w=static_cast<Rows*>(p)->writer;return w.key(f==OriginalField::kName?"name":"short_name")&&w.beginString();},[](std::string_view s,void*p){return static_cast<Rows*>(p)->writer.stringChunk(s);},[](OriginalField,void*p){return static_cast<Rows*>(p)->writer.endString();},[](void*p){return static_cast<Rows*>(p)->writer.end();}};
 };
 ParseResult parse(std::string body,cfg::Provider provider,bool teams,Rows& rows,bool originals=false){
 Input input{std::move(body)};json::Reader reader({&input,Input::read});Sink sink{&rows};
-sink.selection=[](const Selection&s,void*p){static_cast<Rows*>(p)->selections.push_back(s);return true;};
+sink.competition_selection=[](const CompetitionSelection&s,void*p){static_cast<Rows*>(p)->competitions.push_back(s);return true;};
+sink.team_selection=[](const TeamSelection&s,void*p){static_cast<Rows*>(p)->teams.push_back(s);return true;};
 if(originals){rows.writer.array();sink.originals=&rows.originals;}
 auto result=readSelectionResponse(reader,{{provider,"ger.1","2026"},teams?Operation::kTeams:Operation::kCompetitions,0,0,0,0,0,{}},sink);
 if(originals&&result.status==Status::kOk)assert(rows.writer.end()&&rows.writer.finish());return result;}
-void good(std::string body,cfg::Provider provider,bool teams,size_t count){Rows rows;auto result=parse(body,provider,teams,rows);assert(result.status==Status::kOk&&result.document_complete&&rows.selections.size()==count);}
+void good(std::string body,cfg::Provider provider,bool teams,size_t count){Rows rows;auto result=parse(body,provider,teams,rows);assert(result.status==Status::kOk&&result.document_complete&&rows.count()==count);}
 void bad(std::string body,cfg::Provider provider,bool teams){Rows rows;auto result=parse(body,provider,teams,rows);assert(result.status!=Status::kOk&&!result.metadata.metadata_complete);}
 int main(int argc,char**argv){
 SelectionPlan preparation;
@@ -53,12 +54,16 @@ bad(R"({"response":[],"results":1,"errors":[]})",cfg::Provider::kApiFootball,tru
 bad(R"({"response":[],"errors":{"token":"bad"}})",cfg::Provider::kApiFootball,true);
 bad(R"({"response":[],"errors":[],"paging":{"current":1,"total":2}})",cfg::Provider::kApiFootball,true);
 bad(R"({"sports":[{"leagues":[{"teams":[],"slug":"other"}]}]})",cfg::Provider::kEspn,true);
+for(const auto* id:{"0","4294967296","\"abc\"","-1","1.5"})
+ bad(std::string("[{\"teamId\":")+id+",\"teamName\":\"Invalid\"}]",cfg::Provider::kOpenLigaDb,true);
+Rows full_id;auto full=parse(R"([{"teamId":4294967295,"teamName":"Maximum"}])",cfg::Provider::kOpenLigaDb,true,full_id);
+assert(full.status==Status::kOk&&full_id.teams.size()==1&&full_id.teams[0].id==UINT32_MAX);
 std::string longname;for(int i=0;i<10000;++i)longname+="ä😀";
 Rows originals;auto result=parse("[{\"shortName\":null,\"teamName\":\""+longname+"\",\"teamId\":40}]",cfg::Provider::kOpenLigaDb,true,originals,true);
 assert(result.status==Status::kOk&&originals.encoded=="[{\"name\":\""+longname+"\",\"id\":40}]");
 bad("[{\"teamId\":40,\"teamName\":\""+longname+"\\u0000\"}]",cfg::Provider::kOpenLigaDb,true);
 Rows empty;result=parse(R"([{"teamName":"","teamId":40,"shortName":""}])",cfg::Provider::kOpenLigaDb,true,empty,true);assert(result.status==Status::kOk&&empty.encoded.find("\"short_name\":\"\"")!=std::string::npos);
-for(int i=1;i<argc;++i){std::ifstream file(argv[i]);assert(file);std::string body{std::istreambuf_iterator<char>(file),{}};Rows rows;auto result=parse(body,cfg::Provider::kEspn,true,rows,true);assert(result.status==Status::kOk&&!rows.selections.empty());std::cout<<argv[i]<<": "<<body.size()<<" bytes, "<<rows.selections.size()<<" teams, full originals PASS\n";}
+for(int i=1;i<argc;++i){std::ifstream file(argv[i]);assert(file);std::string body{std::istreambuf_iterator<char>(file),{}};Rows rows;auto result=parse(body,cfg::Provider::kEspn,true,rows,true);assert(result.status==Status::kOk&&!rows.teams.empty());std::cout<<argv[i]<<": "<<body.size()<<" bytes, "<<rows.count()<<" teams, full originals PASS\n";}
 std::cout<<"typed selection/full-original callbacks: four providers, complete empty, duplicates, metadata, suffix, 60KiB UTF8, NUL and null fields PASS\n";
 }
 '''
@@ -70,7 +75,7 @@ with tempfile.TemporaryDirectory(prefix='provider-selection-') as folder:
     subprocess.run(['clang++', '-std=c++20', '-Wall', '-Wextra', '-Werror', '-g',
         '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
         '-I'+str(ROOT/'include'), '-I'+str(ROOT/'components/football/include'),
-        '-I'+str(ROOT/'components/json/include'), '-I'+str(ROOT/'components/settings/include'), str(unit),
+        '-I'+str(ROOT/'components/json/include'), '-I'+str(ROOT/'components/timekeeping/include'), '-I'+str(ROOT/'components/settings/include'), str(unit),
         str(ROOT/'components/football/provider_selection.cpp'),
         str(ROOT/'components/football/provider_adapter.cpp'),
         str(ROOT/'components/json/json_stream.cpp'), '-o',str(binary)],check=True)

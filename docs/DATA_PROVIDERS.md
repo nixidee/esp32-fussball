@@ -617,3 +617,24 @@ ESPN summary events are supported; this integration maps no API-Football or
 football-data.org events, which are explicitly Unavailable. Real keyed-provider
 response/state acceptance and physical heap/stack reserves remain unverified;
 controlled replays and Demo do not make incomplete sources complete.
+
+
+### Typed response facts
+
+Adapters emit compact provider values rather than internal store records. On C6,
+match facts occupy20B (fixture input132B), table values6B (row input44B) and
+shared event facts76B (event input80B). Only MatchStore adds directory/detail/pool
+indices and observation history; canonical match/table/event capacities stay
+unchanged. Parser event workspace is7,680B; the independently lazy response-detail
+buffer is7,296B. When both coexist their requested payload is14,976B, excluding
+allocator overhead, TLS and call stacks. This is allocation accounting, not a
+measured device heap peak. Metadata and empty responses allocate no staging. The first actual event or
+buffered table group allocates one workspace; only its active union member is
+initialized. A denied allocation reports memory failure and cannot complete a
+scope or replace a previous table. Anonymous-event hashing uses no staging.
+
+Setup list adapters emit typed competition or team callbacks. Team identifiers
+are checked positive uint32 at the provider token boundary and stay numeric
+through the worker, application reader, HTTP and client draft. Original-name
+streaming receives that same ID directly. Competition IDs/season text retain
+their provider-specific validation; no full list/document tree is retained.

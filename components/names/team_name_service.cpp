@@ -20,12 +20,8 @@ files::State active;
 files::Status active_status = files::Status::kMissing;
 const files::Context& context() {
   static constexpr files::Context value{
-      cfg::kFsBasePath, nullptr, [](void*, files::Usage& out) {
-        ::files::Usage usage{};
-        if (::files::usage(usage) != ESP_OK) return false;
-        out = {usage.total_bytes, usage.used_bytes};
-        return true;
-      }};
+      cfg::kFsBasePath, nullptr,
+      [](void*, files::Usage& out) { return ::files::usage(out) == ESP_OK; }};
   return value;
 }
 esp_err_t error(files::Status status) {
@@ -48,18 +44,6 @@ esp_err_t synchronize() {
     active_status = files::load(context(), reference, active);
   return error(active_status);
 }
-class ConfigGuard {
- public:
-  explicit ConfigGuard(uint32_t revision)
-      : error_(settings::beginNamesPublication(revision)) {}
-  ~ConfigGuard() {
-    if (error_ == ESP_OK) settings::endNamesPublication();
-  }
-  esp_err_t error() const { return error_; }
-
- private:
-  esp_err_t error_;
-};
 }  // namespace
 esp_err_t Lookup::open() {
   if (!close()) return ESP_FAIL;
@@ -70,8 +54,10 @@ esp_err_t Lookup::open() {
   return error(status);
 }
 esp_err_t resolveVisible(Targets& targets, uint8_t language,
-                         VisibleCache& cache) {
-  const auto reference = settings::namesReference();
+                         uint32_t config_revision, VisibleCache& cache) {
+  uint32_t revision;
+  const auto reference = settings::namesReference(&revision);
+  if (revision != config_revision) return ESP_ERR_INVALID_STATE;
   if (cache.reference != reference || cache.language != language) {
     cache.count = 0;
     cache.reference = reference;
@@ -106,13 +92,17 @@ esp_err_t resolveVisible(Targets& targets, uint8_t language,
     else
       missing = true;
   }
-  if (!missing) return ESP_OK;
+  if (!missing)
+    return settings::generation() == config_revision ? ESP_OK
+                                                     : ESP_ERR_INVALID_STATE;
   network::HeavyGuard guard;
   if (!guard) return ESP_ERR_NOT_FINISHED;
   Lookup lookup;
   const auto opened = lookup.open();
   if (opened != ESP_OK) return opened;
-  if (settings::namesReference() != reference) return ESP_ERR_INVALID_STATE;
+  if (settings::namesReference(&revision) != reference ||
+      revision != config_revision)
+    return ESP_ERR_INVALID_STATE;
   // Keep only the current visible projection, bounding state independently of
   // every visited page or competition. Existing cache hits were already copied.
   cache.count = 0;
@@ -132,7 +122,8 @@ esp_err_t resolveVisible(Targets& targets, uint8_t language,
     cache.count = 0;
     return ESP_FAIL;
   }
-  return ESP_OK;
+  return settings::generation() == config_revision ? ESP_OK
+                                                   : ESP_ERR_INVALID_STATE;
 }
 namespace {
 bool storedString(::json::Writer& writer, const store::Reader& reader,
@@ -306,34 +297,23 @@ esp_err_t begin(files::Candidate& candidate, bool replace_collection) {
   if (checked != ESP_OK && !replace_collection) return checked;
   return error(candidate.begin(context(), active));
 }
-esp_err_t applyConfiguration(settings::AppConfig& desired,
-                             uint32_t expected_revision,
-                             files::Candidate* changed_names,
-                             files::Receipt* result,
-                             settings::Violation* violation,
-                             settings::screen_policy::Error* policy_error) {
-  if (result) *result = {};
-  // Settings-only applies neither open LittleFS nor rewrite a names version.
-  if (!changed_names)
-    return settings::apply(desired, expected_revision, violation, policy_error);
-  ConfigGuard guard(expected_revision);
-  if (guard.error() != ESP_OK) return guard.error();
+esp_err_t prepareChange(files::Candidate& candidate,
+                        settings::NamesChange& change) {
+  change = {};
   if (settings::namesReference() != active.reference ||
-      changed_names->expectedReference() != active.reference)
+      candidate.expectedReference() != active.reference)
     return ESP_ERR_INVALID_STATE;
-  desired.names = changed_names->reference();
-  if (!desired.names.slot) return ESP_ERR_INVALID_ARG;
-  const auto saved = settings::applyLocked(desired, expected_revision,
-                                           violation, policy_error);
-  if (saved != ESP_OK) {
-    if (settings::origin() == settings::Origin::kOutcomeUnknown)
-      changed_names->preserve();
-    return saved;
-  }
-  const auto receipt = changed_names->activate(active);
-  active_status = receipt.status;
-  if (result) *result = receipt;
-  return error(receipt.status);
+  const auto reference = candidate.reference();
+  if (!reference.slot) return ESP_ERR_INVALID_ARG;
+  change = {active.reference, reference, &candidate,
+            [](void* raw) {
+              const auto receipt =
+                  static_cast<files::Candidate*>(raw)->activate(active);
+              active_status = receipt.status;
+              return error(receipt.status);
+            },
+            [](void* raw) { static_cast<files::Candidate*>(raw)->preserve(); }};
+  return ESP_OK;
 }
 void invalidate() {
   active = {};

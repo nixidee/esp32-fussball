@@ -19,7 +19,7 @@ namespace settings {
 
 // Initialises NVS and loads the stored record. Call once at boot before any
 // other function here. Never fails: without a usable record the initial
-// values apply (see save() for when saving is refused). 'limits' are the
+// values apply (see apply() for when writing is refused). 'limits' are the
 // maxima of the display in use (hardware profile); stored values above them
 // are clamped on load and initial values stay within them.
 void init(const Limits& limits = {});
@@ -27,31 +27,32 @@ void init(const Limits& limits = {});
 // The limits given to init(); validation of every save uses them.
 const Limits& limits();
 
-// Copy of current general settings under a short lock. The model/codec size
-// is measured in scoped host/C6 checks. If given, out_generation receives the
-// generation of that same snapshot under the same lock.
-Model current(uint32_t* out_generation = nullptr);
-
 // Coherent narrow snapshots; no Model-sized temporary in service readers.
 NetworkSettings networkSettings();
 DiagnosticSettings diagnosticSettings();
-WebSettings webSettings();
+WebSettings webSettings(uint32_t* out_revision = nullptr);
 // Reference to the immutable configured zone; remains valid across Apply.
 const cfg::TimeZone& clockZone();
 
 // Coherent copy, including durable revision/names reference/last apply ID.
 void snapshot(AppConfig& out);
 NamesRef namesReference(uint32_t* out_revision = nullptr);
+// Request-local lease prepared by the names owner under heavy admission.
+// Callbacks perform no I/O and never enter a config writer. The config owner
+// commits the exact reference, activates names, then publishes the revision.
+struct NamesChange {
+  NamesRef expected, desired;
+  void* context = nullptr;
+  esp_err_t (*activate)(void*) = nullptr;
+  void (*preserve)(void*) = nullptr;
+};
 // Candidate is caller-owned scratch; its revision is assigned on admission.
 // Publication occurs only after verified persistence. An uncertain mutation
 // keeps the old RAM snapshot and refuses later writes until reboot/recovery.
 esp_err_t apply(AppConfig& candidate, uint32_t expected_revision,
                 Violation* violation = nullptr,
-                screen_policy::Error* policy_error = nullptr);
-// Caller owns beginNamesPublication()/endNamesPublication(). Never relocks.
-esp_err_t applyLocked(AppConfig& candidate, uint32_t expected_revision,
-                      Violation* violation = nullptr,
-                      screen_policy::Error* policy_error = nullptr);
+                screen_policy::Error* policy_error = nullptr,
+                const NamesChange* names = nullptr);
 
 // Desired library ids under the same short model lock, without a Model copy.
 // File presence and screen enabled state do not release a desired id.
@@ -101,17 +102,6 @@ Origin origin();
 // "rejected", "damaged", "unreadable", "no_storage").
 const char* originName(Origin origin) noexcept;
 
-// Transitional general-section setter. It commits a complete AppConfig,
-// preserving other sections and last_apply_id. Provider relationships are
-// always validated; check_access is retained only for existing callers.
-// ESP_ERR_INVALID_ARG: a value violates its limits, nothing stored; *violation
-// (if given) names the first offending field.
-// ESP_ERR_INVALID_STATE: NVS unusable, or the stored record could not be
-// read at boot (only reset() may replace it).
-// Other errors come from NVS or allocation; the current settings stay.
-esp_err_t save(const Model& model, Violation* violation = nullptr,
-               bool check_access = false);
-
 // Competition projection. Readers copy one entry or the complete section
 // into caller-owned storage; no independently persistent competition owner.
 std::size_t competitionCount();
@@ -145,12 +135,6 @@ void footballSettings(
                            bool saved_competitions) = nullptr);
 Origin screenPolicyOrigin();
 
-// Transitional policy setter: validates global limits and commits a complete
-// AppConfig while preserving competition-attached preferences.
-esp_err_t saveScreenPolicy(const screen_policy::Policy& candidate,
-                           screen_policy::Error* error = nullptr,
-                           const uint32_t* expected_generation = nullptr);
-
 // Immediate request-admission gate, without copying Model/Policy or locking.
 // Explicit setup-wizard queries are admitted separately by their caller.
 bool footballPaused();
@@ -169,20 +153,6 @@ esp_err_t beginFootballSend(bool explicit_setup,
                             uint32_t expected_data_generation,
                             uint32_t expected_settings_generation);
 void endFootballSend();
-
-// Names activation holds the existing settings writer lock from the final
-// snapshot check through durable activation and coherent label publication.
-// No new lock, task or saved setting. Success requires endNamesPublication().
-esp_err_t beginNamesPublication(uint32_t expected_settings_generation);
-void endNamesPublication();
-
-// Gives new entries (id 0) an id, validates the list,
-// requires every active competition to use enabled providers, stores the
-// record and makes it current. On success 'candidate' holds the saved list
-// with its ids. Errors as save(); ESP_ERR_INVALID_STATE also if the stored
-// application record could not be read or has an uncertain write outcome.
-esp_err_t saveCompetitions(Competitions& candidate,
-                           Violation* violation = nullptr);
 
 // Erases the settings namespace; the initial values
 // become current.

@@ -3,10 +3,12 @@
 #include <algorithm>
 #include <new>
 
+#include "civil_time.h"
+
 namespace football::demo {
 namespace {
 constexpr auto kProvider = cfg::Provider::kEspn;
-constexpr int64_t kDay = 86400;
+constexpr int64_t kDay = timekeeping::kSecondsPerDay;
 struct Team {
   uint32_t id;
   const char* name;
@@ -102,6 +104,7 @@ StoredMatch* put(MatchStore& store,
                  const Fixture& fixture, Clock clock, int64_t kickoff,
                  Phase phase, uint8_t minute = kNoValue, Goals score = {},
                  uint8_t round = 6, bool flash = false, bool details = true) {
+  store.selectClub(competition.id, kProvider, competition.club.team, clock);
   StoredMatch row;
   row.id = fixture.id;
   row.competition = competition.id;
@@ -115,9 +118,6 @@ StoredMatch* put(MatchStore& store,
                         fixture.home.name, fixture.home.short_name);
   row.away = store.team(competition.id, kProvider, fixture.away.id,
                         fixture.away.name, fixture.away.short_name);
-  const auto club = competition.club.team;
-  if (club == fixture.home.id || club == fixture.away.id)
-    row.flags |= kMatchOwn;
   if (running(phase) || phase == Phase::kSuspended)
     row.first_live_observed_utc = kKickoff;
   if (phase == Phase::kFinished) row.finished_at = row.kickoff + 95 * 60;
@@ -149,6 +149,7 @@ void events(MatchStore& store, const StoredMatch& match, const Event* input,
   store.endEvents(true);
 }
 void table(MatchStore& store, const settings::CompetitionRoute& competition) {
+  store.selectClub(competition.id, kProvider, competition.club.team, {});
   store.beginTable(competition.id);
   for (unsigned i = 0; i < std::size(kConference); ++i) {
     StoredRow row;
@@ -162,7 +163,6 @@ void table(MatchStore& store, const settings::CompetitionRoute& competition) {
     row.played = 6;
     row.points = static_cast<int16_t>(15 - i * 2);
     row.difference = static_cast<int16_t>(6 - i * 2);
-    if (competition.club.team == team.id) row.flags = kRowOwn;
     store.appendRow(row);
   }
   store.commitTable(true);
@@ -310,12 +310,13 @@ Clock apply(MatchStore& store, const settings::CompetitionRoutes& routes,
     return {};
   Clock clock{kKickoff, realtime_mono_s};
   if (scenario == Scenario::kOwn) {
-    constexpr int32_t offsets[]{-900,    7 * 60,  21 * 60,  45 * 60, 81 * 60,
-                                82 * 60, 85 * 60, 100 * 60, 86400};
+    constexpr int32_t offsets[]{-900,    7 * 60,   21 * 60,
+                                45 * 60, 81 * 60,  82 * 60,
+                                85 * 60, 100 * 60, timekeeping::kSecondsPerDay};
     clock.utc += offsets[step];
   } else if (scenario == Scenario::kOrdinary) {
     constexpr int32_t offsets[]{-900,    30 * 60,  31 * 60,
-                                32 * 60, 100 * 60, 86400};
+                                32 * 60, 100 * 60, timekeeping::kSecondsPerDay};
     clock.utc += offsets[step];
   } else if (scenario == Scenario::kConference)
     clock.utc += step == 0 ? -900 : step == 1 ? 30 * 60 : 100 * 60;

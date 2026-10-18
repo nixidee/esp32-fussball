@@ -3,6 +3,7 @@
 #include <cstddef>
 
 namespace files {
+int openRead(const char* path);
 bool readExact(int fd, std::size_t offset, void* bytes, std::size_t count);
 bool writeExact(int fd, std::size_t offset, const void* bytes,
                 std::size_t count);

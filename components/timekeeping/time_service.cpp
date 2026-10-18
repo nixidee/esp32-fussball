@@ -3,6 +3,7 @@
 #include <cstdlib>
 
 #include "app_config.h"
+#include "civil_time.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "event_bus.h"
@@ -172,8 +173,9 @@ int32_t localOffset(time_t utc) {
   const int64_t days = daysFromCivil(local.tm_year + 1900,
                                      static_cast<unsigned>(local.tm_mon + 1),
                                      static_cast<unsigned>(local.tm_mday));
-  const int64_t as_utc =
-      days * 86400 + local.tm_hour * 3600 + local.tm_min * 60 + local.tm_sec;
+  const int64_t as_utc = days * timekeeping::kSecondsPerDay +
+                         local.tm_hour * 3600 + local.tm_min * 60 +
+                         local.tm_sec;
   return static_cast<int32_t>(as_utc - utc);
 }
 

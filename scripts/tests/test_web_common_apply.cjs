@@ -2,16 +2,17 @@
 // Actual client Apply/reconciliation functions; synthetic serialized HTTP.
 // This proves response-loss and draft behavior, not browser/device acceptance.
 const {readWebSource, productionFunctions} = require('./web_source.cjs');
+const firmwareSchema = require('./web_config_harness.cjs').fixture().schema;
 const vm = require('node:vm'), assert = require('node:assert/strict');
 const {script} = readWebSource();
-const functions = productionFunctions(script, ['secretMode','payload','modelFromConfig',
+const functions = productionFunctions(script, ['validClubId','secretMode','payload','modelFromConfig',
     'applicationPayload','applyField','sameObject','mergeValues','acceptApply',
     'saveFailure','readModel','verifySaved','writeModel','mergeBaseline',
     'expandNamesWire','cloneNamesCollection','packAdoptedNames','nameProviders','adoptedPrefix','adoptedShortPrefix','validateAdoptedNames','namesAdoptionChanges','keepNamesDraft','originalClubMatch','adoptOriginalName']);
 const copy = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 let writes, mode, wire;
 class ApiError extends Error { constructor(status, data) { super(data?.code || status); this.code = data?.code || status; this.status = typeof status === 'number' ? status : undefined; } }
-const context = vm.createContext({console, TextEncoder, TextDecoder, Uint8Array, Set,
+const context = vm.createContext({firmwareSchema,console, TextEncoder, TextDecoder, Uint8Array, Set,
     bytes: value=>new TextEncoder().encode(value).length, crypto: require('node:crypto').webcrypto, ApiError, JSON,
     prepareScreenModel: m => m, competitionPayload: copy,
     screenPayload: m => copy(m.screen_policy), t: x => x, tf:(x,v)=>x.replace('%',v),
@@ -27,7 +28,7 @@ const context = vm.createContext({console, TextEncoder, TextDecoder, Uint8Array,
         if(mode==='lost')throw Error('lost response');
         return copy(wire);
     }});
-vm.runInContext(`const S = {schema:{config_version:1,max_apply_body:200000,short_name_max:3,names_name_max:26,names_key_max:63,names_format:'football-team-names',names_source_version:1,names_wire_version:2,names_file_bytes:16384,provider_keys:['openligadb','api-football','espn','football-data']}};
+vm.runInContext(`const S = {schema:{...firmwareSchema,config_version:1,max_apply_body:200000,short_name_max:3,names_name_max:26,names_key_max:63,names_format:'football-team-names',names_source_version:1,names_wire_version:2,names_file_bytes:16384,provider_keys:['openligadb','api-football','espn','football-data']}};
 const SECRETS=['admin_password'];const NAME_PROVIDERS=['openligadb','api-football','espn','football-data'];
 const PROVIDERS=NAME_PROVIDERS;const clone=x=>x===undefined?undefined:JSON.parse(JSON.stringify(x));
 ${functions}

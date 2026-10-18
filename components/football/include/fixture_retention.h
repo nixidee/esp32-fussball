@@ -1,4 +1,5 @@
-// A complete-season scan retains only round summaries and four own identities.
+// A complete-season scan retains round summaries and the union of each
+// configured club's previous and next three fixtures, with unique match IDs.
 // The next independently admitted request stores the selected union. No match
 // payload, team catalogue or provider document is buffered here.
 #pragma once
@@ -7,8 +8,10 @@
 #include <array>
 #include <cstdint>
 #include <new>
+#include <span>
 #include <string_view>
 
+#include "civil_time.h"
 #include "provider_adapter.h"
 
 namespace football::retention {
@@ -31,7 +34,7 @@ struct Selection {
     std::array<RoundKey, cfg::kRetainedRounds> rounds;
     Calendar calendar_data;
   };
-  std::array<uint32_t, cfg::kRetainedOwnFixtures> own{};
+  std::array<uint32_t, cfg::kRetainedClubFixtures> own{};
   std::array<uint16_t, cfg::kRetainedRounds> expected{};
   uint8_t count = 0;
   bool calendar = false;
@@ -49,7 +52,8 @@ struct Selection {
       return true;
     if (!calendar) return roundIndex(round, label) >= 0;
     for (uint8_t i = 0; i < count; ++i)
-      if (kickoff && kickoff / 86400 == calendar_data.days[i] / 86400)
+      if (kickoff && kickoff / timekeeping::kSecondsPerDay ==
+                         calendar_data.days[i] / timekeeping::kSecondsPerDay)
         return true;
     return false;
   }
@@ -67,6 +71,8 @@ class Index {
  public:
   Index(uint32_t club, int64_t utc, DateContext dates = {},
         bool calendar = false);
+  Index(std::span<const uint32_t> clubs, int64_t utc, DateContext dates = {},
+        bool calendar = false);
   bool observe(const provider::Fixture&);
   bool observeDay(uint32_t);
   bool observeRound(const provider::CalendarRound&);
@@ -83,6 +89,10 @@ class Index {
   struct Own {
     uint32_t id = 0, kickoff = 0;
   };
+  struct Club {
+    uint32_t id = 0;
+    std::array<Own, cfg::kRetainedOwnFixtures> fixtures{};
+  };
   struct Calendar {
     std::array<uint32_t, cfg::kProviderCalendarDays> days{};
     // Two most recent past stages and two first not-yet-passed stages.
@@ -94,10 +104,9 @@ class Index {
     std::array<Round, cfg::kStoreRounds> rounds_;
     Calendar calendar_;
   };
-  std::array<Own, cfg::kRetainedOwnFixtures> own_{};
+  std::array<Club, cfg::kCompetitionMax> clubs_{};
   DateContext dates_;
   int64_t utc_;
-  uint32_t club_;
   uint8_t count_ = 0;
   bool complete_ = true, rounds_complete_ = true;
   bool use_calendar_ = false;

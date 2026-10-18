@@ -198,7 +198,7 @@ void test_openliga_match_fields() {
   TEST_ASSERT_EQUAL_UINT32(m.kickoff + cfg::kExpectedMatchMinutes * 60,
                            m.finished_at);
   TEST_ASSERT_TRUE(m.estimated & football::kEstimatedFinish);
-  TEST_ASSERT_FALSE(m.isOwn());
+  TEST_ASSERT_FALSE(store.isOwn(m));
   TEST_ASSERT_EQUAL_UINT8(kNoIndex, m.detail);
   TEST_ASSERT_EQUAL_UINT32(0, m.score_changed);
   // Not finished, kickoff ahead: estimated as scheduled.
@@ -213,7 +213,7 @@ void test_openliga_match_fields() {
 void test_openliga_own_matches_get_slots_names_and_goals() {
   loadBundesliga(7);  // Borussia Dortmund
   const auto& m = found(kBundesliga, cfg::Provider::kOpenLigaDb, 83192);
-  TEST_ASSERT_TRUE(m.isOwn());
+  TEST_ASSERT_TRUE(store.isOwn(m));
   const auto& own = store.detailAt(m.detail);
   TEST_ASSERT_EQUAL_UINT32(83192, own.match);
   TEST_ASSERT_EQUAL_STRING("Borussia Dortmund", view::teamName(store, m, true));
@@ -230,7 +230,7 @@ void test_openliga_own_matches_get_slots_names_and_goals() {
   TEST_ASSERT_EQUAL(Side::kAway, last.actor);
   // The next own match has a slot, no events yet; others have none.
   const auto& next = found(kBundesliga, cfg::Provider::kOpenLigaDb, 83204);
-  TEST_ASSERT_TRUE(next.isOwn());
+  TEST_ASSERT_TRUE(store.isOwn(next));
   TEST_ASSERT_NOT_EQUAL(m.detail, next.detail);
   TEST_ASSERT_EQUAL_UINT8(0, store.detailAt(next.detail).event_count);
   TEST_ASSERT_EQUAL_STRING("1. FC Union Berlin",
@@ -309,14 +309,13 @@ void test_openliga_table_with_estimated_positions() {
   TEST_ASSERT_EQUAL_UINT8(kBundesliga, top.competition);
   TEST_ASSERT_TRUE(teamName(top.team) == "SC Freiburg");
   TEST_ASSERT_EQUAL_UINT8(1, top.position);
-  TEST_ASSERT_TRUE(top.flags & football::kRowPositionEstimated);
   TEST_ASSERT_EQUAL_INT16(13, top.points);
   TEST_ASSERT_EQUAL_INT16(10, top.difference);
   TEST_ASSERT_EQUAL_UINT8(5, top.played);
-  TEST_ASSERT_FALSE(top.flags & football::kRowOwn);
+  TEST_ASSERT_FALSE(store.isOwn(top));
   const auto& dortmund = store.row(1);
   TEST_ASSERT_TRUE(teamName(dortmund.team) == "Borussia Dortmund");
-  TEST_ASSERT_TRUE(dortmund.flags & football::kRowOwn);
+  TEST_ASSERT_TRUE(store.isOwn(dortmund));
   TEST_ASSERT_EQUAL_UINT8(2, dortmund.position);
   TEST_ASSERT_EQUAL_INT16(-11, store.row(17).difference);
   TEST_ASSERT_EQUAL_UINT8(18, store.row(17).position);
@@ -432,7 +431,7 @@ void test_espn_day_finished_match_and_own_events() {
   TEST_ASSERT_EQUAL_UINT32(utc("2026-10-10T13:30:00Z"), m.kickoff);
   TEST_ASSERT_TRUE(teamName(m.home) == "FC Augsburg");
   TEST_ASSERT_TRUE(teamName(m.away) == "Bayern Munich");
-  TEST_ASSERT_TRUE(m.isOwn());
+  TEST_ASSERT_TRUE(store.isOwn(m));
   const auto& own = store.detailAt(m.detail);
   TEST_ASSERT_EQUAL_STRING("FC Augsburg", view::teamName(store, m, true));
   TEST_ASSERT_EQUAL_STRING("Bayern Munich", view::teamName(store, m, false));
@@ -450,7 +449,7 @@ void test_espn_day_finished_match_and_own_events() {
   TEST_ASSERT_EQUAL_STRING("Ismael Saibari", equaliser.player.data);
   TEST_ASSERT_EQUAL(Side::kAway, equaliser.actor);
   const auto& other = found(kEspnLeague, cfg::Provider::kEspn, 401884775);
-  TEST_ASSERT_FALSE(other.isOwn());
+  TEST_ASSERT_FALSE(store.isOwn(other));
   assertGoals(1, 0, other.principal);
 }
 
@@ -498,8 +497,7 @@ void test_espn_table_reported_positions() {
   const auto& top = store.row(0);
   TEST_ASSERT_TRUE(teamName(top.team) == "SC Freiburg");
   TEST_ASSERT_EQUAL_UINT8(1, top.position);
-  TEST_ASSERT_FALSE(top.flags & football::kRowPositionEstimated);
-  TEST_ASSERT_TRUE(top.flags & football::kRowOwn);
+  TEST_ASSERT_TRUE(store.isOwn(top));
   TEST_ASSERT_EQUAL_INT16(13, top.points);
   TEST_ASSERT_EQUAL_UINT8(5, top.played);
   TEST_ASSERT_EQUAL_INT16(10, top.difference);
@@ -544,7 +542,8 @@ void test_match_reported_running_again_drops_the_final_whistle() {
 
 void test_events_update_in_place_and_mark_removals_once() {
   auto m = synthetic(kBundesliga, 1, utc("2026-10-14T18:30:00Z"));
-  m.flags |= football::kMatchOwn;
+  m.home = store.team(m.competition, m.provider, UINT32_MAX, "Own club");
+  store.selectClub(m.competition, m.provider, UINT32_MAX, {});
   const Clock clock{football::parseUtc("2026-10-14T19:00:00Z"), 1};
   const auto* stored = store.upsert(m, clock);
   TEST_ASSERT_NOT_NULL(stored);
@@ -580,7 +579,8 @@ void test_events_update_in_place_and_mark_removals_once() {
 
 void test_broken_event_stream_keeps_previous_events() {
   auto m = synthetic(kBundesliga, 1, utc("2026-10-14T18:30:00Z"));
-  m.flags |= football::kMatchOwn;
+  m.home = store.team(m.competition, m.provider, UINT32_MAX, "Own club");
+  store.selectClub(m.competition, m.provider, UINT32_MAX, {});
   const Clock clock{football::parseUtc("2026-10-14T19:00:00Z"), 1};
   const auto* stored = store.upsert(m, clock);
   TEST_ASSERT_TRUE(store.beginEvents(*stored));
@@ -601,7 +601,8 @@ void test_broken_event_stream_keeps_previous_events() {
 
 void test_more_events_than_a_list_keep_the_latest() {
   auto m = synthetic(kBundesliga, 1, utc("2026-10-14T18:30:00Z"));
-  m.flags |= football::kMatchOwn;
+  m.home = store.team(m.competition, m.provider, UINT32_MAX, "Own club");
+  store.selectClub(m.competition, m.provider, UINT32_MAX, {});
   const auto* stored =
       store.upsert(m, {football::parseUtc("2026-10-14T20:00:00Z"), 1});
   TEST_ASSERT_TRUE(store.beginEvents(*stored));
@@ -623,7 +624,8 @@ void test_full_event_pool_gives_way_to_the_nearer_own_match() {
   };
   for (uint32_t k = 0; k < 4; ++k) {
     auto m = synthetic(kBundesliga, 10 + k, now - (k + 1) * 86400);
-    m.flags |= football::kMatchOwn;
+    m.home = store.team(m.competition, m.provider, UINT32_MAX, "Own club");
+    store.selectClub(m.competition, m.provider, UINT32_MAX, {});
     store.upsert(m, clock);
     TEST_ASSERT_TRUE(store.beginEvents(own(10 + k), false, now));
     for (uint32_t i = 1; i <= cfg::kMatchEvents; ++i)
@@ -633,7 +635,8 @@ void test_full_event_pool_gives_way_to_the_nearer_own_match() {
   TEST_ASSERT_EQUAL(cfg::kStoreOwnEvents, 4 * cfg::kMatchEvents);
   // A match farther away than all of them takes nothing.
   auto far = synthetic(kBundesliga, 20, now - 6 * 86400);
-  far.flags |= football::kMatchOwn;
+  far.home = store.team(far.competition, far.provider, UINT32_MAX, "Own club");
+  store.selectClub(far.competition, far.provider, UINT32_MAX, {});
   store.upsert(far, clock);
   TEST_ASSERT_TRUE(store.beginEvents(own(20), false, now));
   store.addEvent(goal(900, 5, "F"));
@@ -643,7 +646,9 @@ void test_full_event_pool_gives_way_to_the_nearer_own_match() {
                           store.detailAt(own(13).detail).event_count);
   // The live own match gets its goals from the farthest match's oldest.
   auto live = synthetic(kBundesliga, 30, now - 1800);
-  live.flags |= football::kMatchOwn;
+  live.home =
+      store.team(live.competition, live.provider, UINT32_MAX, "Own club");
+  store.selectClub(live.competition, live.provider, UINT32_MAX, {});
   live.phase = Phase::kLive;
   store.upsert(live, clock);
   TEST_ASSERT_TRUE(store.beginEvents(own(30), false, now));
@@ -685,7 +690,8 @@ void test_full_store_evicts_the_farthest_other_match() {
   TEST_ASSERT_EQUAL_UINT32(9001, store.match(0).id);
   // An own match always fits.
   auto own = synthetic(kBundesliga, 9002, base + 500 * 3600);
-  own.flags |= football::kMatchOwn;
+  own.home = store.team(own.competition, own.provider, UINT32_MAX, "Own club");
+  store.selectClub(own.competition, own.provider, UINT32_MAX, {});
   TEST_ASSERT_NOT_NULL(store.upsert(own, clock));
   TEST_ASSERT_NOT_NULL(
       store.find(kBundesliga, cfg::Provider::kOpenLigaDb, 9002));
@@ -712,7 +718,7 @@ void test_api_football_sample() {
   assertGoals(1, 2, m.principal);
   TEST_ASSERT_EQUAL_STRING("Regular Season - 8", store.labelAt(m.label).data);
   TEST_ASSERT_TRUE(teamName(m.home) == "Manchester United");
-  TEST_ASSERT_TRUE(m.isOwn());
+  TEST_ASSERT_TRUE(store.isOwn(m));
   const char* standings = R"JSON({"response":[{"league":{"standings":[[
     {"rank":1,"team":{"id":40,"name":"Liverpool"},"points":19,"goalsDiff":11,
      "all":{"played":7,"win":6,"draw":1,"lose":0,
@@ -722,7 +728,7 @@ void test_api_football_sample() {
   TEST_ASSERT_EQUAL_INT16(19, store.row(0).points);
   TEST_ASSERT_EQUAL_UINT8(7, store.row(0).played);
   TEST_ASSERT_EQUAL_INT16(11, store.row(0).difference);
-  TEST_ASSERT_TRUE(store.row(0).flags & football::kRowOwn);
+  TEST_ASSERT_TRUE(store.isOwn(store.row(0)));
 }
 
 void test_football_data_sample() {
@@ -808,7 +814,8 @@ const StoredEvent& eventWith(const StoredMatch& m, uint32_t identity) {
 // the list events, they give way when the slot is full.
 void test_detail_events_keep_their_origin_and_give_way() {
   auto m = synthetic(kBundesliga, 1, utc("2026-10-14T18:30:00Z"));
-  m.flags |= football::kMatchOwn;
+  m.home = store.team(m.competition, m.provider, UINT32_MAX, "Own club");
+  store.selectClub(m.competition, m.provider, UINT32_MAX, {});
   const Clock clock{football::parseUtc("2026-10-14T19:00:00Z"), 1};
   const auto* stored = store.upsert(m, clock);
   TEST_ASSERT_TRUE(store.beginEvents(*stored));
@@ -905,7 +912,8 @@ void test_events_notice_clears_when_no_own_match_misses_events() {
   };
   for (uint32_t k = 0; k < 4; ++k) {
     auto m = synthetic(kBundesliga, 10 + k, now - k * 3600);
-    m.flags |= football::kMatchOwn;
+    m.home = store.team(m.competition, m.provider, UINT32_MAX, "Own club");
+    store.selectClub(m.competition, m.provider, UINT32_MAX, {});
     store.upsert(m, clock);
     TEST_ASSERT_TRUE(store.beginEvents(own(10 + k), false, now));
     for (uint32_t i = 1; i <= cfg::kMatchEvents; ++i)
@@ -915,7 +923,8 @@ void test_events_notice_clears_when_no_own_match_misses_events() {
   TEST_ASSERT_EQUAL_UINT8(0, store.notices(kBundesliga));
   // An own match of six days ago finds the pool full.
   auto far = synthetic(kBundesliga, 20, now - 6 * 86400);
-  far.flags |= football::kMatchOwn;
+  far.home = store.team(far.competition, far.provider, UINT32_MAX, "Own club");
+  store.selectClub(far.competition, far.provider, UINT32_MAX, {});
   store.upsert(far, clock);
   TEST_ASSERT_TRUE(store.beginEvents(own(20), false, now));
   store.addEvent(goal(900, 5, "F"));
@@ -930,7 +939,7 @@ void test_events_notice_clears_when_no_own_match_misses_events() {
   // A complete source acquisition excludes the old fixture: its lost events
   // no longer make the retained data incomplete.
   football::retention::Selection selected;
-  for (std::size_t i = 0; i < selected.own.size(); ++i) {
+  for (std::size_t i = 0; i < cfg::kRetainedOwnFixtures; ++i) {
     selected.own[i] = 10 + i;
     store.markFixture(kBundesliga, cfg::Provider::kOpenLigaDb, 10 + i);
   }
@@ -984,7 +993,7 @@ void test_eight_competition_runtime_envelope_fits() {
       auto match =
           synthetic(competition, match_id++, base + (4 + own) * 7 * 86400,
                     first_team, visitor++);
-      match.flags |= football::kMatchOwn;
+      store.selectClub(competition, match.provider, first_team, {base, 1});
       TEST_ASSERT_NOT_NULL(store.upsert(match, {base, 1}));
     }
     first_team += teams;
@@ -997,17 +1006,90 @@ void test_eight_competition_runtime_envelope_fits() {
     const auto& match = store.match(i);
     TEST_ASSERT_TRUE(match.home < cfg::kStoreTeams);
     TEST_ASSERT_TRUE(match.away < cfg::kStoreTeams);
-    own += match.isOwn();
+    own += store.isOwn(match);
   }
-  TEST_ASSERT_EQUAL(32, own);
+  // Each selected club also occurs once in each of the three full rounds.
+  // Ownership follows identity for those24 rows as well as the32 previews.
+  TEST_ASSERT_EQUAL((3 + 4) * cfg::kCompetitionMax, own);
   TEST_ASSERT_EQUAL_UINT8(0, store.notices(1) & football::kNoticeFixtures);
+}
+
+void test_full_round_pool_preserves_old_proofs_and_exposes_incomplete_scope() {
+  using Dataset = MatchStore::Dataset;
+  store.datasetResult(1, Dataset::kFixtures, true);
+  for (uint8_t n = 1; n <= cfg::kStoreRounds; ++n)
+    store.roundResult(1, n, football::kNoIndex, 9, true);
+  TEST_ASSERT_EQUAL(cfg::kStoreRounds, store.roundCount());
+  store.roundResult(1, cfg::kStoreRounds + 1, football::kNoIndex, 9, true);
+  TEST_ASSERT_EQUAL_UINT8(1, store.round(0).number);
+  TEST_ASSERT_EQUAL(cfg::kStoreRounds, store.roundCount());
+  TEST_ASSERT_TRUE(store.notices(1) & football::kNoticeMatches);
+  store.recordDataset(1, Dataset::kFixtures, 1000, 1100, true,
+                      football::Cause::kNone);
+  TEST_ASSERT_EQUAL(football::DatasetState::kPartial,
+                    store.datasetState(1, Dataset::kFixtures));
+  TEST_ASSERT_EQUAL(football::Cause::kStoreFull,
+                    store.datasetNotice(1, Dataset::kFixtures, 0));
+  // An already-held round can still be updated at capacity. A subsequent
+  // complete run clears its own loss indication through the ordinary path.
+  store.beginRun(1, football::kNoticeFixtures);
+  store.roundResult(1, 1, football::kNoIndex, 10, true);
+  store.settleRun(1, football::kNoticeFixtures);
+  store.recordDataset(1, Dataset::kFixtures, 1200, 1300, true,
+                      football::Cause::kNone);
+  TEST_ASSERT_EQUAL_UINT16(10, store.round(0).matches);
+  TEST_ASSERT_EQUAL(football::DatasetState::kComplete,
+                    store.datasetState(1, Dataset::kFixtures));
+}
+void test_success_cannot_hide_capacity_loss_of_the_same_dataset() {
+  using Dataset = MatchStore::Dataset;
+  const std::pair<Dataset, uint8_t> losses[] = {
+      {Dataset::kFixtures, football::kNoticeMatches},
+      {Dataset::kFixtures, football::kNoticeMatchTeams},
+      {Dataset::kTable, football::kNoticeTable},
+      {Dataset::kTable, football::kNoticeTableTeams},
+      {Dataset::kEvents, football::kNoticeEvents}};
+  for (const auto [affected, bit] : losses) {
+    store.clear();
+    store.flag(1, bit, true);
+    for (const auto dataset :
+         {Dataset::kFixtures, Dataset::kTable, Dataset::kEvents}) {
+      store.recordDataset(1, dataset, 100, 200, true, football::Cause::kNone);
+      TEST_ASSERT_EQUAL(affected == dataset ? football::DatasetState::kPartial
+                                            : football::DatasetState::kComplete,
+                        store.datasetState(1, dataset));
+      store.datasetResult(1, dataset, true);
+      TEST_ASSERT_EQUAL(affected == dataset ? football::DatasetState::kPartial
+                                            : football::DatasetState::kComplete,
+                        store.datasetState(1, dataset));
+    }
+    store.flag(1, bit, false);
+    store.recordDataset(1, affected, 300, 400, true, football::Cause::kNone);
+    TEST_ASSERT_EQUAL(football::DatasetState::kComplete,
+                      store.datasetState(1, affected));
+    TEST_ASSERT_EQUAL_INT64(400,
+                            store.datasetStatus(1, affected).last_success_ms);
+  }
 }
 
 void test_club_preference_reclassifies_without_losing_source_facts() {
   const Clock clock{utc("2026-10-17T13:00:00Z"), 100};
   auto old = synthetic(1, 1001, clock.utc - 1800, 40, 20);
   old.phase = Phase::kLive;
-  old.flags = football::kMatchOwn;
+  store.selectClub(1, old.provider, 40, clock);
+  bool own_home = false, own_away = true;
+  store.ownSides(old, own_home, own_away);
+  TEST_ASSERT_TRUE(own_home);
+  TEST_ASSERT_FALSE(own_away);
+  auto away = old;
+  std::swap(away.home, away.away);
+  store.ownSides(away, own_home, own_away);
+  TEST_ASSERT_FALSE(own_home);
+  TEST_ASSERT_TRUE(own_away);
+  auto other_provider = old;
+  other_provider.provider = cfg::Provider::kEspn;
+  store.ownSides(other_provider, own_home, own_away);
+  TEST_ASSERT_FALSE(own_home || own_away);
   old.principal = {2, 1};
   old.score_changed = 90;
   auto next = synthetic(1, 1002, clock.utc - 1800, 80, 30);
@@ -1033,16 +1115,21 @@ void test_club_preference_reclassifies_without_losing_source_facts() {
   store.selectClub(1, old.provider, 80, clock);
   const auto& former = found(1, old.provider, old.id);
   const auto& current = found(1, old.provider, next.id);
-  TEST_ASSERT_FALSE(former.isOwn());
-  TEST_ASSERT_TRUE(current.isOwn());
+  TEST_ASSERT_FALSE(store.isOwn(former));
+  TEST_ASSERT_TRUE(store.isOwn(current));
+  store.ownSides(former, own_home, own_away);
+  TEST_ASSERT_FALSE(own_home || own_away);
+  store.ownSides(current, own_home, own_away);
+  TEST_ASSERT_TRUE(own_home);
+  TEST_ASSERT_FALSE(own_away);
   TEST_ASSERT_TRUE(former.detail >= cfg::kStoreOwnMatches);
   TEST_ASSERT_TRUE(current.detail < cfg::kStoreOwnMatches);
   assertGoals(2, 1, former.principal);
   assertGoals(1, 0, current.principal);
   TEST_ASSERT_EQUAL_UINT32(old.id, eventOf(former, 0).identity);
   TEST_ASSERT_EQUAL_UINT32(next.id, eventOf(current, 0).identity);
-  TEST_ASSERT_FALSE(store.row(0).flags & football::kRowOwn);
-  TEST_ASSERT_TRUE(store.row(1).flags & football::kRowOwn);
+  TEST_ASSERT_FALSE(store.isOwn(store.row(0)));
+  TEST_ASSERT_TRUE(store.isOwn(store.row(1)));
   TEST_ASSERT_EQUAL(2, store.matchCount());
   TEST_ASSERT_EQUAL(2, store.rowCount());
   // An unchanged provider refresh finds the migrated identity in its new
@@ -1058,7 +1145,9 @@ void test_club_preference_reclassifies_without_losing_source_facts() {
 
 void test_shootout_attempts_do_not_displace_highlights() {
   auto match = synthetic(kBundesliga, 900, utc("2026-10-14T18:30:00Z"));
-  match.flags |= football::kMatchOwn;
+  match.home =
+      store.team(match.competition, match.provider, UINT32_MAX, "Own club");
+  store.selectClub(match.competition, match.provider, UINT32_MAX, {});
   const auto* kept = store.upsert(match, {match.kickoff + 8000, 100});
   TEST_ASSERT_TRUE(store.beginEvents(*kept));
   for (uint32_t i = 1; i <= 12; ++i) store.addEvent(goal(i, i, "Highlight"));
@@ -1105,7 +1194,9 @@ void test_event_period_correction_moves_between_highlights_and_attempts() {
   for (const bool complete : {false, true}) {
     store.clear();
     auto match = synthetic(kBundesliga, 901, utc("2026-10-14T18:30:00Z"));
-    match.flags |= football::kMatchOwn;
+    match.home =
+        store.team(match.competition, match.provider, UINT32_MAX, "Own club");
+    store.selectClub(match.competition, match.provider, UINT32_MAX, {});
     const auto* kept = store.upsert(match, {match.kickoff + 8000, 100});
     auto event = goal(100, 120, "Taker");
     TEST_ASSERT_TRUE(store.beginEvents(*kept));
@@ -1131,13 +1222,33 @@ void test_event_period_correction_moves_between_highlights_and_attempts() {
   }
 }
 
+void test_removed_source_slot_cannot_hide_another_sources_dataset() {
+  using Dataset = MatchStore::Dataset;
+  store.recordDataset(1, Dataset::kTable, 10, 20, true, football::Cause::kNone);
+  store.recordDataset(2, Dataset::kTable, 30, 40, true, football::Cause::kNone);
+  store.removeCompetition(1);
+  store.recordDataset(2, Dataset::kFixtures, 50, 60, true,
+                      football::Cause::kNone);
+  TEST_ASSERT_EQUAL(40,
+                    store.datasetStatus(2, Dataset::kTable).last_success_ms);
+  TEST_ASSERT_EQUAL(60,
+                    store.datasetStatus(2, Dataset::kFixtures).last_success_ms);
+  TEST_ASSERT_EQUAL(football::DatasetState::kComplete, store.tableState(2));
+}
+
 void test_store_size_is_pinned() {
   // Owner-approved canonical trim: intermediate score parts, unused table
   // statistics and event revision/score derivation are transient mapper data.
-  TEST_ASSERT_EQUAL(46928, sizeof(MatchStore));
+  // Same capacities; two retired table flag/padding bytes per active/staged
+  // row.
+  TEST_ASSERT_EQUAL(46928 -
+                        2 * (cfg::kStoreTableRows + cfg::kStoreTableStageRows) -
+                        6 * cfg::kStoreRounds,
+                    sizeof(MatchStore));
+  TEST_ASSERT_EQUAL(6, sizeof(football::StoredRound));
   TEST_ASSERT_EQUAL(20, sizeof(football::MatchDetails));
   TEST_ASSERT_EQUAL(40, sizeof(StoredMatch));
-  TEST_ASSERT_EQUAL(12, sizeof(football::StoredRow));
+  TEST_ASSERT_EQUAL(10, sizeof(football::StoredRow));
   TEST_ASSERT_EQUAL(80, sizeof(StoredEvent));
 }
 
@@ -1175,9 +1286,13 @@ int main() {
   RUN_TEST(test_events_notice_clears_when_no_own_match_misses_events);
   RUN_TEST(test_unmaintained_competition_from_a_real_response);
   RUN_TEST(test_eight_competition_runtime_envelope_fits);
+  RUN_TEST(
+      test_full_round_pool_preserves_old_proofs_and_exposes_incomplete_scope);
+  RUN_TEST(test_success_cannot_hide_capacity_loss_of_the_same_dataset);
   RUN_TEST(test_club_preference_reclassifies_without_losing_source_facts);
   RUN_TEST(test_shootout_attempts_do_not_displace_highlights);
   RUN_TEST(test_event_period_correction_moves_between_highlights_and_attempts);
+  RUN_TEST(test_removed_source_slot_cannot_hide_another_sources_dataset);
   RUN_TEST(test_store_size_is_pinned);
   return UNITY_END();
 }

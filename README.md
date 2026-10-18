@@ -19,16 +19,17 @@ adapters and Web commands share one strict streaming JSON reader/writer.
 Software night effects have been removed; night scheduling is offered only
 when the hardware has a controllable backlight pin.
 
-Matched C6 integration build (2026-10-18): **1,732,486 B linked flash,
-174,200 B static RAM, 1,733,248 B binary, 89,818 B Web gzip**. Against the
-pre-consolidation baseline this is −33,812 / +13,188 / −33,808 / +9,631 B.
-The canonical MatchStore grows from33,784 to46,928 B to hold the required
-round/own-match union and independent dataset state; it accounts for13,144 B
-of that static increase. Other changes offset to a net44 B. No football data
+Matched C6 integration build (2026-10-18): **1,737,240 B linked flash,
+174,172 B static RAM, 1,738,000 B binary, 90,291 B Web gzip**. Against the
+pre-consolidation baseline this is −29,058 / +13,160 / −29,056 / +10,104 B.
+The canonical MatchStore grows from33,784 to45,968 B to hold the required
+round/own-match union and independent dataset state; it accounts for12,184 B
+of that static increase. Other changes offset to a net+976 B, including896 B of expanded per-source
+club selection. No football data
 is persisted to compensate for that runtime cost.
 
-The binary leaves **101,760 B** in the unchanged1,835,008-B OTA slot; it exceeds
-the85% reserve limit by **173,492 B**. This is an unmet acceptance criterion,
+The binary leaves **97,008 B** in the unchanged1,835,008-B OTA slot; it exceeds
+the85% reserve limit by **178,244 B**. This is an unmet acceptance criterion,
 not a waived target. Source/bin SHA256 and detailed operation lifetimes are
 recorded with the build evidence. None of these figures proves runtime
 heap/stack reserves. No feature, TLS trust or partition was removed to force
@@ -96,6 +97,7 @@ environments below.
 | Run screen API and image-reference checks | `pio test -e native -f test_screen_json -f test_screen_images` |
 | Run selected ordinary details, Demo and event visibility checks | `pio test -e native -f test_ordinary_details -f test_demo_scenarios -f test_event_visibility` |
 | Run only the event admission suite | `pio test -e native -f test_events` |
+| Check shared file candidates and actual image/JPEG fault paths | `python3 scripts/tests/test_file_candidate.py` and `python3 scripts/tests/test_image_files.py` |
 | Run only the file name suite | `pio test -e native -f test_files` |
 | Run only the timekeeping suite | `pio test -e native -f test_timekeeping` |
 | Run only the heap-meter suite | `pio test -e native -f test_health` |

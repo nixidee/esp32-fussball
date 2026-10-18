@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run actual main/Web lifecycle bodies and whole OTA TU against SDK faults."""
+"""Run lifecycle bodies and whole OTA/portal-DNS owners against SDK faults."""
 from pathlib import Path
 import argparse
 import re
@@ -53,8 +53,12 @@ def main():
                                   for name in handlers)
         (build / "runtime_web.inc").write_text(
             declarations + "\n" + routes + "\n" + "\n".join(lifecycle))
-        (build / "runtime_dns.inc").write_text(function(network, "void dns(void*)"))
         (build / "runtime_mdns.inc").write_text(function(network, "esp_err_t applyHttpService()"))
+        (build / "lwip").mkdir()
+        (build / "lwip/sockets.h").write_text('#include "portal_dns_sdk.h"\n')
+        (build / "freertos").mkdir()
+        for header in ("FreeRTOS.h", "task.h"):
+            (build / "freertos" / header).write_text('#include "portal_dns_task_sdk.h"\n')
         command = ["clang++", "-std=c++20", "-g", "-O1",
                    "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
                    "-DFUSSBALL_TARGET_XIAO_ESP32C6_GC9A01",
@@ -67,12 +71,19 @@ def main():
                  "http_start", "http_route", "http_404", "http_405", "http_debug", "http_stop")
         for case in cases:
             subprocess.run([str(build / "check"), case], check=True)
-        network_command = command[:-3] + [str(sdk.parent / "runtime_network_host.cpp"),
+        network_command = command[:-3] + ["-I" + str(ROOT / "components/network"),
+                                          str(ROOT / "components/network/portal_dns.cpp"),
+                                          str(sdk.parent / "runtime_network_host.cpp"),
                                           "-o", str(build / "network_check")]
         subprocess.run(network_command, check=True)
-        for case in ("mdns", "dns_invalid", "dns_valid"):
+        network_cases = ("mdns", "dns_invalid", "dns_valid", "dns_receive", "dns_send",
+                         "dns_open", "dns_bind", "dns_recv_option", "dns_send_option",
+                         "dns_short_send", "dns_timeout", "dns_interrupt",
+                         "dns_send_interrupt", "dns_disabled", "dns_non_a", "dns_bad_label",
+                         "dns_task", "dns_runtime_open")
+        for case in network_cases:
             subprocess.run([str(build / "network_check"), case], check=True)
-    print("PASS 17 production main/HTTP/OTA/mDNS/DNS scenarios (ASan/UBSan)")
+    print(f"PASS {len(cases) + len(network_cases)} production main/HTTP/OTA/mDNS/DNS scenarios (ASan/UBSan)")
 
 
 if __name__ == "__main__":

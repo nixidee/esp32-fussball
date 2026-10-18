@@ -20,6 +20,8 @@ bool storeMatch(const provider::Fixture& input,
                 const MapContext& context) {
   using namespace provider;
   if (!input.facts.id) return false;
+  store.selectClub(context.competition, context.provider, context.club,
+                   context.clock);
   // A missing/invalid field cannot erase a fact already known from the source.
   // Local estimated phase/minute may still be refreshed by estimateAll().
   const auto* previous =
@@ -59,14 +61,8 @@ bool storeMatch(const provider::Fixture& input,
     match.label = store.label(input.round_label.data);
   if (context.round) match.round = context.round;
   if (context.round_label != kNoIndex) match.label = context.round_label;
-  if (input.home.id || input.away.id) {
-    match.flags &= ~kMatchOwn;
-    if (context.club &&
-        (context.club == input.home.id || context.club == input.away.id))
-      match.flags |= kMatchOwn;
-  }
   if (!(input.fields & kPhase)) estimate(match, context.clock.utc);
-  const bool stage = !match.isOwn() && context.observe_events;
+  const bool stage = !store.isOwn(match) && context.observe_events;
   auto* kept = store.upsert(match, context.clock);
   if (context.observe_match && kept)
     context.observe_match(*kept, context.match_context);
@@ -94,11 +90,16 @@ bool storeMatch(const provider::Fixture& input,
 bool storeTableRow(const provider::TableRow& input, MatchStore& store,
                    const MapContext& context) {
   if (!input.team.id) return false;
-  auto row = input.facts;
+  store.selectClub(context.competition, context.provider, context.club,
+                   context.clock);
+  StoredRow row;
+  row.position = input.facts.position;
+  row.played = input.facts.played;
+  row.difference = input.facts.difference;
+  row.points = input.facts.points;
   row.team = team(input.team, store, context);
   if (row.team == kNoTeam) return false;
   row.group = input.group;
-  if (context.club && context.club == input.team.id) row.flags |= kRowOwn;
   return store.appendRow(row);
 }
 void storeSummaryEvent(const provider::Event& input, MatchStore& store,

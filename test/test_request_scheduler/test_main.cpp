@@ -83,9 +83,9 @@ void addMatch(uint32_t id, int64_t kickoff_dt, bool own = false,
   m.id = id;
   m.kickoff = utc(kickoff_dt);
   m.phase = phase;
-  m.home = store.team(kId, kOlg, id * 2, "Home");
+  m.home = store.team(kId, kOlg, own ? 1000000 : id * 2, "Home");
   m.away = store.team(kId, kOlg, id * 2 + 1, "Away");
-  if (own) m.flags = football::kMatchOwn;
+  if (own) store.selectClub(kId, kOlg, 1000000, at(0));
   TEST_ASSERT_NOT_NULL(store.upsert(m, at(0)));
 }
 

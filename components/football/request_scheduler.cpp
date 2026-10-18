@@ -2,12 +2,13 @@
 
 #include <algorithm>
 
+#include "civil_time.h"
+
 namespace football::schedule {
 namespace {
 
 constexpr std::size_t kBuckets = cfg::kLimitWindowBuckets;
 constexpr uint32_t kGapS = (cfg::kRequestGapMs + 999) / 1000;
-constexpr uint32_t kDayS = 86400;
 
 static_assert(kBuckets >= 2);
 
@@ -214,7 +215,8 @@ Decision Scheduler::next(const Inputs& in) {
   const auto& plans = *in.plans;
   const uint32_t now = in.clock.mono_s;
   const int64_t utc = in.clock.utc;
-  const int64_t day_end = (utc / kDayS + 1) * kDayS;
+  const int64_t day_end =
+      (utc / timekeeping::kSecondsPerDay + 1) * timekeeping::kSecondsPerDay;
   const uint32_t day_left = static_cast<uint32_t>(day_end - utc);
   // Monotonic second of a UTC instant (0 for an instant before boot).
   const auto mono = [&](int64_t at) {

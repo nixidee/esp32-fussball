@@ -38,21 +38,19 @@ class Presenter {
  public:
   Presenter(const settings::DisplaySettings& settings, ViewModel& output,
             const settings::screen_policy::Options& rules,
-            NavigationState& navigation, PresentationState& presentation,
-            std::size_t inputs,
+            PresentationState& presentation, std::size_t inputs,
             const football::Published* publication = nullptr,
-            NavigationContext* facts = nullptr,
+            const PresentationFacts* facts = nullptr,
             football::names::Targets* names = nullptr,
             const settings::UiConfig* configuration = nullptr,
             const char* version = "")
       : model(settings),
         policy(rules),
         view(output),
-        nav(navigation),
         presentation(presentation),
         input_count(inputs),
         published(publication),
-        navigation_data(facts),
+        facts(facts),
         name_targets(names),
         configuration(configuration),
         version(version) {}
@@ -67,11 +65,10 @@ class Presenter {
   const settings::DisplaySettings& model;
   const settings::screen_policy::Options& policy;
   ViewModel& view;
-  NavigationState& nav;
   PresentationState& presentation;
   std::size_t input_count;
   const football::Published* published;
-  NavigationContext* navigation_data;
+  const PresentationFacts* facts;
   football::names::Targets* name_targets;
   const settings::UiConfig* configuration;
   const char* version;
@@ -117,10 +114,11 @@ class Presenter {
   void value(char* out, std::size_t size, int n, bool known);
   void value(char* out, std::size_t size, uint8_t n);
   void value(char* out, std::size_t size, int16_t n);
-  std::tm localCivil(int64_t utc) const;
+  bool localCivil(int64_t utc, std::tm& out) const;
   void localDate(char* out, std::size_t size, int64_t utc);
   void localTime(char* out, std::size_t size, int64_t utc);
-  bool entryOf(uint8_t id, settings::CompetitionRoute& entry);
+  void calendarTime(char* out, std::size_t size, uint8_t instant);
+  const settings::CompetitionRoute* entryOf(uint8_t id) const;
   void roundCaption(const football::MatchStore& store,
                     const football::StoredMatch& match, bool date);
   void cardText(const char* title, const char* line, const char* hint,
@@ -129,8 +127,8 @@ class Presenter {
   const football::CompetitionState* stateOf(uint8_t id);
   uint8_t firstFault(int& count);
   Tone causeTone(football::Cause cause);
-  void faultCard(uint8_t id, const football::DatasetStatus& status, int64_t now,
-                 int64_t utc, const char* title = nullptr);
+  void faultCard(uint8_t id, const football::DatasetStatus& status,
+                 const char* title = nullptr);
   void matchProgress(const football::StoredMatch& match);
   void shootout(const football::MatchStore&, const football::StoredMatch&,
                 int64_t now);
@@ -138,21 +136,17 @@ class Presenter {
                     const football::StoredMatch& match, int64_t now);
   void bindOwnMatch(const football::MatchStore& store,
                     const football::StoredMatch& match,
-                    const football::view::Shown& shown,
                     const BindContext& context);
   void matchRow(const football::MatchStore& store,
-                const football::StoredMatch& match,
-                const football::view::Shown& shown, const BindContext& context,
+                const football::StoredMatch& match, const BindContext& context,
                 bool with_day, MatchRow& out);
   void bindConference(const football::MatchStore& store,
-                      const football::view::Shown& shown,
                       const PreparedContent& content,
                       const BindContext& context);
   void bindTable(const football::MatchStore& store,
                  const PreparedContent& content);
 
   void bindMatchday(const football::MatchStore& store,
-                    const football::view::Shown& shown,
                     const PreparedContent& content, const BindContext& context);
   bool networkFault(const BindContext& context) const;
   bool networkUseIp(const BindContext& context) const;

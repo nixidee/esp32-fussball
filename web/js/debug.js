@@ -34,14 +34,14 @@ async function applyDemo(delta = 0) {
         await mutate('demo', {
             scenario, step
         });
-        for (let attempt = 0; attempt < 20; attempt++) {
+        for (let attempt = 0; attempt < CLIENT.demo_attempts; attempt++) {
             const current = await raw('demo');
             S.demo = current;
             if (!current.pending && current.scenario === scenario && current.step === step) {
                 await load('status', false);
                 return;
             }
-            await sleep(250);
+            await sleep(CLIENT.demo_poll_ms);
         }
         throw Error(t('Demo-Schritt noch nicht bestätigt. Aktualisieren und erneut prüfen.'));
     }
@@ -89,7 +89,7 @@ async function demoAutoNext() {
             action: 'auto_next', config_revision: S.saved._revision
         });
         toast(t(S.status?.screen_manual ? 'Rückkehr zur Automatik angefordert.' : 'Automatischer Wechsel angefordert.'));
-        await sleep(500);
+        await sleep(CLIENT.action_settle_ms);
         await load('status', false);
     }
     finally {
@@ -201,7 +201,7 @@ async function downloadScreenshot() {
             a.click();
         }
         finally {
-            setTimeout(() => URL.revokeObjectURL(url), 1000);
+            setTimeout(() => URL.revokeObjectURL(url), CLIENT.object_url_release_ms);
         }
     }
     catch (e) {

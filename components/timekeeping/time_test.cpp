@@ -10,6 +10,7 @@
 #include <iterator>
 
 #include "app_config.h"
+#include "civil_time.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "event_bus.h"
@@ -194,25 +195,13 @@ std::size_t freeHeap() {
   return heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 }
 
-// Days since 1970-01-01 of a proleptic Gregorian date (month 1..12).
-int64_t daysFromCivil(int64_t year, int month, int day) {
-  year -= month <= 2 ? 1 : 0;
-  const int64_t era = (year >= 0 ? year : year - 399) / 400;
-  const int64_t year_of_era = year - era * 400;
-  const int64_t day_of_year =
-      (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
-  const int64_t day_of_era =
-      year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-  return era * 146097 + day_of_era - 719468;
-}
-
 // Local minus UTC in seconds at a UTC instant, in the applied zone.
 int64_t offsetAt(time_t utc) {
   std::tm local{};
   toLocal(utc, local);
   const int64_t local_s =
       daysFromCivil(local.tm_year + 1900, local.tm_mon + 1, local.tm_mday) *
-          86400 +
+          timekeeping::kSecondsPerDay +
       local.tm_hour * 3600 + local.tm_min * 60 + local.tm_sec;
   return local_s - utc;
 }

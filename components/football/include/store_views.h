@@ -17,12 +17,11 @@
 
 namespace football::view {
 
-// The provider whose matches a competition shows, the own club's id there
-// (0 = no own club). Screen eligibility belongs only to screen policy.
+// The provider whose matches a competition shows. Club membership belongs to
+// MatchStore; screen eligibility belongs only to screen policy.
 struct Source {
   uint8_t competition = 0;
   cfg::Provider provider = cfg::Provider::kOpenLigaDb;
-  uint32_t club = 0;
 };
 
 // The shown source of every active competition: its provider's matches.
@@ -72,9 +71,6 @@ int ownForOverview(const MatchStore& store, const Shown& shown, int64_t utc);
 uint16_t matchCount(const MatchStore& store, const Shown& shown,
                     uint8_t competition);
 
-// Which side of a match is the own club (team id = source club).
-void ownSides(const MatchStore& store, const StoredMatch& match,
-              const Shown& shown, bool& home, bool& away);
 // Borrow the original26-byte provider fallback from the shared directory;
 // "" when unknown. Adopted visible labels resolve outside the football lock.
 const char* teamName(const MatchStore& store, const StoredMatch& match,

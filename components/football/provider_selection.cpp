@@ -1,5 +1,6 @@
 #include <cstdio>
 #include <cstring>
+#include <new>
 
 #include "provider_adapter.h"
 
@@ -105,7 +106,7 @@ class SelectionReader {
       return self.sink->text_chunk(bytes, self.sink->context);
     }
   };
-  bool label(Selection& selection, bool short_name) {
+  bool label(TeamSelection& selection, bool short_name) {
     Token value;
     StringPush push{sink.originals, short_name ? OriginalField::kShortName
                                                : OriginalField::kName};
@@ -125,7 +126,7 @@ class SelectionReader {
     }
     return true;
   }
-  bool team(const Token&, Selection&, cfg::Provider);
+  bool team(const Token&, TeamSelection&, cfg::Provider);
   bool row(const Token&);
   bool rows(const Token& token) {
     result.primary_seen = true;
@@ -144,7 +145,7 @@ class SelectionReader {
   }
 };
 
-bool SelectionReader::team(const Token& token, Selection& selection,
+bool SelectionReader::team(const Token& token, TeamSelection& selection,
                            cfg::Provider provider) {
   const bool olg = provider == cfg::Provider::kOpenLigaDb;
   const bool espn = provider == cfg::Provider::kEspn;
@@ -162,14 +163,13 @@ bool SelectionReader::team(const Token& token, Selection& selection,
         seen |= uint8_t(1 << field);
         if (field != 0) return label(selection, field == 2);
         Token value;
-        if (!next(value) || !identity(value, selection.id, true)) return false;
-        if (sink.originals) {
-          uint32_t number = 0;
-          if (!(number = values::positiveUint32(selection.id.data)) ||
-              !sink.originals->identity(number, sink.originals->context))
-            return false;
-        }
-        return true;
+        if (!next(value) ||
+            (value.kind != Kind::kString && value.kind != Kind::kNumber) ||
+            value.truncated || value.contains_nul ||
+            !(selection.id = values::positiveUint32(value.text)))
+          return bad();
+        return !sink.originals ||
+               sink.originals->identity(selection.id, sink.originals->context);
       }))
     return false;
   return (seen & 3) == 3 || bad();
@@ -201,9 +201,20 @@ bool SelectionReader::apiSeasons(const Token& token, Id& season) {
 }
 
 bool SelectionReader::row(const Token& token) {
-  Selection selection;
   const auto provider = request.source.provider;
   const bool teams = request.operation != Operation::kCompetitions;
+  union Item {
+    CompetitionSelection competition;
+    TeamSelection team;
+    Item() noexcept {}
+  } item;
+  if (teams)
+    new (&item.team) TeamSelection;
+  else
+    new (&item.competition) CompetitionSelection;
+  // Access follows the operation's active member for this complete row.
+  auto& selection = item.competition;
+  auto& selected_team = item.team;
   if (sink.originals && !sink.originals->begin(sink.originals->context))
     return false;
   bool football = true;
@@ -216,11 +227,11 @@ bool SelectionReader::row(const Token& token) {
                   [&](int) {
                     Token value;
                     seen = true;
-                    return next(value) && team(value, selection, provider);
+                    return next(value) && team(value, selected_team, provider);
                   }) ||
           !seen)
         return bad();
-    } else if (!team(token, selection, provider))
+    } else if (!team(token, selected_team, provider))
       return false;
   } else if (provider == cfg::Provider::kApiFootball) {
     const char* const keys[] = {"league", "seasons"};
@@ -299,9 +310,16 @@ bool SelectionReader::row(const Token& token) {
   ++result.rows;
   if (sink.originals && !sink.originals->end(sink.originals->context))
     return false;
-  if (football && sink.selection && !sink.selection(selection, sink.context)) {
-    rejected = true;
-    return false;
+  if (football) {
+    const bool accepted =
+        teams ? !sink.team_selection ||
+                    sink.team_selection(selected_team, sink.context)
+              : !sink.competition_selection ||
+                    sink.competition_selection(selection, sink.context);
+    if (!accepted) {
+      rejected = true;
+      return false;
+    }
   }
   if (sink.enough && sink.enough(sink.context)) stopped = true;
   return true;

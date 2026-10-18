@@ -15,6 +15,44 @@
 
 namespace cfg {
 
+// Browser interaction budgets. The existing asset generator embeds these
+// exact entries before the client sources, including bootstrap HTTP calls.
+// The schema publishes the same array; there is no second JS default table.
+struct WebClientValue {
+  const char* key;
+  uint32_t value;
+};
+inline constexpr WebClientValue kWebClientPolicy[] = {
+    {"request_timeout_ms", 15000},
+    {"upload_timeout_ms", 180000},
+    {"busy_attempts", 3},
+    {"read_retry_ms", 250},
+    {"selection_retry_ms", 1000},
+    {"selection_poll_ms", 750},
+    {"selection_request_windows", 5},
+    {"wait_change_ms", 2000},
+    {"status_poll_ms", 5000},
+    {"action_settle_ms", 500},
+    {"startup_retry_ms", 3000},
+    {"startup_retry_max_ms", 30000},
+    {"startup_idle_ms", 10000},
+    {"demo_poll_ms", 250},
+    {"demo_attempts", 20},
+    {"object_url_release_ms", 1000},
+    {"image_input_debounce_ms", 250},
+    {"toast_info_ms", 6500},
+    {"toast_error_ms", 14000},
+    {"ota_observe_ms", 120000},
+    {"ota_poll_ms", 1800},
+    {"ota_no_restart_ms", 15000},
+    {"ota_rollback_observe_ms", 12000},
+    {"reboot_observe_ms", 90000},
+    {"reboot_initial_ms", 2000},
+    {"reboot_poll_ms", 1500},
+    {"scan_observe_ms", 90000},
+    {"scan_poll_ms", 750},
+};
+
 // ---- Boot layout -----------------------------------------------------------
 // Relative to the shorter display side; these are compile-time defaults.
 inline constexpr uint16_t kContentMarginDivisor = 60;  // 240 px: 4 px
@@ -109,6 +147,8 @@ inline constexpr std::size_t kFileNameMaxChars = 31;
 // Main-task erased-flash scan and image copy run in different operations.
 inline constexpr std::size_t kFsEraseCheckChunkBytes = 256;
 inline constexpr std::size_t kFileCopyChunkBytes = 512;
+// One shared working area consumed by a candidate; never charged twice.
+inline constexpr std::size_t kFileReplacementWorkspaceBytes = 40960;
 
 // Device tests of the file service. Must be kNone in every normal build.
 // They destroy the filesystem content: never run them on owner data.
@@ -342,6 +382,9 @@ inline constexpr std::size_t kMatchEvents = 12;
 // No per-competition team ceiling is imposed. Overflow reports a notice.
 inline constexpr std::size_t kStoreTeams = 256;
 inline constexpr std::size_t kStoreMatches = 512;
+// Current sources plus retained season-boundary sources for configured routes.
+// This is a RAM capacity, not an eviction rule; exhaustion remains explicit.
+inline constexpr std::size_t kStoreSources = 2 * kCompetitionMax;
 inline constexpr std::size_t kStoreTableRows = 224;
 // Rows a table refresh stages before it replaces the stored table (OQ-291,
 // OQ-309): the largest merged group table known (54 rows) fits; a longer
@@ -358,6 +401,8 @@ inline constexpr std::size_t kStoreEvents = kStoreOwnEvents + kStoreOtherEvents;
 inline constexpr std::size_t kStoreRoundLabels = 128;
 inline constexpr std::size_t kRetainedRounds = 3;
 inline constexpr std::size_t kRetainedOwnFixtures = 4;  // previous + next three
+inline constexpr std::size_t kRetainedClubFixtures =
+    kCompetitionMax * kRetainedOwnFixtures;
 inline constexpr std::size_t kFixtureCalendarDays = 16;
 inline constexpr std::size_t kProviderCalendarDays = 366;
 // Matches of one competition whose kickoffs are less than this apart form
@@ -399,6 +444,7 @@ inline constexpr uint32_t kDnsTaskPriority = 2;
 inline constexpr std::size_t kDnsPacketBytes = 512;
 // One scheduler tick between portal DNS packets, including malformed ones.
 inline constexpr uint8_t kDnsYieldTicks = 1;
+inline constexpr uint32_t kDnsSocketWaitMs = 1000, kDnsRetryMs = 10000;
 inline constexpr uint8_t kHttpSockets = 4;
 inline constexpr uint32_t kHttpInitRetryMs = 10000;
 inline constexpr std::size_t kApiBodyBytes = 8192;
@@ -527,7 +573,6 @@ inline constexpr uint8_t kSessionSlots = 4;
 inline constexpr std::size_t kDrainMaxBytes = 32768;
 inline constexpr std::size_t kImageMaxBytes = 32768;
 inline constexpr std::size_t kImageTotalBytes = 327680;
-inline constexpr std::size_t kImageReserveBytes = 40960;
 inline constexpr char kImageTempFile[] = ".image_upload";
 // Retry delay for the desired image after file/source/decode failure.
 inline constexpr uint32_t kImageSourceRetryMs = 10000;

@@ -471,39 +471,36 @@ JSON tree or LittleFS source copy. Failed/deadline-expired sends abort without
 an appended JSON error or successful final chunk. Rollback uses its running
 app's matching source; user values cannot mutate it.
 
-Normal names lookups reuse the fully checked generation via a fresh 96-byte
-header receipt, then address at most 16 records in a selected key/ID checkpoint
-block. There is no per-refresh full saved-club scan or resident user/legacy
-collection. Provider preparation and language changes touch only the existing
-240 working-team slots. Raw fallback text is available only from retained
-details or current provider input; old clipped labels do not recreate missing
-originals.
+Normal visible-name lookup copies only the selected page's team keys and raw
+provider fallback26/3 under the football mutex, then resolves adopted labels
+outside that mutex. The visible cache is keyed by team set, language and exact
+configuration/name revision. Clock and ring changes reuse the prepared labels.
+No complete-directory projection, worker rewrite or reconstructed original is
+used. Full provider originals are available only from the explicit editor query.
 
-Names replacement is a checked transaction:
+Names replacement uses the common configuration Apply:
 
-1. Hold the existing heavy admission and capture names/settings/working-identity
-   revisions. Admit old plus a maximal 16-KiB candidate, explicit LittleFS
-   temporary overhead, unused image quota and reserve before writing.
-2. Stream/normalize the bounded candidate, fully check fields/CRC and close its
-   staging handles. Staging failure preserves the committed names.
-3. Open the checked projection reader before allocating its 6,990-byte packed
-   label/bitmap arena. Prepare full/short labels outside the mutex. Validate
-   revisions and hold the short publication fence; retain the old coherent view
-   on a conflict or preparation error.
-4. Recheck the committed generation and physical reserve. Atomically rename
-   the checked names candidate, publish its prepared labels and applied
-   language/generation together, release resources, then acknowledge the
-   generation/digest. Activation failure preserves the old names. Recover
-   uncertain success read-only.
+1. Hold existing heavy admission, validate the full desired configuration and
+   prepare the inactive one of two bounded names slots. The shared replacement
+   workspace is counted once; unchanged image quota and partitions remain.
+2. Stream the candidate through the common files owner, check its exact length
+   and require synchronization/close. Open the closed file read-only to verify
+   revision/CRC and require that reader to close successfully. A failure cannot
+   publish its reference.
+3. The configuration service validates the expected revision and exact prepared
+   names lease, persists one complete NVS record and checks its readback. That
+   record includes slot, names revision, byte length, CRC and last Apply ID.
+4. Activate the prepared names receipt and publish the coherent RAM configuration
+   revision. Uncertain NVS outcome preserves both slots and the old RAM view,
+   disallows another write and is reconciled from NVS on restart. A lost HTTP
+   answer is read back by Apply ID rather than resending acknowledged work.
 
-The complete names file retains its existing 16-KiB ceiling. The former shared
-48-KiB football-file quota and optional-cache deletion mechanism are removed.
-Both adopted languages and stable identity relationships remain durable;
-only the selected name26/short3 pair is resident per working team. The remaining
-editor and full replacement protocol must use the same common Apply boundary,
-streaming codec and generation rules; their end-to-end acceptance is still open.
-Final linked resource fit, allocator/FD overhead and device heap/stack acceptance
-are not established merely by the encoded file sizes or host tests.
+Each names slot remains bounded to16KiB. There is no names rename/history,
+publication fence,6,990B projection or persistent sporting state. The canonical
+team directory retains original provider fallback26/3 only; adopted values live
+in their referenced collection and completed visible ViewModel. Physical
+power-loss, actual NVS-full and device heap/stack acceptance remain required;
+host fault tests and encoded sizes do not establish those results.
 
 ### Publication
 
@@ -545,9 +542,14 @@ return store indices in fixed lists on the caller's stack (1026 B for a
   known, up to 240 minutes after kickoff while the provider reports it
   running, else 110 minutes after kickoff; never later than 240 minutes
   after kickoff.
+- **Presentation boundary:** controller/navigation prepares the final sequence
+  view and exactly one bounded page. Presenter receives those immutable facts,
+  borrows route captions and cannot query navigation or select another page.
+  Calendar offsets and last-success/retry instants are captured beforehand;
+  no time-service resolver crosses this boundary. Missing facts remain unknown.
 - **Single and phase:** the common canonical selector resolves focused own,
-  unique ordinary, held result or next preview. Owned flags and special-own
-  treatment are independent. Current-phase enabled/manual rules derive provider
+  unique ordinary, held result or next preview. Team identity against the current source club determines ownership; special-own
+  treatment is a separate configured choice. No own flag is stored on a row. Current-phase enabled/manual rules derive provider
   demand; no old screen mask or independent resolver gates content.
 - **Names/events:** every working team supplies one prepared full name and
   short code. Selected ordinary and own details retain raw fallback names and
@@ -697,3 +699,39 @@ storage origin to `outcome_unknown`, blocking writes until reboot/recovery.
 Changed names are staged and validated before that one NVS commit; its exact
 reference activates the coherent file/configuration combination. Settings-only
 Apply never opens or rewrites names. Both slots survive an uncertain NVS write.
+
+
+The configuration service alone coordinates changed-name Apply. The names
+service prepares a request-local44-B C6 lease containing exact expected/desired
+references and activation/preserve operations. Under the existing writer lock,
+configuration verifies the lease, validates the complete candidate, persists and
+verifies NVS, activates the prepared names receipt, then publishes the new RAM
+configuration and revision. No external caller owns the settings writer lock.
+A settings-only Apply cannot change the names reference. A failure after durable
+NVS but before receipt activation keeps old RAM, preserves both slots and uses
+the same outcome-unknown/read-only recovery path. The lease adds no retained
+allocation, file, task or second persistence owner.
+
+
+Visible-name resolution requires the configuration revision that supplied the
+view language. It reads names reference and revision together, rejects an
+already stale request before changing targets/cache, and checks completion
+again. The controller also discards scenes after a concurrent Apply. HTTP
+status obtains language/revision from one narrow snapshot and returns a
+configuration-conflict response when that lookup becomes stale. Name files
+remain outside the football lock; unchanged visible labels still reuse cache.
+
+Images and adopted names share one checked physical file candidate. The files
+component owns typed paths, exact length, space admission, I/O, close and cleanup.
+Names supplies CRC/reference validation of the closed file; images supplies the
+real JPEG decoder check. Names activates through the common NVS Apply, while
+images publishes by rename behind its reader barrier. These distinct domain
+commits share physical mechanics without merging their data lifetimes.
+
+Full-season retention indexes gather the configured club preferences for the
+same exact request source. Each preference contributes the previous and next
+three games; duplicate encounter IDs occur only once in the resulting bounded
+32-ID union. Complete-response checking covers every ID, including those beyond
+bit7. A missing required match or index allocation failure preserves the prior
+working set and reports incomplete/RAM failure. This does not yet replace the
+configured-ID Store keys or coalesce automatic and explicit resolved sources.

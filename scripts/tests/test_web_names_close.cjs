@@ -7,7 +7,8 @@ const {readWebSource, autonomousBoundary, productionFunctions}=require('./web_so
 // Run: node scripts/tests/test_web_names_close.cjs [optional HTML snapshot]
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict'),crypto=require('node:crypto');
 const {html,script}=readWebSource(process.argv[2]||path.resolve(__dirname,'../../web/index.html'));
-const functionNames=['button','confirmAction','dialog','openNames','loadNames','drawNames','nameProviders','adoptedPrefix','adoptedShortPrefix','shortAdoptionPreview','expandNamesWire','validateAdoptedNames','keepNamesDraft','namesAdoptionChanges','editorNameTeams'];
+const functionNames=['validClubId','button','confirmAction','dialog','openNames','loadNames','drawNames','nameProviders','adoptedPrefix','adoptedShortPrefix','shortAdoptionPreview','expandNamesWire','validateAdoptedNames','keepNamesDraft','namesAdoptionChanges','editorNameTeams'];
+const firmwareSchema=require('./web_config_harness.cjs').fixture().schema;
 const source=productionFunctions(script,functionNames);
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no});return{promise,resolve,reject};};
 const rows=name=>({items:[{provider:0,id:42,name,short_name:'ABC'}]});
@@ -24,7 +25,7 @@ function setup(){
   close(){this.open=false;},showModal(){this.open=true;},
   querySelector:node,querySelectorAll(selector){return [...nodes.values()].filter(el=>selector==='[data-name-inherit]'?'nameInherit'in el.dataset:selector==='[data-name-field]'?'nameField'in el.dataset:false);}
  };
- const context={S:{schema:{short_name_max:3,names_name_max:26,names_key_max:63,names_format:'football-team-names',names_source_version:1,names_wire_version:2,provider_keys:['openligadb','api-football','espn','football-data']},saved:{_namesRef:{}},pendingNames:null},PROVIDERS:['OL','AF','ESPN','FD'],TextEncoder,TextDecoder,structuredClone,bytes:x=>new TextEncoder().encode(x).length,
+ const context={S:{schema:{...firmwareSchema,short_name_max:3,names_name_max:26,names_key_max:63,names_format:'football-team-names',names_source_version:1,names_wire_version:2,provider_keys:['openligadb','api-football','espn','football-data']},saved:{_namesRef:{}},pendingNames:null},PROVIDERS:['OL','AF','ESPN','FD'],TextEncoder,TextDecoder,structuredClone,bytes:x=>new TextEncoder().encode(x).length,
   t:x=>x,tf:(x,v)=>x.replace('%',v),ht:x=>x,esc:x=>String(x??''),button:()=>'<button data-act="close">Close</button>',compName:c=>c.competition_name,clone:structuredClone,sameObject:(a,b)=>JSON.stringify(a)===JSON.stringify(b),screenConflict:()=>Error('changed'),renderBar(){},
   $:id=>id==='dialog'?dialog:node(id),
   settingsRead(url){const request={url,...deferred()};if(url==='team-names')nameReads.push(request);else{request.names=nameReads.shift();pending.push(request);}return request.promise;}

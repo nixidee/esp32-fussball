@@ -29,11 +29,6 @@ enum class State : uint8_t {
   kUnavailable,  // no partition, damaged content kept, or an I/O error
 };
 
-struct Usage {
-  std::size_t total_bytes;
-  std::size_t used_bytes;
-};
-
 // Mounts the filesystem; call once at boot before any other function here.
 // Never fails: on a fault the state is kUnavailable and the reason logged.
 void init();

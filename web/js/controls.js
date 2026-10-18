@@ -19,7 +19,7 @@ function toast(message, severity = false) {
     if (top)
         el.showPopover();
     clearTimeout(toast.timer);
-    toast.timer = setTimeout(hide, severity === 'info' ? 6500 : 14000);
+    toast.timer = setTimeout(hide, severity === 'info' ? CLIENT.toast_info_ms : CLIENT.toast_error_ms);
 }
 function dialog(title, body, actions = '', wide = false) {
     const d = $('dialog');
@@ -79,7 +79,7 @@ function F(path, type = 'text', help = '', options = null, disabled = false, lab
     const hint = [
         bound ? t('Erlaubter Bereich') + ': ' + bound.join('–') : '', ssid?.base64 ? t('WLAN-Name als Base64: höchstens 32 Originalbytes. Base64 direkt bearbeiten oder ein gefundenes Netzwerk auswählen.') : S.schema.text[path] ? tf('Höchstens % Byte UTF-8', S.schema.text[path]) : ''
     ].filter(Boolean).join(' ');
-    return `<div class="field ${disabled ? 'off' : ''}" data-field="${path}">${type === 'switch' ? '' : `<div class="field-label"><label for="${id}">${esc(name)}</label>${helpButton(help, path)}</div>`}<div class="ctl">${control}${type === 'switch' ? helpButton(help, path) : ''}${type === 'number' ? `<span class="unit">${/brightness|text_scale/.test(path) ? '%' : /window_before|window_after|_min$/.test(path) ? 'min' : /scroll_repeat_ms/.test(path) ? 'ms' : (/_s(\[\d+\])?$/.test(path) || /^screen_policy\.(phases|competitions).*\[2\]$/.test(path)) ? 's' : ''}</span>` : ''}</div>${hint ? `<div class="help">${esc(hint)}</div>` : ''}<div class="field-error" data-error="${path}"></div></div>`;
+    return `<div class="field ${disabled ? 'off' : ''}" data-field="${path}">${type === 'switch' ? '' : `<div class="field-label"><label for="${id}">${esc(name)}</label>${helpButton(help, path)}</div>`}<div class="ctl">${control}${type === 'switch' ? helpButton(help, path) : ''}${type === 'number' ? `<span class="unit">${/brightness|text_scale/.test(path) ? '%' : /_min$/.test(path) ? 'min' : /scroll_repeat_ms/.test(path) ? 'ms' : (/_s(\[\d+\])?$/.test(path) || /^screen_policy\.(phases|competitions).*\[2\]$/.test(path)) ? 's' : ''}</span>` : ''}</div>${hint ? `<div class="help">${esc(hint)}</div>` : ''}<div class="field-error" data-error="${path}"></div></div>`;
 }
 function SEC(key, help = '') {
     const state = secretMode(key), field = state.mode === 'change' ? `<div class="ctl"><input type="password" id="f-${key}" class="w-l" data-secret="${key}" value="${esc(state.value)}" autocomplete="new-password"></div><p class="help">${ht('Leeres Feld behält den gespeicherten Wert.')}</p>` : '';

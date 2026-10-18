@@ -32,9 +32,10 @@ struct Facts {
   Goals score;
   bool cut = false;
 };
-provider::ParseResult parse(std::string_view body, Facts& facts,
-                            provider::RequestSpec request = {}) {
-  request.source.provider = cfg::Provider::kFootballData;
+provider::ParseResult parse(
+    std::string_view body, Facts& facts, provider::RequestSpec request = {},
+    cfg::Provider provider = cfg::Provider::kFootballData) {
+  request.source.provider = provider;
   Input input{body};
   json::Reader reader({&input, Input::read});
   provider::Sink sink;
@@ -128,7 +129,7 @@ void large_valid_unknown_fields_do_not_need_a_json_tree() {
   TEST_ASSERT_EQUAL(provider::Status::kOk, result.status);
   TEST_ASSERT_TRUE(result.document_complete);
   TEST_ASSERT_EQUAL_UINT(1, facts.rows);
-  TEST_ASSERT_EQUAL_UINT(1, allocation::calls);
+  TEST_ASSERT_EQUAL_UINT(0, allocation::calls);
 }
 void depth_truncation_and_invalid_suffix_keep_observed_score_only() {
   for (const auto& body :
@@ -146,11 +147,21 @@ void depth_truncation_and_invalid_suffix_keep_observed_score_only() {
 void workspace_failure_is_memory_without_publication() {
   Facts facts;
   allocation::fail = true;
-  const auto result = parse(document(), facts);
+  allocation::calls = 0;
+  const auto without_events = parse(document(), facts);
+  TEST_ASSERT_EQUAL(provider::Status::kOk, without_events.status);
+  TEST_ASSERT_TRUE(without_events.document_complete);
+  TEST_ASSERT_EQUAL_UINT(1, facts.rows);
+  TEST_ASSERT_EQUAL_UINT(0, allocation::calls);
+  facts = {};
+  const auto result = parse(
+      R"([{"matchID":1,"team1":{"teamId":1},"team2":{"teamId":2},"goals":[{"goalID":1,"matchMinute":1,"scoreTeam1":1,"scoreTeam2":0}]}])",
+      facts, {}, cfg::Provider::kOpenLigaDb);
   allocation::fail = false;
   TEST_ASSERT_EQUAL(provider::Status::kNoMemory, result.status);
   TEST_ASSERT_EQUAL_UINT(0, facts.rows);
   TEST_ASSERT_FALSE(result.document_complete);
+  TEST_ASSERT_EQUAL_UINT(1, allocation::calls);
 }
 void decimal_numbers_cannot_round_into_a_different_fixture_or_score() {
   for (const auto* value : {"1.0000000000000000000001", "4294967295.0000000001",

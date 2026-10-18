@@ -3,10 +3,10 @@
 #pragma once
 #include <memory>
 
-#include "app_config_model.h"
 #include "effective_names.h"
 #include "esp_err.h"
 #include "json_stream.h"
+#include "settings_store.h"
 #include "team_name_files.h"
 #include "visible_names.h"
 
@@ -58,14 +58,15 @@ class AdoptedExport {
   bool prepared_ = false;
 };
 // Owns heavy admission only on cache misses, always outside repository locks.
-esp_err_t resolveVisible(Targets&, uint8_t language, VisibleCache&);
+// A stale originating config revision is rejected before any target/cache
+// write.
+esp_err_t resolveVisible(Targets&, uint8_t language, uint32_t config_revision,
+                         VisibleCache&);
 bool editable();
 esp_err_t begin(files::Candidate&, bool replace_collection = false);
-esp_err_t applyConfiguration(
-    settings::AppConfig& desired, uint32_t expected_revision,
-    files::Candidate* changed_names = nullptr, files::Receipt* result = nullptr,
-    settings::Violation* violation = nullptr,
-    settings::screen_policy::Error* policy_error = nullptr);
+// Prepares a checked candidate lease; configuration owns commit/publication.
+// Caller keeps candidate and heavy admission alive through settings::apply.
+esp_err_t prepareChange(files::Candidate&, settings::NamesChange&);
 // Reset already erased NVS first; no name mutation changes references itself.
 esp_err_t erase();
 void invalidate();

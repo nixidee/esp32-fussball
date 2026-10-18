@@ -11,11 +11,9 @@ namespace timekeeping {
 void toLocal(time_t utc, std::tm& out) { gmtime_r(&utc, &out); }
 }  // namespace timekeeping
 namespace ui {
-std::tm Presenter::localCivil(int64_t raw) const {
+bool Presenter::localCivil(int64_t raw, std::tm& out) const {
   const time_t at = raw;
-  std::tm out{};
-  gmtime_r(&at, &out);
-  return out;
+  return gmtime_r(&at, &out) != nullptr;
 }
 void Presenter::localDate(char* out, std::size_t size, int64_t) {
   snprintf(out, size, "Sat 17");
@@ -26,7 +24,9 @@ void Presenter::localTime(char* out, std::size_t size, int64_t) {
 void Presenter::roundCaption(const football::MatchStore&,
                              const football::StoredMatch&, bool) {}
 void Presenter::competitionName(char (&)[48], uint8_t) {}
-bool Presenter::entryOf(uint8_t, settings::CompetitionRoute&) { return false; }
+const settings::CompetitionRoute* Presenter::entryOf(uint8_t) const {
+  return nullptr;
+}
 void Presenter::cardText(const char*, const char*, const char*, Tone) {
   assert(false);
 }
@@ -34,8 +34,8 @@ uint8_t Presenter::firstFault(int& count) {
   count = 0;
   return 0;
 }
-void Presenter::faultCard(uint8_t, const football::DatasetStatus&, int64_t,
-                          int64_t, const char*) {
+void Presenter::faultCard(uint8_t, const football::DatasetStatus&,
+                          const char*) {
   assert(false);
 }
 void Presenter::bindStart(uint8_t) { assert(false); }
@@ -67,7 +67,9 @@ int main() {
     match.kickoff = now - 3600;
     match.principal = {
         static_cast<uint8_t>(i == cfg::kStoreMatches - 2 ? 7 : 1), 0};
-    if (i + 1 == cfg::kStoreMatches) match.flags = kMatchOwn;
+    match.home = store.team(match.competition, match.provider,
+                            i + 1 == cfg::kStoreMatches ? 40 : 41, "Home");
+    store.selectClub(match.competition, match.provider, 40, {});
     assert(store.upsert(match, {now, 1}));
   }
   settings::screen_policy::Policy policy;
@@ -100,8 +102,10 @@ int main() {
                       0,     states, routes, false, 255,  255,   {now, 1}};
   network::Status network{};
   ui::BindContext context{now, 1000, true, true, false, &network};
-  ui::Presenter presenter(model, output, policy, state, presentation, 0,
-                          &published, &navigation, nullptr, &configuration);
+  auto scene = ui::presentationFacts(state, navigation, context.now,
+                                     published.fetched_ms, published.retry_ms);
+  ui::Presenter presenter(model, output, policy, presentation, 0, &published,
+                          &scene, nullptr, &configuration);
   presenter.bind(context);
   assert(output.layout == ui::Layout::kConference);
   assert(output.page == 510 && output.pages == 511 && output.row_count == 2);
@@ -109,6 +113,8 @@ int main() {
   state.entry = {screen::Type::kMatchday, 1, 1};
   state.page = 255;
   state.pages = 256;
+  scene = ui::presentationFacts(state, navigation, context.now,
+                                published.fetched_ms, published.retry_ms);
   presenter.bind(context);
   assert(output.page == 255 && output.pages == 256 && output.row_count == 2);
   assert(output.rim.first == 510 && output.rim.count == 2 &&

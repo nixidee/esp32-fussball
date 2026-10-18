@@ -7,7 +7,7 @@ Import("env")
 project_root = Path(env.subst("$PROJECT_DIR"))
 pure_components = {
     "events": "+<event_admission.cpp>",
-    "files": "+<file_names.cpp> +<file_io.cpp>",
+    "files": "+<file_names.cpp> +<file_io.cpp> +<file_candidate.cpp>",
     "geometry": "+<*.cpp>",
     "settings": (
         "+<app_config_model.cpp> +<app_config_record.cpp> +<settings_model.cpp>"
@@ -65,7 +65,7 @@ env.BuildSources(
     str(Path(env.subst("$BUILD_DIR")) / "pure" / "football"),
     str(football_root),
     src_filter=(
-        "+<football_model.cpp> +<fixture_retention.cpp> +<budget_ledger.cpp> +<match_store.cpp> +<store_mappers.cpp>"
+        "+<football_model.cpp> +<source_index.cpp> +<fixture_retention.cpp> +<budget_ledger.cpp> +<match_store.cpp> +<store_mappers.cpp>"
         " +<request_scheduler.cpp> +<provider_plan.cpp> +<store_views.cpp>"
         " +<matchday.cpp> +<screen_selection.cpp>"
         " +<schedule_coverage.cpp> +<provider_adapter.cpp> +<provider_readers.cpp> +<provider_selection.cpp> +<provider_coverage.cpp>"

@@ -12,7 +12,8 @@ StoredMatch& row(uint32_t id) {
   StoredMatch match;
   match.id = id;
   match.competition = 1;
-  match.flags = kMatchOwn;
+  match.home = store.team(1, match.provider, 40, "Own club");
+  store.selectClub(1, match.provider, 40, kClock);
   match.phase = Phase::kLive;
   match.kickoff = kClock.utc - 1800;
   auto* result = store.upsert(match, kClock);

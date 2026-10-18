@@ -1912,3 +1912,10 @@ is implied. Real provider replay and browser checks are distinct from physical
 LCD screenshots, power interruption, heap/stack/fragmentation and OTA rollback
 acceptance. The owner flashes the device; build/host checks cannot certify
 those physical conditions.
+
+2026-10-18 consolidation clarification: the historical Model/record sizes and
+`settings::current()` stack copies described above belong to their dated ADRs.
+The approved aggregate configuration cutover supersedes those APIs: broad
+Model copy/save and separate section setters are removed. Diagnostics use the
+actual current snapshot/Apply; runtime logging uses a172-B projection. Current
+AppConfig and resource values are documented in CONFIGURATION/ARCHITECTURE.

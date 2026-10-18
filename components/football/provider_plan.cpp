@@ -6,6 +6,7 @@
 #include <ctime>
 #include <new>
 
+#include "civil_time.h"
 #include "football_model.h"
 #include "matchday.h"
 
@@ -15,7 +16,6 @@ namespace {
 using cfg::DataType;
 using cfg::Provider;
 
-constexpr uint32_t kDayS = 86400;
 std::size_t index(DataType type) { return static_cast<std::size_t>(type); }
 
 uint32_t sourceKey(uint8_t id, const settings::Source& s) {
@@ -124,8 +124,13 @@ void ResponseDetails::clear() {
   }
 }
 
+void SourceState::clear() {
+  this->~SourceState();
+  new (this) SourceState{};
+}
+
 void Planner::reset() {
-  states_ = {};
+  for (auto& state : states_) state.clear();
   current_ = nullptr;
   store_ = nullptr;
   response_details_.clear();
@@ -135,7 +140,25 @@ void Planner::reset() {
 void Planner::forget(uint8_t slot) {
   if (slot >= cfg::kCompetitionMax) return;
   if (current_ == &states_[slot]) abort();
-  states_[slot] = {};
+  states_[slot].clear();
+}
+
+retention::Index* Planner::makeRetentionIndex(bool calendar) const {
+  if (sink_ != Sink::kIndex || !competitions_)
+    return new (std::nothrow)
+        retention::Index(map_.club, map_.clock.utc, dates_, calendar);
+  // Include the prepared entry even for a caller without the complete route
+  // list. Index deduplicates it; an inconsistent ninth distinct club rejects
+  // the scope instead of overrunning or silently clipping it.
+  std::array<uint32_t, cfg::kCompetitionMax + 1> clubs{};
+  std::size_t count = 0;
+  if (map_.club) clubs[count++] = map_.club;
+  for (const auto& entry : competitions_->entries)
+    if (entry.active && entry.primary == source_ && entry.club.team)
+      clubs[count++] = entry.club.team;
+  return new (std::nothrow)
+      retention::Index(std::span<const uint32_t>(clubs.data(), count),
+                       map_.clock.utc, dates_, calendar);
 }
 
 void Planner::wanted(uint8_t slot, const settings::CompetitionRoute* entry,
@@ -206,7 +229,7 @@ bool Planner::request(const schedule::Job& job,
   auto& state = states_[job.slot];
   const uint32_t key = sourceKey(entry.id, s);
   if (state.key != key) {
-    state = {};
+    state.clear();
     state.key = key;
   }
   current_ = &state;
@@ -247,7 +270,7 @@ bool Planner::begin(MatchStore& store, const Clock& clock, Request& out) {
   retained_rows_ = {};
   response_failure_ = provider::Status::kOk;
   response_sources_ = true;
-  own_seen_ = 0;
+  own_seen_.reset();
   response_rows_ = 0;
   response_round_ = static_cast<uint8_t>(out.spec.round);
   response_label_ = kNoIndex;
@@ -388,15 +411,18 @@ bool Planner::build(Request* out) {
     return set(Operation::kTable, Sink::kTable);
   set(Operation::kFixtures, Sink::kMatches);
   if (out) {
-    const int64_t span = type_ == DataType::kLive
-                             ? 0
-                             : cfg::kFixtureHorizonDays * int64_t{kDayS};
+    const int64_t span =
+        type_ == DataType::kLive
+            ? 0
+            : cfg::kFixtureHorizonDays * int64_t{timekeeping::kSecondsPerDay};
     out->spec.from = static_cast<uint32_t>(
-        std::max<int64_t>(1, map_.clock.utc - span) / kDayS * kDayS);
+        std::max<int64_t>(1, map_.clock.utc - span) /
+        timekeeping::kSecondsPerDay * timekeeping::kSecondsPerDay);
     out->spec.to = static_cast<uint32_t>(
-        std::min<int64_t>(UINT32_MAX - kDayS, map_.clock.utc + span) / kDayS *
-            kDayS +
-        kDayS - 1);
+        std::min<int64_t>(UINT32_MAX - timekeeping::kSecondsPerDay,
+                          map_.clock.utc + span) /
+            timekeeping::kSecondsPerDay * timekeeping::kSecondsPerDay +
+        timekeeping::kSecondsPerDay - 1);
   }
   return true;
 }
@@ -422,7 +448,9 @@ void Planner::liveItems(const MatchStore& store, int64_t utc) {
       // The provider day holding the kickoff, else the next match day.
       uint32_t day = 0;
       for (uint8_t d = 0; d < state.fixtures.count; ++d)
-        if (state.fixtures.calendar_data.days[d] / kDayS == m.kickoff / kDayS)
+        if (state.fixtures.calendar_data.days[d] /
+                timekeeping::kSecondsPerDay ==
+            m.kickoff / timekeeping::kSecondsPerDay)
           day = state.fixtures.calendar_data.days[d];
       add(day);
     }
@@ -443,9 +471,7 @@ bool Planner::consume(const provider::Fixture& row,
                       std::span<const provider::Event> events) {
   if (!row.source_matches) response_sources_ = false;
   if (sink_ == Sink::kIndex || sink_ == Sink::kOwnIndex) {
-    if (!retention_index_)
-      retention_index_.reset(new (std::nothrow) retention::Index(
-          map_.club, map_.clock.utc, dates_));
+    if (!retention_index_) retention_index_.reset(makeRetentionIndex());
     if (!retention_index_) {
       response_failure_ = provider::Status::kNoMemory;
       return false;
@@ -465,7 +491,7 @@ bool Planner::consume(const provider::Fixture& row,
     const auto own =
         std::find(selected.own.begin(), selected.own.end(), row.facts.id);
     if (own != selected.own.end())
-      own_seen_ |= 1u << static_cast<unsigned>(own - selected.own.begin());
+      own_seen_.set(static_cast<std::size_t>(own - selected.own.begin()));
     if (sink_ == Sink::kOwnMatches) {
       if (own == selected.own.end()) return true;
     } else {
@@ -521,9 +547,7 @@ bool Planner::consume(const provider::Event& event) {
   return true;
 }
 bool Planner::consumeDay(uint32_t day) {
-  if (!retention_index_)
-    retention_index_.reset(new (std::nothrow) retention::Index(
-        map_.club, map_.clock.utc, dates_, true));
+  if (!retention_index_) retention_index_.reset(makeRetentionIndex(true));
   if (!retention_index_) {
     response_failure_ = provider::Status::kNoMemory;
     return false;
@@ -535,9 +559,7 @@ bool Planner::consumeDay(uint32_t day) {
   return true;
 }
 bool Planner::consumeCalendarRound(const provider::CalendarRound& round) {
-  if (!retention_index_)
-    retention_index_.reset(new (std::nothrow) retention::Index(
-        map_.club, map_.clock.utc, dates_, true));
+  if (!retention_index_) retention_index_.reset(makeRetentionIndex(true));
   if (!retention_index_) {
     response_failure_ = provider::Status::kNoMemory;
     return false;
@@ -568,9 +590,7 @@ bool Planner::response(const provider::ParseResult& parsed) {
       response_failure_ = provider::Status::kRejected;
       return false;
     }
-    if (!retention_index_)
-      retention_index_.reset(new (std::nothrow) retention::Index(
-          map_.club, map_.clock.utc, dates_));
+    if (!retention_index_) retention_index_.reset(makeRetentionIndex());
     if (!retention_index_) response_failure_ = provider::Status::kNoMemory;
     if (response_failure_ != provider::Status::kOk) return false;
     if (!(sink_ == Sink::kIndex ? retention_index_->select(current_->fixtures)
@@ -593,7 +613,7 @@ bool Planner::response(const provider::ParseResult& parsed) {
       }
   if ((sink_ == Sink::kOwnMatches || retain_admission_) && response_whole_)
     for (std::size_t i = 0; i < current_->fixtures.own.size(); ++i)
-      if (current_->fixtures.own[i] && !(own_seen_ & (1u << i))) {
+      if (current_->fixtures.own[i] && !own_seen_.test(i)) {
         response_failure_ = provider::Status::kRejected;
         return false;
       }
@@ -604,9 +624,7 @@ bool Planner::response(const provider::ParseResult& parsed) {
       return false;
     }
     if (response_failure_ != provider::Status::kOk) return false;
-    if (!retention_index_)
-      retention_index_.reset(new (std::nothrow) retention::Index(
-          map_.club, map_.clock.utc, dates_, true));
+    if (!retention_index_) retention_index_.reset(makeRetentionIndex(true));
     if (!retention_index_) {
       response_failure_ = provider::Status::kNoMemory;
       return false;
@@ -649,7 +667,7 @@ void Planner::observeMatch(const StoredMatch& match, void* context) {
     return;
   }
   response.seen[response.seen_count++] = match.id;
-  if (match.isOwn() || response.ambiguous ||
+  if (planner.store_->isOwn(match) || response.ambiguous ||
       planner.store_->find(match.competition, match.provider, match.id) ==
           nullptr)
     return;
@@ -682,7 +700,7 @@ void Planner::observeMatch(const StoredMatch& match, void* context) {
   response.receiving = static_cast<int8_t>(which);
 }
 
-void Planner::observeEvent(const StoredEvent& event, void* context) {
+void Planner::observeEvent(const EventFacts& event, void* context) {
   auto& planner = *static_cast<Planner*>(context);
   if (!planner.response_details_.events) return;
   auto& response = planner.response_details_;
@@ -727,7 +745,7 @@ void Planner::finishDetails(bool ok, const Clock& clock) {
   }
   const auto single = selection::single(input, selected, *competition);
   const auto* match = selection::find(input, single.match);
-  if (match == nullptr || match->isOwn()) {
+  if (match == nullptr || store_->isOwn(*match)) {
     response_details_.clear();
     return;
   }
@@ -771,10 +789,8 @@ Step Planner::finish(bool ok, const Clock& clock) {
     store_->datasetResult(map_.competition, MatchStore::Dataset::kFixtures,
                           ok && response_whole_);
     if (response_round_known_ && response_round_)
-      store_->roundResult(
-          map_.competition, response_round_, response_label_, response_rows_,
-          static_cast<uint32_t>(std::max<int64_t>(0, clock.utc)),
-          ok && response_whole_);
+      store_->roundResult(map_.competition, response_round_, response_label_,
+                          response_rows_, ok && response_whole_);
   }
   if (sink_ == Sink::kEvents)
     store_->datasetResult(map_.competition, MatchStore::Dataset::kEvents, ok);
@@ -912,9 +928,8 @@ Step Planner::advance(bool ok, const Clock& clock) {
           const auto& key = state.fixtures.rounds[i];
           const auto label =
               key.label.empty() ? kNoIndex : store_->label(key.label.data);
-          store_->roundResult(
-              map_.competition, key.number, label, state.fixtures.expected[i],
-              static_cast<uint32_t>(std::max<int64_t>(0, clock.utc)), true);
+          store_->roundResult(map_.competition, key.number, label,
+                              state.fixtures.expected[i], true);
         }
       else
         for (uint8_t i = 0; i < state.fixtures.calendar_data.stage_count; ++i) {
@@ -927,9 +942,8 @@ Step Planner::advance(bool ok, const Clock& clock) {
                      match.label == stage.label &&
                      (match.flags & kMatchRefresh);
           }
-          store_->roundResult(
-              map_.competition, stage.number, stage.label, count,
-              static_cast<uint32_t>(std::max<int64_t>(0, clock.utc)), true);
+          store_->roundResult(map_.competition, stage.number, stage.label,
+                              count, true);
         }
       store_->settleRun(map_.competition, kNoticeFixtures);
       store_->collect();

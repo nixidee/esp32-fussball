@@ -1,12 +1,9 @@
 #include "team_name_files.h"
 
-#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <algorithm>
 #include <cerrno>
-#include <cstdio>
 #include <utility>
 
 #include "file_error.h"
@@ -16,6 +13,8 @@
 namespace football::names::files {
 namespace {
 Status ioStatus(int error) {
+  if (error == EINVAL || error == EILSEQ) return Status::kInvalid;
+  if (error == EBUSY) return Status::kConflict;
   switch (::files::fromErrno(error)) {
     case ::files::Failure::kNone: return Status::kOk;
     case ::files::Failure::kCapacity: return Status::kPhysicalSpace;
@@ -25,8 +24,7 @@ Status ioStatus(int error) {
   return Status::kIo;
 }
 bool path(const Context& c, uint8_t slot, char* out, std::size_t capacity) {
-  return slot >= 1 && slot <= cfg::kTeamNamesSlotFiles.size() &&
-         ::files::buildPath(c.base_path, cfg::kTeamNamesSlotFiles[slot - 1],
+  return ::files::ownedPath(c.base_path, {::files::FileKind::kNamesSlot, slot},
                             {out, capacity});
 }
 bool fdRead(std::size_t at, void* bytes, std::size_t size, void* context) {
@@ -36,17 +34,6 @@ bool checkedReference(const store::Reader& reader,
                       const settings::NamesRef& ref) {
   return reader.size() == ref.length && reader.generation() == ref.generation &&
          reader.digest() == ref.crc;
-}
-Status physical(const Context& c, std::size_t candidate) {
-  Usage usage;
-  if (!c.usage || !c.usage(c.user, usage) || usage.used > usage.total)
-    return Status::kIo;
-  // One shared replacement workspace. Do not reserve future unused image
-  // quota, another untouched reserve, or an unconditional metadata proof.
-  // I/O/close/validation failures preserve the referenced active version.
-  return ::files::hasReplacementSpace(usage.total, usage.used, candidate)
-             ? Status::kOk
-             : Status::kPhysicalSpace;
 }
 }  // namespace
 
@@ -59,8 +46,9 @@ Status Read::open(const Context& context, const State& state) {
   return open(context, state.reference, state.checked);
 }
 Status Read::open(const Candidate& candidate) {
-  if (!candidate.validated_ || !candidate.context_) return Status::kInvalid;
-  return open(*candidate.context_, candidate.reference(), candidate.checked_);
+  const auto* context = candidate.file_.context();
+  if (!candidate.file_.validated() || !context) return Status::kInvalid;
+  return open(*context, candidate.reference(), candidate.checked_);
 }
 Status Read::open(const Context& context, const settings::NamesRef& ref,
                   const store::Reader& checked) {
@@ -68,7 +56,7 @@ Status Read::open(const Context& context, const settings::NamesRef& ref,
   if (!ref.slot) return Status::kMissing;
   char file[::files::kPathBufferBytes];
   if (!path(context, ref.slot, file, sizeof(file))) return Status::kInvalid;
-  fd_ = ::open(file, O_RDONLY);
+  fd_ = ::files::openRead(file);
   if (fd_ < 0) return ioStatus(errno);
   struct stat info{};
   const bool exact = fstat(fd_, &info) == 0 && S_ISREG(info.st_mode) &&
@@ -88,7 +76,7 @@ Status load(const Context& context, const settings::NamesRef& ref,
     return ref == settings::NamesRef{} ? Status::kMissing : Status::kInvalid;
   char file[::files::kPathBufferBytes];
   if (!path(context, ref.slot, file, sizeof(file))) return Status::kInvalid;
-  int fd = ::open(file, O_RDONLY);
+  int fd = ::files::openRead(file);
   if (fd < 0)
     return ioStatus(errno);  // A referenced missing version is not empty names.
   struct stat info{};
@@ -106,104 +94,85 @@ Status load(const Context& context, const settings::NamesRef& ref,
   return Status::kOk;
 }
 
-Candidate::~Candidate() { abort(); }
+Candidate::~Candidate() = default;
 Candidate::Candidate(Candidate&& from) noexcept
-    : context_(std::exchange(from.context_, nullptr)),
-      fd_(std::exchange(from.fd_, -1)),
+    : file_(std::move(from.file_)),
       expected_(from.expected_),
-      checked_(from.checked_),
-      slot_(from.slot_),
-      failure_(from.failure_),
-      validated_(from.validated_),
-      retained_(from.retained_),
-      owns_file_(std::exchange(from.owns_file_, false)) {
+      checked_(from.checked_) {
   checked_.detach();
 }
 Status Candidate::begin(const Context& context, const State& state) {
-  if (context_ || state.reference.generation == UINT32_MAX)
+  if (file_.context() || state.reference.generation == UINT32_MAX)
     return Status::kConflict;
-  const auto space = physical(context, cfg::kTeamNamesFileBytes);
-  if (space != Status::kOk) return space;
-  context_ = &context;
   expected_ = state.reference;
-  slot_ = expected_.slot == 1 ? 2 : 1;
-  char file[::files::kPathBufferBytes];
-  if (!path(context, slot_, file, sizeof(file))) return Status::kInvalid;
-  fd_ = ::open(file, O_RDWR | O_CREAT | O_TRUNC, 0600);
-  if (fd_ < 0) return ioStatus(errno);
-  owns_file_ = true;
-  return Status::kOk;
+  const uint8_t slot = expected_.slot == 1 ? 2 : 1;
+  return file_.begin(context, {::files::FileKind::kNamesSlot, slot},
+                     cfg::kTeamNamesFileBytes)
+             ? Status::kOk
+             : failure();
 }
 bool Candidate::readCandidate(std::size_t at, void* out, std::size_t n,
                               void* raw) {
-  auto& candidate = *static_cast<Candidate*>(raw);
-  if (candidate.fd_ < 0) return false;
-  if (fdRead(at, out, n, &candidate.fd_)) return true;
-  if (candidate.failure_ == Status::kOk) candidate.failure_ = ioStatus(errno);
-  return false;
+  return static_cast<Candidate*>(raw)->file_.readAt(at, out, n);
 }
 bool Candidate::writeCandidate(std::size_t at, const void* bytes, std::size_t n,
                                void* raw) {
-  auto& candidate = *static_cast<Candidate*>(raw);
-  if (candidate.failure_ != Status::kOk) return false;
-  if (candidate.validated_ || candidate.fd_ < 0 ||
-      at > cfg::kTeamNamesFileBytes || n > cfg::kTeamNamesFileBytes - at) {
-    candidate.failure_ = Status::kInvalid;
-    return false;
-  }
-  if (::files::writeExact(candidate.fd_, at, bytes, n)) return true;
-  candidate.failure_ = ioStatus(errno);
-  return false;
+  return static_cast<Candidate*>(raw)->file_.writeAt(at, bytes, n);
 }
 store::IO Candidate::io() { return {this, readCandidate, writeCandidate}; }
+Status Candidate::failure() const {
+  return file_.error() ? ioStatus(file_.error()) : Status::kOk;
+}
 Status Candidate::validate(std::size_t size) {
-  if (failure_ != Status::kOk) return failure_;
-  if (!context_ || fd_ < 0 || !size || size > cfg::kTeamNamesFileBytes)
-    return Status::kInvalid;
-  struct stat info{};
-  if (fstat(fd_, &info) != 0) return failure_ = ioStatus(errno);
-  if (info.st_size != static_cast<off_t>(size) || !checked_.open(io(), size) ||
-      checked_.generation() != expected_.generation + 1u)
-    return failure_ != Status::kOk ? failure_ : Status::kInvalid;
-  const bool closed = ::files::syncAndClose(fd_);
-  const auto close_status = closed ? Status::kOk : ioStatus(errno);
-  checked_.detach();
-  if (!closed) return failure_ = close_status;
-  validated_ = true;
-  return Status::kOk;
+  struct Check {
+    Candidate* candidate;
+    std::size_t size;
+  } check{this, size};
+  const bool valid = file_.complete(
+      size,
+      [](const char* path, void* raw) {
+        const auto& check = *static_cast<Check*>(raw);
+        auto& candidate = *check.candidate;
+        int input = ::files::openRead(path);
+        if (input < 0) return false;
+        errno = 0;
+        const bool valid =
+            candidate.checked_.open({&input, fdRead, nullptr}, check.size) &&
+            candidate.checked_.generation() ==
+                candidate.expected_.generation + 1u;
+        const int validation_error = errno ? errno : EILSEQ;
+        const bool closed = ::files::closeDescriptor(input);
+        candidate.checked_.detach();
+        if (!valid) errno = validation_error;
+        return valid && closed;
+      },
+      &check);
+  return valid ? Status::kOk : failure();
 }
 settings::NamesRef Candidate::reference() const {
-  if (!validated_) return {};
-  return {slot_, checked_.generation(), static_cast<uint16_t>(checked_.size()),
-          checked_.digest()};
+  if (!file_.validated()) return {};
+  return {file_.location().slot, checked_.generation(),
+          static_cast<uint16_t>(checked_.size()), checked_.digest()};
 }
 Receipt Candidate::activate(State& state) {
   Receipt receipt;
-  if (!validated_ || state.reference != expected_) {
+  if (!file_.validated() || state.reference != expected_) {
     receipt.status = Status::kConflict;
     return receipt;
   }
   state.reference = reference();
   state.checked = checked_;
   state.checked.detach();
-  retained_ = true;
+  file_.preserve();
   receipt.status = Status::kOk;
   receipt.generation = checked_.generation();
   receipt.digest = checked_.digest();
   receipt.activated = true;
   return receipt;
 }
-void Candidate::preserve() { retained_ = true; }
+void Candidate::preserve() { file_.preserve(); }
 bool Candidate::abort() {
-  bool okay = ::files::closeDescriptor(fd_);
-  if (context_ && owns_file_ && !retained_) {
-    char file[::files::kPathBufferBytes];
-    if (!path(*context_, slot_, file, sizeof(file)) ||
-        (unlink(file) != 0 && errno != ENOENT))
-      okay = false;
-  }
-  context_ = nullptr;
-  owns_file_ = false;
-  return okay;
+  checked_.detach();
+  return file_.abort();
 }
 }  // namespace football::names::files

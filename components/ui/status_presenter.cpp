@@ -8,17 +8,16 @@
 #include "request_scheduler.h"
 
 namespace ui {
-std::tm Presenter::localCivil(int64_t utc) const {
-  // The controller supplies calendar facts; presentation never asks the clock
-  // or configuration service. UTC decomposition is the C library's pure helper.
-  const auto dates =
-      navigation_data ? navigation_data->data.dates : football::DateContext{};
-  const auto offset = dates.offset_at ? dates.offset_at(utc, dates.context)
-                                      : dates.fallback_offset_s;
-  const time_t local_seconds = static_cast<time_t>(utc + offset);
-  std::tm value{};
-  gmtime_r(&local_seconds, &value);
-  return value;
+namespace {
+void timeText(char* out, std::size_t size, bool known, const std::tm& local) {
+  if (known)
+    values::formatText(out, size, "%02d:%02d", local.tm_hour, local.tm_min);
+  else
+    values::formatText(out, size, "--:--");
+}
+}  // namespace
+bool Presenter::localCivil(int64_t utc, std::tm& out) const {
+  return facts && facts->calendar.civil(utc, out);
 }
 
 void Presenter::localDate(char* out, std::size_t size, int64_t utc) {
@@ -26,34 +25,37 @@ void Presenter::localDate(char* out, std::size_t size, int64_t utc) {
                                         "Do", "Fr", "Sa"};
   static constexpr const char* kEn[] = {"Sun", "Mon", "Tue", "Wed",
                                         "Thu", "Fri", "Sat"};
-  const auto local = localCivil(utc);
+  std::tm local{};
+  if (!localCivil(utc, local)) {
+    values::formatText(out, size, "—");
+    return;
+  }
   values::formatText(out, size, "%s %02d.%02d.",
                      (model.language ? kEn : kDe)[local.tm_wday % 7],
                      local.tm_mday, local.tm_mon + 1);
 }
 
 void Presenter::localTime(char* out, std::size_t size, int64_t utc) {
-  const auto local = localCivil(utc);
-  values::formatText(out, size, "%02d:%02d", local.tm_hour, local.tm_min);
+  std::tm local{};
+  const bool known = localCivil(utc, local);
+  timeText(out, size, known, local);
+}
+void Presenter::calendarTime(char* out, std::size_t size, uint8_t instant) {
+  std::tm local{};
+  const bool known = facts && facts->calendar.civilAt(instant, local);
+  timeText(out, size, known, local);
 }
 
-bool Presenter::entryOf(uint8_t id, settings::CompetitionRoute& entry) {
-  if (navigation_data) {
-    const auto* found = navigation_data->data.competitions.find(id);
-    if (!found) return false;
-    entry = *found;
-    return true;
-  }
-  return false;
+const settings::CompetitionRoute* Presenter::entryOf(uint8_t id) const {
+  return published ? published->routes.find(id) : nullptr;
 }
 
 void Presenter::roundCaption(const football::MatchStore& store,
                              const football::StoredMatch& match, bool date) {
-  settings::CompetitionRoute entry;
-  const bool known = entryOf(match.competition, entry);
-  const char* competition = known ? entry.competition_name.data.data() : "";
+  const auto* entry = entryOf(match.competition);
+  const char* competition = entry ? entry->competition_name.data.data() : "";
   const std::size_t competition_length =
-      known ? entry.competition_name.view().size() : 0;
+      entry ? entry->competition_name.view().size() : 0;
   char round[40]{};
   if (match.label != football::kNoIndex)
     prefix<39>(round, store.labelAt(match.label).data);
@@ -85,12 +87,12 @@ void Presenter::cardText(const char* title, const char* line, const char* hint,
 }
 
 void Presenter::competitionName(char (&out)[48], uint8_t id) {
-  settings::CompetitionRoute entry;
+  const auto* entry = entryOf(id);
   football::Text<sizeof(out) - 1> name;
-  if (entryOf(id, entry))
-    name.assign(entry.competition_name.empty()
-                    ? entry.primary.competition.view()
-                    : entry.competition_name.view());
+  if (entry)
+    name.assign(entry->competition_name.empty()
+                    ? entry->primary.competition.view()
+                    : entry->competition_name.view());
   memcpy(out, name.data, sizeof(out));
 }
 
@@ -113,17 +115,16 @@ Tone Presenter::causeTone(football::Cause cause) {
 }
 
 void Presenter::faultCard(uint8_t id, const football::DatasetStatus& status,
-                          int64_t now, int64_t utc, const char* title) {
+                          const char* title) {
   const auto* state = stateOf(id);
   const auto cause = status.cause;
   char name[48], retry[40]{}, code[football::kErrorCodeBytes];
   competitionName(name, id);
   // A data notice has no failed request to retry.
-  if (!football::dataNotice(cause) && published && published->retry_ms > now &&
-      utc > 0) {
+  if (!football::dataNotice(cause) &&
+      facts->calendar.retry != CalendarFacts::kMissing) {
     char time[8];
-    localTime(time, sizeof(time),
-              utc + (published->retry_ms - now + 999) / 1000);
+    calendarTime(time, sizeof(time), facts->calendar.retry);
     values::formatText(retry, sizeof(retry), "%s %s",
                        translated("Neuer Versuch", "Retry at"), time);
   }
@@ -230,13 +231,10 @@ Subject Presenter::statusText(const football::Published& data,
                               const BindContext& context) {
   const int64_t utc = context.utc, now = context.now;
   char time[8], code[football::kErrorCodeBytes];
-  const auto asOf = [&](int64_t fetched_ms) {
-    localTime(time, sizeof(time), utc - (now - fetched_ms) / 1000);
-  };
-  // Last successful request of 'fetched_ms' (0 = none) as "Stand HH:MM".
-  const auto stand = [&](int64_t fetched_ms) {
-    if (fetched_ms != 0) {
-      asOf(fetched_ms);
+  // The controller has already converted monotonic observations to UTC.
+  const auto stand = [&](uint8_t instant) {
+    if (instant != CalendarFacts::kMissing) {
+      calendarTime(time, sizeof(time), instant);
       values::formatText(view.status, sizeof(view.status), "%s %s",
                          translated("Stand", "As of"), time);
     } else
@@ -265,18 +263,17 @@ Subject Presenter::statusText(const football::Published& data,
     view.status_tone = Tone::kWarn;
     return {true, 0};
   }
-  const bool competition_card = nav.entry.type == screen::Type::kMatchday ||
-                                nav.entry.type == screen::Type::kTable;
+  const bool competition_card = view.screen == screen::Type::kMatchday ||
+                                view.screen == screen::Type::kTable;
   const auto* state =
       competition_card ? stateOf(presentation.on_screen) : nullptr;
   if (state) {
-    const auto status =
-        contentStatus(data.store, state->id, nav.entry.type, utc);
+    const auto status = contentStatus(data.store, state->id, view.screen, utc);
     if (status.cause != football::Cause::kNone) {
       // The HTTP status only on the card and in the Web UI.
       football::errorCode(code, state->provider, status.cause, 0);
       if (status.last_success_ms != 0) {
-        asOf(status.last_success_ms);
+        calendarTime(time, sizeof(time), facts->calendar.dataset);
         values::formatText(view.status, sizeof(view.status),
                            "%s \xC2\xB7 %s %s", code,
                            translated("Stand", "As of"), time);
@@ -285,11 +282,10 @@ Subject Presenter::statusText(const football::Published& data,
       view.status_tone = causeTone(status.cause);
       return {false, state->id};
     }
-    if (!model.demo &&
-        football::schedule::datasetStale(data.store, state->id,
-                                         contentDataset(nav.entry.type), utc,
-                                         now, state->provider))
-      stand(status.last_success_ms);
+    if (!model.demo && football::schedule::datasetStale(
+                           data.store, state->id, contentDataset(view.screen),
+                           utc, now, state->provider))
+      stand(facts->calendar.dataset);
     return {};
   }
   int count = 0;
@@ -313,7 +309,7 @@ Subject Presenter::statusText(const football::Published& data,
     view.status_tone = Tone::kError;
   } else if (data.stale)
     // A competition that failed keeps earlier data: show the oldest.
-    stand(data.fetched_ms);
+    stand(facts->calendar.fetched);
   return {};
 }
 
@@ -429,8 +425,8 @@ void Presenter::finishStatus(uint32_t state, int64_t now,
     state = football::fingerprint(
         {reinterpret_cast<const char*>(bytes), sizeof(bytes)});
     image_card = view.layout == Layout::kImage &&
-                 (nav.entry.type == screen::Type::kCrest ||
-                  nav.entry.type == screen::Type::kSlideshow) &&
+                 (view.screen == screen::Type::kCrest ||
+                  view.screen == screen::Type::kSlideshow) &&
                  selected_image.actual == images::FileSource::kNone;
     if (image_card) {
       imageFaultCard(selected_image);

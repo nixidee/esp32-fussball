@@ -7,7 +7,21 @@
 
 namespace football::retention {
 Index::Index(uint32_t club, int64_t utc, DateContext dates, bool calendar)
-    : dates_(dates), utc_(utc), club_(club), use_calendar_(calendar) {
+    : Index(std::span<const uint32_t>(&club, 1), utc, dates, calendar) {}
+Index::Index(std::span<const uint32_t> clubs, int64_t utc, DateContext dates,
+             bool calendar)
+    : dates_(dates), utc_(utc), use_calendar_(calendar) {
+  std::size_t count = 0;
+  for (const auto id : clubs) {
+    if (!id || std::any_of(clubs_.begin(), clubs_.begin() + count,
+                           [id](const Club& item) { return item.id == id; }))
+      continue;
+    if (count == clubs_.size()) {
+      complete_ = false;
+      break;
+    }
+    clubs_[count++].id = id;
+  }
   if (calendar)
     new (&calendar_) Calendar{};
   else
@@ -62,18 +76,21 @@ bool Index::observe(const provider::Fixture& fixture) {
     return true;
   }
   const auto kickoff = fixture.facts.kickoff;
-  if (club_ && (fixture.home.id == club_ || fixture.away.id == club_)) {
+  for (auto& club : clubs_) {
+    if (!club.id) break;
+    if (fixture.home.id != club.id && fixture.away.id != club.id) continue;
+    auto& own = club.fixtures;
     if (kickoff < utc_) {
-      if (!own_[0].id || kickoff > own_[0].kickoff ||
-          (kickoff == own_[0].kickoff && fixture.facts.id < own_[0].id))
-        own_[0] = {fixture.facts.id, kickoff};
+      if (!own[0].id || kickoff > own[0].kickoff ||
+          (kickoff == own[0].kickoff && fixture.facts.id < own[0].id))
+        own[0] = {fixture.facts.id, kickoff};
     } else {
       Own next{fixture.facts.id, kickoff};
-      for (std::size_t i = 1; i < own_.size(); ++i) {
-        if (own_[i].id == next.id) break;
-        if (!own_[i].id || next.kickoff < own_[i].kickoff ||
-            (next.kickoff == own_[i].kickoff && next.id < own_[i].id))
-          std::swap(own_[i], next);
+      for (std::size_t i = 1; i < own.size(); ++i) {
+        if (own[i].id == next.id) break;
+        if (!own[i].id || next.kickoff < own[i].kickoff ||
+            (next.kickoff == own[i].kickoff && next.id < own[i].id))
+          std::swap(own[i], next);
         if (!next.id) break;
       }
     }
@@ -111,7 +128,14 @@ bool Index::observe(const provider::Fixture& fixture) {
 }
 bool Index::own(Selection& out) const {
   if (!complete_ || utc_ <= 0) return false;
-  for (std::size_t i = 0; i < own_.size(); ++i) out.own[i] = own_[i].id;
+  out.own = {};
+  auto next = out.own.begin();
+  for (const auto& club : clubs_) {
+    if (!club.id) break;
+    for (const auto& match : club.fixtures)
+      if (match.id && std::find(out.own.begin(), next, match.id) == next)
+        *next++ = match.id;
+  }
   return true;
 }
 bool Index::select(Selection& out, MatchStore* store,
@@ -189,8 +213,7 @@ bool Index::selectCalendar(Selection& out, MatchStore* store,
     selected.number = stage.number;
     if (store && competition) {
       selected.label = store->label(stage.label.data);
-      store->roundResult(competition, stage.number, selected.label, 0,
-                         static_cast<uint32_t>(utc_), false);
+      store->roundResult(competition, stage.number, selected.label, 0, false);
     }
   }
   for (uint16_t i = 0; i < calendar.count; ++i) {

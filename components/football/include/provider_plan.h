@@ -43,6 +43,7 @@
 #pragma once
 
 #include <array>
+#include <bitset>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -110,6 +111,9 @@ struct Completion {
 
 // What one competition's source keeps between requests (RAM only).
 struct SourceState {
+  // Reconstruct directly in owned storage; aggregate assignment creates a
+  // large source-array temporary on the provider task's limited stack.
+  void clear();
   uint32_t key = 0;  // hash of the competition id and its source settings
   settings::Bytes<cfg::kSeasonMaxBytes> season;  // resolved current season
   uint32_t season_utc = 0;  // UTC second of its resolution, 0 = unknown
@@ -150,7 +154,7 @@ struct ResponseDetails {
   // and duplicate detection belong to the existing worker-owned planner, so a
   // simultaneous bounded settings request stays inside the shared heap limit.
   struct EventBuffer {
-    std::array<std::array<StoredEvent, cfg::kStoreOtherEvents>, 2> candidates{};
+    std::array<std::array<EventFacts, cfg::kStoreOtherEvents>, 2> candidates{};
   };
   std::array<Candidate, 2> candidates{};
   std::array<uint32_t, cfg::kStoreMatches> seen{};
@@ -231,8 +235,11 @@ class Planner {
   // The stored row of the events run's match (event_match_), null if gone.
   const StoredMatch* eventsRow() const;
   static void observeMatch(const StoredMatch&, void*);
-  static void observeEvent(const StoredEvent&, void*);
+  static void observeEvent(const EventFacts&, void*);
   void finishDetails(bool ok, const Clock& clock);
+  // A complete-season index covers every configured club of this same
+  // request source. Explicit team schedules keep their one-team boundary.
+  retention::Index* makeRetentionIndex(bool calendar = false) const;
   const settings::CompetitionRoutes* competitions_ = nullptr;
   const settings::screen_policy::Eligibility* eligibility_ = nullptr;
   DateContext dates_;
@@ -243,7 +250,7 @@ class Planner {
   provider::Status response_failure_ = provider::Status::kOk;
   bool retain_admission_ = false;
   bool response_sources_ = true;
-  uint8_t own_seen_ = 0;
+  std::bitset<cfg::kRetainedClubFixtures> own_seen_;
 
   std::array<SourceState, cfg::kCompetitionMax> states_{};
   // The prepared request: its source, data type and consume context.

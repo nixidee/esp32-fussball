@@ -26,8 +26,20 @@ past_own = [row for row in club if date(row) < clock]
 next_own = [row for row in club if date(row) >= clock]
 expected = {row["matchID"] for row in rows if row["group"]["groupOrderID"] in selected}
 expected.update(row["matchID"] for row in past_own[-1:] + next_own[:3])
+# Independent multi-club oracle from recorded provider fixtures, not selector
+# output. Eight club preferences share one source; shared matches occur once.
+clubs = sorted({row[side]["teamId"] for row in rows for side in ("team1", "team2")})[:8]
+club_union = set()
+for team in clubs:
+    fixtures = sorted((row for row in rows if team in (row["team1"]["teamId"], row["team2"]["teamId"])), key=date)
+    past = [row for row in fixtures if date(row) < clock]
+    future = [row for row in fixtures if date(row) >= clock]
+    club_union.update(row["matchID"] for row in past[-1:] + future[:3])
+multi_expected = {row["matchID"] for row in rows if row["group"]["groupOrderID"] in selected} | club_union
 with tempfile.TemporaryDirectory(prefix="fixture-retention-", dir="/tmp") as directory:
     folder = Path(directory)
+    multi = folder / "multi.txt"
+    multi.write_text("\n".join(" ".join(map(str, [len(values), *values])) for values in (clubs, sorted(club_union), sorted(multi_expected))))
     reversed_season = folder / "reversed.json"
     reversed_season.write_text(json.dumps(rows[::-1]))
     command = ["clang++", "-std=c++20", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
@@ -37,4 +49,4 @@ with tempfile.TemporaryDirectory(prefix="fixture-retention-", dir="/tmp") as dir
         command.append(str(root / path))
     command += ["-o", str(folder / "check")]
     subprocess.run(command, check=True)
-    subprocess.run([str(folder / "check"), str(season), str(reversed_season), str(own), str(cup), str(calendar), str(cup_day), *map(str, sorted(expected))], check=True)
+    subprocess.run([str(folder / "check"), str(season), str(reversed_season), str(own), str(cup), str(calendar), str(cup_day), str(multi), *map(str, sorted(expected))], check=True)

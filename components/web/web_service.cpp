@@ -14,6 +14,7 @@
 #include <memory>
 #include <new>
 #include <string_view>
+#include <type_traits>
 
 #include "app_config.h"
 #include "command_json.h"
@@ -689,10 +690,15 @@ esp_err_t applyConfig(httpd_req_t* req) {
   if (settings::generation() != application.expected_revision)
     return error(req, fault::kSettingsChanged);
   settings::screen_policy::Error policy_error;
-  const auto err = football::names::applyConfiguration(
-      *config, application.expected_revision,
-      application.names_changed ? &names.candidate : nullptr, nullptr, &why,
-      &policy_error);
+  settings::NamesChange names_change;
+  if (application.names_changed) {
+    const auto prepared =
+        football::names::prepareChange(names.candidate, names_change);
+    if (prepared != ESP_OK) return failed(req, prepared, "adopted_names");
+  }
+  const auto err = settings::apply(
+      *config, application.expected_revision, &why, &policy_error,
+      application.names_changed ? &names_change : nullptr);
   if (settings::origin() == settings::Origin::kOutcomeUnknown)
     return error(req, "503 Service Unavailable", "outcome_unknown",
                  "configuration may be durable; do not repeat Apply; restart "
@@ -768,8 +774,12 @@ esp_err_t getStatus(httpd_req_t* req) {
                  overview.own.home.data, sizeof(overview.own.home.data)});
     targets.add({overview.own.away_id, overview.own.provider,
                  overview.own.away.data, sizeof(overview.own.away.data)});
-    names_error = football::names::resolveVisible(
-        targets, settings::webSettings().language, cache);
+    uint32_t revision;
+    const auto web = settings::webSettings(&revision);
+    names_error =
+        football::names::resolveVisible(targets, web.language, revision, cache);
+    if (names_error == ESP_ERR_INVALID_STATE)
+      return error(req, fault::kSettingsChanged);
   }
   files::Usage usage{};
   files::usage(usage);
@@ -1051,17 +1061,29 @@ esp_err_t getSelection(httpd_req_t* req) {
         !out.field("wait_s", waits ? (left + 999) / 1000 : 0) ||
         !out.key("items") || !out.array())
       return false;
-    football::Selection item;
-    if (!state.busy)
+    const auto items = [&](auto& item) {
       for (unsigned i = 0; i < state.count; ++i) {
-        // A concurrent result replacement terminates this stream. The client
-        // rejects the incomplete response; never append a second JSON body.
+        // Replacement terminates this stream; never attach a second body.
         if (!football::selectionAt(query, i, state.revision, item) ||
-            !out.object() || !out.field("id", item.id.data) ||
-            !out.field("name", item.name.data) ||
-            !out.field("season", item.season.data) || !out.end())
+            !out.object() || !out.field("id", item.identity()) ||
+            !out.field("name", item.name.data))
           return false;
+        if constexpr (std::is_same_v<std::remove_reference_t<decltype(item)>,
+                                     football::CompetitionSelection>)
+          if (!out.field("season", item.season.data)) return false;
+        if (!out.end()) return false;
       }
+      return true;
+    };
+    if (!state.busy) {
+      if (state.teams) {
+        football::TeamSelection item;
+        if (!items(item)) return false;
+      } else {
+        football::CompetitionSelection item;
+        if (!items(item)) return false;
+      }
+    }
     return out.end();
   });
 }
@@ -1494,16 +1516,9 @@ esp_err_t cancelSelection(httpd_req_t* req) {
 esp_err_t postDisplay(httpd_req_t* req) {
   Request request(req);
   if (const auto* f = admitSession(req)) return error(req, *f);
-  if (const auto* f = checkJsonBody(req)) return error(req, *f);
-  JsonBody body(req);
   DisplayCommand command;
-  settings::Violation violation;
-  const auto decoded = readDisplayCommand(body.input(), command, violation);
-  if (decoded == CommandDecode::kViolation) return rejected(req, violation);
-  if (decoded != CommandDecode::kOk)
-    return error(req, body_broken ? fault::kBodyIncomplete : fault::kJson,
-                 nullptr, body.diagnostic());
-  if (!body.complete()) return error(req, fault::kBodyIncomplete);
+  esp_err_t reply;
+  if (!readCommand(req, command, readDisplayCommand, reply)) return reply;
   if (command.config_revision != settings::generation())
     return error(req, fault::kSettingsChanged);
   if (command.action == ui::Action::kAutomaticNext &&

@@ -333,12 +333,20 @@ An explicit busy rejection owns no query; an unacknowledged start is never
 resent automatically.
 
 `GET /selection?query=1234567800000001` returns that same `query`, `busy`,
-`items` (`id`, `name`, `season`; at most one page), `more`, `revision` and
+`items` (at most one page), `more`, `revision` and
 `error_code`. Missing/malformed IDs are rejected; a superseded, cancelled,
 expired or configuration-stale ID receives409 `changed` before output. Row
 reads recheck both query and result revision; replacement during streaming
 aborts without a final success terminator. It cannot return another query's
 successful list. Provider failure also supplies its cause/code/HTTP status.
+
+Competition-list items carry textual `id`, `name` and `season`. Club-list
+items carry positive uint32 numeric `id` and textual `name`; they have no
+competition-season field. The query owns this result kind. Wrong-kind internal
+reads are refused before accessing result storage. The schema's `team_id_max`
+is derived from uint32; all browser club-ID validators use that one contract.
+Textual club IDs are not an alternative current API format. Confirmed empty
+results contain an explicit empty items array; malformed/missing arrays fail.
 
 While busy, `wait`/`wait_s` describe a window limit or provider pause. Matching
 reads renew the30-second idle lease, so an open editor can retain a long limit
@@ -359,6 +367,9 @@ The schema publishes `ota_max` from the inactive OTA slot, `selection_text_max`,
 `config_version`, `max_apply_body`, the names format/source/wire versions and
 normalized file/text bounds. `operation_deadline_ms` and `socket_timeout_ms`
 come from the same transport configuration as the explicit originals query.
+`client` publishes browser interaction timeouts, retry limits and polling
+budgets. The offline page embeds these exact central configuration values,
+including before its first schema fetch; no separate browser defaults apply.
 `firmware_id`
 in status is the full 64-character lowercase hexadecimal ELF SHA256 from the
 app descriptor. It distinguishes builds with equal version strings; it is
@@ -673,7 +684,9 @@ Application Apply and small typed commands reject unknown and duplicate keys,
 invalid scalar types, malformed Unicode and trailing non-space bytes. Label
 schemas reject embedded NUL; raw SSID bytes are intentionally separate. The
 same JSON reader/encoder handles settings, screen rules, names and commands;
-there is no body-sized JSON allocation. API keys are not passed into
+small commands also share typed scalar/field checks and one complete HTTP
+body/error path, including display actions. There is no body-sized JSON
+allocation. API keys are not passed into
 the debug producer.
 
 The debug WebSocket takes its token from the URL query because the browser
@@ -742,3 +755,14 @@ visible and the Web UI gives collection/backup recovery advice. A failed lookup
 does not publish a complete cache that could hide the failure on the next poll.
 This adds only a4-B local error result and streamed fields, no resident model,
 heap allocation or stored setting.
+
+The schema names the common file replacement workspace `replacement_workspace`
+(40,960 bytes). The image client uses that value for candidate admission; image
+quota and per-image size remain separate bounds. The former image-specific
+workspace field is removed together with its client use.
+
+Image upload and copy share the same physical candidate owner as adopted names.
+A candidate must be fully written, synchronized, closed and content-checked
+before publication. Image rename runs behind the LVGL reader barrier; names
+activation uses the exact NVS reference. A cleanup failure never replaces the
+primary operation cause. No journal or additional API write sequence is required.

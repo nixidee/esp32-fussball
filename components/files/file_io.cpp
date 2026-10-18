@@ -1,5 +1,6 @@
 #include "file_io.h"
 
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -19,6 +20,7 @@ bool seek(int fd, std::size_t offset) {
   return false;
 }
 }  // namespace
+int openRead(const char* path) { return ::open(path, O_RDONLY); }
 bool readExact(int fd, std::size_t offset, void* bytes, std::size_t count) {
   if (!seek(fd, offset)) return false;
   auto* at = static_cast<uint8_t*>(bytes);

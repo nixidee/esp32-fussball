@@ -1,5 +1,13 @@
 # Configuration
 
+Browser interaction budgets also live in `include/app_config.h`, in
+`kWebClientPolicy`. The existing offline asset generator embeds that numeric
+table before the browser sources; the schema publishes the same entries. It
+covers HTTP/upload limits, bounded busy retries, selection/Demo/status polling,
+restart/OTA observation, image input debounce and notification lifetimes. These
+are interaction budgets, independent of provider request limits and the local
+OTA health trial. Changing their owner does not change their existing values.
+
 Implementation checkpoint: 2026-10-18. General settings, competitions and screen
 policy now belong to one AppConfig and one current-format NVS record. Football
 provider data is RAM-only. Adopted names remain separate; one common Apply references and activates the
@@ -336,7 +344,7 @@ bounds each admitted full-file/fallback-resolution pass, reusing the existing
 JPEG workspace. A longer candidate chain resumes in a later ordinary app
 poll. Waiting for exclusive-operation admission is nonblocking and does not
 hold that admission during the delay. `kImageTempFile` names the one replacement
-temporary file. `kImageReserveBytes` (40,960 B) is a shared replacement workspace:
+temporary file. `kFileReplacementWorkspaceBytes` (40,960 B) is a shared replacement workspace:
 admission requires actual available space of at least the larger of that value
 and the candidate size. The candidate consumes the workspace; no second reserve
 or unused future image quota is charged. Checked I/O still decides whether the
@@ -355,10 +363,12 @@ never replaces the active referenced version. JPEG validation preserves its
 first stdio error through checked close, with the existing absolute deadline
 taking precedence when the operation has expired. Its1B error classification
 replaces its previous1B failure flag; actual C6 Validation size stays24B and
-the shared JPEG work buffer is unchanged. The candidate's1B failure status replaces its previous1B
-boolean; actual C6 candidate size remains140B, with no new resident state, heap
-allocation or filesystem bytes. The final linked Flash delta is measured in the
-integrated target build, not inferred from source size.
+the shared JPEG work buffer is unchanged. The common physical Candidate is20B
+and its borrowed Context12B on C6; the names domain candidate is144B, up4B
+temporary from140B. The integrated cutover adds4B static RAM and1,552B linked
+Flash; it adds no heap allocation, task, filesystem history or quota. The primary
+operation error remains available through error(); a failed abort reports its
+own cleanup errno separately. Both causes remain observable.
 
 Lists never contain empty entries: an entry exists or the list is shorter.
 Crest displays its dedicated role; Images uses the policy library list. Neither
@@ -394,11 +404,10 @@ names reference. Truncated, unknown-version, corrupt or invalid records select s
 defaults; no legacy record or shorter trailing-field migration is loaded.
 Reading never repairs or writes a record. An unreadable record refuses writes.
 
-One settings writer serializes Apply, snapshots, section adapters and explicit
-image-reference cleanup. Save validates the caller's expected revision, writes
+One settings writer serializes Apply and explicit image-reference cleanup.
+Snapshots use the short model lock. Apply validates the caller's expected revision, writes
 one complete blob, commits and verifies readback before publishing the complete
-RAM config and matching generation. A section edit preserves the other sections
-and last-apply ID. Provider-data generation advances only when its inputs change.
+RAM config and matching generation. There are no separate section setters. Provider-data generation advances only when its inputs change.
 Deleting a competition removes its attached display preferences in that same
 commit. Changed names are staged and validated first; the same NVS commit
 selects their exact slot/generation/length/CRC before coherent activation.
@@ -564,3 +573,43 @@ fragmentation, all-task25%usable-stack headroom, C6 font-decode CPU, NVS garbage
 collection/power interruption, LCD/SPI completion, OTA/rollback and longrun
 acceptance require owner-flashed hardware. Current live keyed-provider states
 also remain unverified. A fitting build is not full acceptance.
+
+
+The configuration service alone coordinates changed-name Apply. The names
+service prepares a request-local44-B C6 lease containing exact expected/desired
+references and activation/preserve operations. Under the existing writer lock,
+configuration verifies the lease, validates the complete candidate, persists and
+verifies NVS, activates the prepared names receipt, then publishes the new RAM
+configuration and revision. No external caller owns the settings writer lock.
+A settings-only Apply cannot change the names reference. A failure after durable
+NVS but before receipt activation keeps old RAM, preserves both slots and uses
+the same outcome-unknown/read-only recovery path. The lease adds no retained
+allocation, file, task or second persistence owner.
+
+
+Visible-name resolution requires the configuration revision that supplied the
+view language. It reads names reference and revision together, rejects an
+already stale request before changing targets/cache, and checks completion
+again. The controller also discards scenes after a concurrent Apply. HTTP
+status obtains language/revision from one narrow snapshot and returns a
+configuration-conflict response when that lookup becomes stale. Name files
+remain outside the football lock; unchanged visible labels still reuse cache.
+
+### Settings device diagnostics
+
+All `kSettingsTest` modes remain available. Sample and save-loop diagnostics use
+an AppConfig snapshot and the real revision-checked Apply. Raw corrupt/version/
+short/long record modes deliberately bypass validation for the next boot test.
+The full-NVS mode fills its separate namespace, requires both the fill and the
+actual Apply to return `ESP_ERR_NVS_NOT_ENOUGH_SPACE`, and compares complete
+configuration fingerprints before reporting PASS. RAM, I/O and setup failures
+are failures of this check. It cleans the fill namespace afterwards. Controlled
+host SDK errors verify this decision; physical NVS exhaustion and power-cut
+behaviour still require an owner-flashed device run.
+
+Diagnostics retain one2704-B candidate and at most one2618-B wire buffer at a
+time; the fingerprint wire is released before Apply allocates its wire. These
+are requested payloads, not measured stack/heap peaks. Normal configuration
+logging copies172B of printable fields and presence/length indicators rather
+than the704-B complete model. Password and raw SSID bytes are never copied into
+that log snapshot. Diagnostic code remains inactive when kSettingsTest is None.

@@ -18,8 +18,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "hw_target.h"
-#include "lwip/sockets.h"
+#include "lwip/ip4_addr.h"
 #include "mdns.h"
+#include "portal_dns.h"
 #include "settings_store.h"
 #include "time_service.h"
 
@@ -92,7 +93,8 @@ bool owns(uint32_t mask) { return (resources & mask) == mask; }
 bool initialized() {
   return owns(kRequiredResources) && configured_radio && !settings_pending &&
          http_ready.load() == owns(kHttpService) &&
-         init_errors[static_cast<unsigned>(InitStep::kHttpService)] == ESP_OK;
+         init_errors[static_cast<unsigned>(InitStep::kHttpService)] == ESP_OK &&
+         init_errors[static_cast<unsigned>(InitStep::kPortalDns)] == ESP_OK;
 }
 esp_err_t& initError(InitStep step) {
   return init_errors[static_cast<unsigned>(step)];
@@ -108,11 +110,6 @@ int64_t sntp_retry_at = 0;
 AccessPoint results[cfg::kScanEntries]{};
 std::size_t result_count = 0;
 char ntp_server[cfg::kNtpServerMaxChars + 1]{};
-StaticTask_t dns_tcb;
-StackType_t dns_stack[cfg::kDnsStackBytes / sizeof(StackType_t)];
-int dns_fd = -1;
-// Query buffer of the portal DNS task, static instead of on its 2 KB stack.
-uint8_t dns_packet[cfg::kDnsPacketBytes];
 
 bool userScanBusy(UserScanState state) {
   return state == UserScanState::kQueued || state == UserScanState::kRunning;
@@ -187,64 +184,6 @@ void event(void*, esp_event_base_t base, int32_t id, void* data) {
       clients.fetch_sub(1);
   } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP)
     station_event.store(Station::kGotIp);
-}
-void dns(void*) {
-  const int fd = dns_fd;
-  uint8_t* const packet = dns_packet;
-  for (;;) {
-    // recvfrom can stay immediately ready under a packet flood. Give the app
-    // loop a chance even when every packet is rejected before sending.
-    vTaskDelay(cfg::kDnsYieldTicks);
-    sockaddr_in source{};
-    socklen_t length = sizeof(source);
-    int n = recvfrom(fd, packet, sizeof(dns_packet) - 16, 0,
-                     reinterpret_cast<sockaddr*>(&source), &length);
-    // A standard query (QR 0, opcode 0) with exactly one question.
-    if (n < 17 || !status().ap || (packet[2] & 0xF8) != 0 || packet[4] != 0 ||
-        packet[5] != 1)
-      continue;
-    int end = 12;
-    while (end < n && packet[end] != 0) {
-      const int size = packet[end];
-      if (size > 63 || end + size + 1 >= n) {
-        end = n;
-        break;
-      }
-      end += size + 1;
-    }
-    if (end + 5 > n || packet[end + 3] != 0 || packet[end + 4] != 1) continue;
-    // Class IN. Type A gets the AP address; every other type (AAAA, HTTPS)
-    // an empty answer, so a phone does not wait for its lookup to time out.
-    // Records after the question (an EDNS option) are not answered.
-    const bool a = packet[end + 1] == 0 && packet[end + 2] == 1;
-    n = end + 5;
-    packet[2] = 0x81;
-    packet[3] = 0x80;
-    packet[6] = 0;
-    packet[7] = a ? 1 : 0;
-    packet[8] = packet[9] = packet[10] = packet[11] = 0;
-    uint8_t answer[] = {0xc0,
-                        0x0c,
-                        0,
-                        1,
-                        0,
-                        1,
-                        0,
-                        0,
-                        0,
-                        30,
-                        0,
-                        4,
-                        cfg::kApIp[0],
-                        cfg::kApIp[1],
-                        cfg::kApIp[2],
-                        cfg::kApIp[3]};
-    if (a) {
-      memcpy(packet + n, answer, sizeof(answer));
-      n += sizeof(answer);
-    }
-    sendto(fd, packet, n, 0, reinterpret_cast<sockaddr*>(&source), length);
-  }
 }
 // Once at init: gpio_config reserves output pins, and configuring a reserved
 // pin again only logs "conflict found". antenna() then just sets levels.
@@ -445,34 +384,20 @@ esp_err_t applyModel(const settings::NetworkSettings& model) {
   return err;
 }
 
-esp_err_t startDns() {
-  if (dns_fd < 0) {
-    dns_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (dns_fd < 0) return ESP_FAIL;
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_port = htons(53);
-    timeval timeout{1, 0};
-    if (bind(dns_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) !=
-            0 ||
-        setsockopt(dns_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
-                   sizeof(timeout)) != 0) {
-      close(dns_fd);
-      dns_fd = -1;
-      return ESP_FAIL;
+void advanceInitialization(bool force_settings = false) {
+  const int64_t now = timekeeping::monotonicMs();
+  if (owns(kDnsTask)) {
+    const auto error = portalDnsError();
+    if (initError(InitStep::kPortalDns) != error) {
+      initError(InitStep::kPortalDns) = error;
+      if (failureStep() == InitStep::kNone)
+        init_retry_at = 0;
+      else if (init_retry_at == 0)
+        init_retry_at = now + cfg::kDnsRetryMs;
+      publish();
     }
   }
-  // A task-allocation failure leaves this one bound, configured socket owned
-  // by the service. There is no worker using it until creation succeeds.
-  if (xTaskCreateStatic(dns, "portal_dns", cfg::kDnsStackBytes, nullptr,
-                        cfg::kDnsTaskPriority, dns_stack, &dns_tcb) == nullptr)
-    return ESP_ERR_NO_MEM;
-  return ESP_OK;
-}
-
-void advanceInitialization(bool force_settings = false) {
   if (initialized()) return;
-  const int64_t now = timekeeping::monotonicMs();
   if (!force_settings && init_retry_at != 0 && now < init_retry_at &&
       (!settings_pending || initError(InitStep::kRadio) != ESP_OK))
     return;
@@ -560,7 +485,7 @@ void advanceInitialization(bool force_settings = false) {
     result(InitStep::kRadio, err);
     settings_pending = err != ESP_OK;
   }
-  run(InitStep::kPortalDns, kDnsTask, kStack | kLoop, startDns);
+  run(InitStep::kPortalDns, kDnsTask, kStack | kLoop, startPortalDns);
   run(InitStep::kMdns, kMdns, kLoop | kStation | kAccessPoint, mdns_init);
   if (!owns(kDhcpHostname | kMdnsHostname) && allowed(InitStep::kHostname))
     result(InitStep::kHostname, applyHostname());

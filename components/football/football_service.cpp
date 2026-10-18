@@ -9,8 +9,10 @@
 #include <ctime>
 #include <memory>
 #include <new>
+#include <type_traits>
 
 #include "binary_codec.h"
+#include "civil_time.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "event_bus.h"
@@ -47,7 +49,26 @@ SelectionRequest selection_request;
 std::atomic<uint32_t> original_query{0};
 uint32_t original_generation = 0, original_settings_generation = 0,
          original_epoch = 0;
-Selection selections[cfg::kSelectionEntries];
+// Query owns the active type; rows are constructed only when admitted.
+struct SelectionRows {
+  union Row {
+    CompetitionSelection competition;
+    TeamSelection team;
+    Row() noexcept {}
+  } rows[cfg::kSelectionEntries];
+  void set(std::size_t at, const CompetitionSelection& value) {
+    new (&rows[at].competition) CompetitionSelection(value);
+  }
+  void set(std::size_t at, const TeamSelection& value) {
+    new (&rows[at].team) TeamSelection(value);
+  }
+  void get(std::size_t at, CompetitionSelection& value) const {
+    value = rows[at].competition;
+  }
+  void get(std::size_t at, TeamSelection& value) const {
+    value = rows[at].team;
+  }
+} selections;
 SelectionStatus selection_state{};
 uint32_t selection_boot_nonce = 0, selection_counter = 0,
          selection_settings_generation = 0;
@@ -313,7 +334,8 @@ esp_err_t beginSend(void* context) {
     return refuse(ESP_ERR_INVALID_STATE, Cause::kTime);
   // DNS/TLS may cross UTC midnight. Charge the send's actual day, not the
   // day on which the worker began resolving the request.
-  const auto send_day = static_cast<uint32_t>(utc / 86400);
+  const auto send_day =
+      static_cast<uint32_t>(utc / timekeeping::kSecondsPerDay);
   if (send_day != day) {
     day = send_day;
     budget::settle(day);
@@ -873,10 +895,12 @@ void fold(char (&text)[N]) {
     }
   }
 }
-bool selectionRow(const Selection& selection, void* context) {
+template <class Row>
+bool selectionRow(const Row& selection, void* context) {
   auto& page = *static_cast<SelectContext*>(context);
   if (!selectionAlive(page.query)) return false;
   const auto& query = *page.request;
+  if (query.teams != std::is_same_v<Row, TeamSelection>) return false;
   if (!query.search.empty()) {
     char hay[cfg::kNameBytes + 1]{}, needle[cfg::kSelectionTextMaxBytes + 1]{};
     values::copyPadded(hay, sizeof(hay), selection.name.data);
@@ -894,7 +918,7 @@ bool selectionRow(const Selection& selection, void* context) {
   if (selection_state.count >= cfg::kSelectionEntries)
     selection_state.more = page.enough = true;
   else
-    selections[selection_state.count++] = selection;
+    selections.set(selection_state.count++, selection);
   unlock();
   return true;
 }
@@ -1009,7 +1033,8 @@ bool stepSelection(const settings::ProviderSettings& model, uint32_t generation,
   provider::ParseResult parsed;
   SelectContext context{&query, owner};
   provider::Sink sink{&context};
-  sink.selection = selectionRow;
+  sink.competition_selection = selectionRow<CompetitionSelection>;
+  sink.team_selection = selectionRow<TeamSelection>;
   sink.cancelled = [](void* value) {
     return !selectionAlive(static_cast<SelectContext*>(value)->query);
   };
@@ -1277,7 +1302,7 @@ bool stepDiscovery(const settings::ProviderSettings& model, uint32_t generation,
   if (!eligibility.selection.automatic_break || eligibility.frame || utc == 0 ||
       routes.entries.empty())
     return false;
-  const auto today = utc / 86400;
+  const auto today = utc / timekeeping::kSecondsPerDay;
   const auto& stored = discovery.stored();
   if (!stored.active && stored.runs.day != 0 && today <= stored.runs.day)
     return false;
@@ -1489,7 +1514,7 @@ void worker(void*) {
       unlock();
       continue;
     }
-    day = static_cast<uint32_t>(utc / 86400);
+    day = static_cast<uint32_t>(utc / timekeeping::kSecondsPerDay);
     // A counter that could not be read counts as used up on this day only
     // (the demo runs without a valid clock: no day to settle).
     if (clock_valid) budget::settle(day);
@@ -1807,6 +1832,7 @@ esp_err_t start(const SelectionRequest& request, SelectionQuery& query) {
   selection_state.busy = true;
   selection_state.count = 0;
   selection_state.more = false;
+  selection_state.teams = request.teams;
   selection_state.cause = Cause::kNone;
   selection_state.provider = request.provider;
   selection_state.http = 0;
@@ -1861,18 +1887,31 @@ esp_err_t selectionStatus(SelectionQuery query, SelectionStatus& out) {
   unlock();
   return ESP_OK;
 }
-bool selectionAt(SelectionQuery query, uint16_t index, uint32_t revision,
-                 Selection& out) {
+namespace {
+template <class Row>
+bool readSelectionRow(SelectionQuery query, uint16_t index, uint32_t revision,
+                      Row& out) {
   if (!mutex) return false;
   lock();
   const bool ok = selectionCurrentLocked(query, timekeeping::monotonicMs()) &&
                   !selection_state.busy &&
+                  selection_state.teams == std::is_same_v<Row, TeamSelection> &&
                   revision == selection_state.revision &&
                   index < selection_state.count;
-  if (ok) out = selections[index];
+  if (ok) selections.get(index, out);
   unlock();
   return ok;
 }
+}  // namespace
+bool selectionAt(SelectionQuery query, uint16_t index, uint32_t revision,
+                 CompetitionSelection& out) {
+  return readSelectionRow(query, index, revision, out);
+}
+bool selectionAt(SelectionQuery query, uint16_t index, uint32_t revision,
+                 TeamSelection& out) {
+  return readSelectionRow(query, index, revision, out);
+}
+
 esp_err_t cancelSelection(SelectionQuery query) {
   if (!mutex) return ESP_ERR_NOT_FOUND;
   lock();

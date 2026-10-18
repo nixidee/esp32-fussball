@@ -2,6 +2,7 @@
 'use strict';
 // One German/English text table. Provider names, IDs and device measurements are data.
 const W = Object.fromEntries(`
+Positive ganze Vereinskennung von 1 bis %. Ohne Verein separat wählen.|Positive integer club ID from 1 to %. Select no club separately.
 JSON-Daten sind ungültig. Eingabe prüfen und erneut versuchen.|JSON data is invalid. Check the input and retry.
 Übertragung der Anfrage wurde unterbrochen. Verbindung prüfen und erneut versuchen.|The request transfer was interrupted. Check the connection and retry.
 JSON-Byteposition: %|JSON byte offset: %

@@ -39,7 +39,7 @@ bool detailSlot(const MatchStore& store, const StoredMatch& m) {
 int conferencePin(const MatchStore& store, const List& list, bool enabled) {
   if (enabled)
     for (unsigned i = 0; i < list.count; ++i)
-      if (store.match(list.index[i]).isOwn()) return list.index[i];
+      if (store.isOwn(store.match(list.index[i]))) return list.index[i];
   return -1;
 }
 
@@ -73,7 +73,7 @@ struct ConferenceSplit {
 
 void Shown::add(const settings::CompetitionRoute& entry) {
   if (!entry.active || entry.id == 0) return;
-  add(Source{entry.id, entry.primary.provider, entry.club.team});
+  add(Source{entry.id, entry.primary.provider});
 }
 
 void Shown::add(const Source& source) {
@@ -179,7 +179,7 @@ int ownForOverview(const MatchStore& store, const Shown& shown, int64_t utc) {
   int64_t best_distance = 0;
   for (std::size_t i = 0; i < store.matchCount(); ++i) {
     const auto& m = store.match(i);
-    if (!m.isOwn() || !shown.shows(m)) continue;
+    if (!store.isOwn(m) || !shown.shows(m)) continue;
     const bool live = running(m.phase);
     const int64_t d = m.kickoff ? distance(m, utc) : INT64_MAX;
     if (best < 0 || (live && !best_live) ||
@@ -200,19 +200,6 @@ uint16_t matchCount(const MatchStore& store, const Shown& shown,
     if (m.competition == competition && shown.shows(m)) ++count;
   }
   return count;
-}
-
-void ownSides(const MatchStore& store, const StoredMatch& match,
-              const Shown& shown, bool& home, bool& away) {
-  home = away = false;
-  const auto* s = shown.source(match.competition);
-  if (!match.isOwn() || s == nullptr || s->club == 0) return;
-  const auto club = [&](TeamIndex team) {
-    return team < cfg::kStoreTeams && store.teamAt(team).id == s->club &&
-           store.teamAt(team).provider == match.provider;
-  };
-  home = club(match.home);
-  away = club(match.away);
 }
 
 const char* teamName(const MatchStore& store, const StoredMatch& match,
@@ -251,7 +238,7 @@ Table table(const MatchStore& store, uint8_t competition, uint8_t group) {
     if (groups.count) group = groups.ordinal[0];
     for (std::size_t i = 0; i < store.rowCount(); ++i)
       if (store.row(i).competition == competition &&
-          (store.row(i).flags & kRowOwn)) {
+          store.isOwn(store.row(i))) {
         group = store.row(i).group;
         break;
       }
@@ -266,7 +253,7 @@ Table table(const MatchStore& store, uint8_t competition, uint8_t group) {
        ++i) {
     const auto& row = store.row(i);
     if (row.competition != competition || row.group != group) continue;
-    if ((row.flags & kRowOwn) && out.own < 0) out.own = out.count;
+    if (store.isOwn(row) && out.own < 0) out.own = out.count;
     out.row[out.count++] = static_cast<uint8_t>(i);
   }
   return out;

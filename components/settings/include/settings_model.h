@@ -19,30 +19,9 @@
 
 namespace settings {
 
-// Byte string with explicit length; may contain any byte (an SSID may).
-template <std::size_t Capacity>
-struct Bytes {
-  static_assert(Capacity <= 255, "length is stored in one byte");
-  static constexpr std::size_t kCapacity = Capacity;
-
-  uint8_t length = 0;
-  std::array<char, Capacity> data{};
-
-  std::string_view view() const noexcept { return {data.data(), length}; }
-  bool empty() const noexcept { return length == 0; }
-
-  // Fails and keeps the old value if the value does not fit; never truncates.
-  bool assign(std::string_view value) noexcept {
-    if (value.size() > Capacity) return false;
-    values::copyPadded(data.data(), data.size(), value);
-    length = static_cast<uint8_t>(value.size());
-    return true;
-  }
-
-  bool operator==(const Bytes& other) const noexcept {
-    return view() == other.view();
-  }
-};
+// The raw-byte value has one shared implementation, including alias-safe
+// assignment and lossless SSID bytes. Domain validation stays here.
+using values::Bytes;
 
 // Fields in stored order (record format 1). Append only.
 enum class Field : uint8_t {

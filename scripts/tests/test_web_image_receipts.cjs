@@ -17,7 +17,7 @@ function model() {
 function setup(language = 0) {
   const writes = [], reads = [], result = {textContent: ''};
   const server = model();
-  const S = {saved: structuredClone(server), draft: structuredClone(server), schema: {limits: {images: 10}, image_quota: 327680, image_max: 32768, image_reserve: 40960}, images: {items: [{id: 1}, {id: 2}]}};
+  const S = {saved: structuredClone(server), draft: structuredClone(server), schema: {limits: {images: 10}, image_quota: 327680, image_max: 32768, replacement_workspace: 40960}, images: {items: [{id: 1}, {id: 2}]}};
   S.draft.hostname = 'unsaved'; S.draft.screen_policy.appearance.conference.image = 7;
   const context = {S, console, structuredClone, Set, Map, Error,
     clone: structuredClone, eq: (a, b) => JSON.stringify(a) === JSON.stringify(b),

@@ -20,6 +20,17 @@ ui::NavigationState navigation;
 network::Status network_status{};
 names::Targets labels;
 uint32_t last_status = 0;
+bool calendar_frozen = false;
+int calendar_calls = 0;
+uint8_t last_calendar_count = 0;
+int64_t offset_transition = 0;
+int32_t offset_before = 0, offset_after = 0;
+int32_t calendarOffset(int64_t utc, void*) {
+  assert(
+      !calendar_frozen);  // No service access after facts have been prepared.
+  ++calendar_calls;
+  return utc < offset_transition ? offset_before : offset_after;
+}
 
 void setup(Phase phase = Phase::kLive) {
   store.clear();
@@ -45,7 +56,7 @@ void setup(Phase phase = Phase::kLive) {
   StoredMatch match;
   match.id = 1;
   match.competition = 1;
-  match.flags = kMatchOwn;
+  store.selectClub(1, match.provider, 40, {});
   match.phase = phase;
   match.kickoff = kNow - 5400;
   match.principal = {1, 1};
@@ -65,27 +76,81 @@ void setup(Phase phase = Phase::kLive) {
 StoredMatch& match() {
   return *const_cast<StoredMatch*>(store.find(1, cfg::kProviderDefault, 1));
 }
-ui::sequence::ContentKind renderModel(int64_t now_ms = 0) {
-  ui::NavigationData facts{store, shown, routes, {kNow, 100}, {}, true, false};
-  selection::Input input(policy, routes, store, {kNow, 100});
+ui::sequence::ContentKind renderModel(int64_t now_ms = 0, int64_t utc = kNow,
+                                      int64_t retry_ms = 0) {
+  const DateContext dates{calendarOffset, nullptr, 0};
+  ui::NavigationData facts{store, shown, routes, {utc, 100},
+                           dates, true,  false};
+  selection::Input input(policy, routes, store, {utc, 100}, dates);
   settings::projectUiConfig({}, policy, configured,
                             selection::select(input).phase, config);
   ui::NavigationContext context(config, facts);
   ui::sequence::synchronize(navigation, context.input(), now_ms);
-  Published published{store, shown,  1,      0,     true, false, 1,
-                      0,     states, routes, false, 1,    0,     {kNow, 100}};
-  ui::BindContext bind{kNow, now_ms, true, true, false, &network_status};
+  Published published{store,    shown,  1,      0,     true, false, 1,
+                      retry_ms, states, routes, false, 1,    0,     {utc, 100}};
+  ui::BindContext bind{utc, now_ms, true, true, false, &network_status};
+  const auto scene = ui::presentationFacts(
+      navigation, context, now_ms, published.fetched_ms, published.retry_ms);
+  last_calendar_count = scene.calendar.count;
+  if (retry_ms > now_ms)
+    assert(scene.calendar.retry != ui::CalendarFacts::kMissing);
+  const auto prepared_calls = calendar_calls;
+  calendar_frozen = true;
   labels = {};
-  last_status = ui::Presenter(config.device, output, config.screens, navigation,
-                              presentation, 0, &published, &context, &labels,
-                              &config, "test")
-                    .bind(bind);
+  last_status =
+      ui::Presenter(config.device, output, config.screens, presentation, 0,
+                    &published, &scene, &labels, &config, "test")
+          .bind(bind);
+  assert(calendar_calls == prepared_calls);
+  calendar_frozen = false;
   return context
       .prepare({screen::Type::kLiveMulti, 1, 1},
                ui::sequence::PageMode::kAutomatic, 0)
       .content.kind;
 }
 int main() {
+  // Europe/Berlin's 2026 autumn transition: the future kickoff uses its own
+  // offset, not the current offset. Both UTC instants display 02:30 locally.
+  offset_transition = 1792890000;
+  offset_before = 7200;
+  offset_after = 3600;
+  setup(Phase::kScheduled);
+  match().kickoff = 1792891800;
+  for (auto& phase : policy.shared) {
+    for (auto& rule : phase) rule.automatic = false;
+    phase[screen::index(screen::Type::kLiveSingle)].automatic = true;
+  }
+  renderModel(1000, 1792888200);
+  assert(output.layout == ui::Layout::kOwnMatch);
+  assert(std::strcmp(output.own.centre, "02:30") == 0);
+  assert(std::strcmp(output.own.pill, "So 25.10.") == 0);
+  offset_before = offset_after = 0;
+  // The largest supported page still has room for independent current,
+  // global-as-of, dataset-as-of and retry instants. All five rows show times.
+  setup(Phase::kScheduled);
+  configured.entries[0].club.own_special = false;
+  routes.entries[0].club.own_special = false;
+  match().kickoff = kNow + 60;
+  policy.visible_matches = cfg::kVisibleMatchesRange.max;
+  for (auto& phase : policy.shared) {
+    for (auto& rule : phase) rule.automatic = false;
+    phase[screen::index(screen::Type::kLiveMulti)].automatic = true;
+  }
+  for (unsigned i = 1; i < cfg::kVisibleMatchesRange.max; ++i) {
+    auto other = match();
+    other.id = i + 1;
+    other.kickoff += 60 * i;
+    assert(store.upsert(other, {kNow, 100}));
+  }
+  store.recordDataset(1, MatchStore::Dataset::kFixtures, 60000, 60000, true,
+                      Cause::kNone);
+  store.recordDataset(1, MatchStore::Dataset::kFixtures, 95000, 95000, false,
+                      Cause::kNetwork);
+  renderModel(120000, kNow, 241000);
+  assert(output.layout == ui::Layout::kConference && output.row_count == 5);
+  assert(last_calendar_count == cfg::kVisibleMatchesRange.max + 4);
+  for (unsigned i = 0; i < output.row_count; ++i)
+    assert(std::strcmp(output.matches[i].centre, "--:--") != 0);
   setup();
   match().minute = 93;
   match().added = 3;
@@ -220,9 +285,10 @@ int main() {
       StoredRow row;
       row.group = group;
       row.position = i + 1;
-      row.team = store.team(1, cfg::kProviderDefault, 100 + 10 * group + i,
+      row.team = store.team(1, cfg::kProviderDefault,
+                            group == 1 && i == 3 ? 40 : 100 + 10 * group + i,
                             group ? "B Club" : "A Club");
-      if (group == 1 && i == 3) row.flags = kRowOwn;
+
       assert(store.appendRow(row));
     }
   assert(store.commitTable(true));
@@ -241,6 +307,15 @@ int main() {
   assert(navigation.paged && navigation.pages == 5);
   assert(std::strstr(output.caption, "Group A"));
   assert(std::strcmp(output.table[0].name, "A Club") == 0);
+  offset_before = 7200;
+  offset_after = 3600;
+  store.recordDataset(1, MatchStore::Dataset::kTable, 60000, 60000, true,
+                      Cause::kNone);
+  store.recordDataset(1, MatchStore::Dataset::kTable, 200000, 200000, false,
+                      Cause::kNetwork, 503);
+  renderModel(3660000, 1792891800);
+  assert(std::strstr(output.status, "Stand 02:30"));
+  offset_before = offset_after = 0;
   // Usable table rows survive table failure. Fixtures success cannot replace
   // the table's own last-success time or clear its warning.
   navigation = {};
@@ -309,6 +384,12 @@ int main() {
   char table_code[kErrorCodeBytes];
   errorCode(table_code, cfg::kProviderDefault, Cause::kBadResponse, 422);
   assert(std::strcmp(output.card.hints[0], table_code) == 0);
+  offset_before = 7200;
+  offset_after = 3600;
+  renderModel(950001, 1792888200, 4550001);
+  assert(std::strcmp(output.card.hints[0], "Neuer Versuch 02:30") == 0);
+  assert(std::strcmp(output.card.hints[1], table_code) == 0);
+  offset_before = offset_after = 0;
   // Capacity notices stay meaningful even with a different dataset's active
   // request failure. Failed staging never replaces previously usable rows.
   store.recordDataset(1, MatchStore::Dataset::kTable, 1000000, 1000000, true,
@@ -327,5 +408,6 @@ int main() {
       "actual Presenter: time periods, real18 attempts/windows/correction, "
       "missing data, short targets, overview layouts, group-local "
       "tables/manual cross-group, dataset-specific routing/warnings/as-of "
+      "and immutable calendar facts/DST/kickoff/as-of/retry/max page "
       "PASS");
 }

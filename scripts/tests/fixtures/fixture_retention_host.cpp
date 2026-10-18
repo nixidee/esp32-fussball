@@ -2,12 +2,34 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <new>
 #include <set>
 #include <string>
+#include <vector>
 
 #include "fixture_retention.h"
 #include "provider_plan.h"
 #include "store_mappers.h"
+
+namespace allocation_probe {
+bool deny_index = false;
+unsigned denied = 0;
+}  // namespace allocation_probe
+void* operator new(std::size_t bytes, const std::nothrow_t&) noexcept {
+  if (allocation_probe::deny_index &&
+      bytes == sizeof(football::retention::Index)) {
+    ++allocation_probe::denied;
+    return nullptr;
+  }
+  try {
+    return ::operator new(bytes);
+  } catch (...) {
+    return nullptr;
+  }
+}
+void operator delete(void* pointer, const std::nothrow_t&) noexcept {
+  ::operator delete(pointer);
+}
 
 namespace football::provider {
 ParseResult readSelectionResponse(json::Reader&, const RequestSpec&,
@@ -31,7 +53,7 @@ std::string load(const char* path) {
 }
 int main(int argc, char** argv) {
   using namespace football;
-  assert(argc >= 8);
+  assert(argc >= 9);
   const auto utc = parseUtc("2026-10-14T12:00:00Z");
   provider::RequestSpec request;
   request.source = {cfg::Provider::kOpenLigaDb, "bl1", "2026"};
@@ -84,7 +106,7 @@ int main(int argc, char** argv) {
     assert(provider::readResponse(second, request, sink).status ==
            provider::Status::kOk);
     std::set<uint32_t> expected;
-    for (int arg = 7; arg < argc; ++arg)
+    for (int arg = 8; arg < argc; ++arg)
       expected.insert(static_cast<uint32_t>(std::stoul(argv[arg])));
     assert(store.matchCount() == expected.size());
     for (std::size_t i = 0; i < store.matchCount(); ++i)
@@ -92,6 +114,173 @@ int main(int argc, char** argv) {
     assert(expected.empty() && store.teamCount() == 18 &&
            !(store.notices(1) & kNoticeMatches));
   }
+  // One actual season index serves all eight configured clubs. Expected
+  // identities are independently selected from the recorded response in Python.
+  std::ifstream oracle(argv[7]);
+  const auto read_list = [&]() {
+    unsigned count = 0;
+    assert(oracle >> count);
+    std::vector<uint32_t> result(count);
+    for (auto& value : result) assert(oracle >> value);
+    return result;
+  };
+  auto clubs = read_list();
+  const auto expected_own = read_list(), expected_union = read_list();
+  assert(clubs.size() == cfg::kCompetitionMax);
+  for (int pass = 1; pass <= 2; ++pass) {
+    const auto body = load(argv[pass]);
+    // A repeated preference must not consume another club or match slot.
+    clubs.push_back(clubs.front());
+    retention::Index index(clubs, utc);
+    clubs.pop_back();
+    Input input{body};
+    json::Reader reader({&input, Input::read});
+    provider::Sink sink;
+    sink.context = &index;
+    sink.fixture = [](const provider::Fixture& row,
+                      std::span<const provider::Event>, void* raw) {
+      return static_cast<retention::Index*>(raw)->observe(row);
+    };
+    assert(provider::readResponse(reader, request, sink).status ==
+           provider::Status::kOk);
+    retention::Selection selection;
+    assert(index.select(selection));
+    std::set<uint32_t> own_ids;
+    for (const auto id : selection.own)
+      if (id) assert(own_ids.insert(id).second);
+    assert(own_ids ==
+           std::set<uint32_t>(expected_own.begin(), expected_own.end()));
+    assert(own_ids.size() > cfg::kRetainedOwnFixtures);
+    MatchStore merged;
+    MapContext map;
+    map.competition = 1;
+    map.provider = request.source.provider;
+    map.clock = {utc, 100};
+    struct Admission {
+      retention::Selection& selection;
+      MatchStore& store;
+      MapContext& map;
+    } admission{selection, merged, map};
+    Input second_input{body};
+    json::Reader second({&second_input, Input::read});
+    sink.context = &admission;
+    sink.fixture = [](const provider::Fixture& row,
+                      std::span<const provider::Event> events, void* raw) {
+      auto& target = *static_cast<Admission*>(raw);
+      return !target.selection.contains(row.facts.round, row.round_label.data,
+                                        row.facts.kickoff, row.facts.id) ||
+             storeMatch(row, events, target.store, target.map);
+    };
+    assert(provider::readResponse(second, request, sink).status ==
+           provider::Status::kOk);
+    std::set<uint32_t> actual;
+    for (std::size_t i = 0; i < merged.matchCount(); ++i)
+      assert(actual.insert(merged.match(i).id).second);
+    assert(actual ==
+           std::set<uint32_t>(expected_union.begin(), expected_union.end()));
+  }
+  // Drive the production Planner with eight independent configured clubs of
+  // the same complete-season source. Its final scope must account for every
+  // selected own identity, including indices beyond the old byte mask.
+  settings::CompetitionRoutes shared_routes;
+  for (std::size_t i = 0; i < clubs.size(); ++i) {
+    settings::CompetitionRoute entry;
+    entry.id = static_cast<uint8_t>(i + 1);
+    entry.incarnation = entry.id;
+    entry.primary.provider = cfg::Provider::kOpenLigaDb;
+    assert(entry.primary.competition.assign("bl1"));
+    assert(entry.primary.season.assign("2026"));
+    entry.club.team = clubs[i];
+    assert(shared_routes.entries.push(entry));
+  }
+  settings::screen_policy::Eligibility eligibility;
+  plan::Planner shared_planner;
+  shared_planner.context(shared_routes, eligibility);
+  MatchStore shared_store;
+  schedule::Job shared_job;
+  shared_job.competition = 1;
+  shared_job.type = cfg::DataType::kFixtures;
+  const auto shared_body = load(argv[1]);
+  const auto shared_request = [&](uint32_t omit) {
+    plan::Request next;
+    assert(shared_planner.request(shared_job, shared_routes.entries[0],
+                                  shared_store, {utc, 100}, next));
+    Input input{shared_body};
+    json::Reader reader({&input, Input::read});
+    struct Receive {
+      plan::Planner& planner;
+      uint32_t omit;
+    } receive{shared_planner, omit};
+    provider::Sink sink;
+    sink.context = &receive;
+    sink.fixture = [](const provider::Fixture& row,
+                      std::span<const provider::Event> events, void* raw) {
+      auto& target = *static_cast<Receive*>(raw);
+      return row.facts.id == target.omit || target.planner.consume(row, events);
+    };
+    const auto parsed = provider::readResponse(reader, next.spec, sink);
+    assert(parsed.status == provider::Status::kOk);
+    const bool complete = shared_planner.response(parsed);
+    assert(complete == (omit == 0));
+    return shared_planner.complete(
+        complete ? plan::Fetch::kOk : plan::Fetch::kFailed, {utc, 100});
+  };
+  assert(shared_request(0).more);
+  const auto& own_union = shared_planner.state(0).fixtures.own;
+  std::set<uint32_t> planned_own;
+  for (const auto id : own_union)
+    if (id) assert(planned_own.insert(id).second);
+  assert(planned_own ==
+         std::set<uint32_t>(expected_own.begin(), expected_own.end()));
+  assert(planned_own.size() > 8);
+  assert(!shared_request(0).more);
+  std::set<uint32_t> planned_matches;
+  for (std::size_t i = 0; i < shared_store.matchCount(); ++i)
+    assert(planned_matches.insert(shared_store.match(i).id).second);
+  assert(planned_matches ==
+         std::set<uint32_t>(expected_union.begin(), expected_union.end()));
+  // A syntactically complete response missing a required own fixture beyond
+  // bit7 must not finish the scope or prune previously valid data.
+  assert(shared_request(0).more);
+  const auto omitted = own_union[8];
+  assert(omitted);
+  assert(shared_request(omitted).outcome == schedule::Outcome::kFailed);
+  assert(shared_store.find(1, cfg::Provider::kOpenLigaDb, omitted));
+  // The enlarged temporary index still has one allocation. A real refusal at
+  // that boundary reports RAM failure and cannot prune the previous scope.
+  const auto retained_count = shared_store.matchCount();
+  plan::Request no_memory_request;
+  assert(shared_planner.request(shared_job, shared_routes.entries[0],
+                                shared_store, {utc, 100}, no_memory_request));
+  Input no_memory_input{shared_body};
+  json::Reader no_memory_reader({&no_memory_input, Input::read});
+  provider::Sink no_memory_sink;
+  no_memory_sink.context = &shared_planner;
+  no_memory_sink.fixture = [](const provider::Fixture& row,
+                              std::span<const provider::Event> events,
+                              void* raw) {
+    return static_cast<plan::Planner*>(raw)->consume(row, events);
+  };
+  allocation_probe::deny_index = true;
+  const auto failed_index = provider::readResponse(
+      no_memory_reader, no_memory_request.spec, no_memory_sink);
+  allocation_probe::deny_index = false;
+  assert(allocation_probe::denied == 1 &&
+         !shared_planner.response(failed_index) &&
+         shared_planner.responseFailure() == provider::Status::kNoMemory);
+  assert(shared_planner.complete(plan::Fetch::kFailed, {utc, 100}).outcome ==
+         schedule::Outcome::kFailed);
+  assert(shared_store.matchCount() == retained_count &&
+         shared_store.find(1, cfg::Provider::kOpenLigaDb, omitted));
+  // Resetting the planner reconstructs state in place; a fresh acquisition
+  // must produce the same complete scope through the normal public functions.
+  shared_planner.reset();
+  assert(shared_request(0).more && !shared_request(0).more);
+  assert(shared_store.matchCount() == retained_count);
+  clubs.push_back(UINT32_MAX);
+  retention::Index overflow(clubs, utc);
+  retention::Selection rejected;
+  assert(!overflow.select(rejected));
   // The real own-schedule endpoint is reverse ordered and has no round keys.
   const auto own_body = load(argv[3]);
   provider::RequestSpec own_request;
@@ -111,7 +300,10 @@ int main(int argc, char** argv) {
          provider::Status::kOk);
   retention::Selection own;
   assert(own_index.own(own));
-  for (const auto id : own.own) assert(id != 0);
+  // The single club still has exactly four identities; the larger source
+  // union has unused zero slots. Preserve the original four-fixture promise.
+  assert(std::count_if(own.own.begin(), own.own.end(),
+                       [](uint32_t id) { return id != 0; }) == 4);
   assert(!own_index.select(own));  // no invented competition round scope
   // The real cup calendar reports the two February weeks as ONE quarterfinal
   // stage. Keep the preceding Rd16 and following semifinals as complete stages.
@@ -249,7 +441,7 @@ int main(int argc, char** argv) {
   assert(!request_body(false).more);
   assert(!runtime.find(1, cfg::Provider::kOpenLigaDb, old.id));
   assert(runtime.matchCount() ==
-         other_count + static_cast<std::size_t>(argc - 7));
+         other_count + static_cast<std::size_t>(argc - 8));
   assert(runtime.roundCount() == 3);
   schedule::Wanted wanted;
   planner.wanted(0, &route, runtime, {utc, 100}, wanted);
@@ -258,7 +450,9 @@ int main(int argc, char** argv) {
       << "PASS real306-game season: exact union before admission, arbitrary "
          "order, eight-source workload, two-request Planner/cost, failed "
          "document preserves scope; real34-game own schedule; actual cupQF "
-         "two-weeks +previousRd16/nextsemi and strict explicit year. Index="
+         "two-weeks +previousRd16/nextsemi and strict explicit year; "
+         "eight-club "
+         "source union/dedup/order/capacity. Index="
       << sizeof(retention::Index)
       << " Selection=" << sizeof(retention::Selection) << '\n';
 }

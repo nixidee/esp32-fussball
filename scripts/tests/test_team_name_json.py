@@ -66,28 +66,28 @@ cases["bad-string-tail"] = cases["good-clipped"].replace('"en":"ä😀"', '"en":
 cases["bad-key-escaped-duplicate"] = '{"format":"football-team-names","version":1,"clubs":[{"key":"a","\\u006bey":"b"}]}'
 cases["bad-after-complete"] = cases["good-empty"]+" false"
 
-with tempfile.TemporaryDirectory(prefix="names-json-") as directory:
+with tempfile.TemporaryDirectory(prefix="nj", dir="/tmp") as directory:
     work = Path(directory)
     # Runtime POSIX root must fit the same production path buffer as /fs.
     fs = work / "fs"
     fs.mkdir()
     (work / "esp_err.h").write_text("#pragma once\nusing esp_err_t=int;\n")
-    files = (ROOT / "components/names/team_name_files.cpp").read_text().replace(
-        "char file[::files::kPathBufferBytes];", "char file[512];")
-    # Only path transport is adapted to host temp roots. Production storage,
-    # checked I/O, CRC and staging code remain unchanged.
-    (work / "files.cpp").write_text('#include "faults.h"\n' + files.replace('::open(file,', '::names_test_open(file,'))
-    io = (ROOT / "components/files/file_io.cpp").read_text()
-    io = '#include "faults.h"\n' + io.replace('::read(', '::names_test_read(').replace(
-        '::write(', '::names_test_write(').replace('::close(', '::names_test_close(').replace(
-        'fsync(fd)', 'names_test_sync(fd)')
-    (work / "io.cpp").write_text(io)
-    (work / "faults.h").write_text('''#include <sys/types.h>
+    # Whole names/files owners compile unchanged. Adapt only POSIX calls in
+    # common I/O/candidate objects, retaining the real36B path bound.
+    (work / "faults.h").write_text('''#pragma once
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <cstddef>
 ssize_t names_test_read(int,void*,std::size_t);
 ssize_t names_test_write(int,const void*,std::size_t);
 int names_test_sync(int);int names_test_close(int);
 int names_test_open(const char*,int,int=0);
+#define open(...) names_test_open(__VA_ARGS__)
+#define read(...) names_test_read(__VA_ARGS__)
+#define write(...) names_test_write(__VA_ARGS__)
+#define close(...) names_test_close(__VA_ARGS__)
+#define fsync(...) names_test_sync(__VA_ARGS__)
 ''')
     paths = []
     for name, text in cases.items():
@@ -101,16 +101,22 @@ int names_test_open(const char*,int,int=0);
     fixture = fixture.replace("// ACTUAL_EXPORT", service[start:end])
     (work / "main.cpp").write_text(fixture)
     sources = [ROOT / "components/names/team_name_json.cpp",
-               ROOT / "components/names/team_name_store.cpp", work / "files.cpp",
+               ROOT / "components/names/team_name_store.cpp", ROOT / "components/names/team_name_files.cpp",
                ROOT / "components/football/football_model.cpp",
                ROOT / "components/timekeeping/civil_time.cpp",
-               work / "io.cpp", ROOT / "components/files/file_names.cpp",
+               ROOT / "components/files/file_names.cpp",
                ROOT / "components/json/json_stream.cpp",
                work / "main.cpp"]
     command = ["clang++", "-std=c++20", "-Wall", "-Wextra", "-Werror", "-O1", "-g",
                "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-DFUSSBALL_NATIVE"]
     for path in [work, ROOT / "include", *(ROOT / "components").glob("*/include")]:
         command += ["-I", str(path)]
+    for name in ("file_io", "file_candidate"):
+        target = work / (name + ".o")
+        subprocess.run(command + ["-include", str(work / "faults.h"), "-c",
+                                   str(ROOT / "components/files" / (name + ".cpp")),
+                                   "-o", str(target)], check=True)
+        sources.append(target)
     command += list(map(str, sources)) + ["-o", str(work / "check")]
     subprocess.run(command, check=True)
     environment = dict(os.environ)

@@ -2,6 +2,8 @@
 // independent traversal or clock; screen_sequence is the sole navigation
 // policy.
 #pragma once
+#include <ctime>
+
 #include "screen_sequence.h"
 #include "store_views.h"
 #include "ui_config.h"
@@ -93,4 +95,33 @@ struct NavigationContext {
   uint16_t match_count_ = 0, row_count_ = 0;
   uint32_t proofs_ = 0;
 };
+// Final controller selection, borrowed only within one football publication.
+// Presentation formats these facts; it never probes navigation/content again.
+struct CalendarFacts {
+  // Kickoffs are bounded by the published page limit (Single shares its row),
+  // plus current time, two independent last successes and one retry.
+  static constexpr uint8_t kMissing = UINT8_MAX;
+  struct Instant {
+    int64_t utc = 0;
+    int32_t offset_s = 0;
+  };
+  std::array<Instant, cfg::kVisibleMatchesRange.max + 4> instants{};
+  uint8_t count = 0, fetched = kMissing, dataset = kMissing, retry = kMissing;
+  uint8_t find(int64_t utc) const;
+  bool civilAt(uint8_t index, std::tm& out) const;
+  bool civil(int64_t utc, std::tm& out) const {
+    return civilAt(find(utc), out);
+  }
+};
+struct PresentationFacts {
+  sequence::View sequence;
+  CalendarFacts calendar;
+  const PreparedContent* page = nullptr;
+  settings::screen_policy::Phase phase = settings::screen_policy::Phase::kIdle;
+  bool active = false;
+};
+PresentationFacts presentationFacts(const NavigationState&, NavigationContext&,
+                                    int64_t now, int64_t fetched_ms,
+                                    int64_t retry_ms);
+
 }  // namespace ui

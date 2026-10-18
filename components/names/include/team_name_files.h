@@ -4,18 +4,13 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "file_candidate.h"
 #include "names_ref.h"
 #include "team_name_store.h"
 
 namespace football::names::files {
-struct Usage {
-  std::size_t total = 0, used = 0;
-};
-struct Context {
-  const char* base_path = cfg::kFsBasePath;
-  void* user = nullptr;
-  bool (*usage)(void*, Usage&) = nullptr;
-};
+using Usage = ::files::Usage;
+using Context = ::files::Context;
 enum class Status : uint8_t {
   kOk,
   kMissing,
@@ -73,17 +68,13 @@ class Candidate {
   void preserve();
   bool abort();
   const store::Reader& checked() const { return checked_; }
-  Status failure() const { return failure_; }
+  Status failure() const;
 
  private:
   friend class Read;
-  const Context* context_ = nullptr;
-  int fd_ = -1;
+  ::files::Candidate file_;
   settings::NamesRef expected_;
   store::Reader checked_;
-  uint8_t slot_ = 0;
-  Status failure_ = Status::kOk;
-  bool validated_ = false, retained_ = false, owns_file_ = false;
   static bool readCandidate(std::size_t, void*, std::size_t, void*);
   static bool writeCandidate(std::size_t, const void*, std::size_t, void*);
 };

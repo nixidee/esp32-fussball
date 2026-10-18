@@ -22,6 +22,7 @@ bool validCivilDate(int year, unsigned month, unsigned day) noexcept;
 int64_t daysFromCivil(int year, unsigned month, unsigned day) noexcept;
 
 inline constexpr uint16_t kMinutesPerDay = 24 * 60;
+inline constexpr uint32_t kSecondsPerDay = uint32_t{kMinutesPerDay} * 60;
 
 // Daily window in local civil time, minutes after midnight (0..1439). The
 // start is inside, the end is not. start > end crosses midnight (e.g. night

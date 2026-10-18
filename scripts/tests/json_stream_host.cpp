@@ -322,7 +322,7 @@ int main() {
     web::DisplayCommand command;
     settings::Violation why;
     assert(web::readDisplayCommand(source.input(), command, why) ==
-           web::CommandDecode::kOk);
+           web::SettingsDecode::kOk);
     assert(command.action == ui::Action::kNext &&
            command.config_revision == 17);
   }
@@ -335,7 +335,7 @@ int main() {
       web::DisplayCommand command;
       settings::Violation why;
       assert(web::readDisplayCommand(source.input(), command, why) ==
-             web::CommandDecode::kOk);
+             web::SettingsDecode::kOk);
       assert(command.config_revision == revision);
       assert(command.action ==
              (std::string_view(action) == "next" ? ui::Action::kNext
@@ -366,7 +366,7 @@ int main() {
     web::DisplayCommand command{ui::Action::kPrevious, 23};
     settings::Violation why;
     assert(web::readDisplayCommand(source.input(), command, why) !=
-           web::CommandDecode::kOk);
+           web::SettingsDecode::kOk);
     assert(command.action == ui::Action::kPrevious &&
            command.config_revision == 23);
   }

@@ -11,6 +11,7 @@ is involved.
 
 import argparse
 import gzip
+import json
 import re
 from pathlib import Path
 
@@ -20,7 +21,23 @@ STYLESHEET = re.compile(r'<link\s+rel="stylesheet"\s+href="([^"]+)"\s*/?>')
 SCRIPT = re.compile(r'<script\s+src="([^"]+)"\s*>\s*</script>')
 
 
-def render_document(source):
+
+def client_policy(config=None):
+    """Read the numeric client contract from its single firmware owner."""
+    config = (Path(config) if config is not None else
+              Path(__file__).resolve().parents[1] / "include/app_config.h")
+    source = config.read_text()
+    match = re.search(r"kWebClientPolicy\[\]\s*=\s*\{([\s\S]*?)\n\};", source)
+    if not match:
+        raise ValueError("Missing central Web client policy")
+    entries = re.findall(r'\{\s*"([a-z_]+)"\s*,\s*([0-9]+)\s*\}\s*,?', match[1])
+    residue = re.sub(r'\{\s*"[a-z_]+"\s*,\s*[0-9]+\s*\}\s*,?', '', match[1])
+    if residue.strip() or not entries or len({key for key, _ in entries}) != len(entries):
+        raise ValueError("Invalid central Web client policy")
+    return {key: int(value) for key, value in entries}
+
+
+def render_document(source, config=None):
     """Inline local styles/scripts into one document with one script scope."""
     source = Path(source).resolve()
     root = source.parent
@@ -37,7 +54,8 @@ def render_document(source):
     )
     scripts = list(SCRIPT.finditer(html))
     if scripts:
-        content = "\n".join(local_text(match[1]).rstrip() for match in scripts)
+        content = ("const CLIENT = Object.freeze(" + json.dumps(client_policy(config), separators=(",", ":")) + ");\n"
+                   + "\n".join(local_text(match[1]).rstrip() for match in scripts))
         # A single scope preserves the original application's lexical state.
         # HTML source order is the only declaration order used by any loader.
         first = True
@@ -53,10 +71,10 @@ def render_document(source):
     return html
 
 
-def render_header(source):
+def render_header(source, config=None):
     """Returns the header text and the gzip payload size."""
     html = "\n".join(
-        line.strip() for line in render_document(source).splitlines()
+        line.strip() for line in render_document(source, config).splitlines()
     ).encode()
     payload = gzip.compress(html, compresslevel=9, mtime=0)
     text = (
@@ -68,9 +86,9 @@ def render_header(source):
     return text, len(payload)
 
 
-def prepare_header(source, build_dir):
+def prepare_header(source, build_dir, config=None):
     """Returns (output, changed, gzip bytes); writes only when bytes differ."""
-    text, size = render_header(source)
+    text, size = render_header(source, config)
     content = text.encode("utf-8")
     output = Path(build_dir) / OUTPUT_RELATIVE_PATH
     if output.is_file() and output.read_bytes() == content:
@@ -85,7 +103,9 @@ def prepare_header(source, build_dir):
 def run_platformio(env):
     source = Path(env.subst("$PROJECT_DIR")) / SOURCE_RELATIVE_PATH
     try:
-        output, changed, size = prepare_header(source, env.subst("$BUILD_DIR"))
+        output, changed, size = prepare_header(
+            source, env.subst("$BUILD_DIR"),
+            Path(env.subst("$PROJECT_DIR")) / "include/app_config.h")
     except (OSError, UnicodeError, ValueError) as error:
         print("Error (web asset): %s" % error)
         env.Exit(1)

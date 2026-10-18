@@ -146,7 +146,7 @@ void test_initial_complete_response_keeps_foreign_names_and_events() {
   TEST_ASSERT_FALSE(store.hasDetail(find(10)));
   planner.finish(true, now());
   const auto& m = find(10);
-  TEST_ASSERT_FALSE(m.isOwn());
+  TEST_ASSERT_FALSE(store.isOwn(m));
   TEST_ASSERT_TRUE(store.hasDetail(m));
   TEST_ASSERT_TRUE(m.detail >= cfg::kStoreOwnMatches);
   TEST_ASSERT_EQUAL_STRING("Full foreign home name",
@@ -222,7 +222,7 @@ void test_special_off_owned_single_keeps_owned_bank_without_special_priority() {
   begin();
   row(10, "STATUS_IN_PROGRESS", "in", "2026-10-17T11:30:00Z", 1, true);
   planner.finish(true, now());
-  TEST_ASSERT_TRUE(find(10).isOwn());
+  TEST_ASSERT_TRUE(store.isOwn(find(10)));
   TEST_ASSERT_TRUE(find(10).detail < cfg::kStoreOwnMatches);
   TEST_ASSERT_EQUAL_UINT32(10, wanted().event_match);
   TEST_ASSERT_EQUAL_UINT32(0, wanted().priority_match);
@@ -309,7 +309,7 @@ void test_recorded_scoreboard_row_keeps_first_response_foreign_detail() {
       test_support::consume(recorded_row, planner, entry().primary));
   planner.finish(true, clock);
   const auto& match = find(401884775);
-  TEST_ASSERT_FALSE(match.isOwn());
+  TEST_ASSERT_FALSE(store.isOwn(match));
   TEST_ASSERT_TRUE(store.hasDetail(match));
   TEST_ASSERT_EQUAL_UINT8(4, view::events(store, match).count);
   TEST_ASSERT_EQUAL_STRING(
@@ -340,7 +340,7 @@ void test_foreign_summary_adds_substitution_with_both_names() {
   TEST_ASSERT_EQUAL(EventType::kSubstitution, substitution.type);
   TEST_ASSERT_EQUAL_STRING("Coming on", substitution.player_in.data);
   TEST_ASSERT_EQUAL_STRING("Going off", substitution.player.data);
-  TEST_ASSERT_FALSE(find(10).isOwn());
+  TEST_ASSERT_FALSE(store.isOwn(find(10)));
 }
 
 void test_event_polling_uses_exact_target_instead_of_another_competition_window() {
@@ -392,7 +392,8 @@ void checkSelectedSummaryCompletion(bool own, bool past_deadline) {
   m.id = 401892555;
   m.kickoff = kNow - 60;
   m.phase = Phase::kLive;
-  if (own) m.flags = kMatchOwn;
+  m.home = store.team(m.competition, kProvider, own ? 99 : 1000000, "Home");
+  store.selectClub(m.competition, kProvider, entry().club.team, now());
   TEST_ASSERT_NOT_NULL(store.upsert(m, now()));
   TEST_ASSERT_TRUE(store.ensureDetail(entry().id, kProvider, m.id, now()));
 
@@ -440,7 +441,7 @@ void checkSelectedSummaryCompletion(bool own, bool past_deadline) {
     summary(inputAt(125));
     TEST_ASSERT_FALSE(scheduler.next(inputAt(140)).run);
   }
-  TEST_ASSERT_EQUAL(own, store.find(entry().id, kProvider, m.id)->isOwn());
+  TEST_ASSERT_EQUAL(own, store.isOwn(*store.find(entry().id, kProvider, m.id)));
 }
 }  // namespace
 
@@ -512,7 +513,8 @@ void test_protected_own_rows_can_evict_live_candidate_without_losing_buffer_even
     own.competition = 2;
     own.provider = kProvider;
     own.id = 1000 + i;
-    own.flags = kMatchOwn;
+    own.home = store.team(2, kProvider, 1000000, "Own club");
+    store.selectClub(2, kProvider, 1000000, now());
     own.phase = Phase::kScheduled;
     own.kickoff = kNow + 86400;
     TEST_ASSERT_NOT_NULL(store.upsert(own, now()));
@@ -539,7 +541,8 @@ void test_rejected_row_never_appends_its_events_to_the_previous_candidate() {
     own.competition = 2;
     own.provider = kProvider;
     own.id = 1000 + i;
-    own.flags = kMatchOwn;
+    own.home = store.team(2, kProvider, 1000000, "Own club");
+    store.selectClub(2, kProvider, 1000000, now());
     own.phase = Phase::kScheduled;
     own.kickoff = kNow + 86400;
     TEST_ASSERT_NOT_NULL(store.upsert(own, now()));

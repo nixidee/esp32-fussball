@@ -17,7 +17,7 @@ constexpr uint32_t kHardSeconds = cfg::kUnknownMatchEndMinutes * 60u;
 constexpr uint32_t kExpectedSeconds = cfg::kExpectedMatchMinutes * 60u;
 constexpr auto kProvider = cfg::Provider::kOpenLigaDb;
 MatchStore store;
-settings::Competitions competitions;
+settings::CompetitionRoutes competitions;
 settings::ProviderPlans plans;
 
 StoredMatch match(Phase phase, uint32_t kickoff = 0,
@@ -211,10 +211,12 @@ void test_clock_rollback_keeps_earliest_future_observation_as_next_window() {
 
 void test_future_known_game_does_not_hide_unknown_kickoff_final_request() {
   auto future = match(Phase::kScheduled, kObserved + 3600, 0);
-  future.flags = kMatchOwn;
+  future.home = store.team(1, kProvider, 40, "Own club");
+  store.selectClub(1, kProvider, 40, {kObserved, 1});
   appendMatch(future, 10);
   auto result = match(Phase::kFinished, 0, 0);
-  result.flags = kMatchOwn;
+  result.home = store.team(1, kProvider, 40, "Own club");
+  store.selectClub(1, kProvider, 40, {kObserved, 1});
   result.finished_at = kObserved - 1;
   appendMatch(result, 20);
   // Select the finished identity explicitly, as the provider planner does.

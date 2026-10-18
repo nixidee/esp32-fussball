@@ -208,7 +208,7 @@ function validate(m, sec = S.sec) {
         if (!c.club || typeof c.club !== 'object' || Array.isArray(c.club))
             add(p + '.club', 'Falscher Datentyp');
         else {
-            range(p + '.club.team', [0, 4294967295]);
+            range(p + '.club.team', [0, sc.team_id_max]);
             range(p + '.club.group', [0, sc.limits.competitions]);
             if (typeof c.club.own_special !== 'boolean')
                 add(p + '.club.own_special', 'Falscher Datentyp');

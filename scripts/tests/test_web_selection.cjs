@@ -109,6 +109,50 @@ async function test(name, run) { await run(setup()); ++passed; console.log('PASS
     await h.U.runSelection(false);oldReply.resolve(h.result(first,'Obsolete'));await previous;
     assert.equal(current.list[0].name,'New response');assert.equal(old.list.length,0);assert(h.element('dialog').open);
   });
+  await test('repeated busy rejections stop without a result read or accepted write', async h => {
+    const w=h.open();
+    for(let i=0;i<h.data.schema.client.busy_attempts;i++)
+      h.starts.push(async()=>h.response(409,{code:'busy'}));
+    await h.U.runSelection(false);
+    assert(w.error);assert.equal(w.busy,false);assert.equal(w.list.length,0);
+    assert.equal(h.calls.length,h.data.schema.client.busy_attempts);
+    assert(h.calls.every(call=>call.path==='data/select'));
+  });
+  await test('closing on a busy refusal prevents every later retry', async h => {
+    const w=h.open();
+    h.starts.push(async()=>{h.headerClose();return h.response(409,{code:'busy'});});
+    await h.U.runSelection(false);
+    assert.equal(h.calls.length,1);assert.equal(w.list.length,0);
+    assert.equal(h.element('dialog').open,false);
+  });
+  await test('team results preserve maximum numeric identity without text conversion', async h => {
+    const w=h.open();w.step=2;w.entry.primary.competition='bl1';h.U.drawWizard();
+    h.starts.push(async()=>h.response(200,{query:first}));
+    h.reads.push(async()=>h.response(200,{query:first,busy:false,items:[{id:4294967295,name:'Maximum'}]}));
+    await h.U.runSelection(false);
+    assert.equal(w.error,'');assert.equal(w.list[0].id,4294967295);
+    assert.equal(typeof w.list[0].id,'number');
+  });
+  await test('invalid or textual team identity cannot replace an existing list', async h => {
+    for(const id of ['40',0,-1,4294967296,1.5,null]) {
+      const w=h.open();w.step=2;w.entry.primary.competition='bl1';w.list=[{id:40,name:'Retained'}];h.U.drawWizard();
+      h.starts.push(async()=>h.response(200,{query:first}));
+      h.reads.push(async()=>h.response(200,{query:first,busy:false,items:[{id,name:'Invalid'}]}));
+      await h.U.runSelection(false);assert(w.error);assert.equal(w.list[0].name,'Retained');h.headerClose();
+    }
+  });
+  await test('malformed item arrays are errors while confirmed empty remains valid', async h => {
+    for(const items of [undefined,null,{},[null],[{id:40,name:7}]]) {
+      const w=h.open();w.step=2;w.entry.primary.competition='bl1';h.U.drawWizard();
+      h.starts.push(async()=>h.response(200,{query:first}));
+      h.reads.push(async()=>h.response(200,{query:first,busy:false,items}));
+      await h.U.runSelection(false);assert(w.error);assert.equal(w.list.length,0);h.headerClose();
+    }
+    const w=h.open();w.step=2;w.entry.primary.competition='bl1';h.U.drawWizard();
+    h.starts.push(async()=>h.response(200,{query:first}));
+    h.reads.push(async()=>h.response(200,{query:first,busy:false,items:[]}));
+    await h.U.runSelection(false);assert.equal(w.error,'');assert.equal(w.list.length,0);
+  });
   console.log(passed+' correlated wizard/client race cases passed');
   clearTimeout(watchdog);
 })().catch(error=>{clearTimeout(watchdog);console.error(error);process.exitCode=1;});

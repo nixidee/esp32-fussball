@@ -7,7 +7,7 @@
 #include "provider_adapter.h"
 namespace football {
 using MatchObserver = void (*)(const StoredMatch&, void*);
-using MatchEventObserver = void (*)(const StoredEvent&, void*);
+using MatchEventObserver = void (*)(const EventFacts&, void*);
 struct MapContext {
   uint8_t competition = 0;
   cfg::Provider provider = cfg::Provider::kOpenLigaDb;

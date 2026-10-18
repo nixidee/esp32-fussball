@@ -80,14 +80,14 @@ struct Status {
 using SelectionQuery = uint64_t;
 struct SelectionStatus {
   SelectionQuery query = 0;
-  bool busy, more;
-  uint16_t count;
   uint32_t revision;
+  uint16_t count;
   // Why the last selection failed (kNone = it did not), the provider asked
   // and its HTTP error status (0 = none), as in CompetitionState.
   Cause cause;
   cfg::Provider provider;
   uint16_t http;
+  bool busy, more, teams;
   // While busy: what holds the next request (kLimit: a window limit,
   // kRetry: the provider paused us; kNone: nothing) and the monotonic ms it
   // may run (0 = none).
@@ -169,7 +169,9 @@ esp_err_t select(const SelectionRequest& request, SelectionQuery& query);
 esp_err_t beginOriginalNames(uint8_t competition, uint32_t& query);
 esp_err_t selectionStatus(SelectionQuery query, SelectionStatus& out);
 bool selectionAt(SelectionQuery query, uint16_t index, uint32_t revision,
-                 Selection& out);
+                 CompetitionSelection& out);
+bool selectionAt(SelectionQuery query, uint16_t index, uint32_t revision,
+                 TeamSelection& out);
 esp_err_t cancelSelection(SelectionQuery query);
 // Volatile provider fallback labels of teams in the published matches/table.
 // Adopted names belong to the separate full collection; no filesystem read.

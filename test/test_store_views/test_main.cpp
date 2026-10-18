@@ -55,14 +55,14 @@ StoredMatch* add(uint8_t competition, uint32_t id, uint8_t round,
   m.phase = phase;
   m.home = team(competition, provider, own ? 40 : id * 2);
   m.away = team(competition, provider, id * 2 + 1);
-  if (own) m.flags = football::kMatchOwn;
+  if (own) store.selectClub(competition, m.provider, 40, {kickoff, 0});
   return store.upsert(m, {kickoff, 0});
 }
 
 view::Shown shownAll() {
   view::Shown shown;
-  shown.add(view::Source{kLeague, kOlg, 40});
-  shown.add(view::Source{kCup, kOlg, 40});
+  shown.add(view::Source{kLeague, kOlg});
+  shown.add(view::Source{kCup, kOlg});
   return shown;
 }
 
@@ -84,7 +84,7 @@ void test_entry_shows_its_source_rows() {
   view::Shown normal;
   normal.add(entry(kLeague, kOlg));
   TEST_ASSERT_EQUAL(kOlg, normal.source(kLeague)->provider);
-  TEST_ASSERT_EQUAL_UINT32(40, normal.source(kLeague)->club);
+  TEST_ASSERT_TRUE(store.isOwn(store.match(0)));
   TEST_ASSERT_EQUAL_UINT(1, view::matchCount(store, normal, kLeague));
 
   // Inactive competitions show nothing.
@@ -133,7 +133,7 @@ void test_table_rows_of_one_competition() {
       StoredRow r;
       r.team = team(c, kOlg, 100u * c + i);
       r.position = i + 1;
-      r.flags = c == kLeague && i == 2 ? football::kRowOwn : 0;
+      if (c == kLeague && i == 2) store.selectClub(c, kOlg, 100u * c + i, {});
       store.appendRow(r);
     }
     store.commitTable(true);
@@ -261,7 +261,7 @@ void test_conference_pin_is_repeated_without_losing_unique_matches() {
       const auto page = view::conferencePage(store, list, request);
       TEST_ASSERT_EQUAL_UINT8(3, page.pages);
       TEST_ASSERT_EQUAL_UINT8(example.visible[p], page.row_count);
-      TEST_ASSERT_TRUE(store.match(page.rows[0]).isOwn());
+      TEST_ASSERT_TRUE(store.isOwn(store.match(page.rows[0])));
       for (unsigned row = 0; row < page.row_count; ++row) {
         if (row) TEST_ASSERT_FALSE(seen[page.rows[row]]);
         if (!seen[page.rows[row]]) ++unique;
@@ -282,8 +282,8 @@ void test_conference_minimum_two_keeps_pin_and_all_others_reachable() {
     const auto page = view::conferencePage(store, list, request);
     TEST_ASSERT_EQUAL_UINT8(3, page.pages);
     TEST_ASSERT_EQUAL_UINT8(2, page.row_count);
-    TEST_ASSERT_TRUE(store.match(page.rows[0]).isOwn());
-    TEST_ASSERT_FALSE(store.match(page.rows[1]).isOwn());
+    TEST_ASSERT_TRUE(store.isOwn(store.match(page.rows[0])));
+    TEST_ASSERT_FALSE(store.isOwn(store.match(page.rows[1])));
     ++others;
   }
   TEST_ASSERT_EQUAL_UINT(3, others);
@@ -316,7 +316,9 @@ void test_every_widened_match_index_is_reachable() {
     match.competition = kLeague;
     match.kickoff = static_cast<uint32_t>(kSaturday);
     match.phase = Phase::kLive;
-    if (i + 1 == cfg::kStoreMatches) match.flags = football::kMatchOwn;
+    match.home = store.team(match.competition, match.provider,
+                            i + 1 == cfg::kStoreMatches ? 40 : 41, "Home");
+    store.selectClub(match.competition, match.provider, 40, {});
     TEST_ASSERT_NOT_NULL(store.upsert(match, {kSaturday, 1}));
     list.index[list.count++] = static_cast<football::MatchIndex>(i);
   }

@@ -6,9 +6,11 @@
 #include <ctime>
 #include <limits>
 
+#include "civil_time.h"
+
 namespace football::coverage {
 namespace {
-constexpr uint32_t kDay = 86400;
+constexpr uint32_t kDay = timekeeping::kSecondsPerDay;
 }  // namespace
 
 bool observeNormalRow(Evidence& evidence,

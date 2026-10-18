@@ -434,12 +434,16 @@ bool schemaJson(json::Writer& out, const settings::Limits& limits,
       !integer("inputs", limits.inputs) || !out.key("backlight") ||
       !out.boolean(backlight) || !integer("image_max", cfg::kImageMaxBytes) ||
       !integer("selection_entries", cfg::kSelectionEntries) ||
+      !integer("team_id_max", UINT32_MAX) ||
       !out.key("selection_country_default") ||
       !out.string(cfg::kSelectionCountryDefault) ||
       !integer("image_quota", cfg::kImageTotalBytes) ||
-      !integer("image_reserve", cfg::kImageReserveBytes) ||
-      !out.key("time_zones") || !out.array())
+      !integer("replacement_workspace", cfg::kFileReplacementWorkspaceBytes) ||
+      !out.key("client") || !out.object())
     return false;
+  for (const auto& entry : cfg::kWebClientPolicy)
+    if (!integer(entry.key, entry.value)) return false;
+  if (!out.end() || !out.key("time_zones") || !out.array()) return false;
   for (const auto zone : cfg::kTimeZones)
     if (!out.string(zone.label)) return false;
   if (!out.end() || !out.key("providers") || !out.array()) return false;

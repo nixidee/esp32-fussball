@@ -10,6 +10,24 @@
 #include "app_config.h"
 
 namespace files {
+struct Usage {
+  std::size_t total_bytes = 0, used_bytes = 0;
+};
+// Physical file identities only; content, image roles and active names
+// references remain with their domain owners.
+enum class FileKind : uint8_t {
+  kNone,
+  kImageCandidate,
+  kImageSlot,
+  kStockImage,
+  kNamesSlot
+};
+struct Location {
+  FileKind kind = FileKind::kNone;
+  uint8_t slot = 0;
+};
+bool ownedName(Location file, std::span<char> out);
+bool ownedPath(std::string_view base, Location file, std::span<char> out);
 
 // "<base path>/<name>" plus terminator; sizeof(kFsBasePath) already counts
 // one byte, which takes the separator.

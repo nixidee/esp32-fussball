@@ -27,9 +27,10 @@ StoredMatch* add(uint8_t competition, uint32_t id, bool own,
   m.provider = kProvider;
   m.kickoff = kickoff;
   m.phase = Phase::kLive;
-  m.home = store.team(competition, kProvider, id * 2, "Ordinary home");
+  m.home = store.team(competition, kProvider, own ? 1000000 : id * 2,
+                      "Ordinary home");
   m.away = store.team(competition, kProvider, id * 2 + 1, "Ordinary away");
-  if (own) m.flags = kMatchOwn;
+  if (own) store.selectClub(competition, kProvider, 1000000, {kNow, 100});
   return store.upsert(m, {kNow, 100});
 }
 
@@ -57,7 +58,7 @@ void test_ordinary_details_require_an_explicit_identity() {
   TEST_ASSERT_FALSE(store.hasDetail(find(1, 10)));
   auto* m = store.ensureDetail(1, kProvider, 10, {kNow, 100});
   TEST_ASSERT_NOT_NULL(m);
-  TEST_ASSERT_FALSE(m->isOwn());
+  TEST_ASSERT_FALSE(store.isOwn(*m));
   TEST_ASSERT_TRUE(m->detail >= cfg::kStoreOwnMatches);
   TEST_ASSERT_EQUAL_STRING("Ordinary home", view::teamName(store, *m, true));
   fillEvents(1, 10, 100);
@@ -138,7 +139,7 @@ void test_recorded_espn_ordinary_and_own_details_use_the_same_parser() {
   TEST_ASSERT_TRUE(storeMatch(row, store, c));
   const auto& own = find(1, 401884775);
   const auto own_events = view::events(store, own);
-  TEST_ASSERT_TRUE(own.isOwn());
+  TEST_ASSERT_TRUE(store.isOwn(own));
   TEST_ASSERT_EQUAL_UINT8(4, own_events.count);
   const StoredEvent first = store.eventAt(own_events.index[0]);
   Text<cfg::kNameBytes> name;
@@ -150,7 +151,7 @@ void test_recorded_espn_ordinary_and_own_details_use_the_same_parser() {
   TEST_ASSERT_TRUE(storeMatch(row, store, c));
   const auto& ordinary = find(1, 401884775);
   const auto ordinary_events = view::events(store, ordinary);
-  TEST_ASSERT_FALSE(ordinary.isOwn());
+  TEST_ASSERT_FALSE(store.isOwn(ordinary));
   TEST_ASSERT_EQUAL_UINT8(own_events.count, ordinary_events.count);
   TEST_ASSERT_EQUAL_STRING(name.data, view::teamName(store, ordinary, true));
   const auto& ordinary_first = store.eventAt(ordinary_events.index[0]);

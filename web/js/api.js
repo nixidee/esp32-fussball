@@ -12,7 +12,7 @@ class ApiError extends Error {
     }
 }
 async function raw(path, body, method = 'GET', base = '', binary = false, options = {}) {
-    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), options.timeoutMs || 15000);
+    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), options.timeoutMs || CLIENT.request_timeout_ms);
     const cancelled = () => controller.abort();
     if (options.signal?.aborted) cancelled();
     options.signal?.addEventListener('abort', cancelled, {once: true});
@@ -99,14 +99,16 @@ function login() {
     });
     return authWait;
 }
-async function mutate(path, body = {}, method = 'POST', binary = false, options = {}) {
+// Both transports share session admission. Only an explicit pre-mutation
+// session rejection may replay once; connection/timeout errors never replay.
+async function withSession(operation) {
     if (!S.session?.valid) {
         await authenticate();
         if (S.session.password_set && !S.session.valid)
             await login();
     }
     try {
-        return await raw(path, body, method, '', binary, options);
+        return await operation();
     }
     catch (e) {
         if (e.status === 401 && e.code === 'session') {
@@ -114,10 +116,13 @@ async function mutate(path, body = {}, method = 'POST', binary = false, options 
             await authenticate();
             if (S.session.password_set)
                 await login();
-            return raw(path, body, method, '', binary, options);
+            return operation();
         }
         throw e;
     }
+}
+function mutate(path, body = {}, method = 'POST', binary = false, options = {}) {
+    return withSession(() => raw(path, body, method, '', binary, options));
 }
 async function load(key, rerender = true) {
     if (S.loading[key])
@@ -155,25 +160,29 @@ async function load(key, rerender = true) {
         S.loading[key] = false;
     }
 }
-// Busy means the shared operation slot is temporarily occupied. Only these
-// read-only snapshots may retry; a successful write is never replayed here.
-async function settingsRead(path) {
-    for (let retry = 0;; retry++) {
+// Only explicit busy rejection may repeat a write. Lost acknowledgements and
+// every other error escape unchanged. The caller owns cancellation and delay.
+async function retryBusy(operation, delayMs, current = () => true, linear = false) {
+    for (let attempt = 0; attempt < CLIENT.busy_attempts && current(); ++attempt) {
         try {
-            return await raw(path);
-        }
-        catch (error) {
-            if (error.code !== 'busy' || retry === 2)
+            return await operation();
+        } catch (error) {
+            if (error.status !== 409 || error.code !== 'busy' || attempt + 1 === CLIENT.busy_attempts)
                 throw error;
-            await sleep(250 * (retry + 1));
+            await sleep(delayMs * (linear ? attempt + 1 : 1));
         }
     }
+    return null;
+}
+// Snapshot retries never replay an acknowledged Apply or overwrite the draft.
+function settingsRead(path) {
+    return retryBusy(() => raw(path), CLIENT.read_retry_ms, () => true, true);
 }
 function upload(path, file, progress, headers = {}) {
     return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open('POST', '/api/v1/' + path);
-        xhr.timeout = 180000;
+        xhr.timeout = CLIENT.upload_timeout_ms;
         xhr.setRequestHeader('X-CSRF-Token', S.token);
         xhr.setRequestHeader('Content-Type', 'application/octet-stream');
         for (const [k, v] of Object.entries(headers))
@@ -201,25 +210,8 @@ function upload(path, file, progress, headers = {}) {
         xhr.send(file);
     });
 }
-async function authenticatedUpload(path, file, progress, headers = {}) {
-    if (!S.session?.valid) {
-        await authenticate();
-        if (S.session.password_set && !S.session.valid)
-            await login();
-    }
-    try {
-        return await upload(path, file, progress, headers);
-    }
-    catch (e) {
-        if (e.status === 401 && e.code === 'session') {
-            S.token = '';
-            await authenticate();
-            if (S.session.password_set)
-                await login();
-            return upload(path, file, progress, headers);
-        }
-        throw e;
-    }
+function authenticatedUpload(path, file, progress, headers = {}) {
+    return withSession(() => upload(path, file, progress, headers));
 }
 
 // SSIDs are up to 32 arbitrary bytes. JSON strings cover valid UTF-8; the

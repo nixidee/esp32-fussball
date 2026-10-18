@@ -17,6 +17,7 @@ code = r'''
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <type_traits>
 #include "football_service.h"
 #include "request_json.h"
 #include "correlation_id.h"
@@ -60,15 +61,23 @@ int httpd_query_key_value(const char* query,const char* key,char* out,std::size_
 namespace timekeeping {int64_t monotonicMs(){return 100;}}
 namespace football {
 SelectionQuery current=UINT64_C(0x1234567800000001);
-bool busy=false;unsigned starts=0,cancels=0,reads=0;int break_at=-1;
+bool busy=false,teams=false;unsigned starts=0,cancels=0,reads=0;int break_at=-1;
 esp_err_t select(const SelectionRequest&,SelectionQuery& query){++starts;if(busy)return ESP_ERR_NOT_FINISHED;query=current;return ESP_OK;}
 esp_err_t selectionStatus(SelectionQuery query,SelectionStatus& out){
  ++reads;if(query!=current)return ESP_ERR_NOT_FOUND;
- out={};out.query=query;out.revision=7;out.count=8;return ESP_OK;
+ out={};out.query=query;out.revision=7;out.count=8;out.teams=teams;return ESP_OK;
 }
-bool selectionAt(SelectionQuery query,uint16_t i,uint32_t revision,Selection& out){
+bool rowAvailable(SelectionQuery query,uint16_t i,uint32_t revision){
  assert(query==UINT64_C(0x1234567800000001)&&revision==7);
- if(i==break_at){++current;return false;}out.id.assign(std::to_string(i+1));out.name.assign(std::string(64,'W'));return true;
+ if(i==break_at){++current;return false;}return true;
+}
+bool selectionAt(SelectionQuery query,uint16_t i,uint32_t revision,CompetitionSelection& out){
+ assert(!teams);if(!rowAvailable(query,i,revision))return false;
+ out.id.assign(std::to_string(i+1));out.name.assign(std::string(64,'W'));return true;
+}
+bool selectionAt(SelectionQuery query,uint16_t i,uint32_t revision,TeamSelection& out){
+ assert(teams);if(!rowAvailable(query,i,revision))return false;
+ out.id=i?i:UINT32_MAX;out.name.assign(std::string(64,'W'));return true;
 }
 esp_err_t cancelSelection(SelectionQuery query){++cancels;return query==current?ESP_OK:ESP_ERR_NOT_FOUND;}
 const char* cadenceName(Cadence){return "none";}
@@ -90,6 +99,10 @@ int main(){
  }
  httpd_req_t good;good.query="query=1234567800000001";
  assert(getSelection(&good)==ESP_OK&&good.final==1&&good.output.find("\"query\":\"1234567800000001\"")!=good.output.npos);
+ assert(good.output.find("\"id\":\"1\"")!=good.output.npos);
+ football::teams=true;httpd_req_t numeric;numeric.query=good.query;
+ assert(getSelection(&numeric)==ESP_OK&&numeric.output.find("\"id\":4294967295")!=numeric.output.npos);
+ assert(numeric.output.find("\"season\"")==numeric.output.npos);football::teams=false;
  football::break_at=5;httpd_req_t replaced;replaced.query=good.query;
  assert(getSelection(&replaced)==ESP_FAIL&&replaced.final==0&&!replaced.output.empty());
  football::current=UINT64_C(0x1234567800000001);football::break_at=-1;

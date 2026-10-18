@@ -96,9 +96,9 @@ async function runOta() {
         });
         S.ota.state = 'boot';
         paintOta();
-        const deadline = Date.now() + 120000, start = Date.now();
+        const deadline = Date.now() + CLIENT.ota_observe_ms, start = Date.now();
         let reboot = false, trial = false, sawDisconnect = false;
-        await sleep(1800);
+        await sleep(CLIENT.ota_poll_ms);
         while (Date.now() < deadline) {
             try {
                 const s = await raw('status');
@@ -114,13 +114,13 @@ async function runOta() {
                         S.ota.version = s.version;
                         break;
                     }
-                    else if (Date.now() - start > 15000) {
+                    else if (Date.now() - start > CLIENT.ota_no_restart_ms) {
                         S.ota.state = 'unknown';
                         S.ota.code = 'ota_no_restart';
                         break;
                     }
                 }
-                else if (s.firmware_id === before.firmware_id && reboot && !s.trial && Date.now() - start > 12000) {
+                else if (s.firmware_id === before.firmware_id && reboot && !s.trial && Date.now() - start > CLIENT.ota_rollback_observe_ms) {
                     S.ota.state = 'rollback';
                     S.ota.version = s.version;
                     break;
@@ -135,7 +135,7 @@ async function runOta() {
             catch {
                 sawDisconnect = true;
             }
-            await sleep(1800);
+            await sleep(CLIENT.ota_poll_ms);
         }
         if (S.ota.state === 'boot' || S.ota.state === 'trial') {
             S.ota.code = S.ota.state === 'boot' ? 'ota_no_answer' : 'ota_trial_open';
@@ -155,8 +155,8 @@ async function runOta() {
     }
 }
 async function waitForDevice(before, reset = false) {
-    const deadline = Date.now() + 90000;
-    await sleep(2000);
+    const deadline = Date.now() + CLIENT.reboot_observe_ms;
+    await sleep(CLIENT.reboot_initial_ms);
     while (Date.now() < deadline) {
         try {
             const s = await raw('status');
@@ -176,7 +176,7 @@ async function waitForDevice(before, reset = false) {
         }
         catch {
         }
-        await sleep(1500);
+        await sleep(CLIENT.reboot_poll_ms);
     }
     throw Error(t('Gerät nicht erreichbar. Es wird erneut versucht …'));
 }
@@ -232,7 +232,7 @@ async function scanWifi() {
             if (e.status !== 409 || e.code !== 'busy')
                 throw e;
         }
-        const deadline = Date.now() + 90000;
+        const deadline = Date.now() + CLIENT.scan_observe_ms;
         for (;;) {
             const data = await raw('wifi');
             if (!data.busy) {
@@ -245,7 +245,7 @@ async function scanWifi() {
             }
             if (Date.now() > deadline)
                 throw Error(t('Zeitüberschreitung. Erneut versuchen.'));
-            await sleep(750);
+            await sleep(CLIENT.scan_poll_ms);
         }
     }
     catch (e) {

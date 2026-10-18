@@ -86,8 +86,18 @@ enum MatchField : uint16_t {
   kShootout = 1 << 6,
   kRound = 1 << 7
 };
+// Only reported values cross the adapter boundary. Store-owned observation
+// timestamps, directory indices, competition slots and detail refs never do.
+struct MatchFacts {
+  uint32_t id = 0, kickoff = 0;
+  Phase phase = Phase::kUnknown;
+  uint8_t minute = kNoValue, added = kNoValue;
+  Period period = Period::kUnknown;
+  Goals principal, shootout;
+  uint8_t round = 0;
+};
 struct Fixture {
-  StoredMatch facts;
+  MatchFacts facts;
   TeamInput home, away;
   Text<31> round_label;
   uint16_t fields = 0;
@@ -98,16 +108,20 @@ struct Fixture {
   bool carries_events = false, events_truncated = false;
 };
 struct Event {
-  StoredEvent facts;
+  EventFacts facts;
   uint32_t reported_team = 0;
 };
 struct TableGroup {
   Text<31> key, label;
   uint8_t ordinal = 0;
 };
+struct TableFacts {
+  uint8_t position = kNoValue, played = kNoValue;
+  int16_t difference = kNoNumber, points = kNoNumber;
+};
 struct TableRow {
   TeamInput team;
-  StoredRow facts;
+  TableFacts facts;
   uint8_t group = 0;
 };
 struct CalendarRound {
@@ -161,7 +175,8 @@ struct Sink {
   bool (*group)(const TableGroup&, void*) = nullptr;
   bool (*row)(const TableRow&, void*) = nullptr;
   bool (*event)(const Event&, void*) = nullptr;
-  bool (*selection)(const Selection&, void*) = nullptr;
+  bool (*competition_selection)(const CompetitionSelection&, void*) = nullptr;
+  bool (*team_selection)(const TeamSelection&, void*) = nullptr;
   bool (*day)(uint32_t, void*) = nullptr;
   bool (*text)(std::string_view, void*) = nullptr;
   bool (*calendar_round)(const CalendarRound&, void*) = nullptr;

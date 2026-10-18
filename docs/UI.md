@@ -275,7 +275,11 @@ group, and ranks restart with that table. No group is flattened into another.
 One prepared page supplies both sequence eligibility/page count and the Presenter
 with the selected match, Conference rows, table rows or sporting round. Its
 lifetime is one canonical-store read. The Presenter composes labels and semantic
-progress; the renderer measures fonts and round-screen geometry. Names use the
+progress; the renderer measures fonts and round-screen geometry. The controller
+prepares immutable calendar offsets for the page, current time, independent
+last successes and retry. Each instant uses its own timezone offset; no time
+service is called during presentation. Missing calendar facts remain unknown.
+Names use the
 consciously adopted 26/3-byte display envelope. Full provider originals are
 transient editor data; import/adoption previews any reduction before confirmation
 and storage. The renderer tries the complete adopted display label in all

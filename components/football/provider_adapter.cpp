@@ -10,6 +10,7 @@
 #include <memory>
 #include <new>
 
+#include "civil_time.h"
 #include "provider_settings.h"
 
 namespace football::provider {
@@ -249,9 +250,10 @@ bool buildRequest(const RequestSpec& request, HttpRequest& out) noexcept {
     }
     char from[11], to[11];
     return operation == Operation::kFixtures && request.to >= request.from &&
-           request.to <= UINT32_MAX - 86400 &&
+           request.to <= UINT32_MAX - timekeeping::kSecondsPerDay &&
            date(request.from, "%Y-%m-%d", from, sizeof(from)) &&
-           date(request.to + 86400, "%Y-%m-%d", to, sizeof(to)) &&
+           date(request.to + timekeeping::kSecondsPerDay, "%Y-%m-%d", to,
+                sizeof(to)) &&
            url(out, "%s/%s/matches?dateFrom=%s&dateTo=%s%s%s", base, league,
                from, to, source.season.empty() ? "" : "&season=", season);
   }

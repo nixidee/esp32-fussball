@@ -4,6 +4,7 @@
 #include <limits>
 
 #include "binary_codec.h"
+#include "civil_time.h"
 #include "settings_record.h"
 
 namespace football::coverage {
@@ -366,8 +367,9 @@ Assessment assess(const EvidenceArray& evidence,
   out.competition = 0;
   out.reason = Reason::kNone;
   const uint64_t gap = uint64_t{out.next} - out.previous;
-  out.verdict = gap > uint64_t{threshold_days} * 86400 ? Verdict::kBreak
-                                                       : Verdict::kNoBreak;
+  out.verdict = gap > uint64_t{threshold_days} * timekeeping::kSecondsPerDay
+                    ? Verdict::kBreak
+                    : Verdict::kNoBreak;
   return out;
 }
 

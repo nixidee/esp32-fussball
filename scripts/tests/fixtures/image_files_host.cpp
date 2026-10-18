@@ -1,4 +1,4 @@
-// Production image service and JPEG validator are inserted by the runner.
+// Whole production image/files/JPEG owners are linked by the runner.
 #include <ArduinoJson.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -19,7 +19,9 @@
 
 #include "display_port.h"
 #include "file_io.h"
+#include "file_service.h"
 #include "image_service.h"
+#include "network_service.h"
 #include "request_json.h"
 #include "settings_store.h"
 #include "tjpgd.h"
@@ -47,19 +49,12 @@ template <class... T>
 void testLog(const T&...) {}
 #define ESP_LOGI(...) testLog(__VA_ARGS__)
 #define ESP_LOGW(...) testLog(__VA_ARGS__)
-namespace hw {
-struct Display {
-  unsigned width = 240, height = 240;
-};
-Display kDisplay;
-}  // namespace hw
 namespace ota {
 bool trial() { return ::trial; }
 }  // namespace ota
 namespace network {
-struct HeavyGuard {
-  explicit operator bool() const { return heavy_ok; }
-};
+bool tryHeavy() { return heavy_ok; }
+void releaseHeavy() {}
 }  // namespace network
 namespace files {
 State state() { return mounted ? State::kMounted : State::kUnavailable; }
@@ -67,7 +62,11 @@ esp_err_t usage(Usage& out) {
   out = {1024 * 1024, 1024 * 1024 - free_bytes};
   return ESP_OK;
 }
-esp_err_t format() { return ESP_FAIL; }
+esp_err_t format() {
+  std::filesystem::remove_all(imageTestRoot);
+  std::filesystem::create_directory(imageTestRoot);
+  return ESP_OK;
+}
 }  // namespace files
 namespace display {
 ImageObservation observed{};
@@ -97,13 +96,20 @@ esp_err_t dropMissingImages(ImageMask present,
   return completion ? completion(context) : ESP_OK;
 }
 }  // namespace settings
+std::string mappedPath(const char* path) {
+  const std::string_view value(path);
+  return value.starts_with("/fs/")
+             ? imageTestRoot + std::string(value.substr(3))
+             : std::string(value);
+}
+void lv_image_cache_drop(const char*) {}
 int test_open(const char* path, int flags, int mode = 0) {
   if (fail_open) {
     fail_open = false;
     errno = other_error;
     return -1;
   }
-  return ::open(path, flags, mode);
+  return ::open(mappedPath(path).c_str(), flags, mode);
 }
 ssize_t test_read(int fd, void* data, std::size_t count) {
   if (fail_read) {
@@ -153,14 +159,14 @@ int test_rename(const char* from, const char* to) {
     errno = other_error;
     return -1;
   }
-  return ::rename(from, to);
+  return ::rename(mappedPath(from).c_str(), mappedPath(to).c_str());
 }
 int test_unlink(const char* path) {
   if (fail_unlink && std::string_view(path).ends_with("img1.jpg")) {
     errno = other_error;
     return -1;
   }
-  return ::unlink(path);
+  return ::unlink(mappedPath(path).c_str());
 }
 int test_stat(const char* path, struct stat* out) {
   if (!fail_stat_suffix.empty() &&
@@ -168,7 +174,7 @@ int test_stat(const char* path, struct stat* out) {
     errno = EIO;
     return -1;
   }
-  return ::stat(path, out);
+  return ::stat(mappedPath(path).c_str(), out);
 }
 unsigned stdio_fault = 0;
 int stdio_error = EIO, stdio_close_error = 0;
@@ -178,12 +184,13 @@ void stdioFailure() {
   if (stdio_deadline) fake_now += 2000000;
 }
 FILE* test_fopen(const char* path, const char* mode) {
+  ++validations;  // Observe the actual decoder's file-open boundary.
   if (stdio_fault == 1) {
     stdio_fault = 0;
     stdioFailure();
     return nullptr;
   }
-  return ::fopen(path, mode);
+  return ::fopen(mappedPath(path).c_str(), mode);
 }
 size_t test_fread(void* bytes, size_t size, size_t count, FILE* file) {
   if (stdio_fault == 2) {
@@ -315,7 +322,7 @@ void reset() {
   free_bytes = 1024 * 1024;
   display::observed = {};
   validations = 0;
-  images::validated = 0;
+  assert(images::format() == ESP_OK);
   images::clearSelection();
   writeFile("default_crest.jpg", jpeg);
   writeFile("default_background.jpg", jpeg);
@@ -329,7 +336,7 @@ int upload(uint8_t id, const std::vector<uint8_t>& bytes) {
 }
 void publication() {
   reset();
-  free_bytes = cfg::kImageReserveBytes;
+  free_bytes = cfg::kFileReplacementWorkspaceBytes;
   assert(upload(1, jpeg) ==
          ESP_OK);  // reserve is consumed once, not added to size
   assert(readFile(imageTestRoot + "/img1.jpg") == jpeg);
@@ -361,7 +368,7 @@ void publication() {
   assert(images::write(jpeg.data(), jpeg.size() - 1) == ESP_OK);
   assert(images::finish(fake_now / 1000 + 1000) != ESP_OK);
   assert(readFile(imageTestRoot + "/img1.jpg") == jpeg);
-  free_bytes = cfg::kImageReserveBytes - 1;
+  free_bytes = cfg::kFileReplacementWorkspaceBytes - 1;
   assert(images::begin(1, jpeg.size()) == files::kStorageFull);
   free_bytes = 1024 * 1024;
   references = false;
@@ -566,9 +573,9 @@ void deletionWire() {
 }
 void validationCache() {
   reset();
-  assert(upload(1, jpeg) == ESP_OK);
-  assert(upload(2, jpeg) == ESP_OK);
-  images::validated = 0;
+  // Existing files after boot start unchecked; no private cache mutation.
+  writeFile("img1.jpg", jpeg);
+  writeFile("img2.jpg", jpeg);
   validations = 0;
   char source[64];
   auto first = images::select(1, cfg::kStockCrest, source, sizeof(source));
@@ -584,14 +591,15 @@ void validationCache() {
   display::observed = {first.attempt,
                        display::ImageDecodeResult::kDecodeFailed};
   auto fallback = images::select(1, cfg::kStockCrest, source, sizeof(source));
-  assert(fallback.actual == images::FileSource::kFactory &&
-         !(images::validated.load() & 1));
+  assert(fallback.actual == images::FileSource::kFactory);
+  const auto after_failure = validations;
   writeFile("img1.jpg", jpeg);
   fake_now += (cfg::kImageSourceRetryMs + 1) * 1000;
   display::observed = {};
   auto recovered = images::select(1, cfg::kStockCrest, source, sizeof(source));
   assert(recovered.actual == images::FileSource::kLibrary &&
-         recovered.reason == images::Failure::kNone);
+         recovered.reason == images::Failure::kNone &&
+         validations == after_failure + 1);
   reset();
   const auto background =
       images::select(0, cfg::kStockBackground, source, sizeof(source));

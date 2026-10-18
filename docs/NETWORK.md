@@ -164,7 +164,13 @@ The portal DNS worker yields for one scheduler tick before each packet,
 including malformed queries. Continuous traffic therefore cannot keep this
 higher-priority worker immediately ready without giving the application loop
 an opportunity to run. Packet storage and the existing worker/task remain
-unchanged.
+unchanged. Fatal receive/send errors and a short datagram release the owned
+socket before a ten-second retry; failed reopen is retried after another pause.
+Receive/send waits are bounded to one second. Receive timeout/interruption and
+send interruption retain the socket. A runtime socket failure is relayed through
+the existing NET E10 status and cleared on recovery, without stopping working
+WiFi/HTTP or changing OTA validity. The network component contains the complete
+DNS task/socket owner; no additional task, queue or packet buffer is introduced.
 
 ## Time
 
@@ -321,3 +327,10 @@ Its SDK rollback role is separate from the new upload compatibility check.
 Wrong-profile/layout images, interrupted uploads, power loss, local offline
 health and actual rollback are required acceptance checks. None has been run
 for this candidate.
+
+Calendar decomposition has one Gregorian daysFromCivil implementation shared
+by provider timestamps, the applied-time service and the time diagnostic. Fixed
+seconds per day are derived once in civil_time. UTC-day request budgets and
+local-date display grouping retain their distinct semantics. Independent
+expected timezone-transition values remain in the device diagnostic; compiling
+them does not establish physical clock/SNTP/device acceptance.

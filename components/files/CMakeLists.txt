@@ -3,6 +3,7 @@ idf_component_register(
   SRCS
     "file_names.cpp"
     "file_io.cpp"
+    "file_candidate.cpp"
     "file_service.cpp"
     "file_test.cpp"
   INCLUDE_DIRS

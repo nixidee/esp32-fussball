@@ -2,6 +2,7 @@
 
 import gzip
 import importlib.util
+import json
 import re
 import subprocess
 import tempfile
@@ -15,6 +16,29 @@ SPEC.loader.exec_module(BUNDLE)
 
 
 class WebBundleTest(unittest.TestCase):
+    def test_actual_platformio_entry_does_not_require_file_global(self):
+        with tempfile.TemporaryDirectory() as build_dir:
+            class Environment:
+                def subst(self, key):
+                    return {"$PROJECT_DIR": str(ROOT), "$BUILD_DIR": build_dir}[key]
+
+                def Exit(self, code):
+                    raise AssertionError("PlatformIO generator failed: " + str(code))
+
+            scope = {"Import": lambda name: None, "env": Environment()}
+            script = ROOT / "scripts/embed_web.py"
+            exec(compile(script.read_text(), str(script), "exec"), scope)
+            self.assertTrue((Path(build_dir) / BUNDLE.OUTPUT_RELATIVE_PATH).is_file())
+
+    def test_bootstrap_policy_matches_the_actual_firmware_schema(self):
+        fixture = json.loads(subprocess.check_output(
+            ["python3", str(ROOT / "scripts/tests/web_config_fixture.py")],
+            text=True))
+        html = BUNDLE.render_document(ROOT / "web/index.html")
+        client = json.loads(re.search(
+            r"const CLIENT = Object.freeze\((\{[^\n]+\})\);", html)[1])
+        self.assertEqual(client, fixture["schema"]["client"])
+
     def test_real_document_is_one_offline_script_and_stylesheet(self):
         html = BUNDLE.render_document(ROOT / "web/index.html")
         self.assertEqual(html.count("<script>"), 1)

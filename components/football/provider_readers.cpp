@@ -7,6 +7,7 @@
 #include <memory>
 #include <new>
 
+#include "civil_time.h"
 #include "provider_adapter.h"
 
 namespace football::provider {
@@ -55,31 +56,46 @@ struct Workspace {
     std::array<Event, cfg::kStoreEvents> events;
     std::array<TableRow, cfg::kStoreTableStageRows> rows;
   };
-  Workspace() : events{} {}
+  explicit Workspace(Operation operation) {
+    if (operation == Operation::kTable)
+      new (&rows) decltype(rows){};
+    else
+      new (&events) decltype(events){};
+  }
   ~Workspace() {}
 };
 
 class Parser {
  public:
-  Parser(json::Reader& input, const RequestSpec& spec, const Sink& target,
-         Workspace& temporary)
-      : reader(input), request(spec), sink(target), work(temporary) {}
+  Parser(json::Reader& input, const RequestSpec& spec, const Sink& target)
+      : reader(input), request(spec), sink(target) {}
   ParseResult run();
 
  private:
   json::Reader& reader;
   const RequestSpec& request;
   const Sink& sink;
-  Workspace& work;
+  std::unique_ptr<Workspace> work;
   ParseResult result;
   char buffer[160]{};
-  bool rejected = false, malformed = false;
+  bool rejected = false, malformed = false, no_memory = false;
   uint8_t group_count = 0;
   std::size_t event_count = 0;
   uint8_t shot_count = 0;
   bool events_cut = false;
   uint32_t row_order = 0;
 
+  bool workspace() {
+    if (work) return true;
+    if (!no_memory) work.reset(new (std::nothrow) Workspace(request.operation));
+    no_memory = !work;
+    return !no_memory;
+  }
+  bool eventDataRequested() const {
+    return request.operation == Operation::kFixtures ||
+           request.operation == Operation::kOwnFixtures ||
+           request.operation == Operation::kSummary;
+  }
   bool next(Token& token) { return reader.next(token, buffer, sizeof(buffer)); }
   bool skip(const Token& token) { return reader.skip(token); }
   bool scalar(const Token& token) {
@@ -249,7 +265,7 @@ class Parser {
     }
     return true;
   }
-  void add(Event event) {
+  void identify(Event& event) {
     if (event.facts.flags & kEventShootout) event.facts.ordinal = shot_count++;
     if (!event.facts.identity) {
       char key[128];
@@ -269,12 +285,18 @@ class Parser {
             (event.facts.flags & kEventShootout) ? event.facts.ordinal : 0);
       event.facts.identity = fingerprint(key);
     }
-    if (event_count < work.events.size())
-      work.events[event_count++] = event;
+  }
+  bool add(Event event) {
+    if (!eventDataRequested()) return true;
+    identify(event);
+    if (!workspace()) return false;
+    if (event_count < work->events.size())
+      work->events[event_count++] = event;
     else {
       events_cut = true;
       result.metadata.invalid = true;
     }
+    return true;
   }
   bool olgFixture(const Token&);
   bool olgGoal(const Token&, uint8_t&, uint8_t&);
@@ -334,15 +356,18 @@ bool Parser::emitFixture(Fixture& fixture) {
   }
   fixture.events_truncated = events_cut;
   for (std::size_t i = 0; i < event_count; ++i) {
-    auto& event = work.events[i];
+    auto& event = work->events[i];
     if (event.reported_team)
       event.facts.actor = event.reported_team == fixture.home.id ? Side::kHome
                           : event.reported_team == fixture.away.id
                               ? Side::kAway
                               : Side::kUnknown;
   }
-  if (sink.fixture &&
-      !sink.fixture(fixture, {work.events.data(), event_count}, sink.context)) {
+  if (sink.fixture && !sink.fixture(fixture,
+                                    work ? std::span<const Event>(
+                                               work->events.data(), event_count)
+                                         : std::span<const Event>{},
+                                    sink.context)) {
     rejected = true;
     return false;
   }
@@ -383,8 +408,7 @@ bool Parser::olgGoal(const Token& token, uint8_t& home, uint8_t& away) {
     home = after.home;
     away = after.away;
   }
-  add(event);
-  return ok;
+  return ok && add(event);
 }
 
 bool Parser::olgFixture(const Token& token) {
@@ -450,6 +474,7 @@ bool Parser::olgFixture(const Token& token) {
         }
         return scalar(value);
       case 7: {
+        if (!eventDataRequested()) return skip(value);
         fixture.carries_events = value.kind == Kind::kArray;
         uint8_t home = 0, away = 0;
         return array(value, [&](const Token& v, std::size_t) {
@@ -489,7 +514,6 @@ bool Parser::olgRow(const Token& token) {
   TableRow row;
   row.facts.position =
       static_cast<uint8_t>(std::min<uint32_t>(++row_order, 254));
-  row.facts.flags |= kRowPositionEstimated;
   const char* const keys[] = {"teamInfoId", "teamName", "shortName",
                               "matches",    "goalDiff", "points"};
   const bool ok = object(token, keys, [&](int field, const Token& value) {
@@ -577,8 +601,7 @@ bool Parser::espnEvent(const Token& token, bool summary) {
     event.facts.player_in = first;
     event.facts.flags |= kEventDetail;
     if (!event.facts.identity) {
-      add(event);
-      event = work.events[--event_count];
+      identify(event);
     }
     if (sink.event && !sink.event(event, sink.context)) {
       rejected = true;
@@ -614,8 +637,7 @@ bool Parser::espnEvent(const Token& token, bool summary) {
     event.facts.player.assign(both);
   } else
     event.facts.player = first;
-  add(event);
-  return true;
+  return add(event);
 }
 
 bool Parser::espnCompetition(const Token& token, Fixture& fixture) {
@@ -774,10 +796,12 @@ bool Parser::espnFixture(const Token& token) {
         (fixture.home.id == request.team || fixture.away.id == request.team)));
   if (request.operation == Operation::kFixtures && request.from &&
       fixture.facts.kickoff) {
-    const uint64_t from = uint64_t{request.from / 86400} * 86400;
-    const uint64_t to =
-        uint64_t{(request.to ? request.to : request.from) / 86400} * 86400 +
-        86400;
+    const uint64_t from = uint64_t{request.from / timekeeping::kSecondsPerDay} *
+                          timekeeping::kSecondsPerDay;
+    const uint64_t to = uint64_t{(request.to ? request.to : request.from) /
+                                 timekeeping::kSecondsPerDay} *
+                            timekeeping::kSecondsPerDay +
+                        timekeeping::kSecondsPerDay;
     fixture.scope_matches =
         fixture.facts.kickoff >= from && fixture.facts.kickoff < to;
   }
@@ -1030,11 +1054,12 @@ bool Parser::afTable(const Token& token) {
         std::size_t count = 0;
         bool overflow = false;
         const bool parsed = array(group, [&](const Token& item, std::size_t) {
-          if (count == work.rows.size()) {
+          if (!workspace()) return false;
+          if (count == work->rows.size()) {
             overflow = true;
             return skip(item);
           }
-          auto& row = work.rows[count++];
+          auto& row = work->rows[count++];
           row = {};
           Text<31> row_caption;
           const bool ok = afRow(item, row, row_caption);
@@ -1054,7 +1079,7 @@ bool Parser::afTable(const Token& token) {
         std::snprintf(key, sizeof(key), "%u", static_cast<unsigned>(ordinal));
         if (!emitGroup(key, caption.data)) return false;
         for (std::size_t at = 0; at < count; ++at)
-          if (!emitRow(work.rows[at])) return false;
+          if (!emitRow(work->rows[at])) return false;
         return true;
       });
     });
@@ -1170,11 +1195,12 @@ bool Parser::fdTable(const Token& token) {
     if (field == 2) return label(value, key);
     seen = value.kind == Kind::kArray;
     return array(value, [&](const Token& v, std::size_t) {
-      if (count == work.rows.size()) {
+      if (!workspace()) return false;
+      if (count == work->rows.size()) {
         overflow = true;
         return skip(v);
       }
-      auto& row = work.rows[count++];
+      auto& row = work->rows[count++];
       row = {};
       return fdRow(v, row);
     });
@@ -1192,7 +1218,7 @@ bool Parser::fdTable(const Token& token) {
   }
   if (!emitGroup(key.data, key.empty() ? title.data : key.data)) return false;
   for (std::size_t at = 0; at < count; ++at)
-    if (!emitRow(work.rows[at])) return false;
+    if (!emitRow(work->rows[at])) return false;
   return ok;
 }
 
@@ -1611,7 +1637,9 @@ bool Parser::root(const Token& token) {
 ParseResult Parser::run() {
   Token token;
   if (!next(token) || !root(token) || !reader.finish()) {
-    result.status = rejected ? Status::kRejected : Status::kBadResponse;
+    result.status = no_memory  ? Status::kNoMemory
+                    : rejected ? Status::kRejected
+                               : Status::kBadResponse;
     return result;
   }
   result.document_complete = !result.metadata.duplicate && !malformed;
@@ -1631,15 +1659,7 @@ ParseResult readResponse(json::Reader& reader, const RequestSpec& request,
       request.operation == Operation::kTeams ||
       request.operation == Operation::kOriginalNames)
     return readSelectionResponse(reader, request, sink);
-  auto workspace = std::unique_ptr<Workspace>(new (std::nothrow) Workspace);
-  if (!workspace) {
-    ParseResult failed;
-    failed.status = Status::kNoMemory;
-    return failed;
-  }
-  if (request.operation == Operation::kTable)
-    new (&workspace->rows) decltype(workspace->rows){};
-  Parser parser(reader, request, sink, *workspace);
+  Parser parser(reader, request, sink);
   return parser.run();
 }
 }  // namespace football::provider

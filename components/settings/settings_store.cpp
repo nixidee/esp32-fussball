@@ -297,13 +297,23 @@ NamesRef namesReference(uint32_t* out_revision) {
   return result;
 }
 
+namespace {
 esp_err_t applyLocked(AppConfig& config, uint32_t expected_revision,
-                      Violation* violation,
-                      screen_policy::Error* policy_error) {
+                      Violation* violation = nullptr,
+                      screen_policy::Error* policy_error = nullptr,
+                      const NamesChange* names = nullptr) {
   if (!nvs_ready || record_unread ||
       expected_revision != current_config.revision ||
       current_config.revision == UINT32_MAX)
     return ESP_ERR_INVALID_STATE;
+  if (names) {
+    if (!names->activate || !names->preserve || !names->desired.slot)
+      return ESP_ERR_INVALID_ARG;
+    if (names->expected != current_config.names) return ESP_ERR_INVALID_STATE;
+    config.names = names->desired;
+  } else if (config.names != current_config.names) {
+    return ESP_ERR_INVALID_STATE;
+  }
   // One publication owner assigns all new identities inside the transaction.
   // Per-competition preferences move with the entry; no second binding table
   // or HTTP save choreography needs reconciliation.
@@ -312,27 +322,27 @@ esp_err_t applyLocked(AppConfig& config, uint32_t expected_revision,
       !validate(config, violation, policy_error, display_limits))
     return ESP_ERR_INVALID_ARG;
   config.revision = current_config.revision + 1;
-  const auto error = persist(config);
-  if (error == ESP_OK) publish(config);
+  auto error = persist(config);
+  if (error == ESP_OK && names) {
+    error = names->activate(names->context);
+    if (error != ESP_OK) unknownWrite(error);
+  }
+  if (error == ESP_OK)
+    publish(config);
+  else if (names && record_unread)
+    names->preserve(names->context);
   return error;
 }
+}  // namespace
 esp_err_t apply(AppConfig& config, uint32_t expected_revision,
-                Violation* violation, screen_policy::Error* policy_error) {
+                Violation* violation, screen_policy::Error* policy_error,
+                const NamesChange* names) {
   xSemaphoreTake(write_mutex, portMAX_DELAY);
   const auto error =
-      applyLocked(config, expected_revision, violation, policy_error);
+      applyLocked(config, expected_revision, violation, policy_error, names);
   xSemaphoreGive(write_mutex);
   return error;
 }
-Model current(uint32_t* out_generation) {
-  xSemaphoreTake(model_mutex, portMAX_DELAY);
-  const Model copy = current_config.model;
-  if (out_generation != nullptr)
-    *out_generation = generation_counter.load(std::memory_order_acquire);
-  xSemaphoreGive(model_mutex);
-  return copy;
-}
-
 ImageMask referencedImages() {
   xSemaphoreTake(model_mutex, portMAX_DELAY);
   // Disabled policy entries retain ownership of their desired images.
@@ -398,19 +408,6 @@ uint32_t dataGeneration() {
   return data_generation_counter.load(std::memory_order_acquire);
 }
 
-esp_err_t save(const Model& model, Violation* violation, bool check_access) {
-  (void)check_access;  // The aggregate always validates its provider
-                       // relationships.
-  xSemaphoreTake(write_mutex, portMAX_DELAY);
-  auto next = candidate();
-  esp_err_t error = ESP_ERR_NO_MEM;
-  if (next) {
-    next->model = model;
-    error = applyLocked(*next, current_config.revision, violation);
-  }
-  xSemaphoreGive(write_mutex);
-  return error;
-}
 std::size_t competitionCount() {
   xSemaphoreTake(model_mutex, portMAX_DELAY);
   const std::size_t count = current_config.competitions.entries.size();
@@ -511,10 +508,11 @@ DiagnosticSettings diagnosticSettings() {
   return out;
 }
 
-WebSettings webSettings() {
+WebSettings webSettings(uint32_t* out_revision) {
   WebSettings out;
   xSemaphoreTake(model_mutex, portMAX_DELAY);
   projectWebSettings(current_config.model, out);
+  if (out_revision) *out_revision = current_config.revision;
   xSemaphoreGive(model_mutex);
   return out;
 }
@@ -555,46 +553,6 @@ esp_err_t beginFootballSend(bool explicit_setup,
 
 void endFootballSend() { xSemaphoreGive(write_mutex); }
 
-esp_err_t beginNamesPublication(uint32_t expected_settings_generation) {
-  if (xSemaphoreTake(write_mutex, 0) != pdTRUE) return ESP_ERR_TIMEOUT;
-  if (!nvs_ready || record_unread ||
-      generation() != expected_settings_generation) {
-    xSemaphoreGive(write_mutex);
-    return ESP_ERR_INVALID_STATE;
-  }
-  return ESP_OK;
-}
-
-void endNamesPublication() { xSemaphoreGive(write_mutex); }
-
-esp_err_t saveScreenPolicy(const screen_policy::Policy& policy,
-                           screen_policy::Error* policy_error,
-                           const uint32_t* expected_generation) {
-  xSemaphoreTake(write_mutex, portMAX_DELAY);
-  auto next = candidate();
-  esp_err_t error = ESP_ERR_NO_MEM;
-  if (next) {
-    next->screens = policy;
-    error = applyLocked(
-        *next,
-        expected_generation ? *expected_generation : current_config.revision,
-        nullptr, policy_error);
-  }
-  xSemaphoreGive(write_mutex);
-  return error;
-}
-esp_err_t saveCompetitions(Competitions& competitions, Violation* violation) {
-  xSemaphoreTake(write_mutex, portMAX_DELAY);
-  auto next = candidate();
-  esp_err_t error = ESP_ERR_NO_MEM;
-  if (next) {
-    next->competitions = competitions;
-    error = applyLocked(*next, current_config.revision, violation);
-    if (error == ESP_OK) competitions = next->competitions;
-  }
-  xSemaphoreGive(write_mutex);
-  return error;
-}
 esp_err_t reset() {
   xSemaphoreTake(write_mutex, portMAX_DELAY);
   esp_err_t error = ESP_ERR_INVALID_STATE;
@@ -625,30 +583,45 @@ esp_err_t reset() {
   return error;
 }
 void logCurrent(const char* when) {
+  // Retain only printable non-secret fields, never a complete settings model.
+  struct LogSnapshot {
+    decltype(Model::hostname) hostname;
+    decltype(Model::time_zone) time_zone;
+    decltype(Model::ntp_server) ntp_server;
+    Origin origin;
+    uint16_t ssid_bytes, status_interval;
+    uint8_t competitions;
+    bool wifi_password, ap_password, external_antenna, status_log;
+  } log;
   xSemaphoreTake(model_mutex, portMAX_DELAY);
-  const Model model = current_config.model;
-  const Origin from = current_source;
-  const auto competition_count =
-      static_cast<unsigned>(current_config.competitions.entries.size());
-  const Origin competitions_from = current_source;
+  const auto& model = current_config.model;
+  log = {model.hostname,
+         model.time_zone,
+         model.ntp_server,
+         current_source,
+         model.wifi_ssid.length,
+         model.debug_status_interval_s,
+         static_cast<uint8_t>(current_config.competitions.entries.size()),
+         model.wifi_password.length != 0,
+         model.ap_password.length != 0,
+         model.external_antenna,
+         model.debug_status_log};
   xSemaphoreGive(model_mutex);
 
-  ESP_LOGI(
-      kTag,
-      "%s (%s): wifi ssid %s (%u B), wifi password %s, ap password %s, "
-      "hostname %.*s, external antenna %s, status log %s every %u s, "
-      "time zone %.*s, ntp server %.*s",
-      when, originName(from), setText(model.wifi_ssid.length),
-      static_cast<unsigned>(model.wifi_ssid.length),
-      setText(model.wifi_password.length), setText(model.ap_password.length),
-      static_cast<int>(model.hostname.length), model.hostname.data.data(),
-      model.external_antenna ? "on" : "off",
-      model.debug_status_log ? "on" : "off",
-      static_cast<unsigned>(model.debug_status_interval_s),
-      static_cast<int>(model.time_zone.length), model.time_zone.data.data(),
-      static_cast<int>(model.ntp_server.length), model.ntp_server.data.data());
-  ESP_LOGI(kTag, "%s (%s): %u competitions", when,
-           originName(competitions_from), competition_count);
+  ESP_LOGI(kTag,
+           "%s (%s): wifi ssid %s (%u B), wifi password %s, ap password %s, "
+           "hostname %.*s, external antenna %s, status log %s every %u s, "
+           "time zone %.*s, ntp server %.*s",
+           when, originName(log.origin), setText(log.ssid_bytes),
+           static_cast<unsigned>(log.ssid_bytes), setText(log.wifi_password),
+           setText(log.ap_password), static_cast<int>(log.hostname.length),
+           log.hostname.data.data(), log.external_antenna ? "on" : "off",
+           log.status_log ? "on" : "off",
+           static_cast<unsigned>(log.status_interval),
+           static_cast<int>(log.time_zone.length), log.time_zone.data.data(),
+           static_cast<int>(log.ntp_server.length), log.ntp_server.data.data());
+  ESP_LOGI(kTag, "%s (%s): %u competitions", when, originName(log.origin),
+           static_cast<unsigned>(log.competitions));
 }
 
 }  // namespace settings

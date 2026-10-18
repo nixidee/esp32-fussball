@@ -93,7 +93,7 @@ const ACT = {
             action: 'next', config_revision: S.saved._revision
         });
         toast(t('Aktion an das Display gesendet.'));
-        await sleep(500);
+        await sleep(CLIENT.action_settle_ms);
         await load('status', false);
     }, ip: async () => {
         await mutate('display', {
@@ -250,20 +250,20 @@ async function startup() {
     await load('session', false);
     await Promise.allSettled(['schema', 'settings', 'status', 'images'].map(key => load(key, false)));
     render();
-    let retryMs = 3000;
+    let retryMs = CLIENT.startup_retry_ms;
     for (;;) {
         await sleep(retryMs);
         const failed = Object.keys(S.errors).filter(k => k !== 'status');
         if (failed.length) {
             await Promise.allSettled(failed.map(k => load(k)));
-            retryMs = Math.min(30000, retryMs * 2);
+            retryMs = Math.min(CLIENT.startup_retry_max_ms, retryMs * 2);
         }
         else
-            retryMs = 10000;
+            retryMs = CLIENT.startup_idle_ms;
     }
 }
 // Autonomous work starts here.
-setInterval(() => load('status', false), 5000);
+setInterval(() => load('status', false), CLIENT.status_poll_ms);
 window.addEventListener('pagehide', () => {
     closeDebug();
     if (ED.bmp?.close)

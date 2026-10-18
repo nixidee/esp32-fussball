@@ -2,6 +2,7 @@
 // bytes, validated label text and identities are not interchangeable.
 #pragma once
 
+#include <array>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdint>
@@ -19,6 +20,31 @@ inline void copyPadded(char* out, std::size_t capacity,
   if (input.size() < capacity)
     std::memset(out + input.size(), 0, capacity - input.size());
 }
+
+// Byte string with explicit length; may contain any byte (an SSID may).
+template <std::size_t Capacity>
+struct Bytes {
+  static_assert(Capacity <= 255, "length is stored in one byte");
+  static constexpr std::size_t kCapacity = Capacity;
+
+  uint8_t length = 0;
+  std::array<char, Capacity> data{};
+
+  std::string_view view() const noexcept { return {data.data(), length}; }
+  bool empty() const noexcept { return length == 0; }
+
+  // Fails and keeps the old value if the value does not fit; never truncates.
+  bool assign(std::string_view value) noexcept {
+    if (value.size() > Capacity) return false;
+    values::copyPadded(data.data(), data.size(), value);
+    length = static_cast<uint8_t>(value.size());
+    return true;
+  }
+
+  bool operator==(const Bytes& other) const noexcept {
+    return view() == other.view();
+  }
+};
 
 // Clips valid UTF-8 at a complete code point; does not validate its input.
 // Validation belongs to the boundary that accepts text, not raw bytes.

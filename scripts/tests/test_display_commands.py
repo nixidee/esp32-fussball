@@ -20,6 +20,8 @@ with tempfile.TemporaryDirectory(prefix="football-display-commands-") as directo
         "ESP_ERR_INVALID_STATE=0x103,ESP_ERR_TIMEOUT=0x107,"
         "ESP_ERR_NOT_FINISHED=0x109;\n")
     (scratch / "display_http.inc").write_text(function(web, "esp_err_t postDisplay("))
+    (scratch / "command_body.inc").write_text(
+        "template <class T, class Decode>\n" + function(web, "bool readCommand("))
     (scratch / "display_submit.inc").write_text(function(controller, "esp_err_t submit("))
     (scratch / "display_poll.inc").write_text(function(controller, "void poll()"))
     (scratch / "display_input.inc").write_text(function(controller, "void input("))

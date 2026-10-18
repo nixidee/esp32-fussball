@@ -3,6 +3,7 @@
 #include <cstring>
 #include <new>
 
+#include "civil_time.h"
 #include "presenter.h"
 #include "ui_controller.h"
 
@@ -182,7 +183,6 @@ void Presenter::ownHighlight(const football::MatchStore& store,
 
 void Presenter::bindOwnMatch(const football::MatchStore& store,
                              const football::StoredMatch& match,
-                             const football::view::Shown& shown,
                              const BindContext& context) {
   using football::Phase;
   view.layout = Layout::kOwnMatch;
@@ -192,7 +192,7 @@ void Presenter::bindOwnMatch(const football::MatchStore& store,
   namePrefix<40>(own.away, football::view::teamName(store, match, false));
   teamTarget(own.home, own.home_short, store, match.home);
   teamTarget(own.away, own.away_short, store, match.away);
-  football::view::ownSides(store, match, shown, own.own_home, own.own_away);
+  store.ownSides(match, own.own_home, own.own_away);
   const bool before = !started(match);
   const int64_t kickoff = match.kickoff;  // 0 = unknown
   if (match.principal.valid() && !before)
@@ -210,7 +210,7 @@ void Presenter::bindOwnMatch(const football::MatchStore& store,
     own.highlight_tone = Tone::kDim;
     if (kickoff != 0 && context.valid && kickoff > context.utc) {
       const int64_t left = kickoff - context.utc;
-      const long days = static_cast<long>(left / 86400),
+      const long days = static_cast<long>(left / timekeeping::kSecondsPerDay),
                  hours = static_cast<long>(left / 3600),
                  minutes = static_cast<long>((left + 59) / 60);
       if (days >= 1)
@@ -267,15 +267,14 @@ void Presenter::bindOwnMatch(const football::MatchStore& store,
 
 void Presenter::matchRow(const football::MatchStore& store,
                          const football::StoredMatch& match,
-                         const football::view::Shown& shown,
                          const BindContext& context, bool with_day,
                          MatchRow& out) {
   namePrefix<40>(out.home, football::view::teamName(store, match, true));
   namePrefix<40>(out.away, football::view::teamName(store, match, false));
   teamTarget(out.home, out.home_short, store, match.home);
   teamTarget(out.away, out.away_short, store, match.away);
-  football::view::ownSides(store, match, shown, out.own_home, out.own_away);
-  out.own = match.isOwn();
+  store.ownSides(match, out.own_home, out.own_away);
+  out.own = out.own_home || out.own_away;
   // score_changed is in monotonic seconds.
   out.goal = match.score_changed > 0 &&
              context.now / 1000 - match.score_changed < cfg::kGoalFlashS;
@@ -285,8 +284,9 @@ void Presenter::matchRow(const football::MatchStore& store,
   } else if (match.kickoff != 0 && !started(match)) {
     char time[8];
     localTime(time, sizeof(time), match.kickoff);
-    const auto day = localCivil(match.kickoff), today = localCivil(context.utc);
-    if (with_day && context.valid &&
+    std::tm day{}, today{};
+    if (with_day && context.valid && localCivil(match.kickoff, day) &&
+        localCivil(context.utc, today) &&
         (day.tm_yday != today.tm_yday || day.tm_year != today.tm_year)) {
       char date[16];
       localDate(date, sizeof(date), match.kickoff);
@@ -306,7 +306,6 @@ void Presenter::matchRow(const football::MatchStore& store,
 }
 
 void Presenter::bindConference(const football::MatchStore& store,
-                               const football::view::Shown& shown,
                                const PreparedContent& content,
                                const BindContext& context) {
   const auto& page = content.matches;
@@ -323,7 +322,7 @@ void Presenter::bindConference(const football::MatchStore& store,
                        translated("Konferenz", "Conference"));
   const unsigned rows = std::min<unsigned>(page.row_count, view.matches.size());
   for (unsigned row = 0; row < rows; ++row)
-    matchRow(store, store.match(page.rows[row]), shown, context, false,
+    matchRow(store, store.match(page.rows[row]), context, false,
              view.matches[row]);
   view.row_count = rows;
   // Rim: progress of the own match of the Konferenz.
@@ -336,11 +335,11 @@ void Presenter::bindTable(const football::MatchStore& store,
   const auto& selection = content.table;
   const uint8_t id = selection.competition;
   const char* competition = nullptr;
-  settings::CompetitionRoute entry;
-  if (id != 0 && entryOf(id, entry) && !entry.competition_name.empty()) {
-    competition = entry.competition_name.data.data();
+  const auto* entry = entryOf(id);
+  if (entry && !entry->competition_name.empty()) {
+    competition = entry->competition_name.data.data();
     values::formatText(view.caption, sizeof(view.caption), "%.*s",
-                       static_cast<int>(entry.competition_name.view().size()),
+                       static_cast<int>(entry->competition_name.view().size()),
                        competition);
   }
   if (!competition)
@@ -391,7 +390,7 @@ void Presenter::bindTable(const football::MatchStore& store,
                          standing.difference);
     else
       values::formatText(row.difference, sizeof(row.difference), "--");
-    row.own = (standing.flags & football::kRowOwn) != 0;
+    row.own = store.isOwn(standing);
   }
   view.rim.kind = RimKind::kScroll;
   view.rim.first = static_cast<uint16_t>(first);
@@ -400,7 +399,6 @@ void Presenter::bindTable(const football::MatchStore& store,
 }
 
 void Presenter::bindMatchday(const football::MatchStore& store,
-                             const football::view::Shown& shown,
                              const PreparedContent& content,
                              const BindContext& context) {
   const auto& selection = content.matchday;
@@ -415,8 +413,8 @@ void Presenter::bindMatchday(const football::MatchStore& store,
   view.slots = selection.pages > 1 ? static_cast<uint8_t>(per_page)
                                    : static_cast<uint8_t>(rows);
   for (int row = 0; row < rows; ++row)
-    matchRow(store, store.match(content.matches.rows[row]), shown, context,
-             true, view.matches[row]);
+    matchRow(store, store.match(content.matches.rows[row]), context, true,
+             view.matches[row]);
   view.row_count = static_cast<uint8_t>(rows);
   view.rim.kind = RimKind::kScroll;
   view.rim.first = static_cast<uint16_t>(from);
@@ -436,13 +434,13 @@ uint32_t Presenter::bind(const BindContext& context) {
   presentation.no_badge = false;
   presentation.card_network = false;
   presentation.card_fault = 0;
-  presentation.on_screen = nav.entry.competition;
-  const auto now = context.now, utc = context.utc;
-  const auto output = sequence::view(nav, navigation_data->input(), now);
+  presentation.on_screen = facts->sequence.entry.competition;
+  const auto utc = context.utc;
+  const auto& output = facts->sequence;
   const auto type = output.empty ? screen::Type::kCrest : output.entry.type;
   view.screen = type;
   setStyle(type);
-  const auto phase = navigation_data->selected.phase;
+  const auto phase = facts->phase;
   const Reason reason =
       output.frame                                    ? Reason::kFrame
       : output.manual                                 ? Reason::kManual
@@ -459,11 +457,8 @@ uint32_t Presenter::bind(const BindContext& context) {
   firstFault(faults);
   if (presentation.starting) {
     const auto wifi = context.net->state;
-    bool active = false;
-    for (const auto& entry : navigation_data->data.competitions.entries)
-      active |= entry.active;
     presentation.starting =
-        active && !policy.frame && !model.demo && !context.ap &&
+        facts->active && !policy.frame && !model.demo && !context.ap &&
         data.fetched_ms == 0 && faults == 0 && !networkFault(context) &&
         wifi != network::State::kBackoff &&
         wifi != network::State::kBackoffAuth &&
@@ -508,16 +503,12 @@ uint32_t Presenter::bind(const BindContext& context) {
                           : translated("Inhalte und Automatik prüfen",
                                        "Check content and automatic rules"),
              Tone::kNeutral);
-  } else if (screen::sporting(type) &&
-             content(nav.entry,
-                     nav.paged ? sequence::PageMode::kManualHeld
-                               : sequence::PageMode::kAutomatic,
-                     nav.page, navigation_data)
-                     .kind == sequence::ContentKind::kError) {
+  } else if (facts->page &&
+             facts->page->content.kind == sequence::ContentKind::kError) {
     const auto status =
-        contentStatus(data.store, nav.entry.competition, nav.entry.type, utc);
+        contentStatus(data.store, output.entry.competition, type, utc);
     if (status.cause != football::Cause::kNone)
-      faultCard(nav.entry.competition, status, now, utc);
+      faultCard(output.entry.competition, status);
     else if (!context.connected && !model.demo) {
       const auto why = network::offlineReason(context.net->state);
       cardText(translated("Kein WLAN", "No WiFi"),
@@ -543,18 +534,14 @@ uint32_t Presenter::bind(const BindContext& context) {
                translated("Im Web Anbieter prüfen", "Check provider in Web UI"),
                Tone::kNeutral);
   } else if (screen::sporting(type)) {
-    const auto mode = nav.paged    ? sequence::PageMode::kManualHeld
-                      : nav.manual ? sequence::PageMode::kManualAutomatic
-                                   : sequence::PageMode::kAutomatic;
-    const auto& prepared = navigation_data->prepare(nav.entry, mode, nav.page);
+    const auto& prepared = *facts->page;
     if (type == screen::Type::kLiveSingle ||
         (type == screen::Type::kLiveMulti && prepared.total == 1)) {
-      if (prepared.single)
-        bindOwnMatch(data.store, *prepared.single, data.shown, context);
+      if (prepared.single) bindOwnMatch(data.store, *prepared.single, context);
     } else if (type == screen::Type::kLiveMulti) {
-      bindConference(data.store, data.shown, prepared, context);
+      bindConference(data.store, prepared, context);
     } else if (type == screen::Type::kMatchday) {
-      bindMatchday(data.store, data.shown, prepared, context);
+      bindMatchday(data.store, prepared, context);
     } else if (type == screen::Type::kTable) {
       bindTable(data.store, prepared);
     }

@@ -618,6 +618,12 @@ references. Other policy or competition changes cause a visible conflict instead
 of being silently merged. Confirmed file deletion and already saved reference
 cleanup are reconciled separately after partial failures.
 
+Client timing, polling and retry budgets have one owner in the central firmware
+configuration. The offline generator embeds that exact table for bootstrap;
+the published schema exposes the same values. A common bounded busy retry
+preserves query cancellation and never repeats an unacknowledged write. Inputs
+continue to use the published schema's field bounds.
+
 Current production-function tests cover explicit grouping, group edits without
 source changes, numeric club boundaries, independent nullable overrides and
 common Apply outcomes. Earlier browser evidence below describes the previous
@@ -668,3 +674,17 @@ the Settings page. Provider configuration uses the same expandable sections as
 other infrequent settings; all four providers remain visible by name and
 capability, with credentials and limits inside their own section. Open state
 survives normal page redraws. This changes no option, saved value or API contract.
+
+JSON mutations, binary screenshot requests and XHR image/OTA uploads use one
+session-admission function. Only an explicit expired-session rejection renews
+authentication and repeats the exact operation once. Password cancellation,
+other rejection codes, timeouts and lost connections never replay a mutation.
+The current nested screen-mode fields render readable old/new choices in the
+shared change list. Legacy top-level mode labels/routing have been removed.
+
+Club selection accepts only numeric positive IDs in current list responses.
+Malformed items cannot replace an existing list, while an explicitly empty
+array is a valid empty result. Selection, name import and explicit-original
+validation share the firmware-published team-ID maximum; the browser has no
+independent uint32 ceiling. The expert field explains that positive range and
+the separate No club choice. Existing numeric selections survive list reload.

@@ -59,18 +59,24 @@ std::string visible(uint8_t language) {
 struct Sink { std::string bytes;
  static bool write(std::string_view text,void* raw){static_cast<Sink*>(raw)->bytes.append(text);return true;}
 };
+esp_err_t applyNames(settings::AppConfig& config, uint32_t revision,
+                     names::files::Candidate& candidate) {
+ settings::NamesChange change;
+ const auto prepared=names::prepareChange(candidate,change);
+ return prepared==ESP_OK?settings::apply(config,revision,nullptr,nullptr,&change):prepared;
+}
 void namesTest() {
  settings::AppConfig config;
  durable.clear();boot();settings::snapshot(config);
  assert(config.names==settings::NamesRef{});
  { names::files::Candidate candidate;stage(candidate,"FC Bayern München");
    config.model.hostname.assign("first");config.last_apply_id=UINT64_C(0xfedcba9876543210);
-   assert(names::applyConfiguration(config,config.revision,&candidate)==ESP_OK);
+   assert(applyNames(config,config.revision,candidate)==ESP_OK);
  }
  assert(writes==1&&durable.size()==1&&settings::namesReference().slot==1);
  assert(visible(0)=="FC Bayern München"&&visible(1)=="Bayern Munich");
  const auto first_reference=settings::namesReference();
- files::free_bytes=cfg::kImageReserveBytes-1;
+ files::free_bytes=cfg::kFileReplacementWorkspaceBytes-1;
  {names::files::Candidate candidate;assert(names::begin(candidate)==files::kStorageFull);}
  files::free_bytes=458752;
  assert(settings::namesReference()==first_reference&&writes==1&&visible(0)=="FC Bayern München");
@@ -80,29 +86,44 @@ void namesTest() {
  targets.add({40,cfg::Provider::kOpenLigaDb,label,sizeof(label),short_name,sizeof(short_name)});
  targets.add({999,cfg::Provider::kEspn,exception_label,sizeof(exception_label),exception_short,sizeof(exception_short)});
  targets.add({12345,cfg::Provider::kEspn,fallback_label,sizeof(fallback_label),fallback_short,sizeof(fallback_short)});
- assert(names::resolveVisible(targets,0,cache)==ESP_OK&&std::string(label)=="FC Bayern München"&&std::string(short_name)=="FCB");
+ assert(names::resolveVisible(targets,0,settings::generation(),cache)==ESP_OK&&std::string(label)=="FC Bayern München"&&std::string(short_name)=="FCB");
  assert(std::string(exception_label)=="Unchanged Full"&&exception_short[0]==0);
  network::available=false;std::strcpy(label,"Renamed Provider");std::strcpy(short_name,"NEW");
  std::strcpy(exception_short,"ZZZ");std::strcpy(fallback_label,"New Fallback");std::strcpy(fallback_short,"NOW");
- assert(names::resolveVisible(targets,0,cache)==ESP_OK&&std::string(label)=="FC Bayern München"&&std::string(short_name)=="FCB");
+ assert(names::resolveVisible(targets,0,settings::generation(),cache)==ESP_OK&&std::string(label)=="FC Bayern München"&&std::string(short_name)=="FCB");
  assert(std::string(exception_label)=="Unchanged Full"&&exception_short[0]==0);
  assert(std::string(fallback_label)=="New Fallback"&&std::string(fallback_short)=="NOW");
  network::available=true;
  // A close failure must not publish a complete cache that hides the error.
  names::VisibleCache failed_cache;
  close_failure=true;
- assert(names::resolveVisible(targets,0,failed_cache)==ESP_FAIL);
+ assert(names::resolveVisible(targets,0,settings::generation(),failed_cache)==ESP_FAIL);
  assert(!close_failure && failed_cache.count==0);
  network::available=false;
- assert(names::resolveVisible(targets,0,failed_cache)==ESP_ERR_NOT_FINISHED);
+ assert(names::resolveVisible(targets,0,settings::generation(),failed_cache)==ESP_ERR_NOT_FINISHED);
  network::available=true;
- assert(names::resolveVisible(targets,0,failed_cache)==ESP_OK);
+ assert(names::resolveVisible(targets,0,settings::generation(),failed_cache)==ESP_OK);
  assert(failed_cache.count==targets.count);
  // No names rewrite or filesystem dependency for a settings-only commit.
  const auto ref=settings::namesReference();files::mounted=false;
  settings::snapshot(config);config.model.hostname.assign("settings-only");
- assert(names::applyConfiguration(config,config.revision)==ESP_OK&&settings::namesReference()==ref);
+ assert(settings::apply(config,config.revision)==ESP_OK&&settings::namesReference()==ref);
  files::mounted=true;
+ // The same names reference is insufficient: a stale language/config snapshot
+ // must neither reuse cached adopted labels nor alter the caller's fallback.
+ const auto old_revision=config.revision-1;
+ const auto cache_count=cache.count;const auto cache_ref=cache.reference;
+ std::strcpy(label,"Untouched stale view");std::strcpy(short_name,"OLD");
+ network::available=false;
+ assert(names::resolveVisible(targets,1,old_revision,cache)==ESP_ERR_INVALID_STATE);
+ assert(std::string(label)=="Untouched stale view"&&std::string(short_name)=="OLD");
+ assert(cache.count==cache_count&&cache.reference==cache_ref&&cache.language==0);
+ names::VisibleCache stale_empty;
+ assert(names::resolveVisible(targets,0,old_revision,stale_empty)==ESP_ERR_INVALID_STATE);
+ assert(stale_empty.count==0&&stale_empty.reference==settings::NamesRef{});
+ network::available=true;
+ assert(names::resolveVisible(targets,1,config.revision,cache)==ESP_OK);
+ assert(std::string(label)=="Bayern Munich"&&cache.language==1);
  Sink sink;json::Writer json({&sink,Sink::write});
  names::AdoptedExport exported;
  assert(exported.prepare()==ESP_OK&&exported.write(json)==ESP_OK&&json.finish());
@@ -128,7 +149,7 @@ void namesTest() {
    { names::files::Candidate candidate;stage(candidate,("New " + std::to_string(failure)).c_str());
      config.model.hostname.assign("fail-" + std::to_string(failure));config.last_apply_id++;
      fault=failure;mutated=false;
-     assert(names::applyConfiguration(config,old.revision,&candidate)!=ESP_OK);
+     assert(applyNames(config,old.revision,candidate)!=ESP_OK);
      settings::AppConfig observed;settings::snapshot(observed);
      assert(observed.names==old.names&&observed.model==old.model&&observed.revision==old.revision);
      assert(settings::origin()==settings::Origin::kOutcomeUnknown);
@@ -140,11 +161,14 @@ void namesTest() {
    if(failure==1)assert(config.names==old.names&&config.model==old.model);
    else assert(config.model.hostname.view()=="fail-"+std::to_string(failure)&&visible(0)=="New "+std::to_string(failure));
  }
- // Simulate interruption after NVS commit but before names RAM activation.
- boot();settings::snapshot(config);
+ // Simulate interruption after durable NVS but before names RAM activation.
+ boot();settings::snapshot(config);const auto cut_revision=config.revision;
  { names::files::Candidate candidate;stage(candidate,"After reboot");
-   config.names=candidate.reference();candidate.preserve();
-   assert(settings::apply(config,config.revision)==ESP_OK);
+   settings::NamesChange change;assert(names::prepareChange(candidate,change)==ESP_OK);
+   change.activate=[](void*){return ESP_FAIL;};
+   assert(settings::apply(config,cut_revision,nullptr,nullptr,&change)==ESP_FAIL);
+   assert(settings::origin()==settings::Origin::kOutcomeUnknown);
+   assert(settings::generation()==cut_revision&&settings::namesReference()==candidate.expectedReference());
  }
  boot();assert(visible(0)=="After reboot");
  // A missing referenced file fails; no false empty-success fallback.
@@ -152,7 +176,7 @@ void namesTest() {
  std::filesystem::remove(std::filesystem::path(cfg::kFsBasePath)/cfg::kTeamNamesSlotFiles[active.slot-1]);
  names::invalidate();assert(names::readStatus()!=ESP_OK);
  files::mounted=false;settings::snapshot(config);config.model.hostname.assign("fs-offline");
- assert(names::applyConfiguration(config,config.revision)==ESP_OK);
+ assert(settings::apply(config,config.revision)==ESP_OK);
  std::cout<<"names/config: exact refs, two slots, reboot cuts,5 uncertain NVS results, visible cache, streamed aliases, settings without filesystem PASS\n";
 }
 int main(){std::filesystem::create_directories(cfg::kFsBasePath);namesTest();}
@@ -190,7 +214,7 @@ inline int usage(Usage& out){out={458752,458752-free_bytes};return mounted?ESP_O
     for component, files in {
       'settings': ('app_config_model.cpp','app_config_record.cpp','settings_model.cpp','settings_record.cpp','screen_policy.cpp','screen_record.cpp','ui_config.cpp','runtime_config.cpp'),
       'timekeeping': ('civil_time.cpp',), 'json': ('json_stream.cpp',),
-      'files': ('file_names.cpp',),
+      'files': ('file_names.cpp','file_candidate.cpp'),
       'football': ('football_model.cpp',),
       'names': ('team_name_service.cpp','team_name_files.cpp','team_name_store.cpp','effective_names.cpp','team_name_json.cpp')
     }.items(): sources += [ROOT / 'components' / component / name for name in files]

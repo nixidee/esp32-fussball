@@ -99,9 +99,48 @@ enum class EventType : uint8_t {
   kInjury,
   kVar
 };
-struct Selection {
+inline constexpr uint8_t kNoValue = 0xff;
+// Unknown signed table value (goal difference, points).
+inline constexpr int16_t kNoNumber = INT16_MIN;
+
+struct Goals {
+  uint8_t home = kNoValue, away = kNoValue;
+  bool valid() const { return home != kNoValue && away != kNoValue; }
+  bool operator==(const Goals&) const = default;
+};
+
+// Team of an event relative to its match.
+enum class Side : uint8_t { kUnknown, kHome, kAway };
+
+// Bits of EventFacts::flags.
+inline constexpr uint8_t kEventRemoved = 0x01;  // withdrawn by the provider
+inline constexpr uint8_t kEventShootout = 0x02;
+// From the detail request (ESPN match summary: substitutions); the detail
+// and the list events each replace only their own events.
+inline constexpr uint8_t kEventDetail = 0x08;
+
+struct EventFacts {
+  uint32_t identity = 0;
+  EventType type = EventType::kGoal;
+  uint8_t minute = kNoValue, added = kNoValue;
+  Side actor = Side::kUnknown;
+  uint8_t flags = 0;
+  uint8_t ordinal = 0;  // provider order among shootout attempts
+  // Scorer or booked player; for a substitution the player going off, or
+  // both names when the provider does not say who comes on.
+  Text<32> player;
+  Text<32> player_in;  // substitution: the player coming on
+};
+
+struct CompetitionSelection {
   Id id, season;
   Text<cfg::kNameBytes> name;
+  std::string_view identity() const { return id.data; }
+};
+struct TeamSelection {
+  uint32_t id = 0;
+  Text<cfg::kNameBytes> name;
+  uint32_t identity() const { return id; }
 };
 const char* providerName(cfg::Provider provider);
 // Stable lower-case key of a failure cause (REST API); "" for kNone.

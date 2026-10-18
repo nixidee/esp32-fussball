@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -11,6 +12,27 @@
 #include "provider_plan.h"
 #include "store_mappers.h"
 #include "store_views.h"
+namespace allocation_probe {
+std::size_t calls = 0, bytes = 0;
+bool fail = false;
+void reset(bool failed = false) {
+  calls = bytes = 0;
+  fail = failed;
+}
+}  // namespace allocation_probe
+void* operator new(std::size_t bytes, const std::nothrow_t&) noexcept {
+  ++allocation_probe::calls;
+  allocation_probe::bytes += bytes;
+  if (allocation_probe::fail) return nullptr;
+  try {
+    return ::operator new(bytes);
+  } catch (...) {
+    return nullptr;
+  }
+}
+void operator delete(void* bytes, const std::nothrow_t&) noexcept {
+  ::operator delete(bytes);
+}
 using namespace football;
 namespace football::provider {
 // This focused sporting replay intentionally excludes interactive selection.
@@ -316,7 +338,7 @@ void full_team_directory_rejects_a_changed_opponent_with_its_score() {
     old.away = 1;
     old.principal = {2, 1};
     old.phase = Phase::kLive;
-    old.flags = kMatchOwn;
+    h.store.selectClub(1, provider, 1, h.map.clock);
     assert(h.store.upsert(old, h.map.clock));
     const auto result = h.parse(body);
     assert(result.status == provider::Status::kRejected &&
@@ -331,7 +353,7 @@ void full_team_directory_rejects_a_changed_opponent_with_its_score() {
                "Original");
     h.store.selectClub(1, provider, 2, h.map.clock);
     kept = h.store.find(1, provider, 1);
-    assert(kept && kept->isOwn() && kept->principal == old.principal &&
+    assert(kept && h.store.isOwn(*kept) && kept->principal == old.principal &&
            std::string_view(view::teamName(h.store, *kept, false)) ==
                "Original");
   }
@@ -340,9 +362,73 @@ void full_team_directory_rejects_a_changed_opponent_with_its_score() {
       "opponent and score together; original labels/facts survive "
       "reclassification with E19");
 }
+void workspace_is_allocated_only_for_required_staging() {
+  for (bool fail : {false, true}) {
+    Harness metadata(cfg::Provider::kOpenLigaDb, "bl1", "2026");
+    metadata.request.operation = provider::Operation::kLastChange;
+    allocation_probe::reset(fail);
+    auto parsed = metadata.parse(R"("2026-10-18T10:00:00Z")");
+    assert(parsed.status == provider::Status::kOk &&
+           allocation_probe::calls == 0);
+    Harness empty(cfg::Provider::kOpenLigaDb, "bl1", "2026");
+    allocation_probe::reset(fail);
+    parsed = empty.parse("[]");
+    assert(parsed.status == provider::Status::kOk &&
+           allocation_probe::calls == 0);
+    empty.request.operation = provider::Operation::kTable;
+    allocation_probe::reset(fail);
+    parsed = empty.parse("[]");
+    assert(parsed.status == provider::Status::kOk &&
+           empty.store.tableState(1) == DatasetState::kComplete &&
+           allocation_probe::calls == 0);
+  }
+  Harness events(cfg::Provider::kOpenLigaDb, "bl1", "2026");
+  const auto body =
+      R"([{"matchID":1,"team1":{"teamId":1},"team2":{"teamId":2},"goals":[{"goalID":1,"matchMinute":1,"scoreTeam1":1,"scoreTeam2":0}]}])";
+  allocation_probe::reset(true);
+  auto parsed = events.parse(body);
+  assert(parsed.status == provider::Status::kNoMemory &&
+         !parsed.document_complete && events.store.matchCount() == 0 &&
+         allocation_probe::calls == 1);
+  allocation_probe::reset();
+  parsed = events.parse(body);
+  assert(parsed.status == provider::Status::kOk && events.events == 1 &&
+         allocation_probe::calls == 1 &&
+         allocation_probe::bytes ==
+             sizeof(provider::Event) * cfg::kStoreEvents);
+  const std::pair<cfg::Provider, const char*> tables[] = {
+      {cfg::Provider::kFootballData,
+       R"({"standings":[{"type":"TOTAL","table":[{"team":{"id":1},"position":1,"playedGames":1,"points":3,"goalDifference":1}]}]})"},
+      {cfg::Provider::kApiFootball,
+       R"({"response":[{"league":{"standings":[[{"rank":1,"team":{"id":1},"points":3,"goalsDiff":1,"all":{"played":1}}]]}}]})"}};
+  for (const auto& [provider, body] : tables) {
+    Harness table(provider, "league", "2026");
+    table.request.operation = provider::Operation::kTable;
+    table.store.beginTable(1);
+    StoredRow old;
+    old.team = table.store.team(1, provider, 1, "Old club");
+    old.points = 13;
+    assert(table.store.appendRow(old) && table.store.commitTable(true));
+    allocation_probe::reset(true);
+    auto result = table.parse(body);
+    assert(result.status == provider::Status::kNoMemory &&
+           !result.document_complete && allocation_probe::calls == 1 &&
+           table.store.rowCount() == 1 && table.store.row(0).points == 13);
+    allocation_probe::reset();
+    result = table.parse(body);
+    assert(result.status == provider::Status::kOk &&
+           allocation_probe::calls == 1 && table.store.rowCount() == 1 &&
+           table.store.row(0).points == 3);
+  }
+  std::puts(
+      "PASS actual parser: metadata/empty table survives denied workspace; "
+      "first required event has exact one OOM; retry allocates one bounded "
+      "payload");
+}
 }  // namespace
 int main(int argc, char** argv) {
   assert(argc == 2);
+  workspace_is_allocated_only_for_required_staging();
   actual(argv[1]);
   calendar(argv[1]);
   partial();

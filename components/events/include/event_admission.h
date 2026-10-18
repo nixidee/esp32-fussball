@@ -19,7 +19,7 @@ namespace events {
 // The enum value is the esp_event ID. State events come first; their value
 // is also their pending bit.
 enum class Event : uint8_t {
-  kSettingsChanged,  // read settings::current()
+  kSettingsChanged,  // read the needed settings snapshot
   kNetworkState,     // producer: WiFi manager (P3)
   kDataUpdated,      // producer: repository (P4)
   kOtaState,         // producer: OTA (P3.7)

@@ -10,16 +10,26 @@ No legacy migration, football cache, all-team name projection or worker name
 fence belongs to this design.
 
 `components/json` owns the strict pull grammar and checked writer. Web commands,
-configuration, status and exports now use typed codecs without a JSON document.
+including display actions, share typed field/scalar decoding and one complete
+HTTP command-body/diagnostic path. Domain actions run only after that succeeds.
+Configuration, status and exports use typed codecs without a JSON document.
 All provider sporting, selection and full-original readers use the same grammar. Typed
 Web helpers own field/array/scalar validation; provider adapters own their data
 semantics. Transport owns body limits, deadlines and real send admission.
 
 The configuration owns each competition's SourceKey, separate ClubPreference,
-explicit group membership and attached display preferences. A compact effective
+explicit group membership and attached display preferences. Runtime ownership
+still keys facts by configured competition: equal sources can retain duplicate
+fixtures. The shared-source runtime cutover remains incomplete. A compact effective
 current-phase Program is derived once for the controller. It replaces broad UI
 Model/Policy copies and independently synchronized association identities.
-The presenter receives facts and emits labels; renderer owns geometry/fonts;
+The controller supplies immutable PresentationFacts (selected sequence view,
+bounded calendar offsets and one prepared page). Calendar facts contain no
+resolver or service context. The controller prepares per-instant offsets and
+as-of/retry instants before presentation, including timezone transitions.
+Presenter has no navigation state or
+content-probe access; it formats the borrowed facts and competition captions.
+The presenter emits labels; renderer owns geometry/fonts;
 the controller owns situation/navigation/visit timing. One action FIFO serves
 physical and Web input. Software night rendering is removed; only a real PWM
 backlight pin enables the night schedule.
@@ -54,6 +64,10 @@ Web adapters ----> settings (one AppConfig / NVS) <---- runtime projections
     +----> images        renderer / LVGL / display transfer completion
                |                    |
          checked files       geometry / hardware profiles
+
+The private network portal-DNS module owns its existing task, one socket and
+512-byte BSS packet. Fatal socket failures release before bounded retry; network
+initialization retains its one task-admission bit and relays runtime status.
 
 Independent owners: network, timekeeping, events, health/OTA (system).
 main.cpp composes owners and passes narrow settings; there is no core catchall.
@@ -103,7 +117,7 @@ main.cpp composes owners and passes narrow settings; there is no core catchall.
   under the active LVGL screen. The fixed application draw list and text
   arena do not replace LVGL's temporary draw-task allocations.
 - One provider worker owns all fetches, parsing, the match store and
-  publication. The store (46,928 B in the current C6 compiler layout,
+  publication. The store (45,968 B in the current C6 compiler layout,
   512 matches/256 teams) is one static object; the worker writes
   each response element into it under a mutex and publishes after every
   request. `football::read()` holds that mutex while the presenter builds
@@ -232,12 +246,13 @@ building and the erased-flash check are the pure component `components/files`
 - **API:** `init()` (once at boot, after the settings store; never fails),
   `state()` (`kMounted`, `kUnavailable`, `kNotStarted`), `usage()`,
   `format()` and `logStatus()` (part of the periodic status log). Files are
-  accessed with the standard POSIX/stdio functions on paths from
-  `files::buildPath()`.
+  accessed through common checked I/O and `files::Candidate`. Typed owned
+  locations provide image, factory and names paths; flat user names use
+  `files::buildPath()`. The files component owns the shared replacement workspace.
 - **Names:** flat, 1–31 characters of `a–z 0–9 _ - .`, not starting with a
   dot. No directories, no `..`, no upper case. Names starting with a dot are
   reserved for the service's own replacement temporary file. Longest path: `/fs/` + 31 characters (36 B with terminator).
-- **Image layer:** quota, replacement reserve and reader-aware publication
+- **Image layer:** catalogue quota and reader-aware publication
   are implemented in `components/images`; see [WEB_UI.md](WEB_UI.md).
   That same service owns one desired/selected image, file validation,
   source-attempt acknowledgement, role/factory fallback and bounded retry.
@@ -673,19 +688,55 @@ buffers remain512/128 B; common Apply may allocate one2704-B candidate and one
 bounded names-import arena when names change. There is no 24-KiB JSON DOM.
 Per-dataset status copies add576 B transiently to `/status`; they preserve table
 and details failures independently of successful fixtures. The final matching
-C6 build measures1,732,486 B linked Flash and174,200 B static RAM. Binary
-1,733,248 B and Webgzip89,818 B match the same source manifest; the earlier
+C6 build measures1,734,276 B linked Flash and173,256 B static RAM. Binary
+1,735,040 B and Webgzip90,284 B match the same source manifest; the earlier
 checkpoints describe only their own snapshots. Against the preserved baseline:
-−33,812 B linked Flash, +13,188 B static RAM, −33,808 B binary, +9,631 B gzip.
-The required canonical store is46,928 B versus33,784 B (+13,144 B); all other
-static changes net+44 B. Initialized-data moves only save Flash, not total RAM.
+−32,022 B linked Flash, +12,244 B static RAM, −32,016 B binary, +10,097 B gzip.
+The required canonical store is45,968 B versus33,784 B (+12,184 B); all other
+static changes net+60 B. Initialized-data moves only save Flash, not total RAM.
 
-The unchanged OTA slot leaves101,760 B free; the85%target still fails by
-173,492 B and has not been waived. Provider typed workspace8064 B plus mutually
-exclusive index3136 B or event7680 B requests11200/15744 B before TLS/SDK.
+The unchanged OTA slot leaves99,968 B free; the85%target still fails by
+175,284 B and has not been waived. Provider staging is allocated only for actual events or buffered table groups
+(maximum7,680 B). Metadata and empty answers use none. With the mutually
+exclusive retention index3,144 B or event detail7,296 B, requested payload is
+10,824/14,976 B before allocator overhead and TLS/SDK.
 Names Apply requests2704+32880 B before releasing the arena ahead of the2618-B
 NVS wire allocation. Export grouping is request-only and below16KiB. Heavy
 admission serializes these paths with image validation/screenshot/OTA; ordinary
 status and normal LVGL JPEG can overlap TLS. No allocation cap is a measured
 peak. Physical TLS/JPEG/heap/largest-block/all-task stack/CPU/OTA acceptance is
 still required; the85%Flash and physical gates remain open.
+
+
+The configuration service alone coordinates changed-name Apply. The names
+service prepares a request-local44-B C6 lease containing exact expected/desired
+references and activation/preserve operations. Under the existing writer lock,
+configuration verifies the lease, validates the complete candidate, persists and
+verifies NVS, activates the prepared names receipt, then publishes the new RAM
+configuration and revision. No external caller owns the settings writer lock.
+A settings-only Apply cannot change the names reference. A failure after durable
+NVS but before receipt activation keeps old RAM, preserves both slots and uses
+the same outcome-unknown/read-only recovery path. The lease adds no retained
+allocation, file, task or second persistence owner.
+
+The configuration API exposes no general Model copy/save or separate policy/
+competition setters. Runtime consumers use narrow snapshots; device diagnostic
+modes use the same aggregate Snapshot/Apply. Logging retains only a172-B
+printable projection, rather than a704-B Model.
+
+## Shared file lifecycle — 2026-10-18
+
+The files component now provides typed physical locations and a bounded checked
+candidate, with one filesystem Usage/Context and replacement-space rule. Both
+image and names consumers use it; the former owner-local physical lifecycles
+are removed. Actual whole-translation-unit host fault checks and controlled-API
+browser upload/replacement/copy/restore/delete checks pass. Physical LittleFS,
+power-loss and runtime reserve acceptance remain open. Content rules and NVS
+activation remain with their owners. The candidate checks length and synchronization/close before content
+validation; image publication uses rename, names publication retains the exact
+slot referenced by AppConfig. No new quota, partition or journal is introduced.
+
+The common raw-byte value is values::Bytes, imported unchanged by settings.
+It keeps exact length and alias-safe assignment, including NUL/invalid-UTF8 SSID
+bytes. Domain identities and display labels retain separate validation rules.
+No settings-owned duplicate byte implementation remains.

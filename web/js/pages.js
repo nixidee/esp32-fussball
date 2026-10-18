@@ -160,9 +160,9 @@ function paintErrors() {
 function showValue(v, p = '') {
     if (/^input_roles\[/.test(p) && ROLES[v])
         return t(ROLES[v]);
-    if (p === 'conference_mode' && Number.isInteger(v))
+    if (p === 'screen_policy.conference_mode' && Number.isInteger(v))
         return t(['Alle Seiten', 'Eine Seite'][v] ?? String(v));
-    if (p === 'matchday_mode' && Number.isInteger(v))
+    if (p === 'screen_policy.matchday_mode' && Number.isInteger(v))
         return t(['Aktueller Spieltag', 'Nächster Spieltag'][v] ?? String(v));
     if (typeof v === 'boolean')
         return t(v ? 'Aktiv' : 'Keine');

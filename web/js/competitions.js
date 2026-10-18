@@ -30,10 +30,6 @@ function providerEnabled(i) {
 }
 let wizard = null;
 function blankCompetition() { return clone(S.schema.competition_defaults); }
-function validClubId(value) {
-    return (typeof value === 'number' || typeof value === 'string' && /^\d+$/.test(value)) &&
-        Number.isInteger(Number(value)) && Number(value) > 0 && Number(value) <= 4294967295;
-}
 function blankSource(provider = 0) {
     return {
         ...clone(S.schema.competition_defaults.primary), provider
@@ -62,7 +58,7 @@ function drawWizard() {
     }
     else if (w.step === 1 || w.step === 2) {
         const teams = w.step === 2, current = teams ? w.entry.club.team || '' : source.competition;
-        body += `<h3>${PROVIDERS[source.provider]} · ${ht(teams ? 'Verein' : 'Wettbewerb')}</h3><div class="cols"><div class="field"><label for="wizardSearch">${ht('Suche')}</label><div class="ctl"><input id="wizardSearch" type="search" class="w-l" value="${esc(w.search[w.step - 1])}" maxlength="${S.schema.selection_text_max}"></div><p class="help">${ht('Tippen filtert die geladene Liste; Enter oder „Suchen“ durchsucht die ganze Liste des Anbieters.')}</p></div>${!teams && source.provider === 0 ? `<div class="field"><label for="wizardListSeason">${ht('Saison')}</label><div class="ctl"><input id="wizardListSeason" class="w-s" inputmode="numeric" value="${esc(w.listSeason)}" placeholder="${ht('laufende')}" maxlength="${S.schema.text.competitions.season}"></div><p class="help">${ht('Leer: laufende Saison. Eine andere Saison wird mit dem Wettbewerb gespeichert.')}</p></div>` : ''}${!teams && source.provider === 1 ? `<div class="field"><label for="wizardCountry">${ht('Land')}</label><div class="ctl"><input id="wizardCountry" class="w-m" value="${esc(w.country)}" maxlength="${S.schema.selection_text_max}"></div></div>` : ''}</div><div class="row"><button class="btn" id="wizardLoad" ${w.busy ? 'disabled' : ''}>${w.busy ? ht('Daten werden geladen') : ht(w.search[w.step - 1] ? 'Suchen' : 'Listen laden')}</button>${w.more ? `<button class="btn" id="wizardMore" ${w.busy ? 'disabled' : ''}>${ht('Weitere laden')}</button>` : ''}</div>${w.busy && w.wait ? `<p class="help" id="wizardWait">${esc(selectionWait(w))}</p>` : ''}<div class="pick">${w.list.map((item, i) => `<button class="choice" data-wpick="${i}" ${w.busy ? 'disabled' : ''}><input type="radio" ${String(item.id) === String(current) && (teams || !source.season || String(item.season) === source.season) ? 'checked' : ''}><b>${esc(item.name || item.id)}</b><small>${esc(item.id)}${item.season ? ' · ' + esc(item.season) : ''}</small></button>`).join('') || `<p class="help">${ht(w.busy ? 'Daten werden geladen' : 'Keine Treffer.')}</p>`}<p class="help" id="wizardNoHit" hidden>${ht('Keine Treffer.')}</p></div>${teams ? `<div class="choices"><button class="choice" id="wizardNoClub" ${w.busy ? 'disabled' : ''}><input type="radio" ${w.noClub ? 'checked' : ''}><b>${ht('Ohne Verein')}</b><small>${ht('Kein eigenes Spiel; die Spiele erscheinen in der Konferenz, die Tabelle ohne markierte Zeile.')}</small></button></div>` : ''}<details class="expert"><summary>${ht('Experte')}</summary><div class="field"><label for="wizardId">${ht(teams ? 'Verein-ID' : 'Wettbewerb-ID')}</label><div class="ctl"><input id="wizardId" class="w-l" value="${esc(current)}" maxlength="${S.schema.text.competitions[teams ? 'team' : 'competition']}"></div><p class="help">${ht('IDs: ohne Steuerzeichen und ohne Leerzeichen am Anfang oder Ende.')}</p></div>${!teams && source.provider === 0 ? '' : `<div class="field"><label for="wizardSeason">${ht('Saison überschreiben')}</label><div class="ctl"><input id="wizardSeason" class="w-m" value="${esc(source.season)}" maxlength="${S.schema.text.competitions.season}"></div><p class="help">${ht('Leer: laufende Saison, das Gerät ermittelt sie selbst.')}</p></div>`}</details>`;
+        body += `<h3>${PROVIDERS[source.provider]} · ${ht(teams ? 'Verein' : 'Wettbewerb')}</h3><div class="cols"><div class="field"><label for="wizardSearch">${ht('Suche')}</label><div class="ctl"><input id="wizardSearch" type="search" class="w-l" value="${esc(w.search[w.step - 1])}" maxlength="${S.schema.selection_text_max}"></div><p class="help">${ht('Tippen filtert die geladene Liste; Enter oder „Suchen“ durchsucht die ganze Liste des Anbieters.')}</p></div>${!teams && source.provider === 0 ? `<div class="field"><label for="wizardListSeason">${ht('Saison')}</label><div class="ctl"><input id="wizardListSeason" class="w-s" inputmode="numeric" value="${esc(w.listSeason)}" placeholder="${ht('laufende')}" maxlength="${S.schema.text.competitions.season}"></div><p class="help">${ht('Leer: laufende Saison. Eine andere Saison wird mit dem Wettbewerb gespeichert.')}</p></div>` : ''}${!teams && source.provider === 1 ? `<div class="field"><label for="wizardCountry">${ht('Land')}</label><div class="ctl"><input id="wizardCountry" class="w-m" value="${esc(w.country)}" maxlength="${S.schema.selection_text_max}"></div></div>` : ''}</div><div class="row"><button class="btn" id="wizardLoad" ${w.busy ? 'disabled' : ''}>${w.busy ? ht('Daten werden geladen') : ht(w.search[w.step - 1] ? 'Suchen' : 'Listen laden')}</button>${w.more ? `<button class="btn" id="wizardMore" ${w.busy ? 'disabled' : ''}>${ht('Weitere laden')}</button>` : ''}</div>${w.busy && w.wait ? `<p class="help" id="wizardWait">${esc(selectionWait(w))}</p>` : ''}<div class="pick">${w.list.map((item, i) => `<button class="choice" data-wpick="${i}" ${w.busy ? 'disabled' : ''}><input type="radio" ${item.id === current && (teams || !source.season || item.season === source.season) ? 'checked' : ''}><b>${esc(item.name || item.id)}</b><small>${esc(item.id)}${item.season ? ' · ' + esc(item.season) : ''}</small></button>`).join('') || `<p class="help">${ht(w.busy ? 'Daten werden geladen' : 'Keine Treffer.')}</p>`}<p class="help" id="wizardNoHit" hidden>${ht('Keine Treffer.')}</p></div>${teams ? `<div class="choices"><button class="choice" id="wizardNoClub" ${w.busy ? 'disabled' : ''}><input type="radio" ${w.noClub ? 'checked' : ''}><b>${ht('Ohne Verein')}</b><small>${ht('Kein eigenes Spiel; die Spiele erscheinen in der Konferenz, die Tabelle ohne markierte Zeile.')}</small></button></div>` : ''}<details class="expert"><summary>${ht('Experte')}</summary><div class="field"><label for="wizardId">${ht(teams ? 'Verein-ID' : 'Wettbewerb-ID')}</label><div class="ctl"><input id="wizardId" class="w-l" value="${esc(current)}" maxlength="${S.schema.text.competitions[teams ? 'team' : 'competition']}"></div><p class="help">${teams ? tf('Positive ganze Vereinskennung von 1 bis %. Ohne Verein separat wählen.', S.schema.team_id_max) : ht('IDs: ohne Steuerzeichen und ohne Leerzeichen am Anfang oder Ende.')}</p></div>${!teams && source.provider === 0 ? '' : `<div class="field"><label for="wizardSeason">${ht('Saison überschreiben')}</label><div class="ctl"><input id="wizardSeason" class="w-m" value="${esc(source.season)}" maxlength="${S.schema.text.competitions.season}"></div><p class="help">${ht('Leer: laufende Saison, das Gerät ermittelt sie selbst.')}</p></div>`}</details>`;
     }
     else {
         body += `<div class="card"><h3>${esc(w.entry.competition_name || source.competition)}</h3><p>${w.entry.club.team ? esc(w.entry.club.name || w.entry.club.team) : ht('Ohne Verein')}</p><p class="muted">${PROVIDERS[source.provider]} · ${ht('Saison')}: ${esc(source.season || t('Automatisch'))}</p></div>`;
@@ -120,9 +116,9 @@ function drawWizard() {
             w.entry.competition_name = item.name || item.id;
         }
         else {
-            w.entry.club.team = Number(item.id);
+            w.entry.club.team = item.id;
             w.noClub = false;
-            w.entry.club.name = item.name || item.id;
+            w.entry.club.name = item.name || String(item.id);
         }
         w.error = '';
         drawWizard();
@@ -310,7 +306,7 @@ function closeWizard(w = wizard) {
 async function awaitSelection(query, current, onWait) {
     // Allow season discovery, list retrieval and intervening automatic work
     // using the device's published per-request deadline.
-    const allowance = S.schema.operation_deadline_ms * 5;
+    const allowance = S.schema.operation_deadline_ms * CLIENT.selection_request_windows;
     let deadline = Date.now() + allowance;
     while (current()) {
         const data = await raw('selection?query=' + query);
@@ -322,27 +318,19 @@ async function awaitSelection(query, current, onWait) {
         onWait?.(data);
         if (Date.now() > deadline)
             throw Error(t('Zeitüberschreitung. Erneut versuchen.'));
-        await sleep(750);
+        await sleep(CLIENT.selection_poll_ms);
     }
     return null;
 }
-async function startSelection(body, current) {
-    for (let retry = 0; retry < 3 && current(); retry++) {
-        try {
-            const receipt = await mutate('data/select', body);
-            if (typeof receipt.query !== 'string' || !/^[0-9a-f]{16}$/.test(receipt.query) || /^0+$/.test(receipt.query))
-                throw Error(t('Antwort des Geräts ist nicht lesbar.'));
-            return receipt.query;
-        } catch (error) {
-            // Only an explicit busy rejection is safe to retry. Never repeat
-            // an unacknowledged start or inspect another browser's query.
-            if (error.status !== 409 || error.code !== 'busy') throw error;
-            if (retry === 2) throw error;
-            await sleep(1000);
-        }
-    }
-    return null;
+function startSelection(body, current) {
+    return retryBusy(async () => {
+        const receipt = await mutate('data/select', body);
+        if (typeof receipt.query !== 'string' || !/^[0-9a-f]{16}$/.test(receipt.query) || /^0+$/.test(receipt.query))
+            throw Error(t('Antwort des Geräts ist nicht lesbar.'));
+        return receipt.query;
+    }, CLIENT.selection_retry_ms, current);
 }
+
 async function runSelection(more) {
     const w = wizard;
     if (!w || w.busy)
@@ -374,7 +362,7 @@ async function runSelection(more) {
             const wait = data.wait_s > 0 ? {
                 code: data.wait, until: Date.now() + data.wait_s * 1000
             } : null;
-            if (wizard === w && (wait?.code !== w.wait?.code || Math.abs((wait?.until || 0) - (w.wait?.until || 0)) > 2000)) {
+            if (wizard === w && (wait?.code !== w.wait?.code || Math.abs((wait?.until || 0) - (w.wait?.until || 0)) > CLIENT.wait_change_ms)) {
                 w.wait = wait;
                 drawWizard();
             }
@@ -385,7 +373,12 @@ async function runSelection(more) {
             throw Error(causeMessage(result.error_code, result.code));
         if (wizard !== w)
             return;
-        const rows = result.items || [];
+        const rows = result.items;
+        if (!Array.isArray(rows) || rows.some(item => !item || Array.isArray(item) ||
+            typeof item !== 'object' || typeof item.name !== 'string' || (query.teams ?
+            !Number.isInteger(item.id) || item.id < 1 || !validClubId(item.id) :
+            typeof item.id !== 'string' || !validId(item.id) || typeof item.season !== 'string')))
+            throw Error(causeMessage('bad_response'));
         w.list = more ? [...w.list, ...rows.filter(item => !w.list.some(x => x.id === item.id && x.season === item.season))] : rows;
         w.query = query;
         w.offset = offset + rows.length;

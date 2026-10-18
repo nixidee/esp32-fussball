@@ -168,7 +168,7 @@ int64_t parseUtc(const char* text) {
   if (at != length) return 0;
   const int64_t utc = timekeeping::daysFromCivil(y, static_cast<unsigned>(m),
                                                  static_cast<unsigned>(d)) *
-                          86400 +
+                          timekeeping::kSecondsPerDay +
                       h * 3600 + n * 60 + s;
   return utc - offset;
 }

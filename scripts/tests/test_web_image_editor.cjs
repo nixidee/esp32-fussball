@@ -35,7 +35,7 @@ function setup(width=240,height=240){
  vm.runInContext(script.slice(0,boundary)+'\nglobalThis.UI={S,ED,openEditor,closeEditor,editorPage,bindEditor,composition,drawEditor,fitImage,prepareImage,scheduleImage,uploadImage};render=()=>globalThis.rerender();toast=(message,kind)=>globalThis.recordToast(message,kind);',context,{filename:htmlPath});
  context.document.getElementById=id=>elements.get(id)||null;
  const U=context.UI;
- Object.assign(U.S,{schema:{width,height,round:true,image_max:32768,image_quota:327680,image_reserve:40960,limits:{images:10}},draft:{language:0,screen_policy:{slides:[],appearance:{}}},saved:{language:0},images:{items:[{id:3,revision:7,bytes:1000}],used:1000,max:10,quota:327680,roles:[{name:'crest',revision:4,bytes:0},{name:'background',revision:9,bytes:0}]},status:{fs_total:524288,fs_used:10000},session:{valid:true,password_set:false},token:'synthetic-test-token'});
+ Object.assign(U.S,{schema:{width,height,round:true,image_max:32768,image_quota:327680,replacement_workspace:40960,limits:{images:10}},draft:{language:0,screen_policy:{slides:[],appearance:{}}},saved:{language:0},images:{items:[{id:3,revision:7,bytes:1000}],used:1000,max:10,quota:327680,roles:[{name:'crest',revision:4,bytes:0},{name:'background',revision:9,bytes:0}]},status:{fs_total:524288,fs_used:10000},session:{valid:true,password_set:false},token:'synthetic-test-token'});
  context.load=async(key)=>{assert.equal(key,'status');};
  context.authenticatedUpload=async(uploadPath,blob,progress,headers)=>{uploads.push({path:uploadPath,blob,headers});progress(100);};
  return{U,context,e:element,elements,timers,requests,decodes,uploads,toasts,canvases,fetchPlans,decodePlans,encodePlans,
