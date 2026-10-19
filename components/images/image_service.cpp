@@ -19,7 +19,7 @@
 #include "file_service.h"
 #include "freertos/FreeRTOS.h"
 #include "hw_target.h"
-#include "network_service.h"
+#include "operation_admission.h"
 #include "ota_service.h"
 #include "settings_store.h"
 namespace images {
@@ -431,7 +431,7 @@ Status select(uint8_t id, cfg::StockImage role, char* out,
     value.retry_at_ms = 0;
   }
   if (resolving) {
-    network::HeavyGuard guard;
+    operations::Guard guard;
     if (guard) {
       const int64_t deadline = now + cfg::kImageValidationTimeoutMs;
       if (files::state() != files::State::kMounted) {

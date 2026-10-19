@@ -75,88 +75,6 @@ function imagesPage() {
         return `<div class="card tile"><div class="th">${thumb(0, kind)}</div><b>${ht(name)}</b><p class="small muted num">${r.replaced ? esc(tf('Ersetzt · %', kb(r.bytes))) : ht('eingebaut')}</p><div class="uses">${u.length ? u.map(x => `<span class="tag acc">${esc(x)}</span>`).join('') : `<span class="tag">${ht('Nicht verwendet')}</span>`}</div><div class="row">${button('Ersetzen', 'roleEdit', `data-role="${kind}"`)}${button('Aus Bibliothek übernehmen', 'roleCopy', `data-role="${kind}" ${inv.items.length ? '' : 'disabled'}`)}${button('Werksbild wiederherstellen', 'roleReset', `data-role="${kind}" ${r.replaced ? '' : 'disabled'}`, 'ghost')}</div></div>`;
     }).join('')}</div>`;
 }
-const ED = {
-    bmp: null, zoom: 100, x: 0, y: 0, opacity: 100, base: '#101820', sample: true, blob: null, quality: null, error: '', busy: false, serial: 0, decodeSerial: 0
-};
-function closeEditor() {
-    if (ED.bmp?.close)
-        ED.bmp.close();
-    ED.bmp = null;
-    ED.serial++;
-    ED.blob = null;
-    S.editor = null;
-}
-async function openEditor(id, role = null) {
-    closeEditor();
-    S.editor = {
-        id, role
-    };
-    Object.assign(ED, {
-        zoom: 100, x: 0, y: 0, opacity: 100, base: '#101820', sample: true, blob: null, quality: null, error: '', busy: false
-    });
-    const editor = S.editor, serial = ++ED.decodeSerial;
-    render();
-    if (!id && !role)
-        return;
-    try {
-        const path = imageUrl(id, role || 'background').slice('/api/v1/'.length), bytes = await raw(path, undefined, 'GET', '', true), next = await decodeImage(new Blob([bytes], {
-            type: 'image/jpeg'
-        }));
-        if (S.editor !== editor || serial !== ED.decodeSerial || ED.busy) {
-            if (next.close)
-                next.close();
-            return;
-        }
-        ED.bmp = next;
-        render();
-    }
-    catch {
-        if (S.editor !== editor || serial !== ED.decodeSerial)
-            return;
-        ED.error = t('Gespeichertes Bild konnte nicht geladen werden. Wähle eine lokale Bilddatei; das gespeicherte Bild bleibt erhalten.');
-        if ($('editorError'))
-            $('editorError').textContent = ED.error;
-    }
-}
-function editorPage() {
-    return head('Bild bearbeiten', 'Zuschnitt in Geräteauflösung. Ziehen verschiebt, Mausrad oder zwei Finger zoomen.', button('Zurück zur Übersicht', 'editorClose', ED.busy ? 'disabled' : '')) + `<p class="small muted" style="margin-bottom:16px">${S.schema.width} × ${S.schema.height} · ${S.editor.role ? esc(roleName(S.editor.role)) : S.editor.id ? esc(imageName(S.editor.id)) : ht('Neues Bild')}</p><div class="editor"><div><div class="canvas-wrap ${S.schema.round ? '' : 'rect'}" id="canvasWrap" style="aspect-ratio:${S.schema.width}/${S.schema.height}"><canvas id="editorCanvas"></canvas></div></div><div style="display:grid;gap:14px;align-content:start"><div class="field"><label for="editorFile">${ht('Datei')}</label><input id="editorFile" type="file" accept="image/*" ${ED.busy ? 'disabled' : ''}><div class="field-error on" id="editorError">${esc(ED.error)}</div></div><div class="field"><label for="zoomNumber">${ht('Zoom')}</label><div class="ctl"><input id="zoomRange" type="range" min="10" max="400" value="${ED.zoom}"><input id="zoomNumber" type="number" class="w-s" min="10" max="400" value="${ED.zoom}"><span class="unit">%</span>${button('Einpassen', 'imageFit')}${button('Füllen', 'imageFill')}</div></div><div class="field"><span class="lbl">${ht('Bildposition')}</span><div class="cols"><div><label for="imageX">${ht('Horizontal (px)')}</label><input id="imageX" type="number" step="any" class="w-m" value="${ED.x}" ${ED.busy ? 'disabled' : ''}></div><div><label for="imageY">${ht('Vertikal (px)')}</label><input id="imageY" type="number" step="any" class="w-m" value="${ED.y}" ${ED.busy ? 'disabled' : ''}></div></div><p class="help">${ht('0 zentriert das Bild. Positive Werte verschieben nach rechts oder unten, negative nach links oder oben; Pixel beziehen sich auf die Geräteauflösung.')}</p></div><div class="field"><label for="editorOpacity">${ht('Deckkraft')}</label><div class="ctl"><input id="editorOpacity" type="range" min="0" max="100" value="${ED.opacity}"><span class="num" id="opacityLabel">${ED.opacity} %</span></div></div><div class="field"><label for="editorBase">${ht('Grundfarbe')}</label><div class="colors"><input id="editorBase" type="color" value="${ED.base}"></div></div><label class="switch"><input id="editorSample" type="checkbox" ${ED.sample ? 'checked' : ''}><span class="track"></span>${ht('Beispieltext einblenden (wird nicht gespeichert)')}</label><div class="notice info" id="editorSize">${ht(ED.bmp ? 'Größe wird berechnet …' : 'Wähle eine Bilddatei.')}</div><div class="progress" id="imageProgress" hidden><i></i></div><p id="imageProgressText" class="small num"></p><div class="row">${button(S.editor.id || S.editor.role ? 'Ersetzen' : 'Hochladen', 'imageUpload', 'id="imageUpload" disabled', 'primary')}${button('Abbrechen', 'editorClose', ED.busy ? 'disabled' : '')}</div></div></div>`;
-}
-function composition(sample = false) {
-    const cv = document.createElement('canvas');
-    cv.width = S.schema.width;
-    cv.height = S.schema.height;
-    const g = cv.getContext('2d');
-    g.fillStyle = ED.base;
-    g.fillRect(0, 0, cv.width, cv.height);
-    if (ED.bmp) {
-        const scale = Math.max(cv.width / ED.bmp.width, cv.height / ED.bmp.height) * ED.zoom / 100;
-        g.globalAlpha = ED.opacity / 100;
-        g.drawImage(ED.bmp, (cv.width - ED.bmp.width * scale) / 2 + ED.x, (cv.height - ED.bmp.height * scale) / 2 + ED.y, ED.bmp.width * scale, ED.bmp.height * scale);
-        g.globalAlpha = 1;
-    }
-    if (sample) {
-        g.textAlign = 'center';
-        g.fillStyle = '#ffffff';
-        g.font = '700 ' + Math.round(cv.width * .19) + 'px system-ui';
-        g.fillText('2 : 1', cv.width / 2, cv.height * .55);
-        g.fillStyle = '#49cba0';
-        g.font = '600 ' + Math.round(cv.width * .075) + 'px system-ui';
-        g.fillText('67′', cv.width / 2, cv.height * .7);
-    }
-    return cv;
-}
-function drawEditor() {
-    for (const [id, value] of [['imageX', ED.x], ['imageY', ED.y]])
-        if ($(id))
-            $(id).value = value;
-    const cv = $('editorCanvas');
-    if (!cv)
-        return;
-    cv.width = S.schema.width;
-    cv.height = S.schema.height;
-    const g = cv.getContext('2d');
-    g.drawImage(composition(ED.sample), 0, 0);
-}
 function imageAllowance() {
     if (!S.images)
         return 0;
@@ -185,191 +103,6 @@ function jpegBaseline(bytes) {
     }
     return false;
 }
-let imageSizeTimer;
-async function prepareImage() {
-    const serial = ++ED.serial;
-    ED.blob = null;
-    ED.quality = null;
-    if ($('imageUpload'))
-        $('imageUpload').disabled = true;
-    if (!ED.bmp || !S.editor)
-        return;
-    const cv = composition(false);
-    let blob = null, quality = null;
-    for (let q = 90; q >= 30; q -= 5) {
-        blob = await new Promise(resolve => cv.toBlob(resolve, 'image/jpeg', q / 100));
-        if (serial !== ED.serial || !S.editor)
-            return;
-        if (blob && blob.size <= S.schema.image_max) {
-            quality = q;
-            break;
-        }
-    }
-    if (!blob)
-        throw Error(t('Datei kann nicht gelesen werden. Das bisherige Bild bleibt erhalten.'));
-    let error = '';
-    if (quality === null)
-        error = t('Bild auch bei Qualität 30 % zu groß. Weniger Details, stärker zoomen oder Deckkraft senken.');
-    else if (blob.size > imageAllowance())
-        error = t('Bild überschreitet die Speicherquote einschließlich Reserve.');
-    else if (!jpegBaseline(new Uint8Array(await blob.arrayBuffer())))
-        error = t('Datei passt nicht zum Gerät oder ist beschädigt.');
-    if (serial !== ED.serial || !S.editor)
-        return;
-    ED.blob = error ? null : blob;
-    ED.quality = quality;
-    const el = $('editorSize');
-    if (el) {
-        el.className = 'notice ' + (error ? 'err' : 'info');
-        el.innerHTML = `<b class="num">${kb(blob.size)} · ${ht('JPEG-Qualität')}: ${quality === null ? '—' : quality + ' %'}</b><span>${ht('Frei für dieses Bild')}: ${kb(imageAllowance())}${error ? '<br>' + esc(error) : ''}</span>`;
-    }
-    if ($('imageUpload'))
-        $('imageUpload').disabled = !ED.blob || ED.busy;
-}
-function scheduleImage() {
-    ED.blob = null;
-    ED.serial++;
-    clearTimeout(imageSizeTimer);
-    if ($('imageUpload'))
-        $('imageUpload').disabled = true;
-    imageSizeTimer = setTimeout(() => prepareImage().catch(e => {
-        if ($('editorError'))
-            $('editorError').textContent = e.message;
-    }), CLIENT.image_input_debounce_ms);
-}
-function fitImage(fill) {
-    if (!ED.bmp)
-        return;
-    const max = Math.max(S.schema.width / ED.bmp.width, S.schema.height / ED.bmp.height), min = Math.min(S.schema.width / ED.bmp.width, S.schema.height / ED.bmp.height);
-    ED.zoom = fill ? 100 : Math.max(10, Math.min(400, Math.round(min / max * 100)));
-    ED.x = ED.y = 0;
-    render();
-}
-function bindEditor() {
-    drawEditor();
-    scheduleImage();
-    for (const [id, key] of [['imageX', 'x'], ['imageY', 'y']])
-        $(id).onchange = e => {
-            if (ED.busy)
-                return;
-            const value = Number(e.target.value);
-            if (e.target.value === '' || !Number.isFinite(value)) {
-                e.target.value = ED[key];
-                toast(t('Eine gültige Pixelzahl eingeben. Die bisherige Position bleibt erhalten.'), 'warning');
-                return;
-            }
-            ED[key] = value;
-            drawEditor();
-            scheduleImage();
-        };
-    const wrap = $('canvasWrap'), pts = new Map();
-    let pinch = null;
-    const zoom = z => {
-        if (ED.busy || !Number.isFinite(z))
-            return;
-        ED.zoom = Math.max(10, Math.min(400, Math.round(z)));
-        $('zoomRange').value = ED.zoom;
-        $('zoomNumber').value = ED.zoom;
-        drawEditor();
-        scheduleImage();
-    };
-    $('zoomRange').oninput = e => zoom(Number(e.target.value));
-    $('zoomNumber').onchange = e => {
-        if (e.target.value === '') {
-            e.target.value = ED.zoom;
-            return;
-        }
-        zoom(Number(e.target.value));
-    };
-    $('editorOpacity').oninput = e => {
-        if (ED.busy)
-            return;
-        ED.opacity = Number(e.target.value);
-        $('opacityLabel').textContent = ED.opacity + ' %';
-        drawEditor();
-        scheduleImage();
-    };
-    $('editorBase').oninput = e => {
-        if (ED.busy)
-            return;
-        ED.base = e.target.value;
-        drawEditor();
-        scheduleImage();
-    };
-    $('editorSample').onchange = e => {
-        if (ED.busy)
-            return;
-        ED.sample = e.target.checked;
-        drawEditor();
-    };
-    $('editorFile').onchange = async (e) => {
-        const file = e.target.files[0];
-        if (!file || ED.busy)
-            return;
-        const previous = ED.bmp, editor = S.editor, serial = ++ED.decodeSerial;
-        try {
-            const next = await decodeImage(file);
-            if (S.editor !== editor || serial !== ED.decodeSerial || ED.busy) {
-                if (next.close)
-                    next.close();
-                return;
-            }
-            ED.bmp = next;
-            if (previous?.close)
-                previous.close();
-            ED.x = ED.y = 0;
-            ED.zoom = 100;
-            ED.error = '';
-            render();
-        }
-        catch {
-            if (S.editor !== editor || serial !== ED.decodeSerial)
-                return;
-            ED.error = t('Datei kann nicht gelesen werden. Das bisherige Bild bleibt erhalten.');
-            if ($('editorError'))
-                $('editorError').textContent = ED.error;
-        }
-    };
-    wrap.addEventListener('wheel', e => {
-        e.preventDefault();
-        zoom(ED.zoom * (e.deltaY < 0 ? 1.06 : 1 / 1.06));
-    }, {
-        passive: false
-    });
-    wrap.onpointerdown = e => {
-        if (ED.busy)
-            return;
-        wrap.setPointerCapture(e.pointerId);
-        pts.set(e.pointerId, [e.clientX, e.clientY]);
-        if (pts.size === 2) {
-            const [a, b] = [...pts.values()];
-            pinch = Math.hypot(a[0] - b[0], a[1] - b[1]);
-        }
-    };
-    wrap.onpointermove = e => {
-        if (ED.busy || !pts.has(e.pointerId))
-            return;
-        const prev = pts.get(e.pointerId);
-        pts.set(e.pointerId, [e.clientX, e.clientY]);
-        if (pts.size === 2) {
-            const [a, b] = [...pts.values()], distance = Math.hypot(a[0] - b[0], a[1] - b[1]);
-            if (pinch > 0)
-                zoom(ED.zoom * distance / pinch);
-            pinch = distance;
-        }
-        else {
-            const rect = wrap.getBoundingClientRect();
-            ED.x += (e.clientX - prev[0]) * S.schema.width / rect.width;
-            ED.y += (e.clientY - prev[1]) * S.schema.height / rect.height;
-            drawEditor();
-            scheduleImage();
-        }
-    };
-    wrap.onpointerup = wrap.onpointercancel = e => {
-        pts.delete(e.pointerId);
-        pinch = null;
-    };
-}
 async function decodeImage(file) {
     if (typeof createImageBitmap === 'function')
         return createImageBitmap(file);
@@ -386,49 +119,363 @@ async function decodeImage(file) {
         im.src = url;
     });
 }
-async function uploadImage() {
-    if (ED.busy || !S.editor)
-        return;
-    if (!ED.blob)
-        throw Error(t('Wähle eine Bilddatei.'));
-    const editor = S.editor, blob = ED.blob;
-    ED.busy = true;
-    document.querySelectorAll('#main input,#main button').forEach(el => el.disabled = true);
-    $('imageProgress').hidden = false;
-    try {
-        await load('status', false);
-        if (blob.size > imageAllowance())
-            throw Error(t('Bild überschreitet die Speicherquote einschließlich Reserve.'));
-        await authenticatedUpload('images/upload', blob, p => {
-            if ($('imageProgress'))
-                $('imageProgress').firstElementChild.style.width = p + '%';
-            if ($('imageProgressText'))
-                $('imageProgressText').textContent = t('Übertragen') + ' ' + p + ' %';
-        }, editor.role ? {
-            'X-Image-Role': editor.role
-        } : editor.id ? {
-            'X-Image-Id': editor.id
-        } : {
-            'X-Image-Reserved': String(imageIds(S.draft).reduce((mask, id) => mask | (1 << id), 0))
-        });
-        S.images = await raw('images');
-        await load('status', false);
+function createImageEditor(config, {
+    t, tf, ht, esc, $, head, button, roleName, imageName, imageUrl,
+    imageIds, imageAllowance, jpegBaseline, decodeImage, kb, raw, authenticatedUpload, load, render, toast, CLIENT
+}) {
+    const ED = {
+        bmp: null, zoom: 100, x: 0, y: 0, opacity: 100, base: '#101820', sample: true, blob: null, quality: null, error: '', busy: false, serial: 0, decodeSerial: 0
+    };
+    function closeEditor() {
+        if (ED.bmp?.close)
+            ED.bmp.close();
+        ED.bmp = null;
+        ED.serial++;
+        ED.blob = null;
+        config.editor = null;
+    }
+    async function openEditor(id, role = null) {
         closeEditor();
+        config.editor = {
+            id, role
+        };
+        Object.assign(ED, {
+            zoom: 100, x: 0, y: 0, opacity: 100, base: '#101820', sample: true, blob: null, quality: null, error: '', busy: false
+        });
+        const editor = config.editor, serial = ++ED.decodeSerial;
         render();
-        toast(t(editor.role ? 'Standardbild ersetzt.' : 'Bild gespeichert. Verwendung unter Anzeige festlegen.'));
-    }
-    catch (e) {
-        ED.error = e.message;
-        if ($('editorError'))
-            $('editorError').textContent = e.message;
-        throw e;
-    }
-    finally {
-        ED.busy = false;
-        if (S.editor)
+        if (!id && !role)
+            return;
+        try {
+            const path = imageUrl(id, role || 'background').slice('/api/v1/'.length), bytes = await raw(path, undefined, 'GET', '', true), next = await decodeImage(new Blob([bytes], {
+                type: 'image/jpeg'
+            }));
+            if (config.editor !== editor || serial !== ED.decodeSerial || ED.busy) {
+                if (next.close)
+                    next.close();
+                return;
+            }
+            ED.bmp = next;
             render();
+        }
+        catch {
+            if (config.editor !== editor || serial !== ED.decodeSerial)
+                return;
+            ED.error = t('Gespeichertes Bild konnte nicht geladen werden. Wähle eine lokale Bilddatei; das gespeicherte Bild bleibt erhalten.');
+            if ($('editorError'))
+                $('editorError').textContent = ED.error;
+        }
     }
-}
+    function imageEditorMarkup(view) {
+        return head('Bild bearbeiten', 'Zuschnitt in Geräteauflösung. Ziehen verschiebt, Mausrad oder zwei Finger zoomen.', button('Zurück zur Übersicht', 'editorClose', view.busy ? 'disabled' : '')) + `<p class="small muted" style="margin-bottom:16px">${view.width} × ${view.height} · ${esc(view.label)}</p><div class="editor"><div><div class="canvas-wrap ${view.round ? '' : 'rect'}" id="canvasWrap" style="aspect-ratio:${view.width}/${view.height}"><canvas id="editorCanvas"></canvas></div></div><div style="display:grid;gap:14px;align-content:start"><div class="field"><label for="editorFile">${ht('Datei')}</label><input id="editorFile" type="file" accept="image/*" ${view.busy ? 'disabled' : ''}><div class="field-error on" id="editorError">${esc(view.error)}</div></div><div class="field"><label for="zoomNumber">${ht('Zoom')}</label><div class="ctl"><input id="zoomRange" type="range" min="10" max="400" value="${view.zoom}"><input id="zoomNumber" type="number" class="w-s" min="10" max="400" value="${view.zoom}"><span class="unit">%</span>${button('Einpassen', 'imageFit')}${button('Füllen', 'imageFill')}</div></div><div class="field"><span class="lbl">${ht('Bildposition')}</span><div class="cols"><div><label for="imageX">${ht('Horizontal (px)')}</label><input id="imageX" type="number" step="any" class="w-m" value="${view.x}" ${view.busy ? 'disabled' : ''}></div><div><label for="imageY">${ht('Vertikal (px)')}</label><input id="imageY" type="number" step="any" class="w-m" value="${view.y}" ${view.busy ? 'disabled' : ''}></div></div><p class="help">${ht('0 zentriert das Bild. Positive Werte verschieben nach rechts oder unten, negative nach links oder oben; Pixel beziehen sich auf die Geräteauflösung.')}</p></div><div class="field"><label for="editorOpacity">${ht('Deckkraft')}</label><div class="ctl"><input id="editorOpacity" type="range" min="0" max="100" value="${view.opacity}"><span class="num" id="opacityLabel">${view.opacity} %</span></div></div><div class="field"><label for="editorBase">${ht('Grundfarbe')}</label><div class="colors"><input id="editorBase" type="color" value="${view.base}"></div></div><label class="switch"><input id="editorSample" type="checkbox" ${view.sample ? 'checked' : ''}><span class="track"></span>${ht('Beispieltext einblenden (wird nicht gespeichert)')}</label><div class="notice info" id="editorSize">${ht(view.hasImage ? 'Größe wird berechnet …' : 'Wähle eine Bilddatei.')}</div><div class="progress" id="imageProgress" hidden><i></i></div><p id="imageProgressText" class="small num"></p><div class="row">${button(view.replacing ? 'Ersetzen' : 'Hochladen', 'imageUpload', 'id="imageUpload" disabled', 'primary')}${button('Abbrechen', 'editorClose', view.busy ? 'disabled' : '')}</div></div></div>`;
+    }
+    function editorPage() {
+        return imageEditorMarkup({width: config.schema.width, height: config.schema.height,
+            round: config.schema.round, label: config.editor.role ? roleName(config.editor.role) : config.editor.id ? imageName(config.editor.id) : t('Neues Bild'),
+            replacing: !!(config.editor.id || config.editor.role), hasImage: !!ED.bmp,
+            busy: ED.busy, zoom: ED.zoom, x: ED.x, y: ED.y, opacity: ED.opacity,
+            base: ED.base, sample: ED.sample});
+    }
+    function composition(sample = false) {
+        const cv = document.createElement('canvas');
+        cv.width = config.schema.width;
+        cv.height = config.schema.height;
+        const g = cv.getContext('2d');
+        g.fillStyle = ED.base;
+        g.fillRect(0, 0, cv.width, cv.height);
+        if (ED.bmp) {
+            const scale = Math.max(cv.width / ED.bmp.width, cv.height / ED.bmp.height) * ED.zoom / 100;
+            g.globalAlpha = ED.opacity / 100;
+            g.drawImage(ED.bmp, (cv.width - ED.bmp.width * scale) / 2 + ED.x, (cv.height - ED.bmp.height * scale) / 2 + ED.y, ED.bmp.width * scale, ED.bmp.height * scale);
+            g.globalAlpha = 1;
+        }
+        if (sample) {
+            g.textAlign = 'center';
+            g.fillStyle = '#ffffff';
+            g.font = '700 ' + Math.round(cv.width * .19) + 'px system-ui';
+            g.fillText('2 : 1', cv.width / 2, cv.height * .55);
+            g.fillStyle = '#49cba0';
+            g.font = '600 ' + Math.round(cv.width * .075) + 'px system-ui';
+            g.fillText('67′', cv.width / 2, cv.height * .7);
+        }
+        return cv;
+    }
+    function drawEditor() {
+        for (const [id, value] of [['imageX', ED.x], ['imageY', ED.y]])
+            if ($(id))
+                $(id).value = value;
+        const cv = $('editorCanvas');
+        if (!cv)
+            return;
+        cv.width = config.schema.width;
+        cv.height = config.schema.height;
+        const g = cv.getContext('2d');
+        g.drawImage(composition(ED.sample), 0, 0);
+    }
+    let imageSizeTimer;
+    async function prepareImage() {
+        const serial = ++ED.serial;
+        ED.blob = null;
+        ED.quality = null;
+        if ($('imageUpload'))
+            $('imageUpload').disabled = true;
+        if (!ED.bmp || !config.editor)
+            return;
+        const cv = composition(false);
+        let blob = null, quality = null;
+        for (let q = 90; q >= 30; q -= 5) {
+            blob = await new Promise(resolve => cv.toBlob(resolve, 'image/jpeg', q / 100));
+            if (serial !== ED.serial || !config.editor)
+                return;
+            if (blob && blob.size <= config.schema.image_max) {
+                quality = q;
+                break;
+            }
+        }
+        if (!blob)
+            throw Error(t('Datei kann nicht gelesen werden. Das bisherige Bild bleibt erhalten.'));
+        let error = '';
+        if (quality === null)
+            error = t('Bild auch bei Qualität 30 % zu groß. Weniger Details, stärker zoomen oder Deckkraft senken.');
+        else if (blob.size > imageAllowance())
+            error = t('Bild überschreitet die Speicherquote einschließlich Reserve.');
+        else if (!jpegBaseline(new Uint8Array(await blob.arrayBuffer())))
+            error = t('Datei passt nicht zum Gerät oder ist beschädigt.');
+        if (serial !== ED.serial || !config.editor)
+            return;
+        ED.blob = error ? null : blob;
+        ED.quality = quality;
+        const el = $('editorSize');
+        if (el) {
+            el.className = 'notice ' + (error ? 'err' : 'info');
+            el.innerHTML = `<b class="num">${kb(blob.size)} · ${ht('JPEG-Qualität')}: ${quality === null ? '—' : quality + ' %'}</b><span>${ht('Frei für dieses Bild')}: ${kb(imageAllowance())}${error ? '<br>' + esc(error) : ''}</span>`;
+        }
+        if ($('imageUpload'))
+            $('imageUpload').disabled = !ED.blob || ED.busy;
+    }
+    function scheduleImage() {
+        ED.blob = null;
+        ED.serial++;
+        clearTimeout(imageSizeTimer);
+        if ($('imageUpload'))
+            $('imageUpload').disabled = true;
+        imageSizeTimer = setTimeout(() => prepareImage().catch(e => {
+            if ($('editorError'))
+                $('editorError').textContent = e.message;
+        }), CLIENT.image_input_debounce_ms);
+    }
+    function fitImage(fill) {
+        if (!ED.bmp)
+            return;
+        const max = Math.max(config.schema.width / ED.bmp.width, config.schema.height / ED.bmp.height), min = Math.min(config.schema.width / ED.bmp.width, config.schema.height / ED.bmp.height);
+        ED.zoom = fill ? 100 : Math.max(10, Math.min(400, Math.round(min / max * 100)));
+        ED.x = ED.y = 0;
+        render();
+    }
+    function bindEditor() {
+        drawEditor();
+        scheduleImage();
+        for (const [id, key] of [['imageX', 'x'], ['imageY', 'y']])
+            $(id).onchange = e => {
+                if (ED.busy)
+                    return;
+                const value = Number(e.target.value);
+                if (e.target.value === '' || !Number.isFinite(value)) {
+                    e.target.value = ED[key];
+                    toast(t('Eine gültige Pixelzahl eingeben. Die bisherige Position bleibt erhalten.'), 'warning');
+                    return;
+                }
+                ED[key] = value;
+                drawEditor();
+                scheduleImage();
+            };
+        const wrap = $('canvasWrap'), pts = new Map();
+        let pinch = null;
+        const zoom = z => {
+            if (ED.busy || !Number.isFinite(z))
+                return;
+            ED.zoom = Math.max(10, Math.min(400, Math.round(z)));
+            $('zoomRange').value = ED.zoom;
+            $('zoomNumber').value = ED.zoom;
+            drawEditor();
+            scheduleImage();
+        };
+        $('zoomRange').oninput = e => zoom(Number(e.target.value));
+        $('zoomNumber').onchange = e => {
+            if (e.target.value === '') {
+                e.target.value = ED.zoom;
+                return;
+            }
+            zoom(Number(e.target.value));
+        };
+        $('editorOpacity').oninput = e => {
+            if (ED.busy)
+                return;
+            ED.opacity = Number(e.target.value);
+            $('opacityLabel').textContent = ED.opacity + ' %';
+            drawEditor();
+            scheduleImage();
+        };
+        $('editorBase').oninput = e => {
+            if (ED.busy)
+                return;
+            ED.base = e.target.value;
+            drawEditor();
+            scheduleImage();
+        };
+        $('editorSample').onchange = e => {
+            if (ED.busy)
+                return;
+            ED.sample = e.target.checked;
+            drawEditor();
+        };
+        $('editorFile').onchange = async (e) => {
+            const file = e.target.files[0];
+            if (!file || ED.busy)
+                return;
+            const previous = ED.bmp, editor = config.editor, serial = ++ED.decodeSerial;
+            try {
+                const next = await decodeImage(file);
+                if (config.editor !== editor || serial !== ED.decodeSerial || ED.busy) {
+                    if (next.close)
+                        next.close();
+                    return;
+                }
+                ED.bmp = next;
+                if (previous?.close)
+                    previous.close();
+                ED.x = ED.y = 0;
+                ED.zoom = 100;
+                ED.error = '';
+                render();
+            }
+            catch {
+                if (config.editor !== editor || serial !== ED.decodeSerial)
+                    return;
+                ED.error = t('Datei kann nicht gelesen werden. Das bisherige Bild bleibt erhalten.');
+                if ($('editorError'))
+                    $('editorError').textContent = ED.error;
+            }
+        };
+        wrap.addEventListener('wheel', e => {
+            e.preventDefault();
+            zoom(ED.zoom * (e.deltaY < 0 ? 1.06 : 1 / 1.06));
+        }, {
+            passive: false
+        });
+        wrap.onpointerdown = e => {
+            if (ED.busy)
+                return;
+            wrap.setPointerCapture(e.pointerId);
+            pts.set(e.pointerId, [e.clientX, e.clientY]);
+            if (pts.size === 2) {
+                const [a, b] = [...pts.values()];
+                pinch = Math.hypot(a[0] - b[0], a[1] - b[1]);
+            }
+        };
+        wrap.onpointermove = e => {
+            if (ED.busy || !pts.has(e.pointerId))
+                return;
+            const prev = pts.get(e.pointerId);
+            pts.set(e.pointerId, [e.clientX, e.clientY]);
+            if (pts.size === 2) {
+                const [a, b] = [...pts.values()], distance = Math.hypot(a[0] - b[0], a[1] - b[1]);
+                if (pinch > 0)
+                    zoom(ED.zoom * distance / pinch);
+                pinch = distance;
+            }
+            else {
+                const rect = wrap.getBoundingClientRect();
+                ED.x += (e.clientX - prev[0]) * config.schema.width / rect.width;
+                ED.y += (e.clientY - prev[1]) * config.schema.height / rect.height;
+                drawEditor();
+                scheduleImage();
+            }
+        };
+        wrap.onpointerup = wrap.onpointercancel = e => {
+            pts.delete(e.pointerId);
+            pinch = null;
+        };
+    }
+    async function uploadImage() {
+        if (ED.busy || !config.editor)
+            return;
+        if (!ED.blob)
+            throw Error(t('Wähle eine Bilddatei.'));
+        const editor = config.editor, blob = ED.blob;
+        ED.busy = true;
+        document.querySelectorAll('#main input,#main button').forEach(el => el.disabled = true);
+        $('imageProgress').hidden = false;
+        try {
+            await load('status', false);
+            if (blob.size > imageAllowance())
+                throw Error(t('Bild überschreitet die Speicherquote einschließlich Reserve.'));
+            await authenticatedUpload('images/upload', blob, p => {
+                if ($('imageProgress'))
+                    $('imageProgress').firstElementChild.style.width = p + '%';
+                if ($('imageProgressText'))
+                    $('imageProgressText').textContent = t('Übertragen') + ' ' + p + ' %';
+            }, editor.role ? {
+                'X-Image-Role': editor.role
+            } : editor.id ? {
+                'X-Image-Id': editor.id
+            } : {
+                'X-Image-Reserved': String(imageIds(config.draft).reduce((mask, id) => mask | (1 << id), 0))
+            });
+            config.images = await raw('images');
+            await load('status', false);
+            closeEditor();
+            render();
+            toast(t(editor.role ? 'Standardbild ersetzt.' : 'Bild gespeichert. Verwendung unter Anzeige festlegen.'));
+        }
+        catch (e) {
+            ED.error = e.message;
+            if ($('editorError'))
+                $('editorError').textContent = e.message;
+            throw e;
+        }
+        finally {
+            ED.busy = false;
+            if (config.editor)
+                render();
+        }
+    }
+
+    function editorBusy() { return ED.busy; }
+
+    return Object.freeze({openEditor, closeEditor, editorPage, bindEditor, fitImage, uploadImage, editorBusy});
+} // End private ImageEditor scope.
+const {openEditor, closeEditor, editorPage, bindEditor, fitImage, uploadImage, editorBusy} = createImageEditor({
+    get schema() { return S.schema; },
+    get images() { return S.images; },
+    set images(value) { S.images = value; },
+    get editor() { return S.editor; },
+    set editor(value) { S.editor = value; },
+    get status() { return S.status; },
+    get draft() { return S.draft; }
+}, {
+    CLIENT,
+    t,
+    tf,
+    ht,
+    esc,
+    $,
+    head,
+    button,
+    roleName,
+    imageName,
+    imageUrl,
+    imageIds,
+    imageAllowance,
+    jpegBaseline,
+    decodeImage,
+    kb,
+    raw,
+    authenticatedUpload,
+    load,
+    render,
+    toast
+});
 async function reconcileImages(removed = [], allowed = removed) {
     const [next, inventory] = await Promise.all([readModel(), raw('images')]);
     mergeBaseline(next, allowed);

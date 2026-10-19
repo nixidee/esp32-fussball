@@ -38,7 +38,7 @@ env.Append(CPPPATH=[str(system_root / "include")])
 env.BuildSources(
     str(Path(env.subst("$BUILD_DIR")) / "pure" / "health"),
     str(system_root),
-    src_filter="+<health_meter.cpp>",
+    src_filter="+<health_meter.cpp> +<operation_admission.cpp>",
 )
 
 # Pure football: shared types/codecs, match store, provider adapters,

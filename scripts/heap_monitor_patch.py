@@ -10,6 +10,8 @@ import hashlib
 import re
 from pathlib import Path
 
+from generated_file import write_if_changed
+
 EXPECTED_IDF_VERSION = "6.1.0"
 EXPECTED_SOURCE_SHA256 = (
     "6576a54104902164e726a0a6149e01cbbbe1aa1c5a388125bc77cb587ff911b4"
@@ -87,13 +89,7 @@ def prepare_patch(framework_dir, build_dir):
                          % (digest, EXPECTED_SOURCE_SHA256))
     patched = patch_source(source.decode("utf-8")).encode("utf-8")
     output = build_dir / OUTPUT_RELATIVE_PATH
-    if output.is_file() and output.read_bytes() == patched:
-        return output, False
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_suffix(".c.tmp")
-    temporary.write_bytes(patched)
-    temporary.replace(output)
-    return output, True
+    return output, write_if_changed(output, patched)
 
 
 def run_platformio(env):

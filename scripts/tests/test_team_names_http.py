@@ -8,9 +8,11 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
 
 
 def block(source, signature):
@@ -52,11 +54,11 @@ struct httpd_req_t {
   std::size_t expire_after = SIZE_MAX;
 };
 struct Request { explicit Request(httpd_req_t*) {} };
-namespace network {
-struct HeavyGuard {
+namespace operations {
+struct Guard {
   bool admitted = !busy;
-  HeavyGuard() { if (admitted) { assert(!held); held = true; } }
-  ~HeavyGuard() { if (admitted) held = false; }
+  Guard() { if (admitted) { assert(!held); held = true; } }
+  ~Guard() { if (admitted) held = false; }
   explicit operator bool() const { return admitted; }
 };
 }

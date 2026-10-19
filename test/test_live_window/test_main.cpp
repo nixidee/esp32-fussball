@@ -3,11 +3,13 @@
 // suspension. Synthetic fixtures prove boundaries, not provider/device results.
 #include <unity.h>
 
+#include "../source_support.h"
 #include "request_scheduler.h"
 #include "screen_selection.h"
 
 namespace {
 using namespace football;
+namespace source_test = football::test_source;
 namespace schedule = football::schedule;
 namespace selection = football::selection;
 namespace policy = settings::screen_policy;
@@ -24,8 +26,6 @@ StoredMatch match(Phase phase, uint32_t kickoff = 0,
                   uint32_t observed = kObserved) {
   StoredMatch m;
   m.id = 10;
-  m.competition = 1;
-  m.provider = kProvider;
   m.phase = phase;
   m.kickoff = kickoff;
   m.first_live_observed_utc = observed;
@@ -34,7 +34,9 @@ StoredMatch match(Phase phase, uint32_t kickoff = 0,
 
 selection::Window selectedWindow(const StoredMatch& m, uint32_t utc) {
   store.clear();
-  TEST_ASSERT_NOT_NULL(store.upsert(m, {0, 0}));
+  auto admitted = m;
+  admitted.source = source_test::source(store, 1, kProvider);
+  TEST_ASSERT_NOT_NULL(store.upsert(admitted, {0, 0}));
   policy::SelectionRules rules;
   rules.other_before_min = cfg::kLiveLeadMinutes;
   rules.other_after_min = 0;
@@ -50,11 +52,18 @@ schedule::Inputs requestsAt(uint32_t utc,
   in.daily_left.fill(schedule::kUnlimited);
   in.store = &store;
   in.clock = {utc, 1000};
-  auto& wanted = in.competitions[0];
-  wanted.id = 1;
+  const auto source = source_test::source(store, 1, kProvider);
+  auto& wanted =
+      in.scopes[type == cfg::DataType::kEvents ? cfg::kStoreSources : source];
+  wanted.competition = 1;
+  if (type == cfg::DataType::kEvents) {
+    wanted.key.competition = 1;
+    wanted.key.incarnation = 1;
+  } else
+    wanted.key.source = store.sourceId(source);
   wanted.provider = kProvider;
   wanted.types = static_cast<uint8_t>(1u << static_cast<unsigned>(type));
-  wanted.event_match = event_match;
+  if (event_match) wanted.event_match = {event_match, store.sourceId(source)};
   return in;
 }
 
@@ -68,13 +77,17 @@ schedule::Decision fromStoredAt(uint32_t utc,
 schedule::Decision polledAt(const StoredMatch& m, uint32_t utc,
                             cfg::DataType type = cfg::DataType::kLive) {
   store.clear();
-  TEST_ASSERT_NOT_NULL(store.upsert(m, {0, 0}));
+  auto admitted = m;
+  admitted.source = source_test::source(store, 1, kProvider);
+  TEST_ASSERT_NOT_NULL(store.upsert(admitted, {0, 0}));
   return fromStoredAt(utc, type);
 }
 
 void appendMatch(StoredMatch m, uint32_t id) {
   m.id = id;
-  TEST_ASSERT_NOT_NULL(store.upsert(m, {0, 0}));
+  auto admitted = m;
+  admitted.source = source_test::source(store, 1, kProvider);
+  TEST_ASSERT_NOT_NULL(store.upsert(admitted, {0, 0}));
 }
 
 void test_unknown_kickoff_confirmed_live_polls_from_first_observation() {
@@ -211,12 +224,14 @@ void test_clock_rollback_keeps_earliest_future_observation_as_next_window() {
 
 void test_future_known_game_does_not_hide_unknown_kickoff_final_request() {
   auto future = match(Phase::kScheduled, kObserved + 3600, 0);
-  future.home = store.team(1, kProvider, 40, "Own club");
-  store.selectClub(1, kProvider, 40, {kObserved, 1});
+  future.home =
+      store.team(source_test::source(store, 1, kProvider), 40, "Own club");
+  source_test::selectClub(store, 1, kProvider, 40, {kObserved, 1});
   appendMatch(future, 10);
   auto result = match(Phase::kFinished, 0, 0);
-  result.home = store.team(1, kProvider, 40, "Own club");
-  store.selectClub(1, kProvider, 40, {kObserved, 1});
+  result.home =
+      store.team(source_test::source(store, 1, kProvider), 40, "Own club");
+  source_test::selectClub(store, 1, kProvider, 40, {kObserved, 1});
   result.finished_at = kObserved - 1;
   appendMatch(result, 20);
   // Select the finished identity explicitly, as the provider planner does.
@@ -230,7 +245,7 @@ void test_selected_unknown_kickoff_final_fetch_after_an_initial_request() {
   auto in = requestsAt(kObserved, cfg::DataType::kEvents, 20);
   const auto first = scheduler.next(in);
   TEST_ASSERT_TRUE(first.run);
-  TEST_ASSERT_EQUAL_UINT32(20, first.job.event_match);
+  TEST_ASSERT_EQUAL_UINT32(20, first.job.event_match.id);
   scheduler.sent(first.job.provider, in.clock.mono_s);
   scheduler.finished(first.job, schedule::Outcome::kOk, in.clock.mono_s);
 
@@ -240,14 +255,15 @@ void test_selected_unknown_kickoff_final_fetch_after_an_initial_request() {
   in.clock = {kObserved + 11, 1011};
   const auto final = scheduler.next(in);
   TEST_ASSERT_TRUE(final.run);
-  TEST_ASSERT_EQUAL_UINT32(20, final.job.event_match);
+  TEST_ASSERT_EQUAL_UINT32(20, final.job.event_match.id);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(cfg::DataType::kEvents),
                           static_cast<uint8_t>(final.job.type));
   scheduler.sent(final.job.provider, in.clock.mono_s);
   scheduler.finished(final.job, schedule::Outcome::kOk, in.clock.mono_s);
   in.clock = {kObserved + 20, 1020};
   TEST_ASSERT_FALSE(scheduler.next(in).run);
-  TEST_ASSERT_EQUAL_UINT32(0, store.find(1, kProvider, 20)->kickoff);
+  TEST_ASSERT_EQUAL_UINT32(
+      0, store.find(source_test::source(store, 1), 20)->kickoff);
 }
 
 void test_all_finished_windows_stay_idle_after_final_request_deadline() {

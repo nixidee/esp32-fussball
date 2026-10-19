@@ -9,10 +9,8 @@ namespace football {
 using MatchObserver = void (*)(const StoredMatch&, void*);
 using MatchEventObserver = void (*)(const EventFacts&, void*);
 struct MapContext {
-  uint8_t competition = 0;
-  cfg::Provider provider = cfg::Provider::kOpenLigaDb;
+  SourceSlot source = kNoSource;
   uint8_t round = 0, round_label = kNoIndex;  // reported calendar scope
-  uint32_t club = 0;
   Clock clock;
   MatchObserver observe_match = nullptr;
   void* match_context = nullptr;

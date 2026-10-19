@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "../provider_adapter_support.h"
+#include "../source_support.h"
 #include "../test_match_store/recorded.h"
 #include "demo_scenarios.h"
 #include "screen_selection.h"
@@ -26,7 +27,7 @@ Clock apply(demo::Scenario scenario, uint8_t step) {
 }
 const StoredMatch& find(uint32_t id,
                         uint8_t competition = demo::kFirstCompetition) {
-  const auto* row = store.find(competition, cfg::Provider::kEspn, id);
+  const auto* row = store.find(store.currentSource(competition), id);
   TEST_ASSERT_NOT_NULL(row);
   return *row;
 }
@@ -72,7 +73,7 @@ void test_concurrent_owned_competitions_use_order_without_faking_ownership() {
   TEST_ASSERT_TRUE(store.isOwn(find(401884775)));
   TEST_ASSERT_TRUE(store.isOwn(find(401884777, demo::kSecondCompetition)));
   TEST_ASSERT_EQUAL_UINT8(demo::kFirstCompetition,
-                          selection::select(input(clock)).focus.competition);
+                          selection::select(input(clock)).competition);
   routes.entries[0].club.own_special = false;
   routes.entries[1].club.own_special = false;
   TEST_ASSERT_EQUAL(policy::Phase::kOtherGames,
@@ -111,13 +112,11 @@ void test_no_club_ordinary_single_keeps_same_provider_names_and_available_events
   ArduinoJson::JsonDocument doc;
   TEST_ASSERT_FALSE(deserializeJson(doc, recorded::kEspnDay));
   MapContext map;
-  map.competition = demo::kSecondCompetition;
-  map.provider = cfg::Provider::kEspn;
-  map.club = 132;
+  map.source = test_source::source(recorded_store, demo::kSecondCompetition,
+                                   cfg::Provider::kEspn, 132);
   map.clock = clock;
   TEST_ASSERT_TRUE(storeMatch(doc["events"][1], recorded_store, map));
-  const auto* recorded_match =
-      recorded_store.find(map.competition, map.provider, 401884777);
+  const auto* recorded_match = recorded_store.find(map.source, 401884777);
   TEST_ASSERT_NOT_NULL(recorded_match);
   TEST_ASSERT_EQUAL_STRING(
       view::teamName(recorded_store, *recorded_match, true),
@@ -277,9 +276,8 @@ void test_saved_order_and_club_preferences_drive_projected_own_matches() {
   TEST_ASSERT_EQUAL_UINT8(2, routes.entries.size());
   const auto clock =
       demo::apply(store, routes, bindings, demo::Scenario::kOwn, 4, 5000);
-  TEST_ASSERT_EQUAL_UINT8(12,
-                          selection::select(input(clock)).focus.competition);
-  const auto* first = store.find(47, cfg::Provider::kEspn, 401884775);
+  TEST_ASSERT_EQUAL_UINT8(12, selection::select(input(clock)).competition);
+  const auto* first = store.find(store.currentSource(47), 401884775);
   TEST_ASSERT_NOT_NULL(first);
   TEST_ASSERT_TRUE(store.isOwn(*first));
 }
@@ -299,9 +297,9 @@ void test_one_saved_entry_has_explicit_unbound_collision_free_second_dataset() {
   const auto clock =
       demo::apply(store, routes, bindings, demo::Scenario::kOwn, 4, 5000);
   TEST_ASSERT_EQUAL_UINT8(saved.id,
-                          selection::select(input(clock)).focus.competition);
+                          selection::select(input(clock)).competition);
   TEST_ASSERT_NOT_NULL(
-      store.find(bindings[1].competition, cfg::Provider::kEspn, 401884777));
+      store.find(store.currentSource(bindings[1].competition), 401884777));
 }
 
 void test_uncommitted_presets_never_claim_a_saved_demo_binding() {

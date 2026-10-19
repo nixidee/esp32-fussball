@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parents[1] / "heap_monitor_patch.py"
+sys.path.insert(0, str(SCRIPT.parent))
 CMAKE_HELPER = SCRIPT.with_suffix(".cmake")
 SPEC = importlib.util.spec_from_file_location("heap_monitor_patch", SCRIPT)
 PATCH = importlib.util.module_from_spec(SPEC)

@@ -20,6 +20,29 @@ struct FetchResult {
   bool paused = false;
   esp_err_t admission_error = ESP_OK;
 };
+// One request-local result. Parser facts, admission/failure and actual send
+// accounting cannot be paired with another request's hidden mutable state.
+struct RequestStatus {
+  int64_t sent_ms = 0;
+  esp_err_t code = ESP_OK;
+  uint16_t http = 0;
+  Cause cause = Cause::kNone;
+  bool sent = false;
+  esp_err_t fail(esp_err_t error, Cause reason) noexcept {
+    code = error;
+    cause = reason;
+    return code;
+  }
+};
+// Completion consumers borrow only status. Parser facts belong to the actual
+// request result; a local refusal never constructs an unused parser payload.
+struct RequestOutcome : RequestStatus {
+  provider::ParseResult parsed;
+};
+struct RequestStep {
+  bool progressed = false;
+  bool sent = false;
+};
 // Hooks around the first nonblocking HTTP transport write only. begin()
 // admits/reserves the request and may transfer a short service lock; end()
 // always releases it immediately after that one write. Both must be provided.

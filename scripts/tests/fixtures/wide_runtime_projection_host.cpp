@@ -58,18 +58,21 @@ int main() {
   assert(routes.entries.push(competition));
   view::Shown shown;
   shown.add(competition);
+  assert(store.bind(1, 1, 40, {}));
+  SourceKey source;
+  assert(source.assign(competition.primary.provider, "league", "2026"));
+  assert(store.resolve(1, source, {}));
   for (unsigned i = 0; i < cfg::kStoreMatches; ++i) {
     StoredMatch match;
     match.id = i + 1;
-    match.competition = 1;
+    match.source = store.currentSource(1);
     match.round = 1;
     match.phase = Phase::kLive;
     match.kickoff = now - 3600;
     match.principal = {
         static_cast<uint8_t>(i == cfg::kStoreMatches - 2 ? 7 : 1), 0};
-    match.home = store.team(match.competition, match.provider,
-                            i + 1 == cfg::kStoreMatches ? 40 : 41, "Home");
-    store.selectClub(match.competition, match.provider, 40, {});
+    match.home =
+        store.team(match.source, i + 1 == cfg::kStoreMatches ? 40 : 41, "Home");
     assert(store.upsert(match, {now, 1}));
   }
   settings::screen_policy::Policy policy;
@@ -98,8 +101,8 @@ int main() {
   presentation.starting = false;
   settings::DisplaySettings model;
   CompetitionStates states{};
-  Published published{store, shown,  1,      1,     true, false, 100,
-                      0,     states, routes, false, 255,  255,   {now, 1}};
+  Published published{store, shown, 1,      1,      true,  false,
+                      100,   0,     states, routes, false, {now, 1}};
   network::Status network{};
   ui::BindContext context{now, 1000, true, true, false, &network};
   auto scene = ui::presentationFacts(state, navigation, context.now,
@@ -107,19 +110,21 @@ int main() {
   ui::Presenter presenter(model, output, policy, presentation, 0, &published,
                           &scene, nullptr, &configuration);
   presenter.bind(context);
-  assert(output.layout == ui::Layout::kConference);
-  assert(output.page == 510 && output.pages == 511 && output.row_count == 2);
-  assert(std::string_view(output.matches[1].centre) == "7:0");
+  assert(output.layout() == ui::Layout::kConference);
+  assert(output.page == 510 && output.pages == 511 &&
+         output.conference.count == 2);
+  assert(std::string_view(output.conference.rows[1].centre) == "7:0");
   state.entry = {screen::Type::kMatchday, 1, 1};
   state.page = 255;
   state.pages = 256;
   scene = ui::presentationFacts(state, navigation, context.now,
                                 published.fetched_ms, published.retry_ms);
   presenter.bind(context);
-  assert(output.page == 255 && output.pages == 256 && output.row_count == 2);
+  assert(output.page == 255 && output.pages == 256 &&
+         output.conference.count == 2);
   assert(output.rim.first == 510 && output.rim.count == 2 &&
          output.rim.total == 512);
-  assert(std::string_view(output.matches[0].centre) == "7:0");
+  assert(std::string_view(output.conference.rows[0].centre) == "7:0");
   std::puts(
       "PASS real Presenter::bind: final Conference 511/511 and Matchday "
       "256/256, correct match511/512 and scroll510/512");

@@ -48,15 +48,15 @@ void httpd_resp_set_type(httpd_req_t*,const char*){}
 void httpd_resp_set_hdr(httpd_req_t*,const char*,const char*){}
 bool sendReady(httpd_req_t*){return timekeeping::monotonicMs()<request_deadline;}
 int httpd_resp_send_chunk(httpd_req_t*req,const char*bytes,size_t count){if(!count){req->finals++;return ESP_OK;}req->sends++;if(mode==Mode::send_error)return ESP_FAIL;req->body.append(bytes,count);return ESP_OK;}
-namespace football{
+namespace application{
 esp_err_t beginOriginalNames(uint8_t competition,uint32_t&query){
  if(competition!=7)return ESP_ERR_NOT_FOUND;
  settings::Source source;source.competition.assign("bl1");source.season.assign("2026");
- auto error=originals::begin(source,query);if(error!=ESP_OK)return error;++started;
- worker=std::thread([id=query]{settings::Source source;assert(originals::claim(id,source));
-  if(mode==Mode::closed){while(originals::active(id))std::this_thread::yield();originals::complete(id,ESP_OK);return;}
-  const bool sent=originals::write(id,document);
-  originals::complete(id,sent&&mode!=Mode::provider_error?ESP_OK:ESP_FAIL);
+ auto error=football::originals::begin(source,query);if(error!=ESP_OK)return error;++started;
+ worker=std::thread([id=query]{settings::Source source;assert(football::originals::claim(id,source));
+  if(mode==Mode::closed){while(football::originals::active(id))std::this_thread::yield();football::originals::complete(id,ESP_OK);return;}
+  const bool sent=football::originals::write(id,document);
+  football::originals::complete(id,sent&&mode!=Mode::provider_error?ESP_OK:ESP_FAIL);
  });return ESP_OK;
 }
 }

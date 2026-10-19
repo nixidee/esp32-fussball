@@ -185,14 +185,15 @@ void Presenter::bindOwnMatch(const football::MatchStore& store,
                              const football::StoredMatch& match,
                              const BindContext& context) {
   using football::Phase;
-  view.layout = Layout::kOwnMatch;
+  setLayout(Layout::kOwnMatch);
   auto& own = view.own;
   roundCaption(store, match, false);
   namePrefix<40>(own.home, football::view::teamName(store, match, true));
   namePrefix<40>(own.away, football::view::teamName(store, match, false));
   teamTarget(own.home, own.home_short, store, match.home);
   teamTarget(own.away, own.away_short, store, match.away);
-  store.ownSides(match, own.own_home, own.own_away);
+  store.ownSides(facts->sequence.entry.competition, match, own.own_home,
+                 own.own_away);
   const bool before = !started(match);
   const int64_t kickoff = match.kickoff;  // 0 = unknown
   if (match.principal.valid() && !before)
@@ -273,7 +274,8 @@ void Presenter::matchRow(const football::MatchStore& store,
   namePrefix<40>(out.away, football::view::teamName(store, match, false));
   teamTarget(out.home, out.home_short, store, match.home);
   teamTarget(out.away, out.away_short, store, match.away);
-  store.ownSides(match, out.own_home, out.own_away);
+  store.ownSides(facts->sequence.entry.competition, match, out.own_home,
+                 out.own_away);
   out.own = out.own_home || out.own_away;
   // score_changed is in monotonic seconds.
   out.goal = match.score_changed > 0 &&
@@ -309,10 +311,11 @@ void Presenter::bindConference(const football::MatchStore& store,
                                const PreparedContent& content,
                                const BindContext& context) {
   const auto& page = content.matches;
-  view.layout = Layout::kConference;
+  setLayout(Layout::kConference);
   view.page = page.page;
   view.pages = page.pages;
-  view.slots = page.pages > 1 ? policy.visible_matches : page.row_count;
+  view.conference.slots =
+      page.pages > 1 ? policy.visible_matches : page.row_count;
   if (page.pages > 1)
     values::formatText(view.caption, sizeof(view.caption), "%s \xC2\xB7 %u/%u",
                        translated("Konferenz", "Conference"), page.page + 1u,
@@ -320,11 +323,12 @@ void Presenter::bindConference(const football::MatchStore& store,
   else
     values::formatText(view.caption, sizeof(view.caption), "%s",
                        translated("Konferenz", "Conference"));
-  const unsigned rows = std::min<unsigned>(page.row_count, view.matches.size());
+  const unsigned rows =
+      std::min<unsigned>(page.row_count, view.conference.rows.size());
   for (unsigned row = 0; row < rows; ++row)
     matchRow(store, store.match(page.rows[row]), context, false,
-             view.matches[row]);
-  view.row_count = rows;
+             view.conference.rows[row]);
+  view.conference.count = rows;
   // Rim: progress of the own match of the Konferenz.
   if (content.own != football::kNoMatch)
     matchProgress(store.match(content.own));
@@ -364,18 +368,18 @@ void Presenter::bindTable(const football::MatchStore& store,
     cardText(translated("Tabelle", "Table"), line, nullptr, Tone::kNeutral);
     return;
   }
-  view.layout = Layout::kTable;
-  values::formatText(view.columns[0], sizeof(view.columns[0]), "%s",
+  setLayout(Layout::kTable);
+  values::formatText(view.table.columns[0], sizeof(view.table.columns[0]), "%s",
                      translated("Pkt", "Pts"));
-  values::formatText(view.columns[1], sizeof(view.columns[1]), "%s",
+  values::formatText(view.table.columns[1], sizeof(view.table.columns[1]), "%s",
                      translated("Diff", "GD"));
-  values::formatText(view.columns[2], sizeof(view.columns[2]), "%s",
+  values::formatText(view.table.columns[2], sizeof(view.table.columns[2]), "%s",
                      translated("Sp", "P"));
   const int first = selection.first;
-  view.row_count = count;
+  view.table.count = count;
   for (int i = 0; i < count; ++i) {
     const auto& standing = store.row(content.table_rows[i]);
-    auto& row = view.table[i];
+    auto& row = view.table.rows[i];
     namePrefix<40>(row.name, football::view::rowName(store, standing));
     teamTarget(row.name, row.name_short, store, standing.team);
     value(row.position, sizeof(row.position),
@@ -390,7 +394,7 @@ void Presenter::bindTable(const football::MatchStore& store,
                          standing.difference);
     else
       values::formatText(row.difference, sizeof(row.difference), "--");
-    row.own = store.isOwn(standing);
+    row.own = store.isOwn(id, standing);
   }
   view.rim.kind = RimKind::kScroll;
   view.rim.first = static_cast<uint16_t>(first);
@@ -405,17 +409,17 @@ void Presenter::bindMatchday(const football::MatchStore& store,
   if (!selection.available || !content.matches.row_count) return;
   const int per_page = std::max<int>(1, policy.visible_matches);
   roundCaption(store, store.match(content.matches.rows[0]), true);
-  view.layout = Layout::kConference;
+  setLayout(Layout::kConference);
   view.page = selection.page;
   view.pages = selection.pages;
   const int from = content.first;
   const int rows = content.matches.row_count;
-  view.slots = selection.pages > 1 ? static_cast<uint8_t>(per_page)
-                                   : static_cast<uint8_t>(rows);
+  view.conference.slots = selection.pages > 1 ? static_cast<uint8_t>(per_page)
+                                              : static_cast<uint8_t>(rows);
   for (int row = 0; row < rows; ++row)
     matchRow(store, store.match(content.matches.rows[row]), context, true,
-             view.matches[row]);
-  view.row_count = static_cast<uint8_t>(rows);
+             view.conference.rows[row]);
+  view.conference.count = static_cast<uint8_t>(rows);
   view.rim.kind = RimKind::kScroll;
   view.rim.first = static_cast<uint16_t>(from);
   view.rim.count = static_cast<uint16_t>(rows);

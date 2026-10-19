@@ -15,6 +15,7 @@ struct ConferenceRequest {
   // Kickoff-order paging by the user, in either mode.
   bool manual = false;
   uint8_t per_page = cfg::kVisibleMatchesDefault;
+  uint8_t competition = 0;  // configured club view used for the pinned row
   // Wrapped by the page count when automatic, clamped when manual.
   unsigned page = 0;
 };

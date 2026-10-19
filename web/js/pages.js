@@ -1,6 +1,6 @@
 // Page composition, navigation and publication of device status to the DOM.
 const PHASE = {
-    unknown: 'Unbekannt', scheduled: 'Geplant', live: 'Live', half_time: 'Halbzeit', extra_time: 'Verlängerung', penalties: 'Elfmeterschießen', finished: 'Beendet', postponed: 'Verschoben', cancelled: 'Abgesagt', abandoned: 'Abgebrochen'
+    unknown: 'Unbekannt', scheduled: 'Geplant', live: 'Live', half_time: 'Halbzeit', extra_time: 'Verlängerung', penalties: 'Elfmeterschießen', finished: 'Beendet', postponed: 'Verschoben', cancelled: 'Abgesagt', abandoned: 'Abgebrochen', suspended: 'Unterbrochen'
 };
 function loadingState() {
     const s = S.status;
@@ -43,11 +43,11 @@ function providerSettings(index) {
     const key = 'provider-' + index;
     const credentials = index === 1 ? SEC('api_football_key')
         : index === 3 ? SEC('football_data_key')
-        : index === 2 ? F('espn_opt_in', 'switch', 'ESPN ist eine inoffizielle Schnittstelle. Freigabe erfolgt ausdrücklich.') : '';
+        : index === 2 ? draftField('espn_opt_in', 'switch', 'ESPN ist eine inoffizielle Schnittstelle. Freigabe erfolgt ausdrücklich.') : '';
     const limits = [
-        F(`providers[${index}].daily_requests`, 'number', 'Höchstens so viele Abrufe je Tag; der Tag wechselt um 00:00 UTC. Reicht der Rest nicht bis zum Tageswechsel, ruft das Gerät zuerst Live-Tabelle, Tabelle, Spielplan und Live-Stände seltener oder gar nicht ab, das eigene Spiel zuletzt; sind die Abrufe aufgebraucht, ruft es den Anbieter erst nach dem Tageswechsel wieder ab. 0 = keine Tagesgrenze.'),
-        F(`providers[${index}].window_requests`, 'number', 'Höchstens so viele Abrufe innerhalb des Zeitfensters, z. B. 10 Abrufe je 60 s. Das Gerät überschreitet sie in keinem Zeitfenster. Beide Werte 0 = keine Grenze.'),
-        F(`providers[${index}].window_s`, 'number', 'Länge des Zeitfensters. 0 nur zusammen mit 0 Abrufen.')
+        draftField(`providers[${index}].daily_requests`, 'number', 'Höchstens so viele Abrufe je Tag; der Tag wechselt um 00:00 UTC. Reicht der Rest nicht bis zum Tageswechsel, ruft das Gerät zuerst Live-Tabelle, Tabelle, Spielplan und Live-Stände seltener oder gar nicht ab, das eigene Spiel zuletzt; sind die Abrufe aufgebraucht, ruft es den Anbieter erst nach dem Tageswechsel wieder ab. 0 = keine Tagesgrenze.'),
+        draftField(`providers[${index}].window_requests`, 'number', 'Höchstens so viele Abrufe innerhalb des Zeitfensters, z. B. 10 Abrufe je 60 s. Das Gerät überschreitet sie in keinem Zeitfenster. Beide Werte 0 = keine Grenze.'),
+        draftField(`providers[${index}].window_s`, 'number', 'Länge des Zeitfensters. 0 nur zusammen mit 0 Abrufen.')
     ].join('');
     return `<details class="expert" data-expert-key="${key}" ${S.expertOpen?.has(key) ? 'open' : ''}>
         <summary>${esc(PROVIDERS[index])}<span>${ht(providerDescription(index))}</span></summary>
@@ -62,21 +62,21 @@ function settingsPage() {
                 <span>${esc(n.ssid)}</span><span class="small muted num">${n.rssi} dBm ${n.secure ? '' : ht('Offen')}</span>
             </button>`).join('') || `<p class="muted">${ht('Keine Netzwerke gefunden.')}</p>`}</div>` : '';
     const wifi = `<div class="cols">
-        ${F('wifi_ssid')}
+        ${draftField('wifi_ssid')}
         ${SEC('wifi_password', 'WLAN-Passwort: 8–63 ASCII-Zeichen oder 64 Hex-Ziffern; leer für offenes WLAN.')}
         <div style="grid-column:1/-1">
             ${button('Netzwerke suchen', 'scan', S.scan === 'busy' ? 'disabled' : '')}
             ${scan ? `<div style="margin-top:10px">${scan}</div>` : ''}
         </div>
-        ${F('hostname', 'text', 'Gerätename: Buchstaben, Ziffern und Bindestrich, ohne Bindestrich am Rand.')}
+        ${draftField('hostname', 'text', 'Gerätename: Buchstaben, Ziffern und Bindestrich, ohne Bindestrich am Rand.')}
         ${SEC('ap_password', 'Setup-Passwort: 8–63 ASCII-Zeichen; leer für offenes WLAN.')}
-        ${F('external_antenna', 'switch', 'Nur aktivieren, wenn eine Antenne am Stecker angeschlossen ist.', null, !S.schema.antenna)}
+        ${draftField('external_antenna', 'switch', 'Nur aktivieren, wenn eine Antenne am Stecker angeschlossen ist.', null, !S.schema.antenna)}
     </div>`;
     const providers = `<div class="provider-settings">${[0, 1, 3, 2].map(providerSettings).join('')}</div>`;
     const clock = `<div class="cols">
-        ${F('time_zone', 'select', '', S.schema.time_zones.map(z => [z, z]))}
-        ${F('ntp_server', 'text', 'Zeitserver: gültige DNS-Namen oder IPv4-Adresse.')}
-        ${F('language', 'select', '', [[0, t('Deutsch')], [1, 'English']])}
+        ${draftField('time_zone', 'select', '', S.schema.time_zones.map(z => [z, z]))}
+        ${draftField('ntp_server', 'text', 'Zeitserver: gültige DNS-Namen oder IPv4-Adresse.')}
+        ${draftField('language', 'select', '', [[0, t('Deutsch')], [1, 'English']])}
     </div>`;
     return head('Einstellungen')
         + section('WLAN', '', wifi)
@@ -220,11 +220,7 @@ function paintStatus() {
         }).join('');
     if ($('warnings')) {
         const warn = [];
-        for (const text of new Set([
-            SOURCE[s.settings_source], COMP_SOURCE[s.competitions_source], s.screen_policy_source && s.screen_policy_source !== 'stored' && s.screen_policy_source !== 'initial' ? t('Anzeigeeinstellungen prüfen:') + ' ' + (SOURCE[s.screen_policy_source] || s.screen_policy_source) : null
-        ]))
-            if (text)
-                warn.push(t(text));
+        if (SOURCE[s.settings_source]) warn.push(t(SOURCE[s.settings_source]));
         if (failure)
             warn.push(failure.message);
         if (imageFault)
@@ -269,7 +265,7 @@ function paintStatus() {
 }
 function jump(path) {
     S.page = pageOf(path);
-    S.editor = null;
+    closeEditor();
     const a = parts(path);
     if (a[0] === 'screen_policy') {
         if (a[1] === 'phases')

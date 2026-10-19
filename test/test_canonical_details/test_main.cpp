@@ -9,12 +9,14 @@
 
 #include "../provider_adapter_support.h"
 #include "../provider_status_support.h"
+#include "../source_support.h"
 #include "../test_match_store/recorded.h"
 #include "match_store.h"
 #include "store_views.h"
 
 namespace {
 using namespace football;
+namespace source_test = football::test_source;
 constexpr auto kProvider = cfg::Provider::kEspn;
 constexpr uint32_t kNow = 1792245600;
 MatchStore store;
@@ -23,19 +25,19 @@ StoredMatch* add(uint8_t competition, uint32_t id, bool own,
                  uint32_t kickoff = kNow) {
   StoredMatch m;
   m.id = id;
-  m.competition = competition;
-  m.provider = kProvider;
+  m.source = source_test::source(store, competition, kProvider);
   m.kickoff = kickoff;
   m.phase = Phase::kLive;
-  m.home = store.team(competition, kProvider, own ? 1000000 : id * 2,
-                      "Ordinary home");
-  m.away = store.team(competition, kProvider, id * 2 + 1, "Ordinary away");
-  if (own) store.selectClub(competition, kProvider, 1000000, {kNow, 100});
+  m.home = store.team(m.source, own ? 1000000 : id * 2, "Ordinary home");
+  m.away = store.team(m.source, id * 2 + 1, "Ordinary away");
+  if (own)
+    source_test::selectClub(store, competition, kProvider, 1000000,
+                            {kNow, 100});
   return store.upsert(m, {kNow, 100});
 }
 
 const StoredMatch& find(uint8_t competition, uint32_t id) {
-  const auto* m = store.find(competition, kProvider, id);
+  const auto* m = store.find(source_test::source(store, competition), id);
   TEST_ASSERT_NOT_NULL(m);
   return *m;
 }
@@ -56,7 +58,8 @@ void fillEvents(uint8_t competition, uint32_t id, uint32_t seed) {
 void test_ordinary_details_require_an_explicit_identity() {
   add(1, 10, false);
   TEST_ASSERT_FALSE(store.hasDetail(find(1, 10)));
-  auto* m = store.ensureDetail(1, kProvider, 10, {kNow, 100});
+  auto* m = store.ensureDetail(
+      {10, store.sourceId(source_test::source(store, 1))}, 1, {kNow, 100});
   TEST_ASSERT_NOT_NULL(m);
   TEST_ASSERT_FALSE(store.isOwn(*m));
   TEST_ASSERT_TRUE(m->detail >= cfg::kStoreOwnMatches);
@@ -71,10 +74,13 @@ void test_ordinary_details_require_an_explicit_identity() {
 void test_changing_a_single_target_preserves_other_competitions() {
   for (uint8_t c = 1; c <= cfg::kCompetitionMax; ++c) {
     add(c, 100 + c, false);
-    TEST_ASSERT_NOT_NULL(store.ensureDetail(c, kProvider, 100 + c, {kNow, 1}));
+    TEST_ASSERT_NOT_NULL(store.ensureDetail(
+        {100u + c, store.sourceId(source_test::source(store, c))}, c,
+        {kNow, 1}));
   }
   add(1, 999, false, 0);
-  TEST_ASSERT_NOT_NULL(store.ensureDetail(1, kProvider, 999, {kNow, 1}));
+  TEST_ASSERT_NOT_NULL(store.ensureDetail(
+      {999, store.sourceId(source_test::source(store, 1))}, 1, {kNow, 1}));
   TEST_ASSERT_FALSE(store.hasDetail(find(1, 101)));
   TEST_ASSERT_TRUE(store.hasDetail(find(1, 999)));
   for (uint8_t c = 2; c <= cfg::kCompetitionMax; ++c)
@@ -85,7 +91,9 @@ void test_ordinary_targets_cannot_displace_eight_own_detail_slots() {
   for (uint8_t c = 1; c <= cfg::kCompetitionMax; ++c) {
     add(c, 100 + c, true);
     add(c, 200 + c, false);
-    TEST_ASSERT_NOT_NULL(store.ensureDetail(c, kProvider, 200 + c, {kNow, 1}));
+    TEST_ASSERT_NOT_NULL(store.ensureDetail(
+        {200u + c, store.sourceId(source_test::source(store, c))}, c,
+        {kNow, 1}));
   }
   for (uint8_t c = 1; c <= cfg::kCompetitionMax; ++c) {
     const auto& own = find(c, 100 + c);
@@ -102,7 +110,9 @@ void test_both_event_banks_fill_without_taking_each_others_capacity() {
     add(c, 100 + c, true, kNow - c * 3600);
     fillEvents(c, 100 + c, c * 100);
     add(c, 200 + c, false, kNow - c * 3600);
-    TEST_ASSERT_NOT_NULL(store.ensureDetail(c, kProvider, 200 + c, {kNow, 1}));
+    TEST_ASSERT_NOT_NULL(store.ensureDetail(
+        {200u + c, store.sourceId(source_test::source(store, c))}, c,
+        {kNow, 1}));
     fillEvents(c, 200 + c, c * 1000);
   }
   unsigned used_own = 0, used_ordinary = 0;
@@ -116,7 +126,8 @@ void test_both_event_banks_fill_without_taking_each_others_capacity() {
   TEST_ASSERT_EQUAL_UINT(48, used_own);
   TEST_ASSERT_EQUAL_UINT(48, used_ordinary);
   add(5, 205, false);
-  TEST_ASSERT_NOT_NULL(store.ensureDetail(5, kProvider, 205, {kNow, 1}));
+  TEST_ASSERT_NOT_NULL(store.ensureDetail(
+      {205, store.sourceId(source_test::source(store, 5))}, 5, {kNow, 1}));
   fillEvents(5, 205, 5000);
   for (uint8_t c = 1; c <= 4; ++c) {
     const auto& own = find(c, 100 + c);
@@ -124,7 +135,8 @@ void test_both_event_banks_fill_without_taking_each_others_capacity() {
     TEST_ASSERT_EQUAL_UINT8(12, view::events(store, own).count);
   }
   TEST_ASSERT_TRUE(find(4, 204).flags & kMatchEventsPoolCut);
-  TEST_ASSERT_TRUE(store.notices(4) & kNoticeEvents);
+  TEST_ASSERT_TRUE(store.notices(source_test::source(store, 4)) &
+                   kNoticeEvents);
 }
 
 void test_recorded_espn_ordinary_and_own_details_use_the_same_parser() {
@@ -132,9 +144,7 @@ void test_recorded_espn_ordinary_and_own_details_use_the_same_parser() {
   TEST_ASSERT_FALSE(deserializeJson(doc, recorded::kEspnDay));
   const auto row = doc["events"][0].as<JsonVariantConst>();
   MapContext c;
-  c.competition = 1;
-  c.provider = kProvider;
-  c.club = 598;
+  c.source = source_test::source(store, 1, kProvider, 598);
   c.clock = {kNow, 1};
   TEST_ASSERT_TRUE(storeMatch(row, store, c));
   const auto& own = find(1, 401884775);
@@ -145,9 +155,10 @@ void test_recorded_espn_ordinary_and_own_details_use_the_same_parser() {
   Text<cfg::kNameBytes> name;
   name.assign(view::teamName(store, own, true));
   store.clear();
-  c.club = 0;
+  c.source = source_test::source(store, 1, kProvider, 0);
   TEST_ASSERT_TRUE(storeMatch(row, store, c));
-  TEST_ASSERT_NOT_NULL(store.ensureDetail(1, kProvider, 401884775, c.clock));
+  TEST_ASSERT_NOT_NULL(store.ensureDetail(
+      {401884775, store.sourceId(source_test::source(store, 1))}, 1, c.clock));
   TEST_ASSERT_TRUE(storeMatch(row, store, c));
   const auto& ordinary = find(1, 401884775);
   const auto ordinary_events = view::events(store, ordinary);
@@ -162,8 +173,7 @@ void test_recorded_espn_ordinary_and_own_details_use_the_same_parser() {
 void test_live_observation_is_confirmed_and_does_not_slide_each_poll() {
   StoredMatch m;
   m.id = 10;
-  m.competition = 1;
-  m.provider = kProvider;
+  m.source = source_test::source(store, 1, kProvider);
   m.phase = Phase::kLive;
   m.estimated = kEstimatedPhase;
   TEST_ASSERT_EQUAL_UINT32(0,
@@ -182,8 +192,7 @@ void test_live_observation_is_confirmed_and_does_not_slide_each_poll() {
 void test_suspension_keeps_observation_and_freezes_an_existing_minute() {
   StoredMatch m;
   m.id = 10;
-  m.competition = 1;
-  m.provider = kProvider;
+  m.source = source_test::source(store, 1, kProvider);
   m.kickoff = kNow - 600;
   m.phase = Phase::kLive;
   m.minute = 10;
@@ -217,8 +226,7 @@ int32_t berlinFallOffset(int64_t instant, void*) {
 void test_finish_day_retention_survives_midnight_dst_and_store_expiry() {
   StoredMatch m;
   m.id = 10;
-  m.competition = 1;
-  m.provider = kProvider;
+  m.source = source_test::source(store, 1, kProvider);
   m.phase = Phase::kFinished;
   m.kickoff = parseUtc("2026-10-24T20:30:00Z");      // Saturday local
   m.finished_at = parseUtc("2026-10-24T22:30:00Z");  // Sunday local
@@ -227,13 +235,15 @@ void test_finish_day_retention_survives_midnight_dst_and_store_expiry() {
   const DateContext dates{berlinFallOffset};
   const auto monday = parseUtc("2026-10-26T22:30:00Z");
   TEST_ASSERT_TRUE(resultHeld(find(1, 10), monday, dates));
-  store.retain(1, retention::Selection{}, monday, dates);
-  TEST_ASSERT_NOT_NULL(store.find(1, kProvider, 10));
+  store.retain(source_test::source(store, 1), retention::Selection{}, monday,
+               dates);
+  TEST_ASSERT_NOT_NULL(store.find(source_test::source(store, 1), 10));
   TEST_ASSERT_TRUE(find(1, 10).estimated & kEstimatedFinish);
   const auto tuesday = parseUtc("2026-10-26T23:00:00Z");
   TEST_ASSERT_FALSE(resultHeld(find(1, 10), tuesday, dates));
-  store.retain(1, retention::Selection{}, tuesday, dates);
-  TEST_ASSERT_NULL(store.find(1, kProvider, 10));
+  store.retain(source_test::source(store, 1), retention::Selection{}, tuesday,
+               dates);
+  TEST_ASSERT_NULL(store.find(source_test::source(store, 1), 10));
 }
 
 void test_result_hold_recomputes_after_timezone_change() {

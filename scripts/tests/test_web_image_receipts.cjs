@@ -4,8 +4,8 @@ const fs = require('node:fs'), path = require('node:path'), vm = require('node:v
 const {readWebSource, productionFunctions} = require('./web_source.cjs');
 const root = path.resolve(__dirname, '../..'), {script} = readWebSource();
 const functions = productionFunctions(script, [
-  'imageName', 'imageAllowance', 'imageIds', 'libraryEntries', 'screenMeaning', 'sameObject',
-  'sameScreenPolicy', 'screenConflict', 'competitionPayload', 'mergeValues', 'prepareScreenModel', 'mergeBaseline',
+  'imageName', 'imageAllowance', 'imageIds', 'libraryEntries', 'sameObject',
+  'screenConflict', 'competitionPayload', 'mergeValues', 'prepareScreenModel', 'mergeBaseline',
   'pruneMissing', 'reconcileImages', 'imageDeleteFailure', 'deleteImage', 'deleteAllImages',
 ]);
 const types = ['single', 'conference', 'table', 'crest', 'matchday', 'images'];
@@ -20,7 +20,7 @@ function setup(language = 0) {
   const S = {saved: structuredClone(server), draft: structuredClone(server), schema: {limits: {images: 10}, image_quota: 327680, image_max: 32768, replacement_workspace: 40960}, images: {items: [{id: 1}, {id: 2}]}};
   S.draft.hostname = 'unsaved'; S.draft.screen_policy.appearance.conference.image = 7;
   const context = {S, console, structuredClone, Set, Map, Error,
-    clone: structuredClone, eq: (a, b) => JSON.stringify(a) === JSON.stringify(b),
+    clone: structuredClone,
     SP_TYPES: types, IMAGE_ROLES: [['crest', 'crest'], ['background', 'background']],
     codeText: value => value ? ` [${value}]` : '',
     $: id => id === 'deleteResults' ? result : null, render() {}, toast() {},

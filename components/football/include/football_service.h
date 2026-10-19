@@ -148,7 +148,6 @@ struct Published {
   // effective canonical routes, also used by the device Demo.
   const settings::CompetitionRoutes& routes;
   bool break_proven;
-  uint8_t loaded_matches, loaded_tables;  // bits in routes.entries order
   Clock clock;  // Demo clock when enabled; otherwise ordinary UTC/monotonic
 };
 // Called while holding the short repository read mutex. Callback must copy
@@ -166,7 +165,19 @@ Overview overview(int64_t utc, Status* status_out = nullptr,
 // single interactive slot until the provider worker acknowledges completion.
 esp_err_t select(const SelectionRequest& request, SelectionQuery& query);
 // Explicit original-name query; same worker/admission slot, no adoption.
-esp_err_t beginOriginalNames(uint8_t competition, uint32_t& query);
+struct RequestOutcome;
+namespace provider {
+struct OriginalsSink;
+}
+// Synchronous producer/codec inversion. Callback code has process lifetime;
+// context and provider sink are borrowed only during one worker invocation.
+using OriginalNamesProducer = RequestOutcome (*)(const provider::OriginalsSink&,
+                                                 void*);
+using OriginalNamesExport = RequestOutcome (*)(uint32_t,
+                                               const settings::Source&,
+                                               OriginalNamesProducer, void*);
+esp_err_t beginOriginalNames(uint8_t competition, uint32_t& query,
+                             OriginalNamesExport encode);
 esp_err_t selectionStatus(SelectionQuery query, SelectionStatus& out);
 bool selectionAt(SelectionQuery query, uint16_t index, uint32_t revision,
                  CompetitionSelection& out);

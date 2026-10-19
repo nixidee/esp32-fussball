@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "../provider_adapter_support.h"
+#include "../source_support.h"
 #include "../test_match_store/recorded.h"
 #include "app_config.h"
 #include "football_model.h"
@@ -156,7 +157,14 @@ void replay(int64_t from, int64_t until, Trace& trace, Respond respond) {
     in.daily_left.fill(kUnlimited);
     in.store = &store;
     in.clock = clock;
-    planner.wanted(0, &entry, store, clock, in.competitions[0]);
+    configured_routes.entries[0] = entry;
+    eligibility = settings::screen_policy::eligibility(configured_policy,
+                                                       configured_routes);
+    planner.synchronize(store, clock);
+    const auto changed = store.takeFixtureChanges();
+    planner.restartFixtures(changed);
+    scheduler.restartFixtures(changed);
+    planner.prepareDemand(store, clock, in);
     const Decision d = scheduler.next(in);
     same_second = dt == last_dt ? same_second + 1 : 0;
     last_dt = dt;
@@ -275,13 +283,14 @@ void test_events_held_until_the_provider_reports_the_kickoff() {
 void test_events_without_an_own_slot_wait_for_their_interval() {
   for (uint32_t i = 0; i < cfg::kStoreOwnMatches; ++i) {
     football::StoredMatch m;
-    m.competition = 9;
-    m.provider = cfg::Provider::kEspn;
+    m.source = football::test_source::source(store, 9, cfg::Provider::kEspn,
+                                             1000000, at(kKickoff));
     m.id = 900 + i;
     m.kickoff = static_cast<uint32_t>(kBase + kKickoff + 60 + 60 * i);
-    m.home = store.team(9, cfg::Provider::kEspn, 1000000, "Home");
-    m.away = store.team(9, cfg::Provider::kEspn, 2 * m.id + 1, "Away");
-    store.selectClub(9, m.provider, 1000000, at(kKickoff));
+    m.home = store.team(m.source, 1000000, "Home");
+    m.away = store.team(m.source, 2 * m.id + 1, "Away");
+    football::test_source::selectClub(store, 9, cfg::Provider::kEspn, 1000000,
+                                      at(kKickoff));
     TEST_ASSERT_NOT_NULL(store.upsert(m, at(kKickoff)));
   }
   auto respond = [&](const Request& r, const Job&, int64_t) {
@@ -290,7 +299,7 @@ void test_events_without_an_own_slot_wait_for_their_interval() {
   Trace trace;
   const int64_t from = kKickoff + 10 * 60, until = from + 3600;
   replay(from, until, trace, respond);
-  const auto* own = store.find(entry.id, cfg::Provider::kEspn, 401884770);
+  const auto* own = store.find(store.currentSource(entry.id), 401884770);
   TEST_ASSERT_NOT_NULL(own);
   TEST_ASSERT_FALSE(own->detail < cfg::kStoreOwnMatches);
   TEST_ASSERT_TRUE(startsOf(trace, cfg::DataType::kEvents).empty());
@@ -403,9 +412,10 @@ void test_failing_provider_backs_off_up_to_900_s_in_the_live_window() {
   };
   // Running own match in the store (live window until kickoff + 240 min).
   football::MapContext c;
-  c.competition = entry.id;
-  c.provider = cfg::Provider::kEspn;
-  c.club = 125;
+  football::SourceKey source;
+  TEST_ASSERT_TRUE(source.assign(cfg::Provider::kEspn, "ger.1", "2026"));
+  TEST_ASSERT_TRUE(store.bind(entry.id, entry.incarnation, 125, at(0)));
+  c.source = store.sourceSlot(store.resolve(entry.id, source, at(0)));
   c.clock = at(0);
   JsonDocument doc;
   deserializeJson(doc, scoreboard(true));
@@ -443,9 +453,10 @@ void test_table_and_live_table_back_off_as_one_request() {
     return espn(r, true);
   };
   football::MapContext c;
-  c.competition = entry.id;
-  c.provider = cfg::Provider::kEspn;
-  c.club = 125;
+  football::SourceKey source;
+  TEST_ASSERT_TRUE(source.assign(cfg::Provider::kEspn, "ger.1", "2026"));
+  TEST_ASSERT_TRUE(store.bind(entry.id, entry.incarnation, 125, at(0)));
+  c.source = store.sourceSlot(store.resolve(entry.id, source, at(0)));
   c.clock = at(0);
   JsonDocument doc;
   deserializeJson(doc, scoreboard(true));
@@ -464,6 +475,8 @@ void test_table_and_live_table_back_off_as_one_request() {
 // OQ-262: the same failure outside a live window. Fixtures and table retry
 // after 60 s, doubling past 900 s up to their intervals (8 h and 4 h).
 void test_failing_provider_backs_off_up_to_the_interval() {
+  // A resolved season is required before table/data backoff is meaningful.
+  entry.primary.season.assign("2026");
   auto respond = [&](const Request&, const Job&, int64_t) {
     return Answer{Fetch::kOk, "<html>502 Bad Gateway</html>"};
   };
@@ -476,6 +489,17 @@ void test_failing_provider_backs_off_up_to_the_interval() {
   TEST_ASSERT_TRUE(startsOf(trace, cfg::DataType::kLive).empty());
 }
 
+void test_failed_resolution_never_sends_unresolved_data_or_table() {
+  Trace trace;
+  replay(0, 3600, trace, [](const Request&, const Job&, int64_t) {
+    return Answer{Fetch::kOk, "<html>502 Bad Gateway</html>"};
+  });
+  TEST_ASSERT_FALSE(startsOf(trace, cfg::DataType::kFixtures).empty());
+  for (const auto type : {cfg::DataType::kTable, cfg::DataType::kLive,
+                          cfg::DataType::kLiveTable, cfg::DataType::kEvents})
+    TEST_ASSERT_TRUE(startsOf(trace, type).empty());
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_events_held_until_the_provider_reports_the_kickoff);
@@ -485,5 +509,6 @@ int main() {
   RUN_TEST(test_failing_provider_backs_off_up_to_900_s_in_the_live_window);
   RUN_TEST(test_failing_provider_backs_off_up_to_the_interval);
   RUN_TEST(test_table_and_live_table_back_off_as_one_request);
+  RUN_TEST(test_failed_resolution_never_sends_unresolved_data_or_table);
   return UNITY_END();
 }

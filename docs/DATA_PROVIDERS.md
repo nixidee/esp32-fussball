@@ -638,3 +638,20 @@ are checked positive uint32 at the provider token boundary and stay numeric
 through the worker, application reader, HTTP and client draft. Original-name
 streaming receives that same ID directly. Competition IDs/season text retain
 their provider-specific validation; no full list/document tree is retained.
+
+Automatic API-Football season resolution validates the `/leagues` envelope and
+exact league ID, plus exactly one current valid year. Parameters, single-page
+result count and empty errors are required before creating a season source.
+A year alone cannot qualify fixtures or table work. The format is documented in
+the provider's [current-season response example](https://www.api-football.com/news/post/how-to-get-standings-for-all-current-seasons)
+(checked2026-10-18); controlled parser/planner regressions do not replace live
+keyed-provider acceptance.
+
+ESPN own-horizon acquisition reads both results and upcoming schedules with an
+explicit season. Current public responses checked2026-10-18 for teams125/598
+contain6results and28upcoming each; future bodies226416/225284B fit the1MiB
+season limit. A single bounded selector combines both lists before retaining
+one previous and three next games per distinct configured club. One index pass
+per list precedes the two admission passes; every request yields to the normal
+scheduler and its budgets. Repeated views of the same source/club share those
+four requests; cost follows the same phase descriptor and club grouping.

@@ -36,10 +36,12 @@ bool detailSlot(const MatchStore& store, const StoredMatch& m) {
   return store.hasDetail(m);
 }
 
-int conferencePin(const MatchStore& store, const List& list, bool enabled) {
+int conferencePin(const MatchStore& store, const List& list, bool enabled,
+                  uint8_t competition) {
   if (enabled)
     for (unsigned i = 0; i < list.count; ++i)
-      if (store.isOwn(store.match(list.index[i]))) return list.index[i];
+      if (store.isOwn(competition, store.match(list.index[i])))
+        return list.index[i];
   return -1;
 }
 
@@ -73,7 +75,7 @@ struct ConferenceSplit {
 
 void Shown::add(const settings::CompetitionRoute& entry) {
   if (!entry.active || entry.id == 0) return;
-  add(Source{entry.id, entry.primary.provider});
+  add(Source{entry.id});
 }
 
 void Shown::add(const Source& source) {
@@ -89,9 +91,10 @@ const Source* Shown::source(uint8_t competition) const {
   return nullptr;
 }
 
-bool Shown::shows(const StoredMatch& match) const {
-  const auto* s = source(match.competition);
-  return s != nullptr && s->provider == match.provider;
+bool Shown::shows(const MatchStore& store, const StoredMatch& match) const {
+  for (unsigned i = 0; i < count_; ++i)
+    if (store.includes(sources_[i].competition, match.source)) return true;
+  return false;
 }
 
 bool started(Phase phase) {
@@ -105,7 +108,8 @@ ConferencePage conferencePage(const MatchStore& store, const List& list,
   const unsigned per_page =
       std::min<unsigned>(request.per_page, kConferenceRowsMax);
   if (list.count == 0 || per_page == 0) return page;
-  const int pinned = conferencePin(store, list, request.pin_own);
+  const int pinned =
+      conferencePin(store, list, request.pin_own, request.competition);
   const unsigned count = list.count - (pinned >= 0 ? 1 : 0);
   const unsigned slots = per_page - (pinned >= 0 ? 1 : 0);
   page.pages = 1;
@@ -155,7 +159,8 @@ int conferencePageOf(const MatchStore& store, const List& list,
   const unsigned per_page =
       std::min<unsigned>(request.per_page, kConferenceRowsMax);
   if (!list.count || !per_page) return -1;
-  const int pinned = conferencePin(store, list, request.pin_own);
+  const int pinned =
+      conferencePin(store, list, request.pin_own, request.competition);
   if (pinned == store_index) return 0;
   const unsigned count = list.count - (pinned >= 0);
   const ConferenceSplit split(count, per_page - (pinned >= 0));
@@ -173,20 +178,24 @@ int conferencePageOf(const MatchStore& store, const List& list,
   return -1;
 }
 
-int ownForOverview(const MatchStore& store, const Shown& shown, int64_t utc) {
-  int best = -1;
+OverviewMatch ownForOverview(const MatchStore& store, const Shown& shown,
+                             int64_t utc) {
+  OverviewMatch best;
   bool best_live = false;
   int64_t best_distance = 0;
-  for (std::size_t i = 0; i < store.matchCount(); ++i) {
-    const auto& m = store.match(i);
-    if (!store.isOwn(m) || !shown.shows(m)) continue;
-    const bool live = running(m.phase);
-    const int64_t d = m.kickoff ? distance(m, utc) : INT64_MAX;
-    if (best < 0 || (live && !best_live) ||
-        (live == best_live && d < best_distance)) {
-      best = static_cast<int>(i);
-      best_live = live;
-      best_distance = d;
+  for (unsigned view = 0; view < shown.count(); ++view) {
+    const auto competition = shown.at(view).competition;
+    for (std::size_t i = 0; i < store.matchCount(); ++i) {
+      const auto& m = store.match(i);
+      if (!store.isOwn(competition, m)) continue;
+      const bool live = running(m.phase);
+      const int64_t d = m.kickoff ? distance(m, utc) : INT64_MAX;
+      if (best.index == kNoMatch || (live && !best_live) ||
+          (live == best_live && d < best_distance)) {
+        best = {static_cast<MatchIndex>(i), competition};
+        best_live = live;
+        best_distance = d;
+      }
     }
   }
   return best;
@@ -197,7 +206,8 @@ uint16_t matchCount(const MatchStore& store, const Shown& shown,
   uint16_t count = 0;
   for (std::size_t i = 0; i < store.matchCount(); ++i) {
     const auto& m = store.match(i);
-    if (m.competition == competition && shown.shows(m)) ++count;
+    if (shown.source(competition) && store.includes(competition, m.source))
+      ++count;
   }
   return count;
 }
@@ -219,13 +229,14 @@ const char* rowName(const MatchStore& store, const StoredRow& row) {
 
 TableGroups tableGroups(const MatchStore& store, uint8_t competition) {
   TableGroups out;
+  const auto source = store.currentSource(competition);
   for (std::size_t i = 0; i < store.groupCount(); ++i)
-    if (store.group(i).competition == competition)
+    if (store.group(i).source == source)
       out.ordinal[out.count++] = store.group(i).ordinal;
   // Pure/demo callers can still supply a single table without group metadata.
   if (!out.count)
     for (std::size_t i = 0; i < store.rowCount(); ++i)
-      if (store.row(i).competition == competition) {
+      if (store.row(i).source == source) {
         out.ordinal[out.count++] = kNoIndex;
         break;
       }
@@ -233,12 +244,13 @@ TableGroups tableGroups(const MatchStore& store, uint8_t competition) {
 }
 Table table(const MatchStore& store, uint8_t competition, uint8_t group) {
   Table out;
+  const auto source = store.currentSource(competition);
   if (group == kNoIndex) {
     const auto groups = tableGroups(store, competition);
     if (groups.count) group = groups.ordinal[0];
     for (std::size_t i = 0; i < store.rowCount(); ++i)
-      if (store.row(i).competition == competition &&
-          store.isOwn(store.row(i))) {
+      if (store.row(i).source == source &&
+          store.isOwn(competition, store.row(i))) {
         group = store.row(i).group;
         break;
       }
@@ -246,14 +258,14 @@ Table table(const MatchStore& store, uint8_t competition, uint8_t group) {
   out.group = group;
   for (std::size_t i = 0; i < store.groupCount(); ++i) {
     const auto& metadata = store.group(i);
-    if (metadata.competition == competition && metadata.ordinal == group)
+    if (metadata.source == source && metadata.ordinal == group)
       out.label = metadata.label;
   }
   for (std::size_t i = 0; i < store.rowCount() && out.count < out.row.size();
        ++i) {
     const auto& row = store.row(i);
-    if (row.competition != competition || row.group != group) continue;
-    if (store.isOwn(row) && out.own < 0) out.own = out.count;
+    if (row.source != source || row.group != group) continue;
+    if (store.isOwn(competition, row) && out.own < 0) out.own = out.count;
     out.row[out.count++] = static_cast<uint8_t>(i);
   }
   return out;

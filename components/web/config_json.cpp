@@ -66,6 +66,22 @@ SettingsDecode readApply(json::Input input, settings::AppConfig& draft,
   request = candidate;
   return SettingsDecode::kOk;
 }
+namespace {
+bool desiredJson(json::Writer& out, const settings::AppConfig& config,
+                 bool secrets) {
+  return out.key("desired") && out.object() && out.key("settings") &&
+         out.object() && settingsJson(out, config.model, secrets) &&
+         out.end() && competitionsJson(out, config.competitions) &&
+         out.key("screens") && out.object() &&
+         screenPolicyJson(out, config.screens) && out.end() && out.end();
+}
+}  // namespace
+bool exportJson(json::Writer& out, const settings::AppConfig& config,
+                bool secrets, WriteNames names, void* context) {
+  return out.key("version") && out.integer(cfg::kAppConfigFormatVersion) &&
+         desiredJson(out, config, secrets) && out.key("adopted_names") &&
+         names && names(out, context);
+}
 bool configJson(json::Writer& out, const settings::AppConfig& config,
                 bool secrets) {
   char correlation[17];
@@ -73,15 +89,11 @@ bool configJson(json::Writer& out, const settings::AppConfig& config,
   const auto& names = config.names;
   return out.key("version") && out.integer(cfg::kAppConfigFormatVersion) &&
          out.key("revision") && out.integer(config.revision) &&
-         out.key("apply_id") && out.string(correlation) && out.key("desired") &&
-         out.object() && out.key("settings") && out.object() &&
-         settingsJson(out, config.model, secrets) && out.end() &&
-         competitionsJson(out, config.competitions) && out.key("screens") &&
-         out.object() && screenPolicyJson(out, config.screens) && out.end() &&
-         out.end() && out.key("names_ref") && out.object() && out.key("slot") &&
-         out.integer(names.slot) && out.key("generation") &&
-         out.integer(names.generation) && out.key("length") &&
-         out.integer(names.length) && out.key("crc") &&
+         out.key("apply_id") && out.string(correlation) &&
+         desiredJson(out, config, secrets) && out.key("names_ref") &&
+         out.object() && out.key("slot") && out.integer(names.slot) &&
+         out.key("generation") && out.integer(names.generation) &&
+         out.key("length") && out.integer(names.length) && out.key("crc") &&
          out.integer(names.crc) && out.end();
 }
 }  // namespace web

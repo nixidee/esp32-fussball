@@ -1,3 +1,106 @@
+// Typed boundary shared by common fields and manual wizard input. Domain
+// validation still rejects invalid values; decoding never invents an identity.
+function decodeInput(kind, raw, checked = false, maximum = 0) {
+    switch (kind) {
+        case 'bool': return checked;
+        case 'policybool': return raw === '' ? null : raw === 'true';
+        case 'num': return raw === '' ? '' : Number(raw);
+        case 'club-id': return decimalIdInput(raw, maximum);
+        case 'colour': return parseInt(raw.slice(1), 16);
+        case 'time': return raw === '' ? '' : Number(raw.slice(0, 2)) * 60 + Number(raw.slice(3, 5));
+        case 'ssid-base64': return ssidValue(raw);
+        default: return raw;
+    }
+}
+const FIELD_UNITS = Object.freeze({brightness: '%', night_brightness: '%', text_scale: '%',
+    scroll_repeat_ms: 'ms', scroll_reset_s: 's', manual_return_s: 's', per_image_s: 's',
+    ip_badge_s: 's', debug_status_interval_s: 's', window_s: 's',
+    own_before_min: 'min', own_after_min: 'min', other_before_min: 'min', other_after_min: 'min'});
+// Binding prepares values and schema metadata; F only renders this description.
+function describeField(model, schema, path, type, help, options, disabled, label, metadata = {}) {
+    const keys = parts(path), key = keys.at(-1), value = get(model, path), ssid = path === 'wifi_ssid' ? ssidEditor(value) : null;
+    const numeric = type === 'number', boolOptions = type === 'select' && options?.some(([v]) => typeof v === 'boolean');
+    const kind = ssid?.base64 ? 'ssid-base64' : boolOptions ? 'policybool' : type === 'select' ? (options?.some(([v]) => typeof v === 'number') ? 'num' : 'str') : ({number: 'num', switch: 'bool', colour: 'colour', time: 'time'})[type] || 'str';
+    const bound = numeric ? metadata.bound || schema.bounds[path] || schema.bounds[keys.filter(k => !/^\d+$/.test(k)).join('.')] || schema.bounds[key] || (key === 'text_scale' ? schema.text_scale : null) : null;
+    const maximum = ssid?.base64 ? 44 : schema.text[path];
+    const hint = [bound ? t('Erlaubter Bereich') + ': ' + bound.join('–') : '', ssid?.base64 ? t('WLAN-Name als Base64: höchstens 32 Originalbytes. Base64 direkt bearbeiten oder ein gefundenes Netzwerk auswählen.') : maximum ? tf('Höchstens % Byte UTF-8', maximum) : ''].filter(Boolean).join(' ');
+    return {path, type, help, options, disabled, kind, bound, maximum,
+        unit: metadata.unit ?? FIELD_UNITS[key] ?? '', name: t(label || LABEL[key] || path) + (ssid?.base64 ? ' (Base64)' : ''), hint,
+        value: ssid?.base64 ? ssid.value : type === 'time' && Number.isInteger(value) ? String(Math.floor(value / 60)).padStart(2, '0') + ':' + String(value % 60).padStart(2, '0') : value};
+}
+function draftField(path, type = 'text', help = '', options = null, disabled = false, label = null, metadata = {}) {
+    return F(describeField(S.draft, S.schema, path, type, help, options, disabled || S.saving, label, metadata));
+}
+// Copy only the branch being changed. These transitions have no DOM, HTTP or
+// mutable application state; callers publish the returned draft once.
+function editDraft(model, path, edit) {
+    const keys = parts(path), copy = value => Array.isArray(value) ? [...value] : {...value};
+    const next = copy(model);
+    let source = model, target = next;
+    for (const key of keys.slice(0, -1)) {
+        target[key] = copy(source[key]); source = source[key]; target = target[key];
+    }
+    const key = keys.at(-1);
+    target[key] = edit(source[key]);
+    return next;
+}
+function draftAction(model, action) {
+    const move = (path, index, direction) => editDraft(model, path, values => {
+        const next = [...values], other = index + direction;
+        if (Number.isInteger(index) && Number.isInteger(other) && index >= 0 && index < next.length && other >= 0 && other < next.length)
+            [next[index], next[other]] = [next[other], next[index]];
+        return next;
+    });
+    switch (action.type) {
+        case 'field': {
+            let next = editDraft(model, action.path, () => action.value);
+            const keys = parts(action.path);
+            if (keys[0] === 'screen_policy' && keys[1] === 'phases' && ['crest', 'images'].includes(keys[3]) && keys[4] === '0' && action.value === true)
+                next = editDraft(next, keys.slice(0, -1).join('.') + '[1]', () => true);
+            return next;
+        }
+        case 'inherit': {
+            const keys = parts(action.path);
+            return editDraft(model, action.path, () => action.enabled ? null : model.screen_policy.phases[keys[3]][keys[4]][2]);
+        }
+        case 'split': return editDraft(model, 'screen_policy.phases.' + action.phase + '.per_competition', values => values.includes(action.screen) ? values.filter(v => v !== action.screen) : [...values, action.screen]);
+        case 'order': return move('screen_policy.order', action.index, action.direction);
+        case 'slide-move': return move('screen_policy.slides', action.index, action.direction);
+        case 'slide-add':
+            if (model.screen_policy.slides.length >= action.maximum) throw Error('Maximale Listenlänge erreicht.');
+            return editDraft(model, 'screen_policy.slides', values => [...values, action.id]);
+        case 'slide-delete': return editDraft(model, 'screen_policy.slides', values => values.filter((_, i) => i !== action.index));
+        case 'competition-move': return move('competitions', action.index, action.direction);
+        case 'competition-delete': return editDraft(model, 'competitions', values => values.filter((_, i) => i !== action.index));
+        case 'competition-group': {
+            const rows = model.competitions, members = action.members;
+            if (members.length < 2 || new Set(members).size !== members.length || members.some(i => !Number.isInteger(i) || !rows[i]?.club.team))
+                throw Error('Mindestens zwei Wettbewerbe mit ausgewähltem Verein wählen.');
+            let group = action.group;
+            if (!group) {
+                const used = new Set(rows.map(row => row.club.group));
+                for (let id = 1; id <= action.maximum; ++id) if (!used.has(id)) {group = id; break;}
+            }
+            if (!group) throw Error('Zu viele Einträge');
+            return editDraft(model, 'competitions', values => values.map((row, index) => members.includes(index) ? {...row, club: {...row.club, group}} : row.club.group === group ? {...row, club: {...row.club, group: 0}} : row));
+        }
+        case 'competition-adopt': return editDraft(model, 'competitions', values => {const next = [...values]; next[action.index] = clone(action.entry); return next;});
+        default: throw Error('Unknown draft action: ' + action.type);
+    }
+}
+function dispatchDraft(action) {
+    try { S.draft = draftAction(S.draft, action); }
+    catch (error) { error.message = t(error.message); throw error; }
+}
+async function reloadDisplayDraft() {
+    const fresh = await readModel(), edited = !sameObject(S.saved.competitions, S.draft.competitions);
+    if (!edited) S.draft = editDraft(S.draft, 'competitions', () => clone(fresh.competitions));
+    S.saved = {...S.saved, competitions: clone(fresh.competitions), screen_policy: clone(fresh.screen_policy)};
+    S.draft = prepareScreenModel(editDraft(S.draft, 'screen_policy', () => clone(fresh.screen_policy)));
+    S.server = null;
+    render();
+}
+
 // The single settings draft, validation, save receipts and baseline reconciliation.
 function secretMode(key) {
     return S.sec[key] || {
@@ -37,7 +140,7 @@ function changes() {
         return [];
     const rows = [];
     function walk(a, b, p) {
-        if (p.split('.').some(key => key.startsWith('_')) || eq(a, b))
+        if (p.split('.').some(key => key.startsWith('_')) || sameObject(a, b))
             return;
         if ((p === 'input_roles' || LIMITS.includes(p) || p.startsWith('screen_policy.')) && Array.isArray(a) && Array.isArray(b) && a.length === b.length) {
             a.forEach((v, i) => walk(v, b[i], `${p}[${i}]`));
@@ -195,7 +298,7 @@ function validate(m, sec = S.sec) {
             text(p + '.' + k, sc.text.competitions[k]);
         if (!id(s.competition))
             add(p + '.competition', 'IDs: ohne Steuerzeichen und ohne Leerzeichen am Anfang oder Ende.');
-        if (typeof s.season === 'string' && s.season !== '' && (!/^\d+$/.test(s.season) || s.provider !== 0 && s.season.length !== 4))
+        if (typeof s.season === 'string' && s.season !== '' && (!/^\d+$/.test(s.season) || sc.provider_setup[s.provider]?.season_digits && s.season.length !== sc.provider_setup[s.provider].season_digits))
             add(p + '.season', 'Saison: nur Ziffern, außer OpenLigaDB genau vier.');
     };
     (m.competitions || []).forEach((c, i) => {
@@ -218,7 +321,7 @@ function validate(m, sec = S.sec) {
         issues.push(...validateCompetitionDisplay(c.display, i));
         if (!c.primary?.competition)
             add(p + '.primary.competition', 'Wert wird benötigt');
-        range(p + '.id', [0, 255]);
+        range(p + '.id', [0, sc.competition_id_max]);
         if (c.id && m.competitions.findIndex(x => x.id === c.id) < i)
             add(p + '.id', 'Doppelter Eintrag');
     });
@@ -287,8 +390,7 @@ function acceptApply(wire, pending) {
     pending.accepted = true;
     S.saveProgress.accepted = 1;
     if (S.status) {
-        S.status.settings_source = S.status.competitions_source =
-            S.status.screen_policy_source = 'stored';
+        S.status.settings_source = 'stored';
     }
 }
 function saveFailure(error) {
@@ -384,7 +486,7 @@ async function save(networkConfirmed = false, sourceConfirmed = false) {
     }
     const general = payload();
     const networkChange = S.saved.hostname !== S.draft.hostname ||
-        !eq(S.saved.wifi_ssid, S.draft.wifi_ssid) ||
+        !sameObject(S.saved.wifi_ssid, S.draft.wifi_ssid) ||
         S.saved.external_antenna !== S.draft.external_antenna ||
         general.wifi_password !== undefined || general.ap_password !== undefined;
     if (networkChange && !networkConfirmed) {

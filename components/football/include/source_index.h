@@ -15,6 +15,12 @@ struct SourceId {
   explicit operator bool() const { return value != 0; }
   bool operator==(const SourceId&) const = default;
 };
+struct MatchKey {
+  uint32_t id = 0;
+  SourceId source;
+  bool valid() const { return id != 0 && bool(source); }
+  bool operator==(const MatchKey&) const = default;
+};
 using SourceSlot = uint8_t;
 inline constexpr SourceSlot kNoSource = UINT8_MAX;
 

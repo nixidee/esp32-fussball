@@ -10,6 +10,7 @@
 #include <string>
 
 #include "../provider_adapter_support.h"
+#include "../source_support.h"
 #include "../test_match_store/recorded.h"
 #include "provider_plan.h"
 #include "store_views.h"
@@ -32,6 +33,7 @@ void* operator new(std::size_t bytes, const std::nothrow_t&) noexcept {
 
 namespace {
 using namespace football;
+namespace source_test = football::test_source;
 namespace plan = football::plan;
 namespace schedule = football::schedule;
 namespace policy = settings::screen_policy;
@@ -49,12 +51,14 @@ Clock now() { return {kNow, 1000}; }
 void refresh() {
   eligibility = policy::eligibility(options, competitions);
   planner.context(competitions, eligibility);
+  planner.synchronize(store, now());
 }
 schedule::Job job(cfg::DataType type = cfg::DataType::kLive) {
   schedule::Job out;
   out.competition = 1;
   out.provider = kProvider;
   out.type = type;
+  out.key.source = store.sourceId(store.currentSource(1));
   return out;
 }
 void begin() {
@@ -68,6 +72,8 @@ void row(uint32_t id, const char* status = "STATUS_IN_PROGRESS",
          unsigned events = 1, bool own = false, bool accepted = true) {
   ArduinoJson::JsonDocument doc;
   doc["id"] = id;
+  doc["season"]["year"] = 2026;
+  doc["league"]["slug"] = "ger.1";
   doc["date"] = date;
   auto c = doc["competitions"][0];
   c["status"]["type"]["state"] = state;
@@ -99,13 +105,19 @@ void row(uint32_t id, const char* status = "STATUS_IN_PROGRESS",
                                       planner, entry().primary));
 }
 const StoredMatch& find(uint32_t id) {
-  const auto* m = store.find(1, kProvider, id);
+  const auto* m = store.find(store.currentSource(1), id);
   TEST_ASSERT_NOT_NULL(m);
   return *m;
 }
 schedule::Wanted wanted() {
   schedule::Wanted out;
-  planner.wanted(0, &entry(), store, now(), out);
+  schedule::Inputs demand;
+  planner.prepareDemand(store, now(), demand);
+  out = demand.scopes[cfg::kStoreSources];
+  const auto& data = demand.scopes[store.currentSource(1)];
+  out.types |= data.types;
+  for (unsigned i = 0; i < cfg::kDataTypeCount; ++i)
+    if (data.types & (1u << i)) out.cost[i] = data.cost[i];
   return out;
 }
 bool wants(const schedule::Wanted& out, cfg::DataType type) {
@@ -113,7 +125,7 @@ bool wants(const schedule::Wanted& out, cfg::DataType type) {
 }
 schedule::Inputs requests(const schedule::Wanted& wanted) {
   schedule::Inputs out;
-  out.competitions[0] = wanted;
+  out.scopes[cfg::kStoreSources] = wanted;
   out.plans = &plans;
   out.store = &store;
   out.clock = now();
@@ -135,6 +147,7 @@ void setUp() {
   c.incarnation = 1;
   c.primary.provider = kProvider;
   c.primary.competition.assign("ger.1");
+  c.primary.season.assign("2026");
   TEST_ASSERT_TRUE(competitions.entries.push(c));
   refresh();
 }
@@ -180,7 +193,7 @@ void test_second_running_match_prevents_arbitrary_ordinary_target() {
   planner.finish(true, now());
   TEST_ASSERT_FALSE(store.hasDetail(find(10)));
   TEST_ASSERT_FALSE(store.hasDetail(find(20)));
-  TEST_ASSERT_EQUAL_UINT32(0, wanted().event_match);
+  TEST_ASSERT_EQUAL_UINT32(0, wanted().event_match.id);
 }
 
 void test_running_match_wins_over_earlier_buffer_candidate() {
@@ -190,7 +203,7 @@ void test_running_match_wins_over_earlier_buffer_candidate() {
   planner.finish(true, now());
   TEST_ASSERT_FALSE(store.hasDetail(find(10)));
   TEST_ASSERT_TRUE(store.hasDetail(find(20)));
-  TEST_ASSERT_EQUAL_UINT32(20, wanted().event_match);
+  TEST_ASSERT_EQUAL_UINT32(20, wanted().event_match.id);
 }
 
 void test_manual_single_requests_exact_foreign_summary_without_own_priority() {
@@ -204,7 +217,7 @@ void test_manual_single_requests_exact_foreign_summary_without_own_priority() {
   planner.finish(true, now());
   const auto demand = wanted();
   TEST_ASSERT_TRUE(wants(demand, cfg::DataType::kEvents));
-  TEST_ASSERT_EQUAL_UINT32(10, demand.event_match);
+  TEST_ASSERT_EQUAL_UINT32(10, demand.event_match.id);
   TEST_ASSERT_FALSE(demand.event_priority);
   auto target = job(cfg::DataType::kEvents);
   target.event_match = demand.event_match;
@@ -224,7 +237,7 @@ void test_special_off_owned_single_keeps_owned_bank_without_special_priority() {
   planner.finish(true, now());
   TEST_ASSERT_TRUE(store.isOwn(find(10)));
   TEST_ASSERT_TRUE(find(10).detail < cfg::kStoreOwnMatches);
-  TEST_ASSERT_EQUAL_UINT32(10, wanted().event_match);
+  TEST_ASSERT_EQUAL_UINT32(10, wanted().event_match.id);
   TEST_ASSERT_EQUAL_UINT32(0, wanted().priority_match);
   TEST_ASSERT_FALSE(wanted().event_priority);
 }
@@ -243,7 +256,7 @@ void test_disabled_views_retain_phase_classification_prerequisites() {
 void test_frame_has_no_automatic_provider_demand() {
   options.frame = true;
   refresh();
-  TEST_ASSERT_EQUAL_UINT8(0, wanted().id);
+  TEST_ASSERT_EQUAL_UINT8(0, wanted().competition);
   TEST_ASSERT_EQUAL_UINT8(0, wanted().types);
 }
 
@@ -252,13 +265,13 @@ void test_duplicate_response_identity_keeps_detail_loss_visible() {
   row(10);
   row(10);
   planner.finish(true, now());
-  TEST_ASSERT_TRUE(store.notices(1) & kNoticeEvents);
+  TEST_ASSERT_TRUE(store.notices(store.currentSource(1)) & kNoticeEvents);
   TEST_ASSERT_TRUE(find(10).flags & kMatchEventsPoolCut);
   TEST_ASSERT_EQUAL_UINT8(0, view::events(store, find(10)).count);
   begin();
   row(10);
   planner.finish(true, now());
-  TEST_ASSERT_FALSE(store.notices(1) & kNoticeEvents);
+  TEST_ASSERT_FALSE(store.notices(store.currentSource(1)) & kNoticeEvents);
   TEST_ASSERT_EQUAL_UINT8(1, view::events(store, find(10)).count);
 }
 
@@ -282,7 +295,7 @@ void test_changed_exact_target_runs_even_with_previous_target_interval() {
   auto input = requests(demand);
   auto first = scheduler.next(input);
   TEST_ASSERT_TRUE(first.run);
-  TEST_ASSERT_EQUAL_UINT32(10, first.job.event_match);
+  TEST_ASSERT_EQUAL_UINT32(10, first.job.event_match.id);
   scheduler.finished(first.job, schedule::Outcome::kOk, input.clock.mono_s);
   begin();
   row(10, "STATUS_CANCELED", "post", "2026-10-17T11:30:00Z", 0);
@@ -290,15 +303,16 @@ void test_changed_exact_target_runs_even_with_previous_target_interval() {
   planner.finish(true, now());
   demand = wanted();
   demand.types = 1u << static_cast<unsigned>(cfg::DataType::kEvents);
-  input.competitions[0] = demand;
+  input.scopes[cfg::kStoreSources] = demand;
   const auto next = scheduler.next(input);
   TEST_ASSERT_TRUE(next.run);
-  TEST_ASSERT_EQUAL_UINT32(20, next.job.event_match);
+  TEST_ASSERT_EQUAL_UINT32(20, next.job.event_match.id);
 }
 
 void test_recorded_scoreboard_row_keeps_first_response_foreign_detail() {
   ArduinoJson::JsonDocument doc;
   TEST_ASSERT_FALSE(deserializeJson(doc, recorded::kEspnDay));
+  doc["events"][0]["season"]["year"] = 2026;
   const auto recorded_row = doc["events"][0];
   const Clock clock{parseUtc(recorded_row["date"] | "") +
                         cfg::kExpectedMatchMinutes * 60 + 60,
@@ -346,8 +360,7 @@ void test_foreign_summary_adds_substitution_with_both_names() {
 void test_event_polling_uses_exact_target_instead_of_another_competition_window() {
   StoredMatch finished;
   finished.id = 10;
-  finished.competition = 1;
-  finished.provider = kProvider;
+  finished.source = store.currentSource(1);
   finished.phase = Phase::kFinished;
   finished.kickoff = kNow - 10000;
   finished.finished_at = kNow - 5000;
@@ -359,9 +372,11 @@ void test_event_polling_uses_exact_target_instead_of_another_competition_window(
   running_match.finished_at = 0;
   store.upsert(running_match, now());
   schedule::Wanted demand;
-  demand.id = 1;
+  demand.competition = 1;
+  demand.key.competition = 1;
+  demand.key.incarnation = 1;
   demand.provider = kProvider;
-  demand.event_match = 10;
+  demand.event_match = {10, store.sourceId(store.currentSource(1))};
   demand.types = 1u << static_cast<unsigned>(cfg::DataType::kEvents);
   auto input = requests(demand);
   schedule::Scheduler scheduler;
@@ -387,22 +402,22 @@ void checkSelectedSummaryCompletion(bool own, bool past_deadline) {
   source.limit = {};
   source.interval_s[static_cast<unsigned>(cfg::DataType::kEvents)] = 30;
   StoredMatch m;
-  m.competition = entry().id;
-  m.provider = kProvider;
+  m.source = store.currentSource(entry().id);
   m.id = 401892555;
   m.kickoff = kNow - 60;
   m.phase = Phase::kLive;
-  m.home = store.team(m.competition, kProvider, own ? 99 : 1000000, "Home");
-  store.selectClub(m.competition, kProvider, entry().club.team, now());
+  m.home = store.team(m.source, own ? 99 : 1000000, "Home");
+  TEST_ASSERT_TRUE(
+      store.bind(entry().id, entry().incarnation, entry().club.team, now()));
   TEST_ASSERT_NOT_NULL(store.upsert(m, now()));
-  TEST_ASSERT_TRUE(store.ensureDetail(entry().id, kProvider, m.id, now()));
+  TEST_ASSERT_TRUE(store.ensureDetail(store.key(m), entry().id, now()));
 
   const auto inputAt = [&](uint32_t dt) {
     const Clock clock{kNow + dt, 1000 + dt};
     schedule::Wanted demand;
     planner.wanted(0, &entry(), store, clock, demand);
     TEST_ASSERT_TRUE(wants(demand, cfg::DataType::kEvents));
-    TEST_ASSERT_EQUAL_UINT32(m.id, demand.event_match);
+    TEST_ASSERT_EQUAL_UINT32(m.id, demand.event_match.id);
     TEST_ASSERT_EQUAL(own, demand.event_priority);
     TEST_ASSERT_EQUAL_UINT8(0, demand.held);
     demand.types &= 1u << static_cast<unsigned>(cfg::DataType::kEvents);
@@ -414,7 +429,7 @@ void checkSelectedSummaryCompletion(bool own, bool past_deadline) {
   const auto summary = [&](const schedule::Inputs& input) {
     const auto decision = scheduler.next(input);
     TEST_ASSERT_TRUE(decision.run);
-    TEST_ASSERT_EQUAL_UINT32(m.id, decision.job.event_match);
+    TEST_ASSERT_EQUAL_UINT32(m.id, decision.job.event_match.id);
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(cfg::DataType::kEvents),
                             static_cast<uint8_t>(decision.job.type));
     plan::Request request;
@@ -441,7 +456,8 @@ void checkSelectedSummaryCompletion(bool own, bool past_deadline) {
     summary(inputAt(125));
     TEST_ASSERT_FALSE(scheduler.next(inputAt(140)).run);
   }
-  TEST_ASSERT_EQUAL(own, store.isOwn(*store.find(entry().id, kProvider, m.id)));
+  TEST_ASSERT_EQUAL(
+      own, store.isOwn(*store.find(store.currentSource(entry().id), m.id)));
 }
 }  // namespace
 
@@ -460,9 +476,9 @@ void test_planner_rejects_a_summary_job_for_a_different_selected_match() {
   row(10);
   planner.finish(true, now());
   const auto demand = wanted();
-  TEST_ASSERT_EQUAL_UINT32(10, demand.event_match);
+  TEST_ASSERT_EQUAL_UINT32(10, demand.event_match.id);
   auto selected_job = job(cfg::DataType::kEvents);
-  selected_job.event_match = 20;
+  selected_job.event_match = {20, store.sourceId(store.currentSource(1))};
   plan::Request request;
   TEST_ASSERT_FALSE(
       planner.request(selected_job, entry(), store, now(), request));
@@ -479,11 +495,11 @@ void test_preview_holds_summary_until_kickoff_without_faking_ownership() {
   row(10, "STATUS_SCHEDULED", "pre", "2026-10-17T12:30:00Z");
   planner.finish(true, now());
   const auto demand = wanted();
-  TEST_ASSERT_EQUAL_UINT32(10, demand.event_match);
+  TEST_ASSERT_EQUAL_UINT32(10, demand.event_match.id);
   TEST_ASSERT_TRUE(demand.held &
                    (1u << static_cast<unsigned>(cfg::DataType::kEvents)));
   auto input = requests(demand);
-  input.competitions[0].types =
+  input.scopes[cfg::kStoreSources].types =
       1u << static_cast<unsigned>(cfg::DataType::kEvents);
   schedule::Scheduler scheduler;
   TEST_ASSERT_FALSE(scheduler.next(input).run);
@@ -510,11 +526,10 @@ void test_protected_own_rows_can_evict_live_candidate_without_losing_buffer_even
   refresh();
   for (unsigned i = 0; i < cfg::kStoreMatches - 2; ++i) {
     StoredMatch own;
-    own.competition = 2;
-    own.provider = kProvider;
+    own.source = source_test::source(store, 2, kProvider, 1000000, now());
     own.id = 1000 + i;
-    own.home = store.team(2, kProvider, 1000000, "Own club");
-    store.selectClub(2, kProvider, 1000000, now());
+    own.home = store.team(own.source, 1000000, "Own club");
+    source_test::selectClub(store, 2, kProvider, 1000000, now());
     own.phase = Phase::kScheduled;
     own.kickoff = kNow + 86400;
     TEST_ASSERT_NOT_NULL(store.upsert(own, now()));
@@ -524,7 +539,7 @@ void test_protected_own_rows_can_evict_live_candidate_without_losing_buffer_even
   row(20, "STATUS_IN_PROGRESS", "in", "2026-10-17T11:00:00Z");
   row(30, "STATUS_SCHEDULED", "pre", "2026-10-27T12:00:00Z", 0, true);
   planner.finish(true, now());
-  TEST_ASSERT_NULL(store.find(1, kProvider, 20));
+  TEST_ASSERT_NULL(store.find(store.currentSource(1), 20));
   TEST_ASSERT_TRUE(store.hasDetail(find(10)));
   TEST_ASSERT_EQUAL_UINT8(1, view::events(store, find(10)).count);
   TEST_ASSERT_EQUAL_STRING("Full foreign home name",
@@ -538,11 +553,10 @@ void test_rejected_row_never_appends_its_events_to_the_previous_candidate() {
   TEST_ASSERT_TRUE(store.hasDetail(find(10)));
   for (unsigned i = 0; i < cfg::kStoreMatches - 1; ++i) {
     StoredMatch own;
-    own.competition = 2;
-    own.provider = kProvider;
+    own.source = source_test::source(store, 2, kProvider, 1000000, now());
     own.id = 1000 + i;
-    own.home = store.team(2, kProvider, 1000000, "Own club");
-    store.selectClub(2, kProvider, 1000000, now());
+    own.home = store.team(own.source, 1000000, "Own club");
+    source_test::selectClub(store, 2, kProvider, 1000000, now());
     own.phase = Phase::kScheduled;
     own.kickoff = kNow + 86400;
     TEST_ASSERT_NOT_NULL(store.upsert(own, now()));
@@ -552,7 +566,7 @@ void test_rejected_row_never_appends_its_events_to_the_previous_candidate() {
   row(20, "STATUS_IN_PROGRESS", "in", "2026-10-17T11:00:00Z", 3, false, false);
   TEST_ASSERT_EQUAL(provider::Status::kTooLarge, planner.responseFailure());
   planner.finish(false, now());
-  TEST_ASSERT_NULL(store.find(1, kProvider, 20));
+  TEST_ASSERT_NULL(store.find(store.currentSource(1), 20));
   TEST_ASSERT_TRUE(store.hasDetail(find(10)));
   TEST_ASSERT_EQUAL_UINT8(1, view::events(store, find(10)).count);
 }
@@ -565,6 +579,12 @@ void test_olg_discovery_filters_other_competitions_and_explicit_seasons() {
   refresh();
   auto fixtures = job(cfg::DataType::kLive);
   fixtures.provider = cfg::Provider::kOpenLigaDb;
+  for (const uint32_t id : {10u, 40u}) {
+    StoredMatch known;
+    known.id = id;
+    known.source = store.currentSource(1);
+    TEST_ASSERT_NOT_NULL(store.upsert(known, now()));
+  }
   plan::Request request;
   TEST_ASSERT_TRUE(planner.request(fixtures, entry(), store, now(), request));
   ArduinoJson::JsonDocument doc;
@@ -575,14 +595,16 @@ void test_olg_discovery_filters_other_competitions_and_explicit_seasons() {
       doc.as<ArduinoJson::JsonVariantConst>(), planner, entry().primary));
   TEST_ASSERT_TRUE(test_support::consume(
       doc.as<ArduinoJson::JsonVariantConst>(), planner, entry().primary));
-  TEST_ASSERT_EQUAL(provider::Operation::kCurrentRound, request.spec.operation);
+  TEST_ASSERT_EQUAL(provider::Operation::kFixtures, request.spec.operation);
+  TEST_ASSERT_EQUAL_STRING("2026",
+                           std::string(request.spec.source.season).c_str());
   doc["matchID"] = 20;
   doc["leagueShortcut"] = "dfb";
   TEST_ASSERT_FALSE(test_support::accepts(
       doc.as<ArduinoJson::JsonVariantConst>(), planner, entry().primary));
   TEST_ASSERT_TRUE(test_support::consume(
       doc.as<ArduinoJson::JsonVariantConst>(), planner, entry().primary));
-  TEST_ASSERT_NULL(store.find(1, cfg::Provider::kOpenLigaDb, 20));
+  TEST_ASSERT_NULL(store.find(store.currentSource(1), 20));
   doc["matchID"] = 30;
   doc["leagueShortcut"] = "BL1";
   doc["leagueSeason"] = 2025;
@@ -590,14 +612,14 @@ void test_olg_discovery_filters_other_competitions_and_explicit_seasons() {
       doc.as<ArduinoJson::JsonVariantConst>(), planner, entry().primary));
   TEST_ASSERT_TRUE(test_support::consume(
       doc.as<ArduinoJson::JsonVariantConst>(), planner, entry().primary));
-  TEST_ASSERT_NULL(store.find(1, cfg::Provider::kOpenLigaDb, 30));
+  TEST_ASSERT_NULL(store.find(store.currentSource(1), 30));
   doc["matchID"] = 40;
   doc["leagueSeason"] = 2026;
   TEST_ASSERT_TRUE(test_support::accepts(
       doc.as<ArduinoJson::JsonVariantConst>(), planner, entry().primary));
   TEST_ASSERT_TRUE(test_support::consume(
       doc.as<ArduinoJson::JsonVariantConst>(), planner, entry().primary));
-  TEST_ASSERT_NOT_NULL(store.find(1, cfg::Provider::kOpenLigaDb, 40));
+  TEST_ASSERT_NOT_NULL(store.find(store.currentSource(1), 40));
   planner.finish(true, now());
 }
 
@@ -620,7 +642,7 @@ void test_event_payload_allocation_failure_is_visible_and_not_retried_per_row() 
   row(20, "STATUS_CANCELED", "pre");
   TEST_ASSERT_EQUAL_UINT(1, detail_allocation::attempts);
   planner.finish(true, now());
-  TEST_ASSERT_TRUE(store.notices(1) & kNoticeEvents);
+  TEST_ASSERT_TRUE(store.notices(store.currentSource(1)) & kNoticeEvents);
   TEST_ASSERT_TRUE(find(10).flags & kMatchEventsPoolCut);
   TEST_ASSERT_EQUAL_UINT8(0, view::events(store, find(10)).count);
 }
@@ -630,13 +652,13 @@ void test_empty_complete_response_keeps_existing_details_without_new_loss() {
   row(10);
   planner.finish(true, now());
   TEST_ASSERT_EQUAL_UINT8(1, view::events(store, find(10)).count);
-  TEST_ASSERT_FALSE(store.notices(1) & kNoticeEvents);
+  TEST_ASSERT_FALSE(store.notices(store.currentSource(1)) & kNoticeEvents);
   detail_allocation::watch = true;
   begin();
   planner.finish(true, now());
   TEST_ASSERT_EQUAL_UINT(0, detail_allocation::attempts);
   TEST_ASSERT_EQUAL_UINT8(1, view::events(store, find(10)).count);
-  TEST_ASSERT_FALSE(store.notices(1) & kNoticeEvents);
+  TEST_ASSERT_FALSE(store.notices(store.currentSource(1)) & kNoticeEvents);
 }
 
 int main() {

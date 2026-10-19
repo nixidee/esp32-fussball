@@ -11,6 +11,7 @@
 
 #include "budget_ledger.h"
 #include "settings_model.h"
+#include "source_index.h"
 
 namespace football::coverage {
 
@@ -36,20 +37,7 @@ enum class Reason : uint8_t {
   kRange,
 };
 
-struct Identity {
-  uint64_t source = 0;
-  uint32_t incarnation = 0;
-  uint8_t id = 0;
-  cfg::Provider provider = cfg::kProviderDefault;
-  bool operator==(const Identity&) const noexcept = default;
-};
-// Hashes every source field with explicit separators/lengths. This is a
-// 64-bit change detector, not a cryptographic authentication claim.
-uint64_t sourceHash(const settings::Source& source) noexcept;
-Identity identity(const settings::CompetitionRoute& competition) noexcept;
-
 struct Span {
-  settings::Bytes<cfg::kSeasonMaxBytes> season;
   Completeness completeness = Completeness::kUnknown;
   Proof proof = Proof::kNone;
   Reason reason = Reason::kMissingMetadata;
@@ -63,31 +51,36 @@ struct Span {
 };
 
 struct Evidence {
-  // Flat header avoids padding between Identity and the fixed two spans.
-  uint64_t source = 0;
-  uint32_t incarnation = 0;
-  uint8_t id = 0;
-  cfg::Provider provider = cfg::kProviderDefault;
-  uint8_t season_count = 0;
-  Reason blocked = Reason::kUnknown;
-  std::array<Span, cfg::kCoverageMaxSeasons> seasons{};
+  SourceKey source;
+  bool populated = false;
+  Span span;
 };
-using EvidenceArray = std::array<Evidence, cfg::kCompetitionMax>;
+using EvidenceArray = std::array<Evidence, cfg::kCoverageSources>;
+struct Requirement {
+  const SourceKey* source = nullptr;
+  uint8_t competition =
+      0;  // 0 = inactive; null source = unresolved active view
+};
+using Requirements = std::array<Requirement, cfg::kCompetitionMax>;
 
-void bind(Evidence& evidence, const Identity& source) noexcept;
-bool matches(const Evidence& evidence, const Identity& source) noexcept;
-bool validate(const Evidence& evidence) noexcept;
-// Replaces the named season or adds a second one. A third season or wrong
-// identity is rejected without modifying evidence. Partial results block the
-// old proof; a failed refresh cannot silently keep claiming a break.
-Reason accept(Evidence& evidence, const Identity& source,
-              const Span& span) noexcept;
-// A global failure has no reliable season provenance: all complete spans
-// become partial. Another season's success cannot re-certify those spans.
-void invalidate(Evidence& evidence, Reason reason) noexcept;
-// Normal successful data may contradict a proved gap; it never refreshes a
-// whole season's checked_utc. Unknown/TBD timing invalidates the old proof.
-bool observeNormal(Evidence& evidence, const Identity& source, uint32_t kickoff,
+// The current exact source or its adjacent next season; no guessed season.
+bool seasonSource(const SourceKey&, uint8_t season_index,
+                  SourceKey& out) noexcept;
+Evidence* find(EvidenceArray&, const SourceKey&) noexcept;
+const Evidence* find(const EvidenceArray&, const SourceKey&) noexcept;
+// Retains only requested current/adjacent keys, deduplicated across views.
+bool synchronize(EvidenceArray&, std::span<const Requirement>) noexcept;
+void bind(Evidence&, const SourceKey&) noexcept;
+bool matches(const Evidence&, const SourceKey&) noexcept;
+bool validate(const Evidence&) noexcept;
+Reason accept(Evidence&, const SourceKey&, const Span&) noexcept;
+Reason accept(EvidenceArray&, const SourceKey&, const Span&) noexcept;
+void invalidate(Evidence&, Reason) noexcept;
+// An unreliable source response can affect both seasons of the same league.
+void invalidateFamily(EvidenceArray&, const SourceKey&, Reason) noexcept;
+// Normal rows can refute proof before display admission/eviction; never refresh
+// it.
+bool observeNormal(EvidenceArray&, const SourceKey&, uint32_t kickoff,
                    bool definite = true) noexcept;
 
 struct Integrity {
@@ -100,8 +93,8 @@ struct Integrity {
 
 class Collector {
  public:
-  void begin(const Identity& source, std::string_view season, uint32_t from,
-             uint32_t to, uint32_t anchor_utc, Proof proof) noexcept;
+  void begin(const SourceKey& source, uint32_t from, uint32_t to,
+             uint32_t anchor_utc, Proof proof) noexcept;
   // Bounds may arrive after streamed rows, e.g. verified wrapper metadata.
   void bounds(uint32_t from, uint32_t to) noexcept;
   void observe(uint32_t kickoff, bool definite = true) noexcept;
@@ -109,11 +102,11 @@ class Collector {
   // No hidden copy: returned Span belongs to this collector. Publish only
   // after checking its result and the caller's unchanged source identity.
   const Span& finish(uint32_t checked_utc, const Integrity& integrity) noexcept;
-  const Identity& source() const noexcept { return source_; }
+  const SourceKey& source() const noexcept { return source_; }
   uint32_t rows() const noexcept { return rows_; }
 
  private:
-  Identity source_{};
+  SourceKey source_{};
   Span span_{};
   uint32_t anchor_ = 0, rows_ = 0, first_ = 0, last_ = 0;
 };
@@ -129,8 +122,8 @@ struct Assessment {
 // No MatchStore argument: eviction or its 224-row capacity cannot prove an
 // empty schedule. Gap is strictly greater than days*24h, independent of DST.
 Assessment assess(const EvidenceArray& evidence,
-                  const settings::CompetitionRoutes& competitions,
-                  uint32_t now_utc, uint16_t threshold_days) noexcept;
+                  std::span<const Requirement> requirements, uint32_t now_utc,
+                  uint16_t threshold_days) noexcept;
 
 // Operational request credits only. Route/season traversal and source binding
 // belong to the worker's RAM and restart from the beginning after reboot.

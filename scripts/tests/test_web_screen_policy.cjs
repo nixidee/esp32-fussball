@@ -50,13 +50,13 @@ async function test(name, fn) {
   await test(
       'null inheritance and explicit false survive splitting and collapse',
       () => {
-        const row = U.screenRow(0);
-        row.own.single = [false, null, null];
+        const row = () => U.screenRow(0);
+        row().own.single = [false, null, null];
         U.S.draft.screen_policy.phases.own.per_competition = ['single'];
         U.ACT.policySplit({dataset: {phase: 'own', type: 'single'}});
-        assert.deepEqual(copy(row.own.single), [false, null, null]);
+        assert.deepEqual(copy(row().own.single), [false, null, null]);
         U.ACT.policySplit({dataset: {phase: 'own', type: 'single'}});
-        assert.deepEqual(copy(row.own.single), [false, null, null]);
+        assert.deepEqual(copy(row().own.single), [false, null, null]);
         const html = U.screenPhaseMarkup();
         assert(html.includes('data-kind="policybool"'));
         const path = U.screenRowPath(0) + '.own.single[0]';
@@ -67,7 +67,7 @@ async function test(name, fn) {
             value: ''
           }
         });
-        assert.equal(row.own.single[0], null);
+        assert.equal(row().own.single[0], null);
         events.input({
           target: {
             dataset: {path, kind: 'policybool'},
@@ -75,13 +75,13 @@ async function test(name, fn) {
             value: 'false'
           }
         });
-        assert.equal(row.own.single[0], false);
-        row.own.single[0] = null;
+        assert.equal(row().own.single[0], false);
+        row().own.single[0] = null;
         const visit = U.screenRowPath(0) + '.own.single[2]';
         events.input({target: {dataset: {inherit: visit}, checked: false}});
-        assert.equal(row.own.single[2], 30);
+        assert.equal(row().own.single[2], 30);
         events.input({target: {dataset: {inherit: visit}, checked: true}});
-        assert.equal(row.own.single[2], null);
+        assert.equal(row().own.single[2], null);
       });
   await test(
       'a device without backlight offers no brightness or night controls and retains rotation IP and inputs',

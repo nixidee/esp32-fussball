@@ -30,7 +30,7 @@ seq::Content probe(const seq::Entry& entry, seq::PageMode mode,
                    uint16_t visible_page, void*) {
   if (focused_only && entry.type == Type::kLiveSingle &&
       selected.phase == policy::Phase::kOwn &&
-      entry.competition != selected.focus.competition)
+      entry.competition != selected.competition)
     return {};
   const auto& item = items[screen::index(entry.type)][entry.competition];
   return {item.kind,
@@ -135,11 +135,13 @@ void test_same_phase_focus_replaces_visible_single_and_keeps_remaining_visit() {
   competition(2);
   enable(Type::kLiveSingle, true, 30);
   selected.phase = policy::Phase::kOwn;
-  selected.focus = {10, 1, cfg::Provider::kOpenLigaDb};
+  selected.competition = 1;
+  selected.focus = {10, football::SourceId{1}};
   focused_only = true;
   tick(0);
   tick(5000);
-  selected.focus = {20, 2, cfg::Provider::kOpenLigaDb};
+  selected.competition = 2;
+  selected.focus = {20, football::SourceId{2}};
   tick(7000);
   TEST_ASSERT_EQUAL_UINT8(2, state.entry.competition);
   TEST_ASSERT_EQUAL_UINT32(7000, state.elapsed_ms);

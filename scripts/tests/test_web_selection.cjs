@@ -38,7 +38,7 @@ function setup() {
   };
   const open = () => {
     h.U.openWizard();
-    const w = vm.runInContext('wizard', h.context);
+    const w = vm.runInContext('__featureTests.wizard()', h.context);
     w.step = 1;
     h.U.drawWizard();
     return w;

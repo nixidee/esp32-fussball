@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "../source_support.h"
 #include "app_config.h"
 #include "football_model.h"
 #include "match_store.h"
@@ -16,6 +17,7 @@
 
 namespace {
 
+namespace source_test = football::test_source;
 using football::Clock;
 using football::MatchStore;
 using football::Phase;
@@ -55,9 +57,23 @@ Inputs inputs(int64_t dt) {
 
 void want(Inputs& in, uint8_t slot, uint8_t id, cfg::Provider provider,
           uint8_t types) {
-  in.competitions[slot].id = id;
-  in.competitions[slot].provider = provider;
-  in.competitions[slot].types = types;
+  const auto source = source_test::source(store, id, provider);
+  TEST_ASSERT_EQUAL(slot, source);
+  auto& data = in.scopes[slot];
+  data.key.source = store.sourceId(source);
+  data.competition = id;
+  data.route = slot;
+  data.provider = provider;
+  data.types = types & ~bit(cfg::DataType::kEvents);
+  if (types & bit(cfg::DataType::kEvents)) {
+    auto& summary = in.scopes[cfg::kStoreSources + slot];
+    summary.key.competition = id;
+    summary.key.incarnation = id;
+    summary.competition = id;
+    summary.route = slot;
+    summary.provider = provider;
+    summary.types = bit(cfg::DataType::kEvents);
+  }
 }
 
 Inputs inputs(int64_t dt, uint8_t types, cfg::Provider provider = kOlg) {
@@ -70,22 +86,23 @@ Inputs inputs(int64_t dt, uint8_t types, cfg::Provider provider = kOlg) {
 // infer event demand from an owned flag in the scheduler's fixture builder.
 Inputs selectedInputs(int64_t dt, uint8_t types, uint32_t event_match) {
   auto in = inputs(dt, types);
-  in.competitions[0].event_match = event_match;
+  if (event_match)
+    in.scopes[cfg::kStoreSources].event_match = {
+        event_match, store.sourceId(store.currentSource(kId))};
   return in;
 }
 
 // A match of competition kId kicking off 'kickoff_dt' after kBase.
 void addMatch(uint32_t id, int64_t kickoff_dt, bool own = false,
-              Phase phase = Phase::kScheduled) {
+              Phase phase = Phase::kScheduled, cfg::Provider provider = kOlg) {
   StoredMatch m;
-  m.competition = kId;
-  m.provider = kOlg;
+  m.source = source_test::source(store, kId, provider);
   m.id = id;
   m.kickoff = utc(kickoff_dt);
   m.phase = phase;
-  m.home = store.team(kId, kOlg, own ? 1000000 : id * 2, "Home");
-  m.away = store.team(kId, kOlg, id * 2 + 1, "Away");
-  if (own) store.selectClub(kId, kOlg, 1000000, at(0));
+  m.home = store.team(m.source, own ? 1000000 : id * 2, "Home");
+  m.away = store.team(m.source, id * 2 + 1, "Away");
+  if (own) source_test::selectClub(store, kId, provider, 1000000, at(0));
   TEST_ASSERT_NOT_NULL(store.upsert(m, at(0)));
 }
 
@@ -322,7 +339,7 @@ void test_events_without_selected_identity_never_infer_an_owned_match() {
     scheduler.reset();
     addMatch(1, -60, own, Phase::kLive);
     const auto in = inputs(0, bit(cfg::DataType::kEvents));
-    TEST_ASSERT_EQUAL_UINT32(0, in.competitions[0].event_match);
+    TEST_ASSERT_EQUAL_UINT32(0, in.scopes[cfg::kStoreSources].event_match.id);
     assertWaits(step(in), Wait::kIdle, 0);
   }
 }
@@ -390,7 +407,7 @@ void test_device_gap() {
 }
 
 void test_paused_provider_does_not_hold_back_another() {
-  addMatch(1, 0, true);
+  addMatch(1, 0, true, Phase::kScheduled, kApi);
   Inputs in = inputs(0);
   want(in, 0, kId, kApi, bit(cfg::DataType::kLive));
   want(in, 1, 7, kOlg, bit(cfg::DataType::kFixtures));
@@ -455,6 +472,7 @@ void test_slot_id_change_starts_fresh() {
   const uint8_t types = bit(cfg::DataType::kFixtures);
   assertRuns(step(inputs(0, types)), cfg::DataType::kFixtures);
   Inputs in = inputs(10);
+  store.unbind(kId, {});
   want(in, 0, 2, kOlg, types);
   const Decision d = step(in);
   assertRuns(d, cfg::DataType::kFixtures);
@@ -504,8 +522,7 @@ void test_run_cost_multiplies_the_daily_demand() {
   assertRuns(scheduler.next(in), cfg::DataType::kFixtures);
   TEST_ASSERT_FALSE(scheduler.degraded());
   // Three requests per run: 36 expected, 20 left.
-  in.competitions[0].cost[static_cast<std::size_t>(cfg::DataType::kFixtures)] =
-      3;
+  in.scopes[0].cost[static_cast<std::size_t>(cfg::DataType::kFixtures)] = 3;
   scheduler.next(in);
   TEST_ASSERT_TRUE(scheduler.degraded());
 }

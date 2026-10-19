@@ -54,16 +54,46 @@ bool date(uint32_t at, const char* format, char* out, std::size_t capacity) {
 }
 }  // namespace
 
-Capabilities capabilities(cfg::Provider provider) noexcept {
+Profile profile(cfg::Provider provider) noexcept {
   switch (provider) {
-    case cfg::Provider::kOpenLigaDb: return {true, true, true, true};
+    case cfg::Provider::kOpenLigaDb:
+      return {{true, true, true, true},
+              FixtureFlow::kSeason,
+              LiveFlow::kRoundChange,
+              Operation::kCurrentSeason,
+              false};
     case cfg::Provider::kApiFootball:
-    case cfg::Provider::kFootballData: return {true, true, false, true};
+      return {{true, true, false, true},
+              FixtureFlow::kSeason,
+              LiveFlow::kDate,
+              Operation::kCurrentSeason,
+              false};
+    case cfg::Provider::kFootballData:
+      return {{true, true, false, true},
+              FixtureFlow::kSeason,
+              LiveFlow::kDate,
+              Operation::kFixtures,
+              false};
     // Calendar days support ordinary fixture retention, but cannot by
     // themselves prove an interval without matches.
-    case cfg::Provider::kEspn: return {true, true, true, false};
+    case cfg::Provider::kEspn:
+      return {{true, true, true, false},
+              FixtureFlow::kCalendar,
+              LiveFlow::kCalendarDay,
+              Operation::kCalendarDays,
+              true};
     default: return {};
   }
+}
+Capabilities capabilities(cfg::Provider provider) noexcept {
+  return profile(provider).available;
+}
+uint32_t accessFingerprint(cfg::Provider provider,
+                           const settings::ProviderSettings& model) noexcept {
+  const auto credentials = authentication(provider, model);
+  const char usable = settings::providerUsable(provider, model) ? 1 : 0;
+  return values::fnv1a32(
+      {&usable, 1}, values::fnv1a32(credentials.value, values::kFnv1a32Basis));
 }
 
 bool prepareSelection(const SourceInput& source, Operation operation,
@@ -75,11 +105,12 @@ bool prepareSelection(const SourceInput& source, Operation operation,
       static_cast<unsigned>(source.provider) >= cfg::kProviderCount ||
       !out.season.assign(source.season))
     return false;
-  out.discover = teams && source.season.empty() &&
-                 (source.provider == cfg::Provider::kOpenLigaDb ||
-                  source.provider == cfg::Provider::kApiFootball);
-  if (!teams && source.provider == cfg::Provider::kOpenLigaDb &&
-      source.season.empty()) {
+  const auto rules = settings::providerRequirements(source.provider);
+  if (!settings::validateSelection(source.provider, teams, source.competition,
+                                   source.season))
+    return false;
+  out.discover = teams && source.season.empty() && rules.discover_teams;
+  if (!teams && rules.list_season && source.season.empty()) {
     if (utc <= 0) return false;
     const time_t at = utc;
     std::tm date{};
@@ -122,11 +153,6 @@ bool buildRequest(const RequestSpec& request, HttpRequest& out) noexcept {
       case Operation::kFixtures:
         if (!request.round && !request.team && !source.season.empty())
           out.body_limit = cfg::kProviderSeasonBodyBytes;
-        if (request.team) {
-          const unsigned weeks = (cfg::kFixtureHorizonDays + 6) / 7;
-          return url(out, "%sgetmatchesbyteamid/%lu/%u/%u", base,
-                     static_cast<unsigned long>(request.team), weeks, weeks);
-        }
         if (request.round)
           return !source.season.empty() &&
                  url(out, "%sgetmatchdata/%s/%s/%u", base, league, season,
@@ -135,7 +161,6 @@ bool buildRequest(const RequestSpec& request, HttpRequest& out) noexcept {
           return url(out, "%sgetmatchdata/%s/%s", base, league, season);
         return url(out, "%sgetmatchdata/%s", base, league);
       case Operation::kCurrentSeason:
-      case Operation::kCurrentRound:
         return url(out, "%sgetmatchdata/%s", base, league);
       case Operation::kLastChange:
         return request.round && !source.season.empty() &&
@@ -168,19 +193,20 @@ bool buildRequest(const RequestSpec& request, HttpRequest& out) noexcept {
       case Operation::kOwnFixtures:
         out.body_limit = cfg::kProviderSeasonBodyBytes;
         return request.team &&
-               url(out, "%s%s/teams/%lu/schedule%s%s", site, league,
+               url(out, "%s%s/teams/%lu/schedule%s%s%s", site, league,
                    static_cast<unsigned long>(request.team),
-                   source.season.empty() ? "" : "?season=", season);
+                   source.season.empty() ? "" : "?season=", season,
+                   request.upcoming ? (source.season.empty() ? "?fixture=true"
+                                                             : "&fixture=true")
+                                    : "");
       case Operation::kTable:
         return url(out,
                    "https://site.web.api.espn.com/apis/v2/sports/soccer/%s/"
                    "standings%s%s",
                    league, source.season.empty() ? "" : "?season=", season);
       case Operation::kCurrentSeason:
-      case Operation::kCurrentRound:
         return url(out, "%s%s/scoreboard", site, league);
       case Operation::kCalendarDays:
-      case Operation::kSeasonCalendar:
         if (!source.season.empty())
           return url(
               out,

@@ -28,7 +28,7 @@ struct Stream {
   }
 };
 bool replay(const std::string& body, std::size_t limit = SIZE_MAX) {
-  response.begin(entry, query, kNow);
+  response.begin(query, kNow);
   Stream stream{body, 0, limit};
   json::Reader reader({&stream, Stream::read});
   auto request = query.http.spec;
@@ -51,6 +51,12 @@ provider::HttpRequest http() {
   TEST_ASSERT_TRUE(provider::buildRequest(query.http.spec, request));
   return request;
 }
+SourceKey sourceKey() {
+  SourceKey result;
+  result.assign(entry.primary.provider, entry.primary.competition.view(),
+                entry.primary.season.view());
+  return result;
+}
 void source(cfg::Provider provider, const char* competition) {
   entry = {};
   entry.id = 1;
@@ -59,9 +65,9 @@ void source(cfg::Provider provider, const char* competition) {
   entry.primary.competition.assign(competition);
   entry.primary.season.assign("2026");
   if (provider == cfg::Provider::kEspn)
-    TEST_ASSERT_FALSE(c::discoveryQuery(entry, {}, kNow, 40, 0, query));
+    TEST_ASSERT_FALSE(c::discoveryQuery(sourceKey(), kNow, 40, query));
   else
-    TEST_ASSERT_TRUE(c::discoveryQuery(entry, {}, kNow, 40, 0, query));
+    TEST_ASSERT_TRUE(c::discoveryQuery(sourceKey(), kNow, 40, query));
 }
 const char* kOlRows =
     R"([{"matchID":1,"leagueShortcut":"bl1","leagueSeason":2026,"matchDateTimeUTC":"2026-09-01T12:00Z"},)"
@@ -204,9 +210,10 @@ void espn_extra_discovery_is_unavailable_and_cannot_invent_a_break() {
   source(cfg::Provider::kEspn, "aus.1");
   TEST_ASSERT_FALSE(provider::capabilities(entry.primary.provider).coverage);
   c::EvidenceArray proof{};
-  c::bind(proof[0], c::identity(entry));
-  settings::CompetitionRoutes configured;
-  configured.entries.push(entry);
+  c::bind(proof[0], sourceKey());
+  const auto required_source = sourceKey();
+  c::Requirements configured;
+  configured[0] = {&required_source, entry.id};
   TEST_ASSERT_EQUAL(c::Verdict::kUnknown,
                     c::assess(proof, configured, kNow, 21).verdict);
   // Ordinary season calendars remain a supported retention request.
@@ -214,49 +221,49 @@ void espn_extra_discovery_is_unavailable_and_cannot_invent_a_break() {
   provider::RequestSpec request;
   request.source = {entry.primary.provider, entry.primary.competition.view(),
                     entry.primary.season.view()};
-  request.operation = provider::Operation::kSeasonCalendar;
+  request.operation = provider::Operation::kCalendarDays;
   TEST_ASSERT_TRUE(provider::buildRequest(request, calendar));
   TEST_ASSERT_NOT_NULL(strstr(calendar.url, "/calendar/ondays"));
 }
 void source_query_is_bounded_encoded_and_does_not_resolve_unknown_years() {
   source(cfg::Provider::kOpenLigaDb, "league test");
   TEST_ASSERT_NOT_NULL(strstr(http().url, "league%20test/2026"));
-  TEST_ASSERT_TRUE(c::discoveryQuery(entry, {}, kNow, 40, 1, query));
-  TEST_ASSERT_EQUAL_STRING("2027", query.season.data.data());
-  TEST_ASSERT_FALSE(c::discoveryQuery(entry, {}, kNow, 40, 2, query));
+  SourceKey next;
+  TEST_ASSERT_TRUE(c::seasonSource(sourceKey(), 1, next));
+  TEST_ASSERT_TRUE(c::discoveryQuery(next, kNow, 40, query));
+  TEST_ASSERT_EQUAL_STRING("2027", query.source.season.data.data());
+  TEST_ASSERT_FALSE(c::seasonSource(sourceKey(), 2, next));
   entry.primary.season = {};
-  TEST_ASSERT_FALSE(c::discoveryQuery(entry, {}, kNow, 40, 0, query));
+  TEST_ASSERT_FALSE(c::discoveryQuery(sourceKey(), kNow, 40, query));
   source(cfg::Provider::kFootballData, "BL1");
   TEST_ASSERT_NOT_NULL(strstr(http().url, "dateTo=2026-11-27"));
 }
 void normal_rows_only_invalidate_and_never_refresh_coverage() {
   source(cfg::Provider::kOpenLigaDb, "bl1");
   TEST_ASSERT_TRUE(replay(kOlRows));
-  c::Evidence evidence;
-  const auto key = c::identity(entry);
-  c::bind(evidence, key);
+  c::EvidenceArray evidence;
+  const auto key = sourceKey();
+  c::bind(evidence[0], key);
   TEST_ASSERT_EQUAL(c::Reason::kNone,
                     c::accept(evidence, key, response.finish(true, kNow)));
   provider::Fixture row;
   row.source_matches = true;
   row.time_definite = true;
   row.facts.kickoff = parseUtc("2026-08-01T12:00Z");
-  TEST_ASSERT_FALSE(c::observeNormalRow(evidence, entry, row));
-  TEST_ASSERT_EQUAL_UINT32(kNow, evidence.seasons[0].checked_utc);
+  TEST_ASSERT_FALSE(c::observeNormalRow(evidence, key, row));
+  TEST_ASSERT_EQUAL_UINT32(kNow, evidence[0].span.checked_utc);
   row.facts.kickoff = parseUtc("2026-10-17T12:00Z");
-  TEST_ASSERT_TRUE(c::observeNormalRow(evidence, entry, row));
-  TEST_ASSERT_EQUAL(c::Completeness::kPartial,
-                    evidence.seasons[0].completeness);
-  TEST_ASSERT_EQUAL(c::Reason::kTimingChanged, evidence.seasons[0].reason);
+  TEST_ASSERT_TRUE(c::observeNormalRow(evidence, key, row));
+  TEST_ASSERT_EQUAL(c::Completeness::kPartial, evidence[0].span.completeness);
+  TEST_ASSERT_EQUAL(c::Reason::kTimingChanged, evidence[0].span.reason);
 }
 void espn_provisional_time_refutes_an_old_proof_before_display_admission() {
   source(cfg::Provider::kEspn, "aus.1");
-  c::Evidence evidence;
-  const auto key = c::identity(entry);
-  c::bind(evidence, key);
+  c::EvidenceArray evidence;
+  const auto key = sourceKey();
+  c::bind(evidence[0], key);
   c::Collector collector;
-  collector.begin(key, "2026", kNow - 86400, kNow + 86400, kNow,
-                  c::Proof::kDateRange);
+  collector.begin(key, kNow - 86400, kNow + 86400, kNow, c::Proof::kDateRange);
   collector.observe(kNow - 86400);
   collector.observe(kNow + 86400);
   c::accept(evidence, key, collector.finish(kNow, {2, true, true, true, true}));
@@ -264,9 +271,9 @@ void espn_provisional_time_refutes_an_old_proof_before_display_admission() {
   row.source_matches = true;
   row.time_definite = false;
   row.facts.kickoff = parseUtc("2026-10-17T04:00Z");
-  TEST_ASSERT_TRUE(c::observeNormalRow(evidence, entry, row));
-  TEST_ASSERT_EQUAL(c::Reason::kUndatedFixture, evidence.seasons[0].reason);
-  TEST_ASSERT_EQUAL_UINT32(kNow, evidence.seasons[0].checked_utc);
+  TEST_ASSERT_TRUE(c::observeNormalRow(evidence, key, row));
+  TEST_ASSERT_EQUAL(c::Reason::kUndatedFixture, evidence[0].span.reason);
+  TEST_ASSERT_EQUAL_UINT32(kNow, evidence[0].span.checked_utc);
 }
 }  // namespace
 void setUp() {}

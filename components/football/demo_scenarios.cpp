@@ -99,32 +99,44 @@ const settings::CompetitionRoute* competition(
              ? entry
              : nullptr;
 }
+SourceSlot source(MatchStore& store,
+                  const settings::CompetitionRoute& competition,
+                  const Clock& clock) {
+  if (!store.bind(competition.id, competition.incarnation,
+                  competition.club.team, clock))
+    return kNoSource;
+  SourceKey key;
+  if (!key.assign(competition.primary.provider,
+                  competition.primary.competition.view(),
+                  competition.primary.season.view()))
+    return kNoSource;
+  return store.sourceSlot(store.resolve(competition.id, key, clock));
+}
 StoredMatch* put(MatchStore& store,
                  const settings::CompetitionRoute& competition,
                  const Fixture& fixture, Clock clock, int64_t kickoff,
                  Phase phase, uint8_t minute = kNoValue, Goals score = {},
                  uint8_t round = 6, bool flash = false, bool details = true) {
-  store.selectClub(competition.id, kProvider, competition.club.team, clock);
+  const auto slot = source(store, competition, clock);
   StoredMatch row;
   row.id = fixture.id;
-  row.competition = competition.id;
-  row.provider = kProvider;
+  row.source = slot;
   row.kickoff = static_cast<uint32_t>(kickoff);
   row.phase = phase;
   row.minute = minute;
   row.principal = score;
   row.round = round;
-  row.home = store.team(competition.id, kProvider, fixture.home.id,
-                        fixture.home.name, fixture.home.short_name);
-  row.away = store.team(competition.id, kProvider, fixture.away.id,
-                        fixture.away.name, fixture.away.short_name);
+  row.home = store.team(slot, fixture.home.id, fixture.home.name,
+                        fixture.home.short_name);
+  row.away = store.team(slot, fixture.away.id, fixture.away.name,
+                        fixture.away.short_name);
   if (running(phase) || phase == Phase::kSuspended)
     row.first_live_observed_utc = kKickoff;
   if (phase == Phase::kFinished) row.finished_at = row.kickoff + 95 * 60;
   if (flash) row.score_changed = std::max<uint32_t>(1, clock.mono_s);
   auto* stored = store.upsert(row, clock);
   if (stored != nullptr && details)
-    stored = store.ensureDetail(competition.id, kProvider, fixture.id, clock);
+    stored = store.ensureDetail(store.key(*stored), competition.id, clock);
   return stored;
 }
 void events(MatchStore& store, const StoredMatch& match, const Event* input,
@@ -149,8 +161,9 @@ void events(MatchStore& store, const StoredMatch& match, const Event* input,
   store.endEvents(true);
 }
 void table(MatchStore& store, const settings::CompetitionRoute& competition) {
-  store.selectClub(competition.id, kProvider, competition.club.team, {});
-  store.beginTable(competition.id);
+  const auto slot = source(store, competition, {});
+  if (store.tableState(slot) == DatasetState::kComplete) return;
+  store.beginTable(slot);
   for (unsigned i = 0; i < std::size(kConference); ++i) {
     StoredRow row;
     const auto club = competition.club.team;
@@ -158,7 +171,7 @@ void table(MatchStore& store, const settings::CompetitionRoute& competition) {
                        : i == 0 && club == kAugsburg.away.id
                            ? kAugsburg.away
                            : kConference[i].home;
-    row.team = store.team(competition.id, kProvider, team.id, team.short_name);
+    row.team = store.team(slot, team.id, team.short_name);
     row.position = i + 1;
     row.played = 6;
     row.points = static_cast<int16_t>(15 - i * 2);

@@ -5,12 +5,10 @@
 namespace football::selection {
 namespace {
 
-bool belongs(const settings::CompetitionRoute& c, const StoredMatch& m) {
-  return c.active && c.id != 0 && m.competition == c.id &&
-         m.provider == c.primary.provider;
+bool belongs(const Input& input, const settings::CompetitionRoute& c,
+             const StoredMatch& m) {
+  return c.active && c.id != 0 && input.store.includes(c.id, m.source);
 }
-
-MatchKey key(const StoredMatch& m) { return {m.id, m.competition, m.provider}; }
 
 bool eligibleDate(const StoredMatch& m) {
   return m.kickoff != 0 && m.phase != Phase::kPostponed &&
@@ -19,16 +17,14 @@ bool eligibleDate(const StoredMatch& m) {
 
 bool verifiedRound(const MatchStore& store, const StoredMatch& m) {
   if (m.round != 0) return true;
-  // This mapper's label comes directly from league.round. football-data's
-  // stage label is a different fact and must never masquerade as a round.
-  return m.provider == cfg::Provider::kApiFootball &&
-         m.label < cfg::kStoreRoundLabels && !store.labelAt(m.label).empty();
+  return (m.flags & kMatchRoundLabel) && m.label < cfg::kStoreRoundLabels &&
+         !store.labelAt(m.label).empty();
 }
 
 bool sameVerifiedRound(const MatchStore& store, const StoredMatch& a,
                        const StoredMatch& b) {
-  if (a.competition != b.competition || a.provider != b.provider ||
-      !verifiedRound(store, a) || !verifiedRound(store, b))
+  if (a.source != b.source || !verifiedRound(store, a) ||
+      !verifiedRound(store, b))
     return false;
   if (a.round != 0 || b.round != 0)
     return a.round != 0 && b.round != 0 && a.round == b.round;
@@ -38,43 +34,35 @@ bool sameVerifiedRound(const MatchStore& store, const StoredMatch& a,
 Window basicWindow(const Input& input, const settings::CompetitionRoute& c,
                    const StoredMatch& m) {
   Window out;
-  if (!belongs(c, m) || input.clock.utc <= 0 || m.phase == Phase::kPostponed ||
-      m.phase == Phase::kCancelled || m.phase == Phase::kAbandoned)
+  const auto timing = matchTiming(m);
+  if (!belongs(input, c, m) || input.clock.utc <= 0 || !timing.valid)
     return out;
-  out.own_special = input.store.isOwn(m) && ownSpecial(input, c);
+  out.own_special = input.store.isOwn(c.id, m) && ownSpecial(input, c);
   const auto before = out.own_special ? input.rules.own_before_min
                                       : input.rules.other_before_min;
   const auto after =
       out.own_special ? input.rules.own_after_min : input.rules.other_after_min;
-  const bool confirmed = running(m.phase) && !(m.estimated & kEstimatedPhase);
-  const bool suspended = m.phase == Phase::kSuspended;
-  if (suspended && m.first_live_observed_utc == 0) return out;
-  const int64_t basis = m.kickoff != 0 ? m.kickoff : m.first_live_observed_utc;
-  if (m.phase == Phase::kFinished) {
-    if (m.finished_at == 0) return out;
-    out.begin = m.kickoff != 0 ? int64_t{m.kickoff} - int64_t{before} * 60
-                               : m.finished_at;
-    out.end = int64_t{m.finished_at} + int64_t{after} * 60;
-  } else {
-    if (basis == 0 || (m.kickoff == 0 && !confirmed && !suspended)) return out;
-    out.begin = m.kickoff != 0 ? basis - int64_t{before} * 60 : basis;
-    out.end =
-        basis + int64_t{confirmed || suspended ? cfg::kUnknownMatchEndMinutes
-                                               : cfg::kExpectedMatchMinutes} *
-                    60;
-    out.reported_running = (confirmed || suspended) &&
-                           input.clock.utc >= basis &&
-                           input.clock.utc < out.end;
-  }
+  out.begin =
+      m.kickoff != 0 ? timing.basis - int64_t{before} * 60 : timing.basis;
+  out.end = timing.end + (timing.finished ? int64_t{after} * 60 : 0);
+  out.reported_running = timing.reported_running &&
+                         input.clock.utc >= timing.basis &&
+                         input.clock.utc < timing.end;
   out.active = input.clock.utc >= out.begin && input.clock.utc < out.end;
   return out;
 }
 
 const settings::CompetitionRoute* ownCompetition(const Input& input,
                                                  const StoredMatch& m) {
-  if (!input.store.isOwn(m)) return nullptr;
-  const auto* c = input.competitions.find(m.competition);
-  return c && belongs(*c, m) && ownSpecial(input, *c) ? c : nullptr;
+  const auto order =
+      settings::screen_policy::competitionOrder(input.competitions);
+  for (unsigned slot = 0; slot < order.count; ++slot) {
+    const auto& c = input.competitions.entries[order.slots[slot]];
+    if (belongs(input, c, m) && input.store.isOwn(c.id, m) &&
+        ownSpecial(input, c))
+      return &c;
+  }
+  return nullptr;
 }
 
 // Enumerates date clusters without a retained group table. Verified rounds
@@ -89,27 +77,27 @@ void clusters(const Input& input, const settings::CompetitionRoute& c,
   };
   for (std::size_t seed = 0; seed < store.matchCount(); ++seed) {
     const auto& anchor = store.match(seed);
-    if (!belongs(c, anchor) || !eligibleDate(anchor) ||
+    if (!belongs(input, c, anchor) || !eligibleDate(anchor) ||
         !verifiedRound(store, anchor))
       continue;
     bool seen = false;
     for (std::size_t i = 0; i < seed && !seen; ++i) {
       const auto& prior = store.match(i);
-      seen = belongs(c, prior) && eligibleDate(prior) &&
+      seen = belongs(input, c, prior) && eligibleDate(prior) &&
              sameVerifiedRound(store, anchor, prior);
     }
     if (seen) continue;
     Round cluster;
     for (std::size_t i = seed; i < store.matchCount(); ++i) {
       const auto& m = store.match(i);
-      if (!belongs(c, m) || !eligibleDate(m) ||
+      if (!belongs(input, c, m) || !eligibleDate(m) ||
           !sameVerifiedRound(store, anchor, m))
         continue;
       const auto day = civilDay(m.kickoff, input.dates);
       if (cluster.valid() &&
           (day < cluster.last_day || day - cluster.last_day > 2))
         flush(cluster);
-      if (!cluster.valid()) cluster = {key(m), day, day, true};
+      if (!cluster.valid()) cluster = {input.store.key(m), day, day, true};
       cluster.last_day = day;
     }
     flush(cluster);
@@ -117,25 +105,26 @@ void clusters(const Input& input, const settings::CompetitionRoute& c,
   Round fallback;
   for (std::size_t i = 0; i < store.matchCount(); ++i) {
     const auto& m = store.match(i);
-    if (!belongs(c, m) || !eligibleDate(m) || verifiedRound(store, m)) continue;
+    if (!belongs(input, c, m) || !eligibleDate(m) || verifiedRound(store, m))
+      continue;
     const auto day = civilDay(m.kickoff, input.dates);
     if (fallback.valid() &&
         (day < fallback.last_day || day - fallback.last_day > 2 ||
          day - fallback.first_day > 3))
       flush(fallback);
-    if (!fallback.valid()) fallback = {key(m), day, day, false};
+    if (!fallback.valid()) fallback = {input.store.key(m), day, day, false};
     fallback.last_day = day;
   }
   flush(fallback);
 }
 
-Single activeSingle(const StoredMatch& m) {
+Single activeSingle(const Input& input, const StoredMatch& m) {
   Content content = Content::kBefore;
   if (m.phase == Phase::kFinished)
     content = Content::kAfter;
   else if (running(m.phase) || m.phase == Phase::kSuspended)
     content = Content::kLive;
-  return {key(m), content};
+  return {input.store.key(m), content};
 }
 
 Single staticSingle(const Input& input, const settings::CompetitionRoute& c) {
@@ -144,7 +133,7 @@ Single staticSingle(const Input& input, const settings::CompetitionRoute& c) {
   const StoredMatch* preview = nullptr;
   for (std::size_t i = 0; i < input.store.matchCount(); ++i) {
     const auto& m = input.store.match(i);
-    if (!belongs(c, m) || !input.store.isOwn(m)) continue;
+    if (!belongs(input, c, m) || !input.store.isOwn(c.id, m)) continue;
     if (resultHeld(m, input.clock.utc, input.dates) &&
         (!result || m.finished_at > result->finished_at))
       result = &m;
@@ -153,17 +142,15 @@ Single staticSingle(const Input& input, const settings::CompetitionRoute& c) {
         (!preview || m.kickoff < preview->kickoff))
       preview = &m;
   }
-  if (result) return {key(*result), Content::kResult};
-  if (preview) return {key(*preview), Content::kPreview};
+  if (result) return {input.store.key(*result), Content::kResult};
+  if (preview) return {input.store.key(*preview), Content::kPreview};
   return {};
 }
 
 }  // namespace
 
 const StoredMatch* find(const Input& input, const MatchKey& match) {
-  return match.valid()
-             ? input.store.find(match.competition, match.provider, match.id)
-             : nullptr;
+  return match.valid() ? input.store.find(match) : nullptr;
 }
 
 bool ownSpecial(const Input& input, const settings::CompetitionRoute& c) {
@@ -187,7 +174,9 @@ Window window(const Input& input, const settings::CompetitionRoute& c,
   const StoredMatch* next = nullptr;
   for (std::size_t i = 0; i < input.store.matchCount(); ++i) {
     const auto& other = input.store.match(i);
-    if (key(other) == key(m) || !ownCompetition(input, other)) continue;
+    if (input.store.key(other) == input.store.key(m) ||
+        !ownCompetition(input, other))
+      continue;
     if (m.kickoff != 0 && other.phase == Phase::kFinished &&
         other.finished_at != 0 && other.finished_at <= m.kickoff &&
         (!previous || other.finished_at > previous->finished_at))
@@ -224,6 +213,7 @@ Selection select(const Input& input) {
   Selection out;
   if (input.clock.utc <= 0) return out;
   MatchKey buffered;
+  uint8_t buffered_competition = 0;
   bool other_active = false;
   const auto priority =
       settings::screen_policy::competitionOrder(input.competitions);
@@ -232,23 +222,25 @@ Selection select(const Input& input) {
     if (!c.active || c.id == 0) continue;
     for (std::size_t i = 0; i < input.store.matchCount(); ++i) {
       const auto& m = input.store.match(i);
-      if (!belongs(c, m)) continue;
+      if (!belongs(input, c, m)) continue;
       const auto period = window(input, c, m);
       if (!period.active) continue;
       if (!period.own_special) {
         other_active = true;
       } else if (period.reported_running) {
-        return {ScreenPhase::kOwn, key(m)};
+        return {ScreenPhase::kOwn, c.id, input.store.key(m)};
       } else if (!buffered.valid()) {
-        buffered = key(m);
+        buffered = input.store.key(m);
+        buffered_competition = c.id;
       }
     }
   }
-  if (buffered.valid()) return {ScreenPhase::kOwn, buffered};
-  if (other_active) return {ScreenPhase::kOtherGames, {}};
+  if (buffered.valid())
+    return {ScreenPhase::kOwn, buffered_competition, buffered};
+  if (other_active) return {ScreenPhase::kOtherGames, 0, {}};
   for (const auto& c : input.competitions.entries)
     if (c.active && phasePeriod(input, c).valid())
-      return {ScreenPhase::kMatchday, {}};
+      return {ScreenPhase::kMatchday, 0, {}};
   out.phase = input.rules.automatic_break && input.break_proven
                   ? ScreenPhase::kBreak
                   : ScreenPhase::kIdle;
@@ -261,21 +253,22 @@ Single single(const Input& input, const Selection& selected,
   if (selected.phase == ScreenPhase::kOwn) {
     if (input.rules.only_one_own_single) {
       const auto* focused = find(input, selected.focus);
-      return focused && belongs(c, *focused) &&
+      return selected.competition == c.id && focused &&
+                     belongs(input, c, *focused) &&
                      window(input, c, *focused).active
-                 ? activeSingle(*focused)
+                 ? activeSingle(input, *focused)
                  : Single{};
     }
     const StoredMatch* buffered = nullptr;
     for (std::size_t i = 0; i < input.store.matchCount(); ++i) {
       const auto& match = input.store.match(i);
-      if (!belongs(c, match)) continue;
+      if (!belongs(input, c, match)) continue;
       const auto period = window(input, c, match);
       if (!period.active || !period.own_special) continue;
-      if (period.reported_running) return activeSingle(match);
+      if (period.reported_running) return activeSingle(input, match);
       if (!buffered) buffered = &match;
     }
-    return buffered ? activeSingle(*buffered) : Single{};
+    return buffered ? activeSingle(input, *buffered) : Single{};
   }
   if (selected.phase == ScreenPhase::kOtherGames) {
     const StoredMatch* live = nullptr;
@@ -283,7 +276,7 @@ Single single(const Input& input, const Selection& selected,
     unsigned live_count = 0, candidate_count = 0;
     for (std::size_t i = 0; i < input.store.matchCount(); ++i) {
       const auto& m = input.store.match(i);
-      if (!belongs(c, m)) continue;
+      if (!belongs(input, c, m)) continue;
       const auto period = window(input, c, m);
       if (!period.active) continue;
       candidate = &m;
@@ -293,9 +286,9 @@ Single single(const Input& input, const Selection& selected,
         ++live_count;
       }
     }
-    if (live_count == 1) return activeSingle(*live);
+    if (live_count == 1) return activeSingle(input, *live);
     if (live_count == 0 && candidate_count == 1)
-      return activeSingle(*candidate);
+      return activeSingle(input, *candidate);
   }
   return staticSingle(input, c);
 }
@@ -337,9 +330,7 @@ Round round(const Input& input, const settings::CompetitionRoute& c,
 bool roundContains(const Input& input, const Round& selected,
                    const StoredMatch& m) {
   const auto* anchor = find(input, selected.anchor);
-  if (!anchor || m.competition != anchor->competition ||
-      m.provider != anchor->provider)
-    return false;
+  if (!anchor || m.source != anchor->source) return false;
   if (selected.verified) return sameVerifiedRound(input.store, *anchor, m);
   if (verifiedRound(input.store, m) || m.kickoff == 0) return false;
   const auto day = civilDay(m.kickoff, input.dates);

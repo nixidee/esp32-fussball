@@ -7,10 +7,10 @@ Configured through a built-in web interface.
 The current implementation candidate is **0.1.0-dev**. It includes four provider
 adapters, six screen types with one controller, German/English Web UI, image
 management, device screenshots, diagnostics and firmware OTA/rollback.
-The source contains the consolidation cutovers; completion of the whole-code
-maintainability review and remaining refactoring is still open, alongside
-device and resource acceptance. This is not an accepted release. S3 development
-remains paused.
+The source cutovers and scoped ownership/retirement review are complete for
+the approved consolidation. Current keyed-provider, physical device and resource
+acceptance remain open. This is not an accepted release. S3 development remains
+paused.
 
 The current architecture has one NVS application configuration and one common
 Apply for settings, competitions, explicit club groups, screen programmes and
@@ -19,21 +19,30 @@ adapters and Web commands share one strict streaming JSON reader/writer.
 Software night effects have been removed; night scheduling is offered only
 when the hardware has a controllable backlight pin.
 
-Matched C6 integration build (2026-10-18): **1,737,240 B linked flash,
-174,172 B static RAM, 1,738,000 B binary, 90,291 B Web gzip**. Against the
-pre-consolidation baseline this is −29,058 / +13,160 / −29,056 / +10,104 B.
-The canonical MatchStore grows from33,784 to45,968 B to hold the required
-round/own-match union and independent dataset state; it accounts for12,184 B
-of that static increase. Other changes offset to a net+976 B, including896 B of expanded per-source
-club selection. No football data
-is persisted to compensate for that runtime cost.
+Current C6 quality-remediation checkpoint (2026-10-18): **1,751,182 B linked
+flash, 178,740 B static RAM, 1,751,936 B binary, 92,683 B Web gzip**.
+All nine source remedies are implemented and their focused integration checks pass;
+current keyed-provider and physical acceptance remain open. Against the
+pre-consolidation baseline this is -15,116 / +17,728 / -15,120 / +12,496 B.
+The canonical MatchStore is48,576 B, including16exact resolved sources and
+8independent configured views; see [data model](docs/DATA_MODEL.md#42-store-parts).
+Football data is reacquired into RAM after boot.
 
-The binary leaves **97,008 B** in the unchanged1,835,008-B OTA slot; it exceeds
-the85% reserve limit by **178,244 B**. This is an unmet acceptance criterion,
-not a waived target. Source/bin SHA256 and detailed operation lifetimes are
-recorded with the build evidence. None of these figures proves runtime
-heap/stack reserves. No feature, TLS trust or partition was removed to force
-an apparently passing budget.
+The binary leaves **83,072 B** in the unchanged1,835,008-B OTA slot; it exceeds
+the standard85% reserve limit by **192,180 B**. On2026-10-18 the owner explicitly
+suspended that criterion for this alpha and its current functionality/budget.
+This is an acceptance exception; the numeric occupancy still exceeds85%.
+Device, runtime and OTA/rollback acceptance remain open, with no agent upload
+authorized. Details: [alpha reserve decision](docs/DECISIONS.md#adr-045--alpha-only-ota-reserve-exception--accepted-2026-10-18).
+These build figures do not establish runtime heap/stack reserves.
+
+The build-generator cleanup was verified against that candidate on2026-10-18:
+RAM, Flash, binary and Web gzip deltas are all0B; generated assets and firmware
+remain byte-identical. The short owner device log reaches272.6s after boot:
+reported lifetime heap minimum77,072B, lowest sampled largest free block86,016B,
+LVGL peak8,956B and filesystem use126,976/458,752B at the last sample.
+Two image uploads were refused with `409 busy`; a completed upload is not shown.
+Usable task-stack sizes and worst-case/long-run measurements remain required.
 
 Focused host checks cover actual parser responses, complete/partial acquisition,
 configuration and names failures, coherent reboot, browser draft races, file
@@ -72,6 +81,7 @@ environments below.
 | Task | Command |
 |---|---|
 | Build firmware | `pio run -e <env>` |
+| Check incremental build publication and failed-write preservation | `python3 scripts/tests/test_generated_file.py` |
 | Build + upload firmware (USB) | `pio run -e <env> -t upload` |
 | Build filesystem image (images) | `pio run -e <env> -t buildfs` |
 | Upload filesystem image (USB) | `pio run -e <env> -t uploadfs` |
@@ -86,6 +96,10 @@ environments below.
 | Run classification and sequence checks | `pio test -e native -f test_screen_selection -f test_screen_sequence -f test_screen_eligibility` |
 | Run canonical coverage checks | `pio test -e native -f test_provider_coverage -f test_schedule_coverage -f test_coverage_persistence` |
 | Replay actual typed provider adapters and transport | `python3 scripts/tests/test_provider_adapters.py` and `python3 scripts/tests/test_provider_transport.py` |
+| Replay shared-source planning against a real recorded season | `python3 scripts/tests/test_source_planning.py` |
+| Check exact-season coverage identity and invalidation | `python3 scripts/tests/test_source_coverage.py` |
+| Replay actual shared-source discovery and request credits | `python3 scripts/tests/test_source_coverage_worker.py` |
+| Check shared-season Store, view ownership and stale IDs | `python3 scripts/tests/test_source_store.py` |
 | Check two-pass fixture retention against real season responses | `python3 scripts/tests/test_fixture_retention.py` |
 | Check common strict JSON grammar and checked binary primitives | `python3 scripts/tests/test_json_stream.py` and `python3 scripts/tests/test_binary_codec.py` |
 | Check display-command HTTP/FIFO admission and input revision changes | `python3 scripts/tests/test_display_commands.py` |
@@ -101,10 +115,13 @@ environments below.
 | Run only the file name suite | `pio test -e native -f test_files` |
 | Run only the timekeeping suite | `pio test -e native -f test_timekeeping` |
 | Run only the heap-meter suite | `pio test -e native -f test_health` |
+| Check capacity/unknown/overlap scheduler windows against an independent oracle | `python3 scripts/tests/test_scheduler_activity.py` |
+| Check manual wizard IDs and every canonical phase against current C++ | `node scripts/tests/test_web_identity_phase.cjs` |
 | Run browser logic regression tests on the host (Node.js) | `node scripts/tests/test_web_ui.cjs` |
 | Check Debug/Overview/Demo controls against current C++ fixtures | `node scripts/tests/test_web_debug_controls.cjs` |
 | Run screenshot protocol/client checks on the host (Node.js) | `node scripts/tests/test_web_screenshot.cjs` |
 | Run image-editor loading, positioning and race checks | `node scripts/tests/test_web_image_editor.cjs` |
+| Check pure Web draft actions and private feature scope | `node scripts/tests/test_web_draft_actions.cjs` |
 | Check coherent application draft/save and complete names collection | `node scripts/tests/test_web_common_apply.cjs` |
 | Run full-name dialog close/race and inherit/empty checks | `node scripts/tests/test_web_names_close.cjs` |
 | Run confirmed factory-reset browser flow | `node scripts/tests/test_web_factory_reset.cjs` |
@@ -235,7 +252,7 @@ argument to check a range, e.g. `scripts/check_format.py main`.
 
 The C6 candidate uses the existing 4 MB dual-OTA layout, a fixed 32 KB LVGL
 pool and two 9,600 B DMA draw buffers. One fixed match store holds the
-football data of all competitions in 48,976 B (512 matches, 256 teams; C6
+football data of all competitions in 48,576 B (512 matches, 256 teams; C6
 compiler layout). Typed parsers stream full responses and retain one bounded
 response workspace, rather than a JSON document. Season selection uses a
 transient compact index and admits the required round/own-match union; it does

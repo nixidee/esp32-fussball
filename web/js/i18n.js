@@ -127,6 +127,7 @@ Beendet|Finished
 Verschoben|Postponed
 Abgesagt|Cancelled
 Abgebrochen|Abandoned
+Unterbrochen|Suspended
 Daten abrufen|Refresh data
 Nächster Bildschirm|Next screen
 IP-Adresse anzeigen|Show IP address
@@ -581,11 +582,7 @@ Nicht gespeichert|Not saved
 Kein eigenes Spiel; die Spiele erscheinen in der Konferenz, die Tabelle ohne markierte Zeile.|No own match; the matches appear in the conference, the table without a highlighted row.
 Noch keine Wettbewerbe. Wähle Anbieter, Wettbewerb und optional einen Verein.|No competitions yet. Choose a provider, competition and optionally a club.
 Noch nicht gespeichert (neu oder geändert). Drücke unten „Speichern“: Erst dann ruft das Gerät diesen Wettbewerb ab.|Not saved yet (new or changed). Press “Save” below: only then does the device query this competition.
-Gespeicherte Wettbewerbe waren ungültig. Das Gerät nutzt Startwerte; Speichern überschreibt die gespeicherten Wettbewerbe.|Stored competitions were invalid. The device uses initial values; saving overwrites the stored competitions.
-Gespeicherte Wettbewerbe sind beschädigt. Das Gerät nutzt Startwerte; Speichern überschreibt die gespeicherten Wettbewerbe.|Stored competitions are damaged. The device uses initial values; saving overwrites the stored competitions.
 Einstellungen stammen aus einer älteren Firmware und wurden verworfen. Bitte neu einrichten.|Settings come from an older firmware and were discarded. Please set them up again.
-Wettbewerbe stammen aus einer älteren Firmware und wurden verworfen. Bitte neu einrichten.|Competitions come from an older firmware and were discarded. Please set them up again.
-Gespeicherte Wettbewerbe konnten nicht gelesen werden. Das Gerät nutzt Startwerte; Speichern ist bis zum Zurücksetzen gesperrt.|Stored competitions could not be read. The device uses initial values; saving is blocked until a reset.
 Gespeicherte Wettbewerbe überschreiben?|Overwrite stored competitions?
 Höchstens so viele Abrufe innerhalb des Zeitfensters, z. B. 10 Abrufe je 60 s. Das Gerät überschreitet sie in keinem Zeitfenster. Beide Werte 0 = keine Grenze.|At most this many requests within the time window, e.g. 10 requests per 60 s. The device never exceeds it in any window. Both values 0 = no limit.
 Länge des Zeitfensters. 0 nur zusammen mit 0 Abrufen.|Length of the time window. 0 only together with 0 requests.
@@ -671,7 +668,6 @@ Die Besuchszeit muss ein ganzzahliges Vielfaches der Bildwechselzeit sein.|Visit
 Die Anzeigeeinstellungen konnten nicht geladen werden. Seite neu laden. [WEB S02]|Screen settings could not be loaded. Reload the page. [WEB S02]
 Anzeige neu laden|Reload screen settings
 Verwirft nur den Anzeigeentwurf. Andere noch offene Änderungen bleiben erhalten.|Discards only the screen settings draft. Other pending changes are retained.
-Anzeigeeinstellungen prüfen:|Check screen settings:
 Automatische Fußballabfragen sind im Bilderrahmen pausiert.|Automatic football requests are paused in picture frame mode.
 Die tatsächliche Geräteausgabe kannst du als Bildschirmfoto herunterladen.|Download a screenshot to inspect the actual device output.
 Keine Bibliotheksbilder ausgewählt. Das Wappen ist eine eigene Bildschirmart.|No library images selected. The crest is a separate screen type.

@@ -43,11 +43,11 @@ inline bool storeMatch(ArduinoJson::JsonVariantConst row, MatchStore& store,
     const MapContext& map;
     bool accepted = false;
   } context{store, map};
-  auto bytes = test_support::wrapped(row, map.provider, false);
+  auto bytes = test_support::wrapped(row, store.provider(map.source), false);
   test_support::Input input{bytes};
   json::Reader reader({&input, test_support::Input::read});
   provider::RequestSpec request;
-  request.source.provider = map.provider;
+  request.source.provider = store.provider(map.source);
   provider::Sink sink;
   sink.context = &context;
   sink.fixture = [](const provider::Fixture& fixture,
@@ -65,18 +65,18 @@ inline bool storeTableRow(ArduinoJson::JsonVariantConst row, MatchStore& store,
     const MapContext& map;
     bool accepted = true;
   } context{store, map};
-  auto bytes = test_support::wrapped(row, map.provider, true);
+  auto bytes = test_support::wrapped(row, store.provider(map.source), true);
   test_support::Input input{bytes};
   json::Reader reader({&input, test_support::Input::read});
   provider::RequestSpec request;
-  request.source.provider = map.provider;
+  request.source.provider = store.provider(map.source);
   request.operation = provider::Operation::kTable;
   provider::Sink sink;
   sink.context = &context;
   sink.row = [](const provider::TableRow& row, void* raw) {
     auto& c = *static_cast<Context*>(raw);
     auto mapped = row;
-    if (c.map.provider == cfg::Provider::kOpenLigaDb)
+    if (c.store.provider(c.map.source) == cfg::Provider::kOpenLigaDb)
       mapped.facts.position = static_cast<uint8_t>(c.store.stagedRows() + 1);
     return c.accepted = storeTableRow(mapped, c.store, c.map);
   };
@@ -131,6 +131,16 @@ inline bool consume(ArduinoJson::JsonVariantConst row, plan::Planner& planner,
   request.source = {source.provider, source.competition.view(),
                     source.season.view()};
   auto bytes = wrapped(row, source.provider, false);
+  // A sliced row has lost its response-level league proof. Restore the
+  // explicitly supplied test envelope; never overwrite the row's own scope.
+  if (source.provider == cfg::Provider::kEspn) {
+    ArduinoJson::JsonDocument envelope;
+    envelope["events"][0] = row;
+    envelope["leagues"][0]["slug"] = source.competition.view();
+    envelope["leagues"][0]["season"]["year"] = source.season.view();
+    bytes.clear();
+    ArduinoJson::serializeJson(envelope, bytes);
+  }
   if (source.provider == cfg::Provider::kEspn &&
       row["participants"].is<ArduinoJson::JsonArrayConst>()) {
     request.operation = provider::Operation::kSummary;

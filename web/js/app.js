@@ -55,29 +55,13 @@ const ACT = {
         const d = dialog(t('Hilfe'), `<p>${esc(t(el.dataset.help))}</p>`, button('Schließen', 'close'));
         d.querySelector('[data-act=close]').onclick = () => d.close();
     }, policySplit: el => {
-        const a = S.draft.screen_policy.phases[el.dataset.phase].per_competition, type = el.dataset.type, i = a.indexOf(type);
-        if (i < 0)
-            a.push(type);
-        else
-            a.splice(i, 1);
+        dispatchDraft({type: 'split', phase: el.dataset.phase, screen: el.dataset.type});
         render();
     }, policyOrder: el => {
-        const a = S.draft.screen_policy.order, i = Number(el.dataset.i), j = i + Number(el.dataset.dir);
-        if (j >= 0 && j < a.length)
-            [a[i], a[j]] = [a[j], a[i]];
+        dispatchDraft({type: 'order', index: Number(el.dataset.i), direction: Number(el.dataset.dir)});
         render();
-    }, policyReload: () => confirmAction('Anzeige neu laden', 'Verwirft nur den Anzeigeentwurf. Andere noch offene Änderungen bleiben erhalten.', async () => {
-        const fresh = await readModel(), edited = !sameObject(S.saved.competitions, S.draft.competitions);
-        if (!edited)
-            S.draft.competitions = clone(fresh.competitions);
-        S.saved.competitions = clone(fresh.competitions);
-        S.saved.screen_policy = clone(fresh.screen_policy);
-        S.draft.screen_policy = clone(fresh.screen_policy);
-        prepareScreenModel(S.draft);
-        S.server = null;
-        render();
-    }), go: el => {
-        if (ED.busy)
+    }, policyReload: () => confirmAction('Anzeige neu laden', 'Verwirft nur den Anzeigeentwurf. Andere noch offene Änderungen bleiben erhalten.', reloadDisplayDraft), go: el => {
+        if (editorBusy())
             return;
         closeDebug();
         closeEditor();
@@ -126,18 +110,13 @@ const ACT = {
         const i = Number(el.dataset.i), c = S.draft.competitions[i];
         confirmAction('Wettbewerbe', tf('„%“ entfernen?', compName(c)) + ' ' + t('Wirksam nach „Speichern“.'), () => removeCompetition(i), 'Entfernen');
     }, slideAdd: () => {
-        const slides = S.draft.screen_policy.slides;
-        if (slides.length >= S.schema.screen_policy.max_slides)
-            throw Error(t('Maximale Listenlänge erreicht.'));
-        slides.push(Number($('slideAdd').value));
+        dispatchDraft({type: 'slide-add', id: Number($('slideAdd').value), maximum: S.schema.screen_policy.max_slides});
         render();
     }, slideMove: el => {
-        const i = Number(el.dataset.i), n = i + Number(el.dataset.dir), a = S.draft.screen_policy.slides;
-        if (n >= 0 && n < a.length)
-            [a[i], a[n]] = [a[n], a[i]];
+        dispatchDraft({type: 'slide-move', index: Number(el.dataset.i), direction: Number(el.dataset.dir)});
         render();
     }, slideDelete: el => {
-        S.draft.screen_policy.slides.splice(Number(el.dataset.i), 1);
+        dispatchDraft({type: 'slide-delete', index: Number(el.dataset.i)});
         render();
     }, imageEdit: el => openEditor(Number(el.dataset.id)), roleEdit: el => openEditor(0, el.dataset.role), roleCopy: el => {
         const kind = el.dataset.role;
@@ -146,7 +125,7 @@ const ACT = {
         const kind = el.dataset.role;
         confirmAction('Werksbild wiederherstellen', 'Danach erscheint wieder das Werksbild. Die eigene Datei wird sofort gelöscht.', () => changeRole(kind, 'reset'), 'Wiederherstellen', `<p><b>${esc(roleName(kind))}</b></p>`);
     }, editorClose: () => {
-        if (ED.busy)
+        if (editorBusy())
             return;
         closeEditor();
         render();
@@ -154,7 +133,7 @@ const ACT = {
         const id = Number(el.dataset.id), u = [...new Set([...uses(id), ...uses(id, S.saved)])];
         confirmAction('Löschen', 'Danach erscheint dort das Standardbild. Die Datei wird sofort gelöscht.', () => deleteImage(id), 'Löschen', `<p><b>${esc(imageName(id))}</b> · ${ht('Wird verwendet als')}: ${esc(u.length ? u.join(', ') : t('Nicht verwendet'))}</p>`);
     }, scan: () => scanWifi(), ssid: el => {
-        S.draft.wifi_ssid = el.dataset.v;
+        dispatchDraft({type: 'field', path: 'wifi_ssid', value: el.dataset.v});
         S.scan = null;
         render();
         toast(t('WLAN-Name übernommen. Passwort prüfen, dann speichern.'));
@@ -188,8 +167,7 @@ document.addEventListener('input', e => {
     if (S.saving)
         return;
     if (el.dataset.inherit) {
-        const path = el.dataset.inherit, a = parts(path);
-        set(S.draft, path, el.checked ? null : S.draft.screen_policy.phases[a[3]][a[4]][2]);
+        dispatchDraft({type: 'inherit', path: el.dataset.inherit, enabled: el.checked});
         S.server = null;
         render();
         return;
@@ -208,20 +186,8 @@ document.addEventListener('input', e => {
     const path = el.dataset.path;
     if (!path)
         return;
-    let value = el.type === 'checkbox' ? el.checked : el.value;
-    if (el.dataset.kind === 'ssid-base64')
-        value = ssidValue(value);
-    else if (el.dataset.kind === 'policybool')
-        value = value === '' ? null : value === 'true';
-    else if (el.dataset.kind === 'num')
-        value = value === '' ? '' : Number(value);
-    else if (el.dataset.kind === 'colour')
-        value = parseInt(value.slice(1), 16);
-    else if (el.dataset.kind === 'time')
-        value = value === '' ? '' : Number(value.slice(0, 2)) * 60 + Number(value.slice(3, 5));
-    set(S.draft, path, value);
-    if (/^screen_policy\.phases\.[^.]+\.(crest|images)\[0\]$/.test(path) && value === true)
-        set(S.draft, path.replace(/\[0\]$/, '[1]'), true);
+    const kind = el.dataset.kind || (el.type === 'checkbox' ? 'bool' : 'str');
+    dispatchDraft({type: 'field', path, value: decodeInput(kind, el.value, el.checked)});
     if (S.server?.path === path)
         S.server = null;
     paintErrors();
@@ -266,7 +232,6 @@ async function startup() {
 setInterval(() => load('status', false), CLIENT.status_poll_ms);
 window.addEventListener('pagehide', () => {
     closeDebug();
-    if (ED.bmp?.close)
-        ED.bmp.close();
+    closeEditor();
 });
 startup().catch(e => toast(e.message, true));

@@ -1,24 +1,24 @@
 // Provider request plans (pure logic): which provider requests one run of a
 // scheduled job makes, their URLs, and where each streamed element goes in
-// the match store. A run can take several requests (OpenLigaDB: current and
-// next round plus the club's fixtures; ESPN: match days, then one scoreboard
-// per day); the scheduler keeps such a job due between them
+// the match store. A fixture run selects from a compact index before admitting
+// full rows; the scheduler keeps the job due between its requests
 // (Scheduler::finished(..., more)). No I/O and no ESP-IDF, so the native
 // tests drive it with recorded responses. Not thread-safe: the provider
 // worker owns it.
 //
 // Per provider and data type (OQ-216, OQ-218; no core data, OQ-248):
-//   OpenLigaDB  fixtures   getmatchdata/{league} (current round, also the
-//                          current season), getmatchdata/…/{round + 1},
-//                          getmatchesbyteamid/{club}/… (club only)
+//   OpenLigaDB  fixtures   exact-season index, then selected fixture admission
 //               table      getbltable/{league}/{season} (also live table)
 //               live       per round with a match in its live window:
 //                          getlastchangedate/…/{round}, then
 //                          getmatchdata/…/{round} when the date changed or
 //                          the last full request is kOpenLigaDbFullRefreshS
 //                          old; goals come with the match data
-//   ESPN        fixtures   calendar/ondays (match days), then the scoreboard
-//                          of every day of the current and the next matchday
+//   ESPN        fixtures   exact-season calendar, selected whole-day
+//   scoreboards,
+//                          then past/future own index and admission per
+//                          distinct club; one previous and three next own
+//                          fixtures total
 //               table      site.web.api standings (also live table; cups
 //                          have none, an absent list is an empty table)
 //               live       the scoreboard of each match day with a match in
@@ -27,18 +27,18 @@
 //                          (substitutions), for own and ordinary matches;
 //                          preview requests wait for kickoff; body cap
 //                          kProviderSummaryBodyBytes
-//   API-Football, football-data.org: generic test sources (OQ-205):
-//   fixtures within kFixtureHorizonDays, standings, today's fixtures.
-//   API-Football first resolves the current season (/leagues) when it is
-//   unknown; a fixtures run kSeasonRecheckS after the last resolution
-//   resolves it again (OQ-259).
+//   API-Football, football-data.org: exact-season fixture index and admission,
+//   standings and live fixtures. Automatic season resolution is a separate
+//   metadata-only job before any data admission, repeated after
+//   kSeasonRecheckS.
 // Other providers make no separate events request: OpenLigaDB delivers
 // goals with the live data, API-Football events are removed (OQ-206).
 //
 // Every active competition retains fixtures/live as phase-classification
 // prerequisites. Current-phase enabled Table and Single entries add table/live
 // table and exact ESPN summary demand respectively; manual-only is enabled too.
-// Picture-frame mode pauses automatic demand. Each competition has one source.
+// Picture-frame mode pauses automatic demand. Equal resolved source keys share
+// facts and jobs; configured views retain independent club and summary demand.
 
 #pragma once
 
@@ -46,6 +46,7 @@
 #include <bitset>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string_view>
 
@@ -63,7 +64,7 @@ namespace football::plan {
 // ESPN match days kept per source: the current and the next matchday.
 inline constexpr std::size_t kEspnDays = cfg::kFixtureCalendarDays;
 // Rounds or match days one live run checks.
-inline constexpr std::size_t kLiveItems = 3;
+inline constexpr std::size_t kLiveItems = cfg::kProviderLiveItems;
 
 // Where the elements of a response go.
 enum class Sink : uint8_t {
@@ -107,17 +108,17 @@ struct Completion {
   schedule::Outcome outcome = schedule::Outcome::kOk;
   bool more = false;     // the run continues with another request
   bool invalid = false;  // the response lacked the season the run needs
+  // Refreshing retained identities proves no new fixture/round completeness.
+  bool preserve_scope = false;
 };
 
-// What one competition's source keeps between requests (RAM only).
+// What one exact resolved source keeps between requests (RAM only).
 struct SourceState {
   // Reconstruct directly in owned storage; aggregate assignment creates a
   // large source-array temporary on the provider task's limited stack.
   void clear();
-  uint32_t key = 0;  // hash of the competition id and its source settings
-  settings::Bytes<cfg::kSeasonMaxBytes> season;  // resolved current season
-  uint32_t season_utc = 0;  // UTC second of its resolution, 0 = unknown
-  uint8_t round = 0;        // OpenLigaDB current round, 0 = unknown
+  SourceId source;
+  uint8_t round = 0;  // OpenLigaDB current round, 0 = unknown
   // OpenLigaDB change date per checked round, with the time of the last
   // full request of that round.
   struct Mark {
@@ -128,7 +129,8 @@ struct SourceState {
   std::array<Mark, kLiveItems> marks{};
   // ESPN match days (UTC start of each provider day) of the current and the
   // next matchday, ascending.
-  retention::Selection fixtures;
+  std::array<uint32_t, kEspnDays> days{};
+  uint8_t day_count = 0;
   // The live run in progress: its rounds (OpenLigaDB) or match days (ESPN,
   // 0 = the scoreboard without date), and the change date just checked.
   std::array<uint32_t, kLiveItems> live{};
@@ -167,6 +169,8 @@ struct ResponseDetails {
 };
 static_assert(sizeof(ResponseDetails::EventBuffer) <= 7680);
 static_assert(sizeof(ResponseDetails) <= 2368);
+static_assert(cfg::kRetainedOwnFixtures <=
+              std::numeric_limits<uint8_t>::digits);
 
 class Planner {
  public:
@@ -175,12 +179,15 @@ class Planner {
                const settings::screen_policy::Eligibility& eligibility,
                DateContext dates = {}, bool break_proven = false);
   void reset();
-  // The source state of slot 'slot' starts afresh (its data was dropped).
+  bool synchronize(MatchStore&, const Clock&);
+  void restartFixtures(uint16_t sources);
+  bool prepareDemand(MatchStore&, const Clock&, schedule::Inputs&,
+                     const selection::Selection* selected = nullptr) const;
+  // The internal source slot starts afresh (its data was dropped).
   void forget(uint8_t slot);
-  // Scheduler inputs of slot 'slot' (entry null, inactive or without
-  // competition: unused) at 'clock': exact Single summaries are held until
-  // their match has started; an API-Football fixtures run whose season
-  // is due for resolution costs its /leagues request too (OQ-264).
+  // Per-view resolution and summary inputs (null/inactive entry: unused).
+  // Exact Single summaries are held until kickoff. prepareDemand combines
+  // these with shared source demand; resolution never admits match facts.
   void wanted(uint8_t slot, const settings::CompetitionRoute* entry,
               const MatchStore& store, const Clock& clock,
               schedule::Wanted& out,
@@ -203,6 +210,7 @@ class Planner {
   bool consumeText(std::string_view);
   bool response(const provider::ParseResult&);
   provider::Status responseFailure() const { return response_failure_; }
+  Cause responseCause() const { return response_cause_; }
   // Ends the prepared request; 'ok' = the response was complete. A failure
   // ends the run (the next run starts from its first request).
   Step finish(bool ok, const Clock& clock);
@@ -240,6 +248,11 @@ class Planner {
   // A complete-season index covers every configured club of this same
   // request source. Explicit team schedules keep their one-team boundary.
   retention::Index* makeRetentionIndex(bool calendar = false) const;
+  bool resolveResponse(const Clock&);
+  uint8_t nextClub(uint8_t first) const;
+  uint32_t currentClub() const;
+  void sourceWanted(SourceSlot, const MatchStore&, const Clock&,
+                    schedule::Wanted&, const selection::Selection*) const;
   const settings::CompetitionRoutes* competitions_ = nullptr;
   const settings::screen_policy::Eligibility* eligibility_ = nullptr;
   DateContext dates_;
@@ -248,15 +261,37 @@ class Planner {
   std::unique_ptr<retention::Index> retention_index_;
   std::array<uint16_t, cfg::kRetainedRounds> retained_rows_{};
   provider::Status response_failure_ = provider::Status::kOk;
+  Cause response_cause_ = Cause::kNone;
   bool retain_admission_ = false;
+  bool known_only_ = false;
   bool response_sources_ = true;
   std::bitset<cfg::kRetainedClubFixtures> own_seen_;
+  std::bitset<cfg::kRetainedClubFixtures> own_expected_;
 
-  std::array<SourceState, cfg::kCompetitionMax> states_{};
+  struct FixtureRun {
+    retention::Selection selection;
+    SourceId source;
+    retention::OwnFixtures own_candidates;
+    std::bitset<cfg::kRetainedClubFixtures> past_expected, future_expected;
+    uint8_t club_route = 0, future_seen = 0;
+    void clear() {
+      selection.clear();
+      source = {};
+      club_route = 0;
+      own_candidates = {};
+      past_expected.reset();
+      future_expected.reset();
+      future_seen = 0;
+    }
+  } fixtures_;
+  std::array<SourceState, cfg::kStoreSources> states_{};
+  SourceState resolving_;
   // The prepared request: its source, data type and consume context.
   SourceState* current_ = nullptr;
   MatchStore* store_ = nullptr;
   settings::Source source_;
+  const settings::CompetitionRoute* entry_ = nullptr;
+  bool resolving = false;
   cfg::DataType type_ = cfg::DataType::kFixtures;
   MapContext map_;
   Sink sink_ = Sink::kMatches;
@@ -264,8 +299,7 @@ class Planner {
   uint16_t response_rows_ = 0;
   uint8_t response_round_ = 0, response_label_ = kNoIndex;
   bool response_round_known_ = true, response_whole_ = false;
-  bool discover_ = false;  // OpenLigaDB rows: note season and round
-  bool filter_ = false;    // OpenLigaDB rows: only this league and season
+  bool filter_ = false;  // admit only rows matching this exact source
   int found_round_ = 0;
   uint32_t found_change_ = 0;
   settings::Bytes<cfg::kSeasonMaxBytes> found_season_;

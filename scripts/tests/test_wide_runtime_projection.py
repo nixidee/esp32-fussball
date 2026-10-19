@@ -16,7 +16,7 @@ with tempfile.TemporaryDirectory(prefix="football-wide-projection-") as director
                 "components/system/include", "components/network/include", "components/images/include",
                 "components/geometry/include", "components/hardware/include", "components/files/include",
                 "components/json/include"]
-    sources = ["components/football/football_model.cpp", "components/football/match_store.cpp",
+    sources = ["components/football/football_model.cpp", "components/football/source_index.cpp", "components/football/match_store.cpp",
                "components/football/matchday.cpp", "components/football/store_views.cpp",
                "components/football/screen_selection.cpp", "components/ui/navigation_policy.cpp",
                "components/ui/screen_sequence.cpp", "components/ui/football_presenter.cpp",

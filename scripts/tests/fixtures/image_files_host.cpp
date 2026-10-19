@@ -21,7 +21,7 @@
 #include "file_io.h"
 #include "file_service.h"
 #include "image_service.h"
-#include "network_service.h"
+#include "operation_admission.h"
 #include "request_json.h"
 #include "settings_store.h"
 #include "tjpgd.h"
@@ -52,10 +52,10 @@ void testLog(const T&...) {}
 namespace ota {
 bool trial() { return ::trial; }
 }  // namespace ota
-namespace network {
-bool tryHeavy() { return heavy_ok; }
-void releaseHeavy() {}
-}  // namespace network
+namespace operations {
+Guard::Guard() noexcept : held_(heavy_ok) {}
+Guard::~Guard() {}
+}  // namespace operations
 namespace files {
 State state() { return mounted ? State::kMounted : State::kUnavailable; }
 esp_err_t usage(Usage& out) {

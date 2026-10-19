@@ -4,8 +4,8 @@ namespace football {
 namespace {
 TeamIndex team(const provider::TeamInput& input, MatchStore& store,
                const MapContext& context) {
-  return store.team(context.competition, context.provider, input.id,
-                    input.name.data, input.short_name.data);
+  return store.team(context.source, input.id, input.name.data,
+                    input.short_name.data);
 }
 Side actor(uint32_t team, uint32_t home, uint32_t away) {
   return !team          ? Side::kUnknown
@@ -20,16 +20,25 @@ bool storeMatch(const provider::Fixture& input,
                 const MapContext& context) {
   using namespace provider;
   if (!input.facts.id) return false;
-  store.selectClub(context.competition, context.provider, context.club,
-                   context.clock);
   // A missing/invalid field cannot erase a fact already known from the source.
   // Local estimated phase/minute may still be refreshed by estimateAll().
-  const auto* previous =
-      store.find(context.competition, context.provider, input.facts.id);
+  const auto* previous = store.find(context.source, input.facts.id);
   StoredMatch match = previous ? *previous : StoredMatch{};
   match.id = input.facts.id;
-  match.competition = context.competition;
-  match.provider = context.provider;
+  match.source = context.source;
+  if (context.round_label != kNoIndex) {
+    match.label = context.round_label;
+    match.flags |= kMatchRoundLabel;
+  } else if (!input.round_label.empty()) {
+    const auto label = store.label(input.round_label.data);
+    if (label == kNoIndex) {
+      store.flag(context.source, kNoticeMatches, true);
+      return false;
+    }
+    match.label = label;
+    match.flags = (match.flags & ~kMatchRoundLabel) |
+                  (input.fields & kRoundLabel ? kMatchRoundLabel : 0);
+  }
   // Admit every provided team identity before publishing any score/timing.
   // A corrected opponent that cannot fit must not inherit the previous
   // opponent's label with a new score. The previous match remains intact.
@@ -57,10 +66,7 @@ bool storeMatch(const provider::Fixture& input,
   if (input.fields & kPrincipal) match.principal = input.facts.principal;
   if (input.fields & kShootout) match.shootout = input.facts.shootout;
   if (input.fields & kRound) match.round = input.facts.round;
-  if (!input.round_label.empty())
-    match.label = store.label(input.round_label.data);
   if (context.round) match.round = context.round;
-  if (context.round_label != kNoIndex) match.label = context.round_label;
   if (!(input.fields & kPhase)) estimate(match, context.clock.utc);
   const bool stage = !store.isOwn(match) && context.observe_events;
   auto* kept = store.upsert(match, context.clock);
@@ -82,7 +88,7 @@ bool storeMatch(const provider::Fixture& input,
   }
   if (kept && input.events_truncated) {
     kept->flags |= kMatchEventsTruncated | kMatchEventsPoolCut;
-    store.flag(context.competition, kNoticeEvents, true);
+    store.flag(context.source, kNoticeEvents, true);
   }
   return kept != nullptr;
 }
@@ -90,8 +96,6 @@ bool storeMatch(const provider::Fixture& input,
 bool storeTableRow(const provider::TableRow& input, MatchStore& store,
                    const MapContext& context) {
   if (!input.team.id) return false;
-  store.selectClub(context.competition, context.provider, context.club,
-                   context.clock);
   StoredRow row;
   row.position = input.facts.position;
   row.played = input.facts.played;

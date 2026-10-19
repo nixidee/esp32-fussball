@@ -1,4 +1,4 @@
-// Adopted-name application owner. Callers hold one network heavy-operation
+// Adopted-name application owner. Callers hold one shared operation
 // guard; no names I/O or settings publication is allowed under football locks.
 #pragma once
 #include <memory>

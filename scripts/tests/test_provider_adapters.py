@@ -10,7 +10,7 @@ with tempfile.TemporaryDirectory(prefix="football-provider-adapters-") as direct
                "-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
     for path in ("include", "components/football/include", "components/json/include", "components/timekeeping/include", "components/settings/include", "components/network/include"):
         command += ["-I", str(root / path)]
-    for path in ("components/football/fixture_retention.cpp", "components/football/provider_readers.cpp", "components/football/provider_plan.cpp",
+    for path in ("components/football/source_index.cpp", "components/football/fixture_retention.cpp", "components/football/provider_adapter.cpp", "components/football/provider_readers.cpp", "components/football/provider_plan.cpp",
                  "components/football/request_scheduler.cpp", "components/football/screen_selection.cpp",
                  "components/football/budget_ledger.cpp", "components/settings/settings_model.cpp",
                  "components/settings/screen_policy.cpp", "components/settings/settings_record.cpp",

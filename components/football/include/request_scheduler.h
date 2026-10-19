@@ -1,6 +1,7 @@
 // Request scheduler (pure logic): decides which provider request runs next
 // and when to ask again, so the provider worker never waits in a loop. A
-// job is one data type of one competition (one source each, OQ-247). Its
+// shared job is one data type of one exact resolved source; metadata resolution
+// and exact Single summary demand also have incarnation-aware view scopes. Its
 // due time follows the provider's interval for the data
 // type (OQ-216); live data types run only while a match of the competition
 // is in its live window, from kLiveLeadMinutes before kickoff (OQ-220) to
@@ -50,21 +51,29 @@ class Window {
   uint16_t requests_ = 0, window_s_ = 0, width_ = 1;
 };
 
-// What one competition slot wants requested this pass (built by the
-// provider plan from the settings): the provider and one bit per
-// cfg::DataType. id 0 = unused slot. A slot whose id changes starts with
-// fresh jobs. 'cost' is the number of requests one run of a job is expected
+// Identity of shared source demand or incarnation-aware configured-view demand.
+struct ScopeKey {
+  SourceId source;  // shared data jobs, independent of their current requester
+  uint32_t incarnation = 0;
+  uint8_t competition = 0;  // per-view resolution/summary jobs
+  bool valid() const { return bool(source) || competition != 0; }
+  bool operator==(const ScopeKey&) const = default;
+};
+// What one scope wants this pass: the transport route, provider and data-type
+// bits. Invalid key = unused slot; changed identity starts fresh jobs.
+// 'cost' is the number of requests one run of a job is expected
 // to make (0 counts as 1); the daily-cap degradation multiplies its demand
 // by it. 'held': data types (bits as in 'types') that count in the daily
 // demand but do not run now, because their request is not possible yet
 // (a Single summary before kickoff).
 struct Wanted {
-  uint8_t id = 0;
+  ScopeKey key;
+  uint8_t competition = 0, route = 0;
   cfg::Provider provider{};
   uint8_t types = 0;
   uint8_t held = 0;
   std::array<uint8_t, cfg::kDataTypeCount> cost{};
-  uint32_t event_match = 0;  // exact eligible Single, independent of ownership
+  MatchKey event_match;  // exact eligible Single, independent of ownership
   uint32_t priority_match = 0;  // globally focused special own fixture only
   bool event_priority = false;
 };
@@ -73,7 +82,7 @@ struct Wanted {
 inline constexpr uint32_t kUnlimited = UINT32_MAX;
 
 struct Inputs {
-  std::array<Wanted, cfg::kCompetitionMax> competitions{};
+  std::array<Wanted, cfg::kRequestScopes> scopes{};
   const settings::ProviderPlans* plans = nullptr;
   settings::RequestLimit global;
   // Requests left today per provider and over all providers (the daily
@@ -85,10 +94,14 @@ struct Inputs {
 };
 
 struct Job {
-  uint8_t slot = 0, competition = 0;  // slot index and competition id
+  ScopeKey key;
+  uint8_t slot = 0, competition = 0, route = 0;
   cfg::DataType type = cfg::DataType::kFixtures;
   cfg::Provider provider = cfg::Provider::kOpenLigaDb;
-  uint32_t event_match = 0;
+  MatchKey event_match;
+  SourceId source() const {
+    return key.source ? key.source : event_match.source;
+  }
   bool event_priority = false;
 };
 
@@ -165,6 +178,7 @@ class Scheduler {
   // The jobs of slot 'slot' start fresh (its competition's source
   // changed): as for a slot whose id changes.
   void forget(uint8_t slot);
+  void restartFixtures(uint16_t sources);
   // Window limits from the provider plans and the global limit (next()
   // applies them too; a changed limit forgets its counted requests).
   void configure(const settings::ProviderPlans& plans,
@@ -190,12 +204,12 @@ class Scheduler {
   // Per job: monotonic second of the last start (negative: before boot, a
   // seeded start; kNotStarted = none), failures since the last success.
   // Table and live table keep both equal (one request).
-  std::array<int32_t, cfg::kCompetitionMax * cfg::kDataTypeCount> last_{};
-  std::array<uint8_t, cfg::kCompetitionMax * cfg::kDataTypeCount> failures_{};
+  std::array<int32_t, cfg::kRequestScopes * cfg::kDataTypeCount> last_{};
+  std::array<uint8_t, cfg::kRequestScopes * cfg::kDataTypeCount> failures_{};
   // Jobs whose run continues with another request.
-  std::bitset<cfg::kCompetitionMax * cfg::kDataTypeCount> pending_;
-  std::array<uint8_t, cfg::kCompetitionMax> ids_{};
-  std::array<uint32_t, cfg::kCompetitionMax> event_ids_{};
+  std::bitset<cfg::kRequestScopes * cfg::kDataTypeCount> pending_;
+  std::array<ScopeKey, cfg::kRequestScopes> keys_{};
+  std::array<MatchKey, cfg::kRequestScopes> event_ids_{};
   std::array<Window, cfg::kProviderCount> windows_{};
   Window global_window_;
   std::array<uint32_t, cfg::kProviderCount> paused_until_{};
@@ -203,6 +217,9 @@ class Scheduler {
   // turn holds every provider back.
   uint32_t last_start_ = kNever, deferred_until_ = 0;
   Factors factors_{};
+  // Rebuilt for each activity assessment; indices only, never cached facts.
+  // Owner-approved 1024B scratch keeps canonical/display order untouched.
+  std::array<MatchIndex, cfg::kStoreMatches> activity_order_;
 };
 
 // Factors for one daily cap: 'left' requests for the expected 'demand' per

@@ -46,7 +46,7 @@ the selected identity changes during acquisition.
    AppConfig competition section), each with exactly one source (provider, competition,
    season) and a separate selected-club preference, and the per-provider and global limits ([CONFIGURATION.md](CONFIGURATION.md)).
 2. **Request scheduler:** one provider task asks which job runs now — one
-   data type of one competition — or when to ask again
+   data type of one resolved source, or one view's resolution/summary — or when to ask again
    (section 2).
 3. **Request plan:** the job becomes one or more provider requests with
    their URLs (section 3).
@@ -200,18 +200,23 @@ The Planner turns one due job into independently admitted requests. After each
 request it returns control to the Scheduler, so another source can run and
 actual window/day/global limits apply to every continuation. A failed request
 ends its run. No request waits for a rate limit while holding heavy admission.
-Provider adapters own URLs, authentication and semantic response scope.
+Provider adapters own URLs, authentication, semantic response scope and one
+Profile describing fixture/live/metadata/summary protocols. Planner consumes
+those protocols without provider identity branches. Access-key/opt-in changes
+are derived from adapter authentication/usability; request budgets do not change
+source identity.
 
 | Provider | Fixture acquisition | Table | Live/details |
 |---|---|---|---|
 | OpenLigaDB | Two full-season streams: compact Index, then selected facts. Resolve an unknown season first. | `getbltable/{league}/{season}` | Relevant rounds use change-date checks and conditional full refresh; reported goals are available, minutes are estimated. |
 | API-Football | Resolve current season when needed, then two season streams for Index and selected facts. | `standings` with validated league/season/groups | Current-date fixture data; no unsupported event details are invented. |
-| football-data.org | Two season streams; the first resolves the actual season when current season was requested, and the second uses that same year. | `TOTAL` standings retain each group separately | Current-date fixture data; unavailable details remain unavailable. |
-| ESPN | One calendar, up to16 selected day scoreboards, and two selected-club schedule streams when a club is configured. | Validated standings; complete successful empty cups clear old rows | Relevant day scoreboards and the exact selected Single summary for supported details. |
+| football-data.org | Automatic season first uses a metadata-only season stream; then two exact-season streams index and admit facts. Explicit seasons need only those two. | `TOTAL` standings retain each group separately | Current-date fixture data; unavailable details remain unavailable. |
+| ESPN | One calendar, up to16 selected day scoreboards, and four schedule streams per distinct applicable club (past/future index, then past/future admission). | Validated standings; complete successful empty cups clear old rows | Relevant day scoreboards and the exact selected Single summary for supported details. |
 
 Every source retains the union of previous/current/next full round, previous
 own match and next three own matches, plus relevant live/unresolved facts.
-The first stream retains compact round counts/bounds and four own identities;
+The first stream retains compact round counts/bounds and the unique union of
+each applicable club's previous and next three identities (up to32);
 it does not insert an entire season into the store. The second stream admits
 only that selected union. Duplicate identities share one match record. Overflow
 is explicit Partial/StoreFull, never hidden eviction or proof of no match.
@@ -232,10 +237,11 @@ reacquires them. API-Football's current-season recheck uses its configured
 Team fallback names arrive with ordinary fixtures/table/live data; the explicit
 full-original editor query is a separate user action, not a hidden request.
 
-C6 compiler layout: Planner4136 B including its2088-B response-detail metadata;
-SourceState232 B includes Selection132 B per source. One Index3136 B is allocated
-only for the indexing request and released before fact admission. These sizes
-are not device heap/stack reserves. Exact current transport limits are below.
+C6 compiler layout: Planner5032B, source progress144B, Scheduler2532B and
+request Inputs1016B. One244B fixture selection is shared across acquisitions;
+other source fixture jobs wait while it is owned, while eligible live/table/
+summary requests can interleave. One transient Index is released before fact
+admission. These are structure costs, not device heap/stack acceptance.
 
 ## 4. Filtering while streaming
 
@@ -391,14 +397,20 @@ list of about 0.6 MB) is not downloaded in full for every page. A failed
 request is logged with the stage it reached (`dns`, `tcp`, `tls` or `http`)
 and the socket's pending error.
 
-## 6. One source per competition
+## 6. Resolved sources and configured views
 
-Each competition has exactly one source: one provider with its competition,
-season and club. Providers are not combined: there is no second source of a
-competition, no fixture pairing between providers and no filling of values
-from another provider. To follow the same league at two providers, the owner
-adds it twice as two competitions; each is requested, stored and shown on
-its own.
+Each configured view chooses one provider and competition, a season preference
+and a separate club. Canonical source identity is provider, competition and
+actually resolved season; empty automatic season is never stored as a source.
+Equal explicit/automatic seasons share matches, tables, rounds, status and data
+jobs. Different providers and different resolved seasons stay distinct.
+
+Eight incarnation-aware bindings retain their club/context and current source.
+Needed older-season results remain addressable through separate logical source
+IDs and reference masks. A physical slot or store reset cannot recycle a logical
+ID during this boot. Sixteen source scopes share data jobs; eight view scopes
+resolve automatic seasons and request the exact eligible summary. Duplicate
+summary targets share the request while preserving each view's detail interest.
 
 ## 7. Store, publication and readers
 
@@ -415,17 +427,14 @@ and capacity/maintenance notice; the service also reports the next request.
 
 ### Changes
 
-- A save that changes a competition's source, removes or pauses it drops
-  its RAM data and starts its jobs afresh; the other competitions keep their
-  data and due times. A
-  changed provider key or ESPN opt-in does the same for every competition
-  that uses that provider; a changed demo mode clears the whole store and
-  every job.
-- A club-only edit on an unchanged source reclassifies the existing matches,
-  table markers and detail priority without clearing facts or requesting again.
-- A save itself requests nothing else: changed limits, intervals or match
-  windows apply with the next decision, other settings do not touch the
-  jobs.
+- Removing/pausing a view or changing provider/competition removes that
+  binding, preserving sources needed by other views. A new resolved season
+  changes the current binding while needed old results stay in RAM.
+- A club-only edit reclassifies existing facts and detail/event priority, then
+  makes that source's fixture union due so previous/next-three retention covers
+  the new applicable clubs. It preserves facts, other jobs and request credits.
+- Provider-access changes invalidate affected bindings; Demo clears the runtime
+  store and job state. Limits, intervals and windows apply at the next decision.
 - A refresh (the Web UI's refresh action only) makes every job due at once;
   counted requests, window limits, pauses and the device gap stay.
 - A clock step re-runs the maintenance (expiry and OpenLigaDB estimates) at
@@ -514,11 +523,13 @@ successful match request is older than 15 minutes (`kDataStaleS`).
 
 ### Readers
 
-The store is one static BSS object with a C6 compiler layout of 48,976 B
-(512 matches, 256 teams). Final linked integration measurement remains a
-separate gate. A reader runs under the
+The store is one static BSS object with a C6 compiler layout of 48,576 B
+(512 matches, 256 teams). Current linked totals and outstanding runtime margins
+are in [CONFIGURATION.md](CONFIGURATION.md#resources-and-acceptance). A reader runs under the
 repository mutex and copies what it needs into its own fixed model; the
-display presenter owns one static 2,044-byte view model. A full model copy
+display presenter owns one static 980-byte view model with mutually exclusive
+layout payloads. It activates the payload before adding borrowed name targets;
+layout changes discard those targets before the payload is reused. A full model copy
 would require separate storage, including stack space if made locally.
 Reader callbacks do not fetch provider data or perform filesystem or LVGL
 work. The presenter receives configuration and clock projections from its caller;
@@ -586,7 +597,7 @@ return store indices in fixed lists on the caller's stack (1026 B for a
 
 - HTTPS verifies the common-root IDF CA bundle and needs a valid clock. No
   redirect is followed.
-- One heavy-operation token serializes TLS and parsing with uploads, image
+- One platform operation-admission token serializes TLS and parsing with uploads, image
   validation/deletion, complete screen-policy HTTP and OTA. Ordinary jobs keep
   it through detail commit/release; discovery takes it before state allocation
   and releases after RAM proof publication/cleanup. A routine LVGL JPEG redraw can still overlap
@@ -733,5 +744,51 @@ same exact request source. Each preference contributes the previous and next
 three games; duplicate encounter IDs occur only once in the resulting bounded
 32-ID union. Complete-response checking covers every ID, including those beyond
 bit7. A missing required match or index allocation failure preserves the prior
-working set and reports incomplete/RAM failure. This does not yet replace the
-configured-ID Store keys or coalesce automatic and explicit resolved sources.
+working set and reports incomplete/RAM failure. Resolved-source Store keys now coalesce automatic and explicit preferences
+that identify the same actual provider season.
+
+Each configured view owns the result of its exact requested summary (MatchKey
+plus DatasetStatus,32B per view). A new valid target resets only that result;
+stale completions are ignored. Same-target views share the actual request and
+event records, but each interested view receives its result. Capacity notices
+still prevent Complete after HTTP success. Planner prepares target context under
+the repository mutex; UI code does not select targets or own provider outcomes.
+
+Removing a view preserves the explicit batch collection boundary.
+Coverage evidence owns one compact proof per exact provider/competition/resolved
+season. Up to16current/adjacent keys are shared by active views; equal automatic
+and explicit seasons and overlapping year preferences do not duplicate requests
+or proofs. Extra discovery traverses those exact keys once, using the existing
+send budgets and durable request credits. Assessment borrows every active view's
+resolved source; missing, stale, partial or unverifiable evidence stays unknown.
+Normal provider rows can invalidate affected season proofs before display-store
+admission; a different season's success cannot restore the lost proof. The
+proof array is1216B (formerly768B), with64B temporary requirement references.
+No football persistence or new NVS format is introduced. Focused source/worker/
+provider/credit checks pass; full provider/device/runtime acceptance remains open.
+
+Demand preparation borrows the controller's coherent phase selection when
+available. Otherwise the planner derives it once with the same selector and
+break-coverage input, then uses it for both shared-source and per-view jobs.
+This preserves phase-specific table demand for either call form; it adds no
+second selection policy or persistent data.
+
+An exact-season live refresh without a known round updates retained identities
+in one response. It cannot certify a new round or a complete fixture selection.
+The planner reports preservation of the existing proof to the worker. A
+successful request still advances its success timestamp independently of
+whether the retained dataset is Partial or Complete. Automatic OpenLigaDB
+season resolution requires matching league provenance for every response row
+and one consistent season; foreign or mixed responses cannot create a source.
+
+For ESPN own fixtures, past and future lists are indexed before either own-list
+admission. The future index is seeded with four compact candidates from the past
+reply and uses the same selection rule. Only the final per-club previous/next3
+set enters the source-wide ID union. Separate pass masks reject omitted required
+IDs without pruning prior facts. The four-step request descriptor also supplies
+cost; distinct applicable clubs are grouped once for planning and execution.
+
+Scheduler activity enumeration uses one fixed1024-byte index workspace owned
+by the existing Scheduler. It sorts indices by canonical polling-window start
+and stable Store index, merges overlap chains once and never reorders or
+caches canonical matches. There is no extra heap allocation or persisted data.

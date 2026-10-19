@@ -10,6 +10,8 @@ import hashlib
 import json
 from pathlib import Path
 
+from generated_file import write_if_changed
+
 SOURCE_RELATIVE_PATH = Path("include/team_names.json")
 OUTPUT_RELATIVE_PATH = Path("team_name_asset/team_name_asset.h")
 PROVIDERS = ("espn", "openligadb")
@@ -127,15 +129,8 @@ def render_header(source):
 
 def prepare_header(source, build_dir):
     text, size = render_header(source)
-    content = text.encode("utf-8")
     output = Path(build_dir) / OUTPUT_RELATIVE_PATH
-    if output.is_file() and output.read_bytes() == content:
-        return output, False, size
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_suffix(".h.tmp")
-    temporary.write_bytes(content)
-    temporary.replace(output)
-    return output, True, size
+    return output, write_if_changed(output, text.encode("utf-8")), size
 
 
 def run_platformio(env):

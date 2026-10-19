@@ -1,5 +1,5 @@
 'use strict';
-const {readWebSource, autonomousBoundary, productionFunctions}=require('./web_source.cjs');
+const {readWebSource, autonomousBoundary, productionFunctions, featureProbes}=require('./web_source.cjs');
 
 // Production image-editor functions and event handlers, extracted from the
 // embedded script. HTTP, ImageBitmap decoding, DOM and JPEG encoding are narrow
@@ -8,7 +8,7 @@ const {readWebSource, autonomousBoundary, productionFunctions}=require('./web_so
 // Run: node scripts/tests/test_web_image_editor.cjs [optional HTML snapshot]
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict'),crypto=require('node:crypto');
 const htmlPath=process.argv[2]||path.join(__dirname,'../../web/index.html');
-const html=readWebSource(htmlPath).html,script=html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+const html=readWebSource(htmlPath).html,script=featureProbes(html.match(/<script>([\s\S]*?)<\/script>/)?.[1]).script;
 assert(script,'Embedded production script exists');
 const boundary=autonomousBoundary(script);
 assert(boundary>0,'Autonomous polling boundary is known');
@@ -32,7 +32,7 @@ function setup(width=240,height=240){
   rerender(){renderCount++;elements.clear();if(!context.UI.S.editor)return;rendered=context.UI.editorPage();for(const id of ['imageX','imageY','zoomRange','zoomNumber','editorOpacity','opacityLabel','editorBase','editorSample','editorFile','imageUpload','editorError','editorSize','imageProgress','imageProgressText','editorCanvas','canvasWrap'])element(id);for(const match of rendered.matchAll(/id="([^"]+)"[^>]*\bvalue="([^"]*)"/g))if(elements.has(match[1]))element(match[1]).value=match[2];element('editorError').textContent=context.UI.ED.error;context.UI.bindEditor();}
  };
  vm.createContext(context);
- vm.runInContext(script.slice(0,boundary)+'\nglobalThis.UI={S,ED,openEditor,closeEditor,editorPage,bindEditor,composition,drawEditor,fitImage,prepareImage,scheduleImage,uploadImage};render=()=>globalThis.rerender();toast=(message,kind)=>globalThis.recordToast(message,kind);',context,{filename:htmlPath});
+ vm.runInContext(script.slice(0,boundary)+'\nglobalThis.UI={...globalThis.__featureTests,S,openEditor,closeEditor,editorPage,bindEditor,fitImage,uploadImage};render=()=>globalThis.rerender();toast=(message,kind)=>globalThis.recordToast(message,kind);',context,{filename:htmlPath});
  context.document.getElementById=id=>elements.get(id)||null;
  const U=context.UI;
  Object.assign(U.S,{schema:{width,height,round:true,image_max:32768,image_quota:327680,replacement_workspace:40960,limits:{images:10}},draft:{language:0,screen_policy:{slides:[],appearance:{}}},saved:{language:0},images:{items:[{id:3,revision:7,bytes:1000}],used:1000,max:10,quota:327680,roles:[{name:'crest',revision:4,bytes:0},{name:'background',revision:9,bytes:0}]},status:{fs_total:524288,fs_used:10000},session:{valid:true,password_set:false},token:'synthetic-test-token'});

@@ -40,20 +40,6 @@ function competitionPayload(rows) {
         return row;
     });
 }
-function screenMeaning(p) { return clone(p); }
-function sameObject(a, b) {
-    if (a === b)
-        return true;
-    if (!a || !b || typeof a !== "object" || typeof b !== "object" || Array.isArray(a) !== Array.isArray(b))
-        return false;
-    if (Array.isArray(a))
-        return a.length === b.length && a.every((v, i) => sameObject(v, b[i]));
-    const keys = Object.keys(a);
-    return keys.length === Object.keys(b).length && keys.every(k => Object.prototype.hasOwnProperty.call(b, k) && sameObject(a[k], b[k]));
-}
-function sameScreenPolicy(a, b) {
-    return sameObject(screenMeaning(a), screenMeaning(b));
-}
 function screenConflict() {
     const e = Error(t('Konfiguration wurde zwischenzeitlich geändert. Status aktualisieren und den Entwurf prüfen. [WEB S01]'));
     e.field = 'screen_policy';
@@ -178,13 +164,11 @@ function validateScreenPolicy(p, competitions, internal = false) {
 }
 function screenBound(path) {
     const bounds = S.schema.screen_policy.bounds, key = parts(path).at(-1);
-    return /\[2\]$/.test(path) ? bounds.visit_s : bounds[key] || (/_min$/.test(key) ? bounds.buffer_min : null);
+    return key === '2' ? bounds.visit_s : bounds[key] || (key.endsWith('_min') ? bounds.buffer_min : null);
 }
 function screenField(path, type = 'number', help = '', options = null, disabled = false, label = null) {
-    let html = F(path, type, help, options, disabled, label);
-    if (type === 'select' && /\[[01]\]$/.test(path))
-        html = html.replace(/data-kind="[^"]+"/, 'data-kind="policybool"');
-    return `<div class="policy-control">${html}</div>`;
+    const bound = screenBound(path), key = parts(path).at(-1);
+    return `<div class="policy-control">${draftField(path, type, help, options, disabled, label, {bound, unit: key === '2' ? 's' : FIELD_UNITS[key] || ''})}</div>`;
 }
 const SP_VISIT_HELP = 'Besuchszeit in Sekunden: 15 bis 43.200. Sportansichten erhalten mindestens 15 Sekunden insgesamt und 5 Sekunden je Unterseite. Auch bei nur manuell erreichbaren Sporteinträgen wirkt die gespeicherte Zeit, bis du selbst Auf/Ab benutzt.', SP_AUTO_HELP = 'Automatisch: wird in dieser Phase in der gemeinsamen Artenfolge besucht. Ausgeschaltet bleibt ein freigegebener Sporteintrag über Weiter/Zurück erreichbar. Wappen und Bilder werden dabei übersprungen. Die gespeicherte Besuchszeit gilt auch für automatische Unterseiten eines nur manuell erreichbaren Eintrags, bis du selbst Auf/Ab benutzt.', SP_ENABLED_HELP = 'Freigabe für diese Phase. Ausgeschaltete Einträge erscheinen weder automatisch noch manuell. Gespeicherte Zeiten und Abweichungen bleiben erhalten.';
 function screenDisclosureHead(key, title) {
@@ -245,10 +229,10 @@ function displayBasics() {
     const m = S.draft, backlight = S.schema.backlight === true;
     const brightnessHelp = 'Helligkeit der Displaybeleuchtung von 0 bis 100 %. 0 schaltet die Beleuchtung aus.';
     const windowHelp = 'Täglicher Beginn und Ende in der lokalen Gerätezeit. Die Startzeit ist eingeschlossen, die Endzeit nicht. Gleiche Zeiten ergeben kein Nachtfenster.';
-    const rotation = F('rotation', 'select', '', [[0, '0°'], [1, '90°'], [2, '180°'], [3, '270°']]);
-    const brightness = backlight ? F('brightness', 'number', brightnessHelp) : '';
-    const night = backlight ? `<div class="cols">${F('night_enabled', 'switch', 'Ändert im eingestellten Zeitfenster ausschließlich die Displaybeleuchtung. Farben, Hintergrund und Bilder bleiben unverändert. Benötigt eine gültige Gerätezeit.')}${F('night_brightness', 'number', brightnessHelp, null, !m.night_enabled)}${F('night_start', 'time', windowHelp, null, !m.night_enabled)}${F('night_end', 'time', windowHelp, null, !m.night_enabled)}</div>` : '';
-    return section(backlight ? 'Helligkeit und Ausrichtung' : 'Ausrichtung', '', `<div class="cols">${brightness}${rotation}</div>` + night) + section('IP-Adresse auf dem Display', '', `<div class="cols">${F('ip_badge_s', 'number', '0 = dauerhaft.')}${F('ip_badge_bottom', 'switch')}${F('ip_badge_ap_permanent', 'switch')}</div>`) + inputSection() + expert('Tastenverhalten beim Blättern', F('scroll_repeat_ms', 'number', 'Nur Tabelle: Abstand der Blätterschritte, solange eine Taste gehalten wird.') + (scrollInput() ? F('scroll_reset_s', 'number', 'So viele Sekunden nach dem letzten Richtungswechsel blättert eine Blättern-Taste wieder abwärts. 0 = nie zurücksetzen.') : ''));
+    const rotation = draftField('rotation', 'select', '', [[0, '0°'], [1, '90°'], [2, '180°'], [3, '270°']]);
+    const brightness = backlight ? draftField('brightness', 'number', brightnessHelp) : '';
+    const night = backlight ? `<div class="cols">${draftField('night_enabled', 'switch', 'Ändert im eingestellten Zeitfenster ausschließlich die Displaybeleuchtung. Farben, Hintergrund und Bilder bleiben unverändert. Benötigt eine gültige Gerätezeit.')}${draftField('night_brightness', 'number', brightnessHelp, null, !m.night_enabled)}${draftField('night_start', 'time', windowHelp, null, !m.night_enabled)}${draftField('night_end', 'time', windowHelp, null, !m.night_enabled)}</div>` : '';
+    return section(backlight ? 'Helligkeit und Ausrichtung' : 'Ausrichtung', '', `<div class="cols">${brightness}${rotation}</div>` + night) + section('IP-Adresse auf dem Display', '', `<div class="cols">${draftField('ip_badge_s', 'number', '0 = dauerhaft.')}${draftField('ip_badge_bottom', 'switch')}${draftField('ip_badge_ap_permanent', 'switch')}</div>`) + inputSection() + expert('Tastenverhalten beim Blättern', draftField('scroll_repeat_ms', 'number', 'Nur Tabelle: Abstand der Blätterschritte, solange eine Taste gehalten wird.') + (scrollInput() ? draftField('scroll_reset_s', 'number', 'So viele Sekunden nach dem letzten Richtungswechsel blättert eine Blättern-Taste wieder abwärts. 0 = nie zurücksetzen.') : ''));
 }
 function displayPage() {
     return head('Anzeige') + (S.server?.path?.startsWith('screen_policy') ? `<div class="notice err"><p>${esc(S.server.message)}</p>${button('Anzeige neu laden', 'policyReload')}</div>` : '') + (S.draft.screen_policy ? screenOptionsMarkup() : `<p class="notice err">${ht('Die Anzeigeeinstellungen konnten nicht geladen werden. Seite neu laden. [WEB S02]')}</p>`) + displayBasics();
@@ -265,7 +249,7 @@ function inputSection() {
     const r = inputRoles();
     if (!r?.length)
         return '';
-    return section('Tasten', 'Jede Taste ist abschaltbar. Genau eine Taste ist die Pflichttaste: kurz = nächster Bildschirm, doppelt = vorheriger Bildschirm, lang = zurück zur Automatik.', `<div class="field" data-field="input_roles"><div class="cols">${r.map((v, i) => F(`input_roles[${i}]`, 'select', ROLE_HELP[v] || '', ROLES.map((n, k) => [k, t(n)]), false, tf('Taste %', i + 1))).join('')}</div><div class="field-error" data-error="input_roles"></div></div>`);
+    return section('Tasten', 'Jede Taste ist abschaltbar. Genau eine Taste ist die Pflichttaste: kurz = nächster Bildschirm, doppelt = vorheriger Bildschirm, lang = zurück zur Automatik.', `<div class="field" data-field="input_roles"><div class="cols">${r.map((v, i) => draftField(`input_roles[${i}]`, 'select', ROLE_HELP[v] || '', ROLES.map((n, k) => [k, t(n)]), false, tf('Taste %', i + 1))).join('')}</div><div class="field-error" data-error="input_roles"></div></div>`);
 }
 function validateCompetitionDisplay(display, index) {
     const issues = [], prefix = `competitions[${index}].display`;

@@ -52,7 +52,7 @@ const settings::CompetitionRoute* Presenter::entryOf(uint8_t id) const {
 
 void Presenter::roundCaption(const football::MatchStore& store,
                              const football::StoredMatch& match, bool date) {
-  const auto* entry = entryOf(match.competition);
+  const auto* entry = entryOf(facts->sequence.entry.competition);
   const char* competition = entry ? entry->competition_name.data.data() : "";
   const std::size_t competition_length =
       entry ? entry->competition_name.view().size() : 0;
@@ -72,6 +72,7 @@ void Presenter::roundCaption(const football::MatchStore& store,
 
 void Presenter::cardText(const char* title, const char* line, const char* hint,
                          Tone ring) {
+  setLayout(Layout::kCard);
   prefix<sizeof(view.card.title) - 1>(view.card.title, title);
   view.card.line_count = 0;
   view.card.hint_count = 0;
@@ -81,7 +82,6 @@ void Presenter::cardText(const char* title, const char* line, const char* hint,
   if (hint && hint[0])
     prefix<sizeof(view.card.hints[0]) - 1>(
         view.card.hints[view.card.hint_count++], hint);
-  view.layout = Layout::kCard;
   view.rim.kind = RimKind::kRing;
   view.rim.tone = ring;
 }
@@ -338,10 +338,10 @@ uint32_t Presenter::statusState(const football::Published& data,
     for (auto dataset : {football::MatchStore::Dataset::kFixtures,
                          football::MatchStore::Dataset::kTable,
                          football::MatchStore::Dataset::kEvents})
-      bytes[n++] = active
-                       ? static_cast<uint8_t>(
-                             data.store.datasetStatus(state.id, dataset).cause)
-                       : 0;
+      bytes[n++] =
+          active ? static_cast<uint8_t>(
+                       data.store.viewDatasetStatus(state.id, dataset).cause)
+                 : 0;
   }
   return football::fingerprint({reinterpret_cast<const char*>(bytes), n});
 }
@@ -357,7 +357,7 @@ uint32_t Presenter::bindStatus(const football::Published& data,
   const uint32_t state = statusState(data, context);
   const Subject subject = statusText(data, context);
   const bool repeated =
-      view.layout == Layout::kCard &&
+      view.layout() == Layout::kCard &&
       (subject.network ? presentation.card_network
                        : subject.competition != 0 &&
                              subject.competition == presentation.card_fault);
@@ -424,7 +424,7 @@ void Presenter::finishStatus(uint32_t state, int64_t now,
     bytes[sizeof(state) + 3] = static_cast<uint8_t>(selected_image.role);
     state = football::fingerprint(
         {reinterpret_cast<const char*>(bytes), sizeof(bytes)});
-    image_card = view.layout == Layout::kImage &&
+    image_card = view.layout() == Layout::kImage &&
                  (view.screen == screen::Type::kCrest ||
                   view.screen == screen::Type::kSlideshow) &&
                  selected_image.actual == images::FileSource::kNone;

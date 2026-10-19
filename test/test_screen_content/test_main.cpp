@@ -2,9 +2,11 @@
 // These checks prove controller content rules, not provider/device acceptance.
 #include <unity.h>
 
+#include "../source_support.h"
 #include "navigation_policy.h"
 
 namespace {
+namespace source_test = football::test_source;
 namespace seq = ui::sequence;
 namespace policy = settings::screen_policy;
 using football::Phase;
@@ -33,13 +35,15 @@ void match(uint8_t competition, uint32_t id, int64_t kickoff, uint8_t round,
            bool own = false, Phase phase = Phase::kScheduled) {
   football::StoredMatch row;
   row.id = id;
-  row.competition = competition;
+  row.source = source_test::source(store, competition);
   row.kickoff = static_cast<uint32_t>(kickoff);
   row.round = round;
   row.phase = phase;
-  row.home = store.team(competition, row.provider, own ? 40 : id * 2, "Home");
-  row.away = store.team(competition, row.provider, id * 2 + 1, "Away");
-  if (own) store.selectClub(competition, row.provider, 40, {kickoff, 0});
+  row.home = store.team(row.source, own ? 40 : id * 2, "Home");
+  row.away = store.team(row.source, id * 2 + 1, "Away");
+  if (own)
+    source_test::selectClub(store, competition, store.provider(row.source), 40,
+                            {kickoff, 0});
   if (phase == Phase::kFinished) row.finished_at = kickoff + 7200;
   TEST_ASSERT_NOT_NULL(store.upsert(row, {kToday, 10}));
 }
@@ -64,18 +68,21 @@ seq::Content content(ui::NavigationContext& context, Type type,
 }
 void test_load_proofs_distinguish_empty_matches_unloaded_table_and_failure() {
   competition(1);
-  store.datasetResult(1, football::MatchStore::Dataset::kFixtures, true);
+  store.datasetResult(source_test::source(store, 1),
+                      football::MatchStore::Dataset::kFixtures, true);
   auto data = facts();
   ui::NavigationContext context(uiConfiguration(data), data);
   TEST_ASSERT_EQUAL(seq::ContentKind::kEmpty,
                     content(context, Type::kLiveMulti).kind);
   TEST_ASSERT_EQUAL(seq::ContentKind::kError,
                     content(context, Type::kTable).kind);
-  store.datasetResult(1, football::MatchStore::Dataset::kTable, true);
+  store.datasetResult(source_test::source(store, 1),
+                      football::MatchStore::Dataset::kTable, true);
   TEST_ASSERT_EQUAL(seq::ContentKind::kEmpty,
                     content(context, Type::kTable).kind);
-  store.recordDataset(1, football::MatchStore::Dataset::kFixtures, 100, 100,
-                      false, football::Cause::kNetwork);
+  store.recordDataset(source_test::source(store, 1),
+                      football::MatchStore::Dataset::kFixtures, 100, 100, false,
+                      football::Cause::kNetwork);
   TEST_ASSERT_EQUAL(seq::ContentKind::kError,
                     content(context, Type::kLiveMulti).kind);
 }
@@ -91,7 +98,7 @@ void test_special_off_own_match_is_ordinary_single_without_own_priority() {
   const auto selected = football::selection::single(
       context.selection, context.selected, competitions.entries[0]);
   TEST_ASSERT_TRUE(store.isOwn(
-      *store.find(1, cfg::Provider::kOpenLigaDb, selected.match.id)));
+      *store.find(source_test::source(store, 1), selected.match.id)));
 }
 void test_own_phase_never_exposes_other_competition_single_even_when_unloaded() {
   competition(1);
@@ -121,7 +128,9 @@ void test_conference_competition_projection_and_one_page_complete_manual_view() 
   const auto members = ui::conferenceMembers(context, 1);
   TEST_ASSERT_EQUAL_UINT16(5, members.count);
   for (unsigned i = 0; i < members.count; ++i)
-    TEST_ASSERT_EQUAL_UINT8(1, store.match(members.index[i]).competition);
+    TEST_ASSERT_EQUAL_UINT8(
+        1,
+        source_test::competition(store, store.match(members.index[i]).source));
   TEST_ASSERT_EQUAL_UINT8(1, ui::conferenceMembers(context, 2).count);
 }
 void test_special_off_ordinary_own_match_keeps_optional_conference_pin() {
@@ -149,7 +158,7 @@ void test_one_page_manual_anchor_tracks_the_match_actually_shown_first() {
   rules.conference_mode = cfg::ConferenceMode::kOnePage;
   for (uint32_t i = 1; i <= 5; ++i)
     match(1, i, kToday - 3600, 1, false, Phase::kLive);
-  auto active = *store.find(1, cfg::Provider::kOpenLigaDb, 5);
+  auto active = *store.find(source_test::source(store, 1), 5);
   active.principal = {2, 0};
   TEST_ASSERT_NOT_NULL(store.upsert(active, {kToday, 10}));
   const auto data = facts();
@@ -168,7 +177,7 @@ void test_balanced_conference_manual_anchor_uses_actual_page_boundaries() {
   rules.conference_mode = cfg::ConferenceMode::kOnePage;
   for (uint32_t id = 1; id <= 11; ++id)
     match(1, id, kToday - 3600 + id, 1, false, Phase::kLive);
-  auto changed = *store.find(1, cfg::Provider::kOpenLigaDb, 5);
+  auto changed = *store.find(source_test::source(store, 1), 5);
   changed.principal = {2, 0};
   TEST_ASSERT_NOT_NULL(store.upsert(changed, {kToday, 10}));
   const auto data = facts();
@@ -214,7 +223,8 @@ void test_next_mode_keeps_held_round_manually_reachable_without_automatic_conten
   competition(1);
   rules.matchday_mode = cfg::MatchdayMode::kNext;
   match(1, 1, kToday - kDay + 3600, 4, false, Phase::kFinished);
-  store.datasetResult(1, football::MatchStore::Dataset::kFixtures, true);
+  store.datasetResult(source_test::source(store, 1),
+                      football::MatchStore::Dataset::kFixtures, true);
   const auto data = facts();
   ui::NavigationContext context(uiConfiguration(data), data);
   TEST_ASSERT_EQUAL(seq::ContentKind::kEmpty,
@@ -237,12 +247,12 @@ void test_next_mode_keeps_held_round_manually_reachable_without_automatic_conten
 void test_table_manual_anchor_uses_actual_clamped_origin_and_reaches_every_row() {
   competition(1);
   rules.table_window = 3;
-  store.beginTable(1);
+  store.beginTable(source_test::source(store, 1));
   for (uint8_t i = 0; i < 8; ++i) {
     football::StoredRow row;
-    row.team = store.team(1, cfg::Provider::kOpenLigaDb, i == 7 ? 40 : 100 + i,
+    row.team = store.team(source_test::source(store, 1), i == 7 ? 40 : 100 + i,
                           "Club");
-    store.selectClub(1, cfg::Provider::kOpenLigaDb, 40, {});
+    source_test::selectClub(store, 1, cfg::Provider::kOpenLigaDb, 40, {});
     TEST_ASSERT_TRUE(store.appendRow(row));
   }
   TEST_ASSERT_TRUE(store.commitTable(true));

@@ -358,7 +358,7 @@ static void synchronizeImpl(State& state, const Input& input, int64_t now,
       Entry target;
       rawEntries(input, [&](const Entry& entry, int) {
         if (entry.type == screen::Type::kLiveSingle &&
-            entry.competition == input.selected.focus.competition &&
+            entry.competition == input.selected.competition &&
             eligible(input, entry, mode(state)))
           target = entry;
       });

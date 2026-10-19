@@ -20,6 +20,7 @@
 #include "hw_target.h"
 #include "lwip/ip4_addr.h"
 #include "mdns.h"
+#include "operation_admission.h"
 #include "portal_dns.h"
 #include "settings_store.h"
 #include "time_service.h"
@@ -32,7 +33,6 @@ portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 Status current{};
 settings::NetworkSettings applied;
 esp_netif_t *sta = nullptr, *ap = nullptr;
-std::atomic<bool> heavy{false};
 std::atomic<bool> http_ready{false};
 // Last station transition since the previous poll(): the later event wins,
 // so "lost, then got an IP" ends connected and the reverse disconnected.
@@ -401,7 +401,7 @@ void advanceInitialization(bool force_settings = false) {
   if (!force_settings && init_retry_at != 0 && now < init_retry_at &&
       (!settings_pending || initError(InitStep::kRadio) != ESP_OK))
     return;
-  HeavyGuard guard;
+  operations::Guard guard;
   if (!guard) {
     // The settings flag survives admission refusal; poll() retries with the
     // current store after the admitted operation releases its token.
@@ -684,11 +684,6 @@ std::size_t scanResults(AccessPoint* out, std::size_t capacity,
   portEXIT_CRITICAL(&mux);
   return count;
 }
-bool tryHeavy() {
-  bool expected = false;
-  return heavy.compare_exchange_strong(expected, true);
-}
-void releaseHeavy() { heavy.store(false); }
 }  // namespace network
 
 // ESP-IDF documents this weak hook for applications owning clock updates.

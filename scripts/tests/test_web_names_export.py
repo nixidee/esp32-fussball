@@ -20,17 +20,17 @@ code = r'''
 #include "app_config.h"
 #include "json_stream.h"
 using esp_err_t = int;
-constexpr int ESP_OK=0, ESP_FAIL=-1, ESP_ERR_NO_MEM=1;
+constexpr int ESP_OK=0, ESP_FAIL=-1, ESP_ERR_NO_MEM=1, ESP_ERR_NOT_FINISHED=2;
 struct httpd_req_t {std::string output; int chunks=0, final=0, failure=0;};
 struct Request {explicit Request(httpd_req_t*){}};
 bool held=false, busy=false, body_broken=false;
 int prepare_result=ESP_OK, write_result=ESP_OK, live=0, prepared=0, written=0;
 struct Fault {};
 namespace fault {constexpr Fault kBusy{},kBodyIncomplete{},kJson{};}
-namespace network {struct HeavyGuard {
+namespace operations {struct Guard {
  bool admitted=!busy;
- HeavyGuard(){if(admitted){assert(!held);held=true;}}
- ~HeavyGuard(){if(admitted)held=false;}
+ Guard(){if(admitted){assert(!held);held=true;}}
+ ~Guard(){if(admitted)held=false;}
  explicit operator bool()const{return admitted;}
 };}
 namespace settings {
@@ -71,6 +71,15 @@ bool settingsJson(json::Writer&,int,bool){return true;}
 bool competitionsJson(json::Writer& out,int){return out.key("competitions")&&out.array()&&out.end();}
 bool screenPolicyJson(json::Writer&,int){return true;}
 '''
+app_header=(ROOT/'components/application/include/application_config.h').read_text()
+app_source=(ROOT/'components/application/config.cpp').read_text()
+codec=(ROOT/'components/web/config_json.cpp').read_text()
+code += 'namespace application { namespace detail {\n'+block(app_header,'class ConfigSnapshot {')+';\n}\n'
+code += block(app_header,'class ConfigExportSession {')+';\n'
+code += block(app_source,'esp_err_t detail::ConfigSnapshot::prepare(')
+code += block(app_source,'esp_err_t ConfigExportSession::prepare(')+'\n}\n'
+code += 'using WriteNames=bool(*)(json::Writer&,void*);\n'
+code += block(codec,'bool desiredJson(')+block(codec,'bool exportJson(')
 code += block(source, "class Writer {") + ";\n"
 code += "template<class Encode>\n" + block(source, "esp_err_t streamJson(")
 code += block(source, "esp_err_t getAdoptedNames(")

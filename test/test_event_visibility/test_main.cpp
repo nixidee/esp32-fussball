@@ -2,18 +2,20 @@
 // unrelated successful responses and clear only when every affected list fits.
 #include <unity.h>
 
+#include "../source_support.h"
 #include "match_store.h"
 
 namespace {
 using namespace football;
+namespace source_test = football::test_source;
 MatchStore store;
 constexpr Clock kClock{1792243800, 1000};
 StoredMatch& row(uint32_t id) {
   StoredMatch match;
   match.id = id;
-  match.competition = 1;
-  match.home = store.team(1, match.provider, 40, "Own club");
-  store.selectClub(1, match.provider, 40, kClock);
+  match.source = source_test::source(store, 1);
+  match.home = store.team(match.source, 40, "Own club");
+  source_test::selectClub(store, 1, store.provider(match.source), 40, kClock);
   match.phase = Phase::kLive;
   match.kickoff = kClock.utc - 1800;
   auto* result = store.upsert(match, kClock);
@@ -41,34 +43,39 @@ void tearDown() {}
 
 void test_thirteenth_event_produces_visible_competition_warning() {
   fill(10, 13, 100);
-  const auto* match = store.find(1, cfg::Provider::kOpenLigaDb, 10);
+  const auto* match = store.find(source_test::source(store, 1), 10);
   TEST_ASSERT_TRUE(match->flags & kMatchEventsTruncated);
-  TEST_ASSERT_TRUE(store.notices(1) & kNoticeEvents);
+  TEST_ASSERT_TRUE(store.notices(source_test::source(store, 1)) &
+                   kNoticeEvents);
   TEST_ASSERT_EQUAL_UINT8(12, store.detailAt(match->detail).event_count);
 }
 void test_another_success_cannot_hide_existing_event_loss() {
   fill(10, 13, 100);
   fill(20, 1, 200);
-  TEST_ASSERT_TRUE(store.notices(1) & kNoticeEvents);
-  const auto* match = store.find(1, cfg::Provider::kOpenLigaDb, 10);
+  TEST_ASSERT_TRUE(store.notices(source_test::source(store, 1)) &
+                   kNoticeEvents);
+  const auto* match = store.find(source_test::source(store, 1), 10);
   TEST_ASSERT_TRUE(match->flags & kMatchEventsTruncated);
 }
 void test_complete_fitting_replacement_clears_the_warning() {
   fill(10, 13, 100);
   fill(20, 1, 200);
   fill(10, 1, 300);
-  const auto* match = store.find(1, cfg::Provider::kOpenLigaDb, 10);
+  const auto* match = store.find(source_test::source(store, 1), 10);
   TEST_ASSERT_FALSE(match->flags & kMatchEventsTruncated);
-  TEST_ASSERT_FALSE(store.notices(1) & kNoticeEvents);
+  TEST_ASSERT_FALSE(store.notices(source_test::source(store, 1)) &
+                    kNoticeEvents);
 }
 void test_incomplete_thirteen_event_merge_keeps_loss_visible() {
   fill(10, 10, 100);
-  TEST_ASSERT_FALSE(store.notices(1) & kNoticeEvents);
+  TEST_ASSERT_FALSE(store.notices(source_test::source(store, 1)) &
+                    kNoticeEvents);
   fill(10, 3, 200, false);
-  const auto* match = store.find(1, cfg::Provider::kOpenLigaDb, 10);
+  const auto* match = store.find(source_test::source(store, 1), 10);
   TEST_ASSERT_EQUAL_UINT8(12, store.detailAt(match->detail).event_count);
   TEST_ASSERT_TRUE(match->flags & kMatchEventsTruncated);
-  TEST_ASSERT_TRUE(store.notices(1) & kNoticeEvents);
+  TEST_ASSERT_TRUE(store.notices(source_test::source(store, 1)) &
+                   kNoticeEvents);
 }
 int main() {
   UNITY_BEGIN();

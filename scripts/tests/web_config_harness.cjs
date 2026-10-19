@@ -5,7 +5,7 @@ const fs = require('node:fs'), path = require('node:path'),
       vm = require('node:vm');
 const assert = require('node:assert/strict'),
       {execFileSync} = require('node:child_process');
-const {readWebSource, autonomousBoundary} = require('./web_source.cjs');
+const {readWebSource, autonomousBoundary, featureProbes} = require('./web_source.cjs');
 const root = path.resolve(__dirname, '../..'),
       copy = value =>
           value === undefined ? undefined : JSON.parse(JSON.stringify(value));
@@ -110,8 +110,6 @@ function harness(filename) {
       provider_started: true,
       own_match: {present: false},
       settings_source: 'stored',
-      competitions_source: 'stored',
-      screen_policy_source: 'stored',
       fs_used: 100000,
       fs_total: 458752
     },
@@ -282,13 +280,12 @@ function harness(filename) {
     fetch: fetchApi,
     confirm: () => true
   };
-  const {script} = readWebSource(), boundary = autonomousBoundary(script);
-  const names = [...new Set(
-      [...script.matchAll(/^(?:async )?function (\w+)\(/gm)].map(m => m[1]))];
+  const probed = featureProbes(readWebSource().script), script = probed.script,
+        boundary = autonomousBoundary(script), names = probed.publicNames;
   vm.createContext(context);
   vm.runInContext(
       script.slice(0, boundary) +
-          `\nglobalThis.UI={S,ED,W,CAUSE,ACT,ApiError,get,set,${
+          `\nglobalThis.UI={...globalThis.__featureTests,S,W,CAUSE,ACT,ApiError,get,set,${
               names.join(',')}};render=()=>renderBar();paintErrors=()=>{};`,
       context);
   const U = context.UI;

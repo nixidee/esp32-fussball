@@ -21,18 +21,30 @@
 #include "time_service.h"
 namespace football {
 namespace {
+// One borrowed validity contract for transport waits and buffered parser work.
+// A request keeps its original generation/epoch/deadline through completion.
+struct RequestValidity {
+  uint32_t generation, epoch;
+  int64_t deadline;
+  const provider::Sink* consumer = nullptr;
+  bool valid() const {
+    return timekeeping::monotonicMs() < deadline &&
+           settings::dataGeneration() == generation && network::ready() &&
+           network::status().epoch == epoch &&
+           (!consumer || !consumer->cancelled ||
+            !consumer->cancelled(consumer->context));
+  }
+};
 // The SDK header-fetch loop has no whole-operation deadline of its own.
 // Bound the transport itself, including trickled headers, without sharing
 // or closing a live TLS handle from another task.
 struct Transport {
   esp_transport_handle_t tls = nullptr;
-  uint32_t generation, epoch;
-  int64_t deadline;
+  RequestValidity validity;
   std::size_t wire_limit, wire_bytes = 0, header_bytes = 0;
   uint32_t ending = 0;
   bool headers = true, failed = false;
   const SendHooks* send_hooks = nullptr;
-  const provider::Sink* consumer = nullptr;
   http::SendAdmission send{};
   // Where the request stopped and the socket's pending error, for the log.
   const char* stage = "dns";
@@ -41,19 +53,14 @@ struct Transport {
     const bool allowed =
         send.allowed(settings::footballPaused(),
                      send_hooks != nullptr && send_hooks->pause_with_frame);
-    const bool ok = timekeeping::monotonicMs() < deadline &&
-                    settings::dataGeneration() == generation &&
-                    network::ready() && network::status().epoch == epoch &&
-                    allowed &&
-                    (!consumer || !consumer->cancelled ||
-                     !consumer->cancelled(consumer->context));
+    const bool ok = allowed && validity.valid();
     failed |= !ok;
     return ok;
   }
   int timeout(int requested) {
     return static_cast<int>(std::max<int64_t>(
-        1,
-        std::min<int64_t>(requested, deadline - timekeeping::monotonicMs())));
+        1, std::min<int64_t>(requested,
+                             validity.deadline - timekeeping::monotonicMs())));
   }
   // One bounded wait slice before idle_end, so validity is rechecked often.
   int slice(int64_t idle_end) {
@@ -253,38 +260,35 @@ int pollWrite(esp_transport_handle_t t, int timeout) {
 int destroyTransport(esp_transport_handle_t) { return 0; }
 class Stream {
  public:
-  Stream(esp_http_client_handle_t client, uint32_t generation,
-         std::size_t limit, int64_t deadline,
-         const provider::Sink* consumer = nullptr)
-      : client_(client),
-        generation_(generation),
-        epoch_(network::status().epoch),
-        limit_(limit),
-        deadline_(deadline),
-        consumer_(consumer) {}
+  Stream(esp_http_client_handle_t client, const RequestValidity& validity,
+         std::size_t limit)
+      : client_(client), validity_(validity), limit_(limit) {}
   json::Input input() {
     return {this, [](void* raw) { return static_cast<Stream*>(raw)->next(); }};
   }
   bool complete() const {
-    return !failed_ && pos_ == size_ &&
+    return !failed_ && validity_.valid() && pos_ == size_ &&
            esp_http_client_is_complete_data_received(client_);
   }
-  bool failed() const { return failed_; }
+  bool failed() const { return failed_ || !validity_.valid(); }
   bool tooLarge() const { return too_large_; }
   std::size_t bytes() const { return bytes_; }
 
  private:
   int next() {
-    if (timekeeping::monotonicMs() >= deadline_ ||
-        settings::dataGeneration() != generation_ || !network::ready() ||
-        network::status().epoch != epoch_ ||
-        (consumer_ && consumer_->cancelled &&
-         consumer_->cancelled(consumer_->context))) {
-      failed_ = true;
-      return -1;
+    if (pos_ == size_ || checked_bytes_ >= cfg::kProviderValidityBytes) {
+      checked_bytes_ = 0;
+      if (!validity_.valid()) {
+        failed_ = true;
+        return -1;
+      }
     }
     if (pos_ == size_) {
       int received = esp_http_client_read(client_, buffer_, sizeof(buffer_));
+      if (!validity_.valid()) {
+        failed_ = true;
+        return -1;
+      }
       if (received <= 0) {
         failed_ |= received < 0;
         return -1;
@@ -297,13 +301,12 @@ class Stream {
       pos_ = 0;
       size_ = received;
     }
+    ++checked_bytes_;
     return static_cast<unsigned char>(buffer_[pos_++]);
   }
   esp_http_client_handle_t client_;
-  uint32_t generation_, epoch_;
-  std::size_t limit_, bytes_ = 0, pos_ = 0, size_ = 0;
-  int64_t deadline_;
-  const provider::Sink* consumer_;
+  const RequestValidity& validity_;
+  std::size_t limit_, bytes_ = 0, pos_ = 0, size_ = 0, checked_bytes_ = 0;
   char buffer_[cfg::kProviderReadBufferBytes];
   bool failed_ = false, too_large_ = false;
 };
@@ -322,14 +325,14 @@ esp_err_t fetchProvider(const provider::RequestSpec& spec,
   const auto limit = request.body_limit;
   esp_http_client_config_t config{};
   Transport context_transport{
-      esp_transport_ssl_init(), generation, network::status().epoch,
-      timekeeping::monotonicMs() + cfg::kOperationDeadlineMs,
+      esp_transport_ssl_init(),
+      {generation, network::status().epoch,
+       timekeeping::monotonicMs() + cfg::kOperationDeadlineMs, &sink},
       limit + cfg::kProviderHeaderBytes + cfg::kProviderWireOverheadBytes};
   if (send_hooks && send_hooks->deadline_ms > 0)
-    context_transport.deadline =
-        std::min(context_transport.deadline, send_hooks->deadline_ms);
+    context_transport.validity.deadline =
+        std::min(context_transport.validity.deadline, send_hooks->deadline_ms);
   context_transport.send_hooks = send_hooks;
-  context_transport.consumer = &sink;
   auto bounded = esp_transport_init();
   if (bounded == nullptr || context_transport.tls == nullptr) {
     if (bounded) esp_transport_destroy(bounded);
@@ -386,7 +389,7 @@ esp_err_t fetchProvider(const provider::RequestSpec& spec,
       err = ESP_FAIL;
   }
   if (err == ESP_OK) {
-    Stream stream(client, generation, limit, context_transport.deadline, &sink);
+    Stream stream(client, context_transport.validity, limit);
     json::Reader reader(stream.input());
     parsed = provider::readResponse(reader, spec, sink);
     if (stream.tooLarge()) {

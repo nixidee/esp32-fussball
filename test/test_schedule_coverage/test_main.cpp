@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <limits>
 
 #include "football_model.h"
@@ -19,11 +20,34 @@ settings::CompetitionRoutes competitions;
 c::Discovery discovery, rebooted;
 c::DiscoveryRecord proposed, restored_guard;
 
+football::SourceKey sourceKey(const settings::CompetitionRoute& entry,
+                              const char* season = nullptr) {
+  football::SourceKey result;
+  result.assign(
+      entry.primary.provider, entry.primary.competition.view(),
+      season ? std::string_view{season} : entry.primary.season.view());
+  return result;
+}
+c::Assessment assess(const c::EvidenceArray& proof,
+                     const settings::CompetitionRoutes& entries, uint32_t now,
+                     uint16_t days) {
+  std::array<football::SourceKey, cfg::kCompetitionMax> keys;
+  c::Requirements requirements;
+  for (uint8_t i = 0; i < entries.entries.size(); ++i) {
+    const auto& entry = entries.entries[i];
+    if (!entry.active) continue;
+    keys[i] = sourceKey(entry);
+    requirements[i] = {&keys[i], entry.id};
+  }
+  return c::assess(proof, requirements, now, days);
+}
 settings::CompetitionRoute& addCompetition(uint8_t id) {
   settings::CompetitionRoute entry;
   entry.id = id;
   entry.incarnation = 100 + id;
-  entry.primary.competition.assign("bl1");
+  char league[8];
+  std::snprintf(league, sizeof(league), "bl%u", unsigned(id));
+  entry.primary.competition.assign(league);
   entry.primary.season.assign("2026");
   competitions.entries.push(entry);
   return competitions.entries[competitions.entries.size() - 1];
@@ -33,10 +57,12 @@ c::Integrity complete(uint32_t rows) { return {rows, true, true, true, true}; }
 
 void putSpan(unsigned slot, uint32_t previous, uint32_t next, uint32_t from,
              uint32_t to, uint32_t now = kNow, const char* season = "2026") {
-  const auto key = c::identity(competitions.entries[slot]);
-  if (evidence[slot].id == 0) c::bind(evidence[slot], key);
+  const auto key = sourceKey(competitions.entries[slot], season);
+  const auto proof_slot =
+      2 * slot + (std::string_view{season} == "2027" ? 1 : 0);
+  if (!evidence[proof_slot].source.valid()) c::bind(evidence[proof_slot], key);
   c::Collector collector;
-  collector.begin(key, season, from, to, now, c::Proof::kDateRange);
+  collector.begin(key, from, to, now, c::Proof::kDateRange);
   unsigned rows = 0;
   if (previous) {
     collector.observe(previous);
@@ -48,7 +74,8 @@ void putSpan(unsigned slot, uint32_t previous, uint32_t next, uint32_t from,
   }
   const auto& result = collector.finish(now, complete(rows));
   TEST_ASSERT_EQUAL(c::Completeness::kComplete, result.completeness);
-  TEST_ASSERT_EQUAL(c::Reason::kNone, c::accept(evidence[slot], key, result));
+  TEST_ASSERT_EQUAL(c::Reason::kNone,
+                    c::accept(evidence[proof_slot], key, result));
 }
 
 void longGap(unsigned slot = 0) {
@@ -58,11 +85,11 @@ void longGap(unsigned slot = 0) {
 
 void complete_stream_evidence_does_not_depend_on_display_capacity() {
   addCompetition(1);
-  const auto key = c::identity(competitions.entries[0]);
+  const auto key = sourceKey(competitions.entries[0]);
   c::bind(evidence[0], key);
   c::Collector all, truncated;
   for (auto* collector : {&all, &truncated})
-    collector->begin(key, "2026", kNow - 100 * kDay, kNow + 100 * kDay, kNow,
+    collector->begin(key, kNow - 100 * kDay, kNow + 100 * kDay, kNow,
                      c::Proof::kFullSeason);
   // Both actual neighbours arrive AFTER the display store's row capacity.
   // The proof still observes them through its own compact stream reduction.
@@ -80,7 +107,7 @@ void complete_stream_evidence_does_not_depend_on_display_capacity() {
   TEST_ASSERT_EQUAL_UINT32(kNow + 30 * kDay, result.next);
   TEST_ASSERT_EQUAL(c::Reason::kNone, c::accept(evidence[0], key, result));
   TEST_ASSERT_EQUAL(c::Verdict::kBreak,
-                    c::assess(evidence, competitions, kNow, 21).verdict);
+                    assess(evidence, competitions, kNow, 21).verdict);
   TEST_ASSERT_EQUAL(
       c::Completeness::kPartial,
       truncated.finish(kNow, complete(cfg::kStoreMatches + 82)).completeness);
@@ -93,26 +120,26 @@ void every_active_competition_counts_even_without_club_or_enabled_screens() {
   TEST_ASSERT_FALSE(other.hasClub());
   longGap();
   TEST_ASSERT_EQUAL(c::Verdict::kUnknown,
-                    c::assess(evidence, competitions, kNow, 21).verdict);
+                    assess(evidence, competitions, kNow, 21).verdict);
   putSpan(1, kNow - 2 * kDay, kNow + 2 * kDay, kNow - 40 * kDay,
           kNow + 40 * kDay);
   TEST_ASSERT_EQUAL(c::Verdict::kNoBreak,
-                    c::assess(evidence, competitions, kNow, 21).verdict);
+                    assess(evidence, competitions, kNow, 21).verdict);
   other.active = false;
   TEST_ASSERT_EQUAL(c::Verdict::kBreak,
-                    c::assess(evidence, competitions, kNow, 21).verdict);
+                    assess(evidence, competitions, kNow, 21).verdict);
 }
 
 void complete_empty_competition_needs_other_real_global_neighbours() {
   addCompetition(1);
   putSpan(0, 0, 0, kNow - 40 * kDay, kNow + 40 * kDay);
-  auto result = c::assess(evidence, competitions, kNow, 21);
+  auto result = assess(evidence, competitions, kNow, 21);
   TEST_ASSERT_EQUAL(c::Verdict::kUnknown, result.verdict);
   TEST_ASSERT_EQUAL(c::Reason::kMissingNeighbours, result.reason);
   addCompetition(2);
   longGap(1);
   TEST_ASSERT_EQUAL(c::Verdict::kBreak,
-                    c::assess(evidence, competitions, kNow, 21).verdict);
+                    assess(evidence, competitions, kNow, 21).verdict);
 }
 
 void strict_elapsed_day_threshold_and_dst_offsets_never_use_local_date_counts() {
@@ -123,7 +150,7 @@ void strict_elapsed_day_threshold_and_dst_offsets_never_use_local_date_counts() 
     const auto next = static_cast<uint32_t>(football::parseUtc(after));
     const auto anchor = static_cast<uint32_t>(football::parseUtc(now));
     putSpan(0, previous, next, previous, next, anchor);
-    return c::assess(evidence, competitions, anchor, 21).verdict;
+    return assess(evidence, competitions, anchor, 21).verdict;
   };
   // The same local time 21 calendar dates later is 20d23h across spring DST.
   TEST_ASSERT_EQUAL(c::Verdict::kNoBreak, run("2026-03-15T12:00:00+01:00",
@@ -146,40 +173,41 @@ void freshness_expiry_and_backward_clock_are_explicit_unknowns() {
   longGap();
   TEST_ASSERT_EQUAL(
       c::Verdict::kBreak,
-      c::assess(evidence, competitions, kNow + cfg::kCoverageMaxAgeS - 1, 21)
+      assess(evidence, competitions, kNow + cfg::kCoverageMaxAgeS - 1, 21)
           .verdict);
   auto result =
-      c::assess(evidence, competitions, kNow + cfg::kCoverageMaxAgeS, 21);
+      assess(evidence, competitions, kNow + cfg::kCoverageMaxAgeS, 21);
   TEST_ASSERT_EQUAL(c::Verdict::kUnknown, result.verdict);
   TEST_ASSERT_EQUAL(c::Reason::kStale, result.reason);
-  result = c::assess(evidence, competitions, kNow - 1, 21);
+  result = assess(evidence, competitions, kNow - 1, 21);
   TEST_ASSERT_EQUAL(c::Verdict::kUnknown, result.verdict);
   TEST_ASSERT_EQUAL(c::Reason::kClock, result.reason);
 }
 
-void source_and_incarnation_changes_never_reuse_another_competitions_proof() {
+void source_changes_reject_old_proof_but_view_incarnation_keeps_shared_facts() {
   auto& competition = addCompetition(1);
   longGap();
-  const auto hash = c::identity(competition).source;
+  const auto original = sourceKey(competition);
   competition.club.team = 40;
-  TEST_ASSERT_EQUAL(hash, c::identity(competition).source);
+  TEST_ASSERT_TRUE(original == sourceKey(competition));
   TEST_ASSERT_EQUAL(c::Verdict::kBreak,
-                    c::assess(evidence, competitions, kNow, 21).verdict);
+                    assess(evidence, competitions, kNow, 21).verdict);
   competition.primary.season.assign("2027");
-  TEST_ASSERT_NOT_EQUAL(hash, c::identity(competition).source);
+  TEST_ASSERT_FALSE(original == sourceKey(competition));
   TEST_ASSERT_EQUAL(c::Reason::kIdentity,
-                    c::assess(evidence, competitions, kNow, 21).reason);
+                    assess(evidence, competitions, kNow, 21).reason);
   competition.primary.season.assign("2026");
   ++competition.incarnation;
-  TEST_ASSERT_EQUAL(c::Reason::kIdentity,
-                    c::assess(evidence, competitions, kNow, 21).reason);
+  // A configured view incarnation cannot change the shared provider facts.
+  TEST_ASSERT_EQUAL(c::Verdict::kBreak,
+                    assess(evidence, competitions, kNow, 21).verdict);
 }
 
 void body_limit_pagination_missing_metadata_and_tbd_never_become_complete() {
   addCompetition(1);
-  const auto key = c::identity(competitions.entries[0]);
+  const auto key = sourceKey(competitions.entries[0]);
   const auto prepare = [&](c::Collector& collector) {
-    collector.begin(key, "2026", kNow - 40 * kDay, kNow + 40 * kDay, kNow,
+    collector.begin(key, kNow - 40 * kDay, kNow + 40 * kDay, kNow,
                     c::Proof::kDateRange);
     collector.observe(kNow - 30 * kDay);
     collector.observe(kNow + 30 * kDay);
@@ -212,18 +240,17 @@ void body_limit_pagination_missing_metadata_and_tbd_never_become_complete() {
 void a_small_success_cannot_rejuvenate_season_proof_and_new_game_invalidates_it() {
   addCompetition(1);
   longGap();
-  const auto key = c::identity(competitions.entries[0]);
-  const auto checked = evidence[0].seasons[0].checked_utc;
-  TEST_ASSERT_FALSE(c::observeNormal(evidence[0], key, kNow - 30 * kDay));
-  TEST_ASSERT_EQUAL_UINT32(checked, evidence[0].seasons[0].checked_utc);
+  const auto key = sourceKey(competitions.entries[0]);
+  const auto checked = evidence[0].span.checked_utc;
+  TEST_ASSERT_FALSE(c::observeNormal(evidence, key, kNow - 30 * kDay));
+  TEST_ASSERT_EQUAL_UINT32(checked, evidence[0].span.checked_utc);
   TEST_ASSERT_EQUAL(
       c::Reason::kStale,
-      c::assess(evidence, competitions, kNow + cfg::kCoverageMaxAgeS, 21)
-          .reason);
-  TEST_ASSERT_TRUE(c::observeNormal(evidence[0], key, kNow + 10 * kDay));
+      assess(evidence, competitions, kNow + cfg::kCoverageMaxAgeS, 21).reason);
+  TEST_ASSERT_TRUE(c::observeNormal(evidence, key, kNow + 10 * kDay));
   TEST_ASSERT_EQUAL(c::Reason::kTimingChanged,
-                    c::assess(evidence, competitions, kNow, 21).reason);
-  TEST_ASSERT_EQUAL_UINT32(checked, evidence[0].seasons[0].checked_utc);
+                    assess(evidence, competitions, kNow, 21).reason);
+  TEST_ASSERT_EQUAL_UINT32(checked, evidence[0].span.checked_utc);
 }
 
 void two_seasons_join_only_through_proved_utc_adjacency_not_their_year_numbers() {
@@ -232,25 +259,23 @@ void two_seasons_join_only_through_proved_utc_adjacency_not_their_year_numbers()
   putSpan(0, kNow - 30 * kDay, 0, kNow - 40 * kDay, split, kNow, "2026");
   putSpan(0, 0, kNow + 30 * kDay, split + 1, kNow + 40 * kDay, kNow, "2027");
   TEST_ASSERT_EQUAL(c::Verdict::kBreak,
-                    c::assess(evidence, competitions, kNow, 21).verdict);
-  ++evidence[0].seasons[1].from;  // a single unproved UTC second is enough
+                    assess(evidence, competitions, kNow, 21).verdict);
+  ++evidence[1].span.from;  // a single unproved UTC second is enough
   TEST_ASSERT_EQUAL(c::Reason::kUncovered,
-                    c::assess(evidence, competitions, kNow, 21).reason);
-  --evidence[0].seasons[1].from;
-  const auto key = c::identity(competitions.entries[0]);
-  auto third = evidence[0].seasons[1];
-  third.season.assign("2028");
-  TEST_ASSERT_EQUAL(c::Reason::kSeasonLimit,
-                    c::accept(evidence[0], key, third));
+                    assess(evidence, competitions, kNow, 21).reason);
+  --evidence[1].span.from;
+  const auto key = sourceKey(competitions.entries[0]);
+  football::SourceKey third;
+  TEST_ASSERT_FALSE(c::seasonSource(key, 2, third));
 }
 
 void moving_past_a_remembered_neighbour_cannot_create_an_infinite_gap() {
   addCompetition(1);
   putSpan(0, kNow - 30 * kDay, kNow + 10, kNow - 40 * kDay, kNow + 40 * kDay);
   TEST_ASSERT_EQUAL(c::Verdict::kBreak,
-                    c::assess(evidence, competitions, kNow, 21).verdict);
+                    assess(evidence, competitions, kNow, 21).verdict);
   TEST_ASSERT_EQUAL(c::Verdict::kUnknown,
-                    c::assess(evidence, competitions, kNow + 11, 21).verdict);
+                    assess(evidence, competitions, kNow + 11, 21).verdict);
 }
 
 void new_game_at_a_proved_season_boundary_also_invalidates_the_joined_gap() {
@@ -259,20 +284,20 @@ void new_game_at_a_proved_season_boundary_also_invalidates_the_joined_gap() {
   putSpan(0, kNow - 30 * kDay, 0, kNow - 40 * kDay, split, kNow, "2026");
   putSpan(0, 0, kNow + 30 * kDay, split + 1, kNow + 40 * kDay, kNow, "2027");
   TEST_ASSERT_EQUAL(c::Verdict::kBreak,
-                    c::assess(evidence, competitions, kNow, 21).verdict);
-  TEST_ASSERT_TRUE(c::observeNormal(
-      evidence[0], c::identity(competitions.entries[0]), split));
+                    assess(evidence, competitions, kNow, 21).verdict);
+  TEST_ASSERT_TRUE(
+      c::observeNormal(evidence, sourceKey(competitions.entries[0]), split));
   TEST_ASSERT_EQUAL(c::Reason::kTimingChanged,
-                    c::assess(evidence, competitions, kNow, 21).reason);
+                    assess(evidence, competitions, kNow, 21).reason);
 }
 
 void an_overlapping_season_cannot_hide_games_after_a_remembered_next_kickoff() {
   addCompetition(1);
-  const auto key = c::identity(competitions.entries[0]);
+  const auto key = sourceKey(competitions.entries[0]);
   c::bind(evidence[0], key);
   c::Collector first;
   const auto collect = [&](uint32_t anchor) {
-    first.begin(key, "2026", kNow - 40 * kDay, kNow + 40 * kDay, anchor,
+    first.begin(key, kNow - 40 * kDay, kNow + 40 * kDay, anchor,
                 c::Proof::kFullSeason);
     first.observe(kNow - 30 * kDay);
     first.observe(kNow + 10);
@@ -285,31 +310,31 @@ void an_overlapping_season_cannot_hide_games_after_a_remembered_next_kickoff() {
   collect(kNow);
   putSpan(0, 0, kNow + 30 * kDay, kNow + 10, kNow + 40 * kDay, kNow, "2027");
   TEST_ASSERT_EQUAL(c::Verdict::kBreak,
-                    c::assess(evidence, competitions, kNow, 21).verdict);
-  const auto after = c::assess(evidence, competitions, kNow + 11, 21);
+                    assess(evidence, competitions, kNow, 21).verdict);
+  const auto after = assess(evidence, competitions, kNow + 11, 21);
   TEST_ASSERT_EQUAL(c::Verdict::kUnknown, after.verdict);
   TEST_ASSERT_EQUAL(c::Reason::kUncovered, after.reason);
   collect(kNow + 11);  // only a complete new query supplies the next real game
   TEST_ASSERT_EQUAL(c::Verdict::kNoBreak,
-                    c::assess(evidence, competitions, kNow + 11, 21).verdict);
+                    assess(evidence, competitions, kNow + 11, 21).verdict);
 }
 
 void partial_or_stale_overlapping_season_is_not_replaced_by_another_season() {
   addCompetition(1);
   longGap();
-  const auto key = c::identity(competitions.entries[0]);
-  auto partial = evidence[0].seasons[0];
+  const auto key = sourceKey(competitions.entries[0]);
+  auto partial = evidence[0].span;
   partial.completeness = c::Completeness::kPartial;
   partial.reason = c::Reason::kBodyLimit;
   TEST_ASSERT_EQUAL(c::Reason::kNone, c::accept(evidence[0], key, partial));
   putSpan(0, kNow - 30 * kDay, kNow + 30 * kDay, kNow - 40 * kDay,
           kNow + 40 * kDay, kNow, "2027");
   TEST_ASSERT_EQUAL(c::Verdict::kUnknown,
-                    c::assess(evidence, competitions, kNow, 21).verdict);
+                    assess(evidence, competitions, kNow, 21).verdict);
   longGap();
-  evidence[0].seasons[0].checked_utc = kNow - cfg::kCoverageMaxAgeS;
+  evidence[0].span.checked_utc = kNow - cfg::kCoverageMaxAgeS;
   TEST_ASSERT_EQUAL(c::Verdict::kUnknown,
-                    c::assess(evidence, competitions, kNow, 21).verdict);
+                    assess(evidence, competitions, kNow, 21).verdict);
 }
 
 void normal_contradiction_stays_unknown_until_the_affected_season_is_reproved() {
@@ -319,20 +344,21 @@ void normal_contradiction_stays_unknown_until_the_affected_season_is_reproved() 
   putSpan(0, kNow - 30 * kDay, kNow + 30 * kDay, kNow - 40 * kDay,
           kNow + 40 * kDay, kNow, "2027");
   TEST_ASSERT_EQUAL(c::Verdict::kBreak,
-                    c::assess(evidence, competitions, kNow, 21).verdict);
+                    assess(evidence, competitions, kNow, 21).verdict);
   TEST_ASSERT_TRUE(c::observeNormal(
-      evidence[0], c::identity(competitions.entries[0]), kNow + kDay));
-  for (const auto& span : evidence[0].seasons) {
+      evidence, sourceKey(competitions.entries[0]), kNow + kDay));
+  for (unsigned i = 0; i < 2; ++i) {
+    const auto& span = evidence[i].span;
     TEST_ASSERT_EQUAL(c::Completeness::kPartial, span.completeness);
     TEST_ASSERT_EQUAL(c::Reason::kTimingChanged, span.reason);
   }
   putSpan(0, kNow - 30 * kDay, kNow + 30 * kDay, kNow - 40 * kDay,
           kNow + 40 * kDay, kNow, "2027");
   TEST_ASSERT_EQUAL(c::Verdict::kUnknown,
-                    c::assess(evidence, competitions, kNow, 21).verdict);
+                    assess(evidence, competitions, kNow, 21).verdict);
   putSpan(0, kNow - 15 * kDay, kNow + kDay, kNow - 40 * kDay, kNow + 40 * kDay);
   TEST_ASSERT_EQUAL(c::Verdict::kNoBreak,
-                    c::assess(evidence, competitions, kNow, 21).verdict);
+                    assess(evidence, competitions, kNow, 21).verdict);
 }
 
 void missing_refresh_metadata_cannot_be_cleared_by_another_seasons_success() {
@@ -340,25 +366,28 @@ void missing_refresh_metadata_cannot_be_cleared_by_another_seasons_success() {
   longGap();
   putSpan(0, kNow - 30 * kDay, kNow + 30 * kDay, kNow - 40 * kDay,
           kNow + 40 * kDay, kNow, "2027");
-  const auto key = c::identity(competitions.entries[0]);
+  const auto key = sourceKey(competitions.entries[0]);
   c::Collector failed;
-  failed.begin(key, "", kNow - 40 * kDay, kNow + 40 * kDay, kNow,
+  failed.begin(key, kNow - 40 * kDay, kNow + 40 * kDay, kNow,
                c::Proof::kFullSeason);
-  const auto& partial = failed.finish(kNow, complete(0));
+  auto incomplete = complete(0);
+  incomplete.metadata_verified = false;
+  const auto& partial = failed.finish(kNow, incomplete);
   TEST_ASSERT_EQUAL(c::Reason::kMissingMetadata, partial.reason);
-  TEST_ASSERT_EQUAL(c::Reason::kNone, c::accept(evidence[0], key, partial));
-  TEST_ASSERT_EQUAL_UINT8(2, evidence[0].season_count);
-  for (const auto& span : evidence[0].seasons) {
+  TEST_ASSERT_EQUAL(c::Reason::kNone, c::accept(evidence, key, partial));
+  TEST_ASSERT_TRUE(evidence[0].populated && evidence[1].populated);
+  for (unsigned i = 0; i < 2; ++i) {
+    const auto& span = evidence[i].span;
     TEST_ASSERT_EQUAL(c::Completeness::kPartial, span.completeness);
     TEST_ASSERT_EQUAL(c::Reason::kMissingMetadata, span.reason);
   }
   putSpan(0, kNow - 30 * kDay, kNow + 30 * kDay, kNow - 40 * kDay,
           kNow + 40 * kDay, kNow, "2027");
   TEST_ASSERT_EQUAL(c::Verdict::kUnknown,
-                    c::assess(evidence, competitions, kNow, 21).verdict);
+                    assess(evidence, competitions, kNow, 21).verdict);
   longGap();
   TEST_ASSERT_EQUAL(c::Verdict::kBreak,
-                    c::assess(evidence, competitions, kNow, 21).verdict);
+                    assess(evidence, competitions, kNow, 21).verdict);
 }
 
 void sixteen_device_requests_and_one_new_daily_run_require_persist_then_commit() {
@@ -478,7 +507,7 @@ int main(int, char**) {
       strict_elapsed_day_threshold_and_dst_offsets_never_use_local_date_counts);
   RUN_TEST(freshness_expiry_and_backward_clock_are_explicit_unknowns);
   RUN_TEST(
-      source_and_incarnation_changes_never_reuse_another_competitions_proof);
+      source_changes_reject_old_proof_but_view_incarnation_keeps_shared_facts);
   RUN_TEST(
       body_limit_pagination_missing_metadata_and_tbd_never_become_complete);
   RUN_TEST(

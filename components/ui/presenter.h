@@ -72,6 +72,11 @@ class Presenter {
   football::names::Targets* name_targets;
   const settings::UiConfig* configuration;
   const char* version;
+  void setLayout(Layout next) {
+    // Targets borrow only the active payload. Never resolve an overwritten row.
+    if (name_targets) name_targets->count = 0;
+    view.setLayout(next);
+  }
   template <std::size_t N, std::size_t M>
   void teamTarget(char (&out)[N], char (&short_out)[M],
                   const football::MatchStore& store,

@@ -8,11 +8,12 @@
 #include <cstdint>
 #include <cstring>
 
+#include "../source_support.h"
 #include "app_config.h"
 #include "conference.h"
 #include "football_model.h"
 #include "match_store.h"
-#include "matchday.h"
+#include "screen_selection.h"
 #include "settings_model.h"
 #include "store_views.h"
 
@@ -26,6 +27,7 @@ using football::StoredEvent;
 using football::StoredMatch;
 using football::StoredRow;
 namespace view = football::view;
+namespace source_test = football::test_source;
 
 constexpr int64_t kMin = 60;
 constexpr int64_t kHour = 3600;
@@ -40,7 +42,8 @@ football::TeamIndex team(uint8_t competition, cfg::Provider provider,
                          uint32_t id) {
   char name[16];
   snprintf(name, sizeof(name), "Team %u", static_cast<unsigned>(id));
-  return store.team(competition, provider, id, name);
+  return store.team(source_test::source(store, competition, provider), id,
+                    name);
 }
 
 StoredMatch* add(uint8_t competition, uint32_t id, uint8_t round,
@@ -48,21 +51,22 @@ StoredMatch* add(uint8_t competition, uint32_t id, uint8_t round,
                  cfg::Provider provider = kOlg) {
   StoredMatch m;
   m.id = id;
-  m.competition = competition;
-  m.provider = provider;
+  m.source = source_test::source(store, competition, provider);
   m.round = round;
   m.kickoff = static_cast<uint32_t>(kickoff);
   m.phase = phase;
   m.home = team(competition, provider, own ? 40 : id * 2);
   m.away = team(competition, provider, id * 2 + 1);
-  if (own) store.selectClub(competition, m.provider, 40, {kickoff, 0});
+  if (own)
+    source_test::selectClub(store, competition, store.provider(m.source), 40,
+                            {kickoff, 0});
   return store.upsert(m, {kickoff, 0});
 }
 
 view::Shown shownAll() {
   view::Shown shown;
-  shown.add(view::Source{kLeague, kOlg});
-  shown.add(view::Source{kCup, kOlg});
+  shown.add(view::Source{kLeague});
+  shown.add(view::Source{kCup});
   return shown;
 }
 
@@ -83,7 +87,9 @@ void test_entry_shows_its_source_rows() {
 
   view::Shown normal;
   normal.add(entry(kLeague, kOlg));
-  TEST_ASSERT_EQUAL(kOlg, normal.source(kLeague)->provider);
+  TEST_ASSERT_EQUAL(
+      kOlg,
+      store.provider(store.currentSource(normal.source(kLeague)->competition)));
   TEST_ASSERT_TRUE(store.isOwn(store.match(0)));
   TEST_ASSERT_EQUAL_UINT(1, view::matchCount(store, normal, kLeague));
 
@@ -103,11 +109,11 @@ void test_own_match_choice_for_overview() {
   add(kCup, 2, 1, now + 4 * 24 * kHour, Phase::kScheduled, true);
   add(kLeague, 3, 6, now + 20 * kMin, Phase::kScheduled, true);
   const auto shown = shownAll();
-  int i = view::ownForOverview(store, shown, now);
+  int i = view::ownForOverview(store, shown, now).index;
   TEST_ASSERT_EQUAL_UINT32(3, store.match(i).id);
   // A running own match wins the overview over a closer one.
   add(kCup, 4, 1, now - 2 * kHour, Phase::kExtraTime, true);
-  i = view::ownForOverview(store, shown, now);
+  i = view::ownForOverview(store, shown, now).index;
   TEST_ASSERT_EQUAL_UINT32(4, store.match(i).id);
 }
 
@@ -128,12 +134,13 @@ void test_names_share_the_single_original_directory() {
 void test_table_rows_of_one_competition() {
   store.clear();
   for (uint8_t c : {kLeague, kCup}) {
-    store.beginTable(c);
+    store.beginTable(source_test::source(store, c));
     for (uint8_t i = 0; i < 4; ++i) {
       StoredRow r;
       r.team = team(c, kOlg, 100u * c + i);
       r.position = i + 1;
-      if (c == kLeague && i == 2) store.selectClub(c, kOlg, 100u * c + i, {});
+      if (c == kLeague && i == 2)
+        source_test::selectClub(store, c, kOlg, 100u * c + i, {});
       store.appendRow(r);
     }
     store.commitTable(true);
@@ -184,12 +191,14 @@ void test_events_in_match_order_without_hidden_ones() {
     store.addEvent(e);
   store.endEvents();
 
-  const auto list = view::events(store, *store.find(kLeague, kOlg, 3));
+  const auto list =
+      view::events(store, *store.find(source_test::source(store, kLeague), 3));
   static constexpr uint32_t kOrder[] = {6, 4, 1, 2};
   TEST_ASSERT_EQUAL_UINT(4, list.count);
   for (unsigned i = 0; i < list.count; ++i)
     TEST_ASSERT_EQUAL_UINT32(kOrder[i], store.eventAt(list.index[i]).identity);
-  const auto shots = view::shootout(store, *store.find(kLeague, kOlg, 3));
+  const auto shots = view::shootout(
+      store, *store.find(source_test::source(store, kLeague), 3));
   TEST_ASSERT_EQUAL_UINT(1, shots.count);
   TEST_ASSERT_EQUAL_UINT32(3, store.eventAt(shots.index[0]).identity);
   // Not an own match: no events.
@@ -219,6 +228,7 @@ void test_conference_owner_page_distributions_preserve_count_and_order() {
   for (const auto& example : examples) {
     const auto list = conference(example.count);
     football::ConferenceRequest request;
+    request.competition = kLeague;
     request.per_page = example.capacity;
     request.pin_own = false;
     unsigned next = 0;
@@ -253,6 +263,7 @@ void test_conference_pin_is_repeated_without_losing_unique_matches() {
   for (const auto& example : examples) {
     const auto list = conference(example.unique, true);
     football::ConferenceRequest request;
+    request.competition = kLeague;
     request.per_page = example.capacity;
     std::array<bool, cfg::kStoreMatches> seen{};
     unsigned unique = 0;
@@ -275,6 +286,7 @@ void test_conference_pin_is_repeated_without_losing_unique_matches() {
 void test_conference_minimum_two_keeps_pin_and_all_others_reachable() {
   const auto list = conference(4, true);
   football::ConferenceRequest request;
+  request.competition = kLeague;
   request.per_page = 2;
   unsigned others = 0;
   for (unsigned p = 0; p < 3; ++p) {
@@ -293,6 +305,7 @@ void test_conference_single_actual_fixture_needs_no_extra_row_or_page() {
   for (bool own : {false, true}) {
     const auto list = conference(1, own);
     football::ConferenceRequest request;
+    request.competition = kLeague;
     request.per_page = 2;
     request.page = 5;
     const auto page = view::conferencePage(store, list, request);
@@ -313,16 +326,18 @@ void test_every_widened_match_index_is_reachable() {
   for (unsigned i = 0; i < cfg::kStoreMatches; ++i) {
     StoredMatch match;
     match.id = i + 1;
-    match.competition = kLeague;
+    match.source = source_test::source(store, kLeague);
     match.kickoff = static_cast<uint32_t>(kSaturday);
     match.phase = Phase::kLive;
-    match.home = store.team(match.competition, match.provider,
-                            i + 1 == cfg::kStoreMatches ? 40 : 41, "Home");
-    store.selectClub(match.competition, match.provider, 40, {});
+    match.home =
+        store.team(match.source, i + 1 == cfg::kStoreMatches ? 40 : 41, "Home");
+    source_test::selectClub(store, kLeague, store.provider(match.source), 40,
+                            {});
     TEST_ASSERT_NOT_NULL(store.upsert(match, {kSaturday, 1}));
     list.index[list.count++] = static_cast<football::MatchIndex>(i);
   }
   football::ConferenceRequest request;
+  request.competition = kLeague;
   request.mode = cfg::ConferenceMode::kAllPages;
   request.pin_own = true;
   request.per_page = 2;
@@ -338,10 +353,21 @@ void test_every_widened_match_index_is_reachable() {
       reached[visible.rows[row]] = true;
   }
   for (bool found : reached) TEST_ASSERT_TRUE(found);
-  football::matchday::Span span;
-  TEST_ASSERT_TRUE(football::matchday::next(
-      store, kLeague, [](const StoredMatch&) { return true; }, 0, span));
-  TEST_ASSERT_EQUAL(cfg::kStoreMatches, span.end);
+  settings::CompetitionRoutes routes;
+  settings::CompetitionRoute route;
+  route.id = route.incarnation = kLeague;
+  route.primary.provider = kOlg;
+  routes.entries.push(route);
+  football::selection::Input input(settings::screen_policy::Options{}, routes,
+                                   store, {kSaturday, 1});
+  const auto round = football::selection::round(input, routes.entries[0],
+                                                cfg::MatchdayMode::kCurrent);
+  TEST_ASSERT_TRUE(round.valid());
+  std::size_t reached_round = 0;
+  for (std::size_t i = 0; i < store.matchCount(); ++i)
+    if (football::selection::roundContains(input, round, store.match(i)))
+      ++reached_round;
+  TEST_ASSERT_EQUAL(cfg::kStoreMatches, reached_round);
 }
 
 int main() {

@@ -11,7 +11,7 @@ idf_component_register(
   INCLUDE_DIRS "include"
   PRIV_INCLUDE_DIRS "../../include"
   REQUIRES football settings json
-  PRIV_REQUIRES files network system)
+  PRIV_REQUIRES files system)
 
 # Generated before every PlatformIO build, including cached CMake runs.
 set(team_name_asset_dir "${CMAKE_BINARY_DIR}/team_name_asset")

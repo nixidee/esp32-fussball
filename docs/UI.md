@@ -939,3 +939,9 @@ remain the fallback when the working directory cannot hold an identity. The
 name cutover still requires owner screenshots of Single, Conference, Matchday,
 Table, Overview and start/next-match content; host checks do not establish round
 LCD layout acceptance.
+
+The controller's output uses one active content payload for the selected
+layout. Switching from a missing image card back to sport data reconstructs
+that payload and its visible-name targets. Shared status, badge and scene style
+are independent. This changes storage, not the information or page capacities.
+Physical screenshots of all affected screen types remain required.

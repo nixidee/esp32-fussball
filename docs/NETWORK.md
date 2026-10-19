@@ -103,7 +103,7 @@ Local initialization is retried by the existing application loop. Each
 confirmed step retains its resources; only failed steps are retried, with
 at least ten seconds between automatic retry batches. New settings are
 adopted through the same path. Retry requires the existing nonblocking
-heavy-operation token, so it waits while TLS, upload or another admitted
+platform operation-admission token, so it waits while TLS, upload or another admitted
 operation holds that token. A portal-DNS or mDNS failure does
 not stop working WiFi, the setup AP or HTTP. Initial hostname assignment
 and later hostname changes share the same acknowledged retry path; HTTP

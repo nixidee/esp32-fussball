@@ -532,9 +532,9 @@ security, TLS verification and the trusted-root bundle are unchanged.
 
 ## Resources and acceptance
 
-Final C6 compiler layout: Model704B, Competitions1708B, RuntimeRoutes1060B,
+Current C6 compiler layout (2026-10-18): Model704B, Competitions1708B, RuntimeRoutes1060B,
 Policy260B, AppConfig2704B, UiConfig448B (including derived Program206B),
-PreparedContent116B, ViewModel2044B, shared JSON Reader48B/Writer64B.
+PreparedContent116B, ViewModel980B, shared JSON Reader48B/Writer64B.
 WebSettings131B, NetworkSettings291B and ProviderSettings284B are the narrow
 consumer copies. The previous full general/policy owners and independent
 competition-rule matrix are retired. These types are included in linked
@@ -547,20 +547,33 @@ import arena before the NVS wire allocation. During import the candidate and
 arena request35584B plus allocator overhead; there is no body/DOM copy.
 Names export uses its separate bounded grouping index described above.
 
-The matching C6 build on2026-10-18 measures linkedFlash1,732,486B,
-staticRAM174,200B, binary1,733,248B and embedded Webgzip89,818B. The
-pre-consolidation baseline was1,766,298/161,012/1,767,056/80,187B respectively:
-net−33,812/+13,188/−33,808/+9,631B. Safe SDK/font/code retirement savings are
-included in these totals; isolated object payloads above are not additive.
+The current C6 quality-remediation build on2026-10-18 measures linked
+Flash1,751,182B, staticRAM178,740B, binary1,751,936B and Webgzip92,683B.
+The nine source remedies and focused integration checks are complete;
+keyed-provider and physical acceptance remain open. The pre-consolidation baseline was
+1,766,298/161,012/1,767,056/80,187B: net-15,116/+17,728/-15,120/+12,496B.
+Individual object sizes are not additive to the linked totals.
 
-The unchanged1,835,008B OTA slot has101,760B free. Its85%limit is1,559,756B;
-the binary exceeds it by173,492B. This acceptance criterion fails and has not
-been waived. No partition/image quota/security reduction is implied.
+The2026-10-18 generator-publication follow-up rechecked the active C6 build:
+Flash/staticRAM/binary/Webgzip deltas are0/0/0/0B. All three generated build
+files, firmware ELF and binary retain their exact hashes; the binary SHA256 is
+`32ffb03a8b1fe17db8b24c1df05d91669f9cce4939b273486fbe469f903de058`.
+No firmware heap/stack/fragmentation, task, NVS or LittleFS allocation changes.
 
-One provider working workspace requests8064B; index pass adds3136B, while the
-separate fixture-admission pass adds7680B ordinary-event storage. Those two
-extras do not overlap:11200B or15744B before TLS/HTTP/allocator overhead.
-Heavy admission serializes that path with names, image validation and OTA.
+The unchanged1,835,008B OTA slot has83,072B free. The standard85%limit is
+1,559,756B; the binary exceeds it by192,180B. On2026-10-18 the owner explicitly
+suspended this occupancy criterion for this alpha and its current functionality/
+budget ([ADR-045](DECISIONS.md#adr-045--alpha-only-ota-reserve-exception--accepted-2026-10-18)).
+The measurement still exceeds85%; the exception is not runtime or OTA acceptance.
+Partition, image quota, security and all other resource criteria are unchanged.
+No agent upload is authorized.
+
+One provider response workspace can request7680B. A fixture index adds3392B;
+the separate fixture-admission pass can add7296B ordinary-event staging. Those
+two extras do not overlap:11072B or14976B requested payload before
+TLS/HTTP/allocator overhead. Metadata and empty responses need no workspace.
+These are C6 compiler layouts, not observed heap peaks. The system operation
+Guard serializes those paths with names, image validation and OTA.
 Normal JPEG rendering in the fixed LVGL pool and ordinary status576B can still
 overlap provider traffic. JPEG validation uses4096B; device screenshot uses
 one9600B internal strip. The two DMA draw buffers total19200B at240×240.
@@ -573,6 +586,25 @@ fragmentation, all-task25%usable-stack headroom, C6 font-decode CPU, NVS garbage
 collection/power interruption, LCD/SPI completion, OTA/rollback and longrun
 acceptance require owner-flashed hardware. Current live keyed-provider states
 also remain unverified. A fitting build is not full acceptance.
+
+The supplied2026-10-18 short C6 run contains nine complete14-task samples through
+272.6s after boot. Reported heap minimum reaches77,072B (lifetime sum of region
+minima, interval start0ms); sampled free heap119,704..156,940B and largest free
+block86,016..92,160B. These are not a simultaneous worst-case heap trace.
+Lowest logged free stack: provider5,136B, HTTP5,800B, LVGL2,956B, main3,700B,
+events1,888B, DNS1,336B and debug3,320B. The serial rows omit usable stack sizes,
+so the all-task25% usable-stack criterion remains unverified. LVGL pool peak
+8,956B and sampled fragmentation0..1% describe that pool only. LittleFS grows
+from20,480 to126,976/458,752B (331,776B free at the last sample); file contents
+and the reason for that growth cannot be inferred from these totals.
+
+Two `POST /api/v1/images/upload` calls return `409 busy` during provider traffic.
+The upload handler rejects an unavailable shared operation Guard before
+beginning the upload. The log does not identify the holder or show a later
+successful upload. All34 logged provider replies are HTTP200, largest410,681B;
+HTTP success alone does not establish parser, displayed-data or feature acceptance.
+No panic/reset is visible in the supplied excerpt. Screens, maximum-load/longrun,
+power-loss and OTA/rollback checks remain separate acceptance evidence.
 
 
 The configuration service alone coordinates changed-name Apply. The names
@@ -613,3 +645,15 @@ are requested payloads, not measured stack/heap peaks. Normal configuration
 logging copies172B of printable fields and presence/length indicators rather
 than the704-B complete model. Password and raw SSID bytes are never copied into
 that log snapshot. Diagnostic code remains inactive when kSettingsTest is None.
+
+Provider live-scope capacity (`kProviderLiveItems`), initial calendar request-cost
+estimate (`kFixtureCalendarEstimatedDays`) and URL bound (`kProviderUrlBytes`)
+live in app_config with the other resource limits. Protocol phase numbers and
+provider endpoint text belong to their adapter/sequence implementation. The
+former fixture week-horizon setting is removed: canonical fixture retention
+selects complete rounds and previous/next-three own identities from the season.
+
+Configured entry-ID limits are exported by the typed schema from the owning
+C++ type; the browser keeps no separate numeric maximum. Imported entries ask
+for new local identities at Save while keeping their provider/club data and
+attached display preferences.

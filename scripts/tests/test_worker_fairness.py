@@ -24,6 +24,7 @@ assert re.search(r'if \(!model\.demo && !settings::footballPaused\(\)\)', worker
 program = r'''
 #include "provider_plan.h"
 #include "provider_settings.h"
+#include "provider_client.h"
 #include <atomic>
 #include <cassert>
 #include <cstdio>
@@ -37,7 +38,7 @@ struct Case {
  schedule::Inputs inputs;
  std::atomic<bool> selecting{true};
  std::atomic<uint32_t> original_query{0};
- bool sent=false,automatic_turn=false,terminal=false,refused=false,auto_refused=false,frame=false;
+ bool automatic_turn=false,terminal=false,refused=false,auto_refused=false,frame=false;
  uint32_t generation=1,settings_seen=1;
  int64_t utc=1000000;
  std::vector<char> trace;
@@ -45,23 +46,25 @@ struct Case {
  Case(){
   model.providers=settings::providerPlansDefault();
   for(auto& provider:model.providers){provider.limit={};provider.interval_s[static_cast<unsigned>(cfg::DataType::kLive)]=60;}
-  StoredMatch live;live.id=1;live.competition=1;live.provider=cfg::Provider::kEspn;live.kickoff=utc;live.phase=Phase::kLive;
+  SourceKey key;assert(key.assign(cfg::Provider::kEspn,"ger.1","2026"));
+  assert(store.bind(1,1,0,{utc,1000}));const auto source=store.resolve(1,key,{utc,1000});assert(source);
+  StoredMatch live;live.id=1;live.source=store.sourceSlot(source);live.kickoff=utc;live.phase=Phase::kLive;
   store.upsert(live,{utc,1000});
   inputs.plans=&model.providers;inputs.store=&store;inputs.daily_left.fill(schedule::kUnlimited);
-  inputs.competitions[0].id=1;inputs.competitions[0].provider=cfg::Provider::kEspn;inputs.competitions[0].types=1u<<static_cast<unsigned>(cfg::DataType::kLive);
+  inputs.scopes[0].key.source=source;inputs.scopes[0].competition=1;inputs.scopes[0].provider=cfg::Provider::kEspn;inputs.scopes[0].types=1u<<static_cast<unsigned>(cfg::DataType::kLive);
  }
- bool stepSelection(const settings::ProviderSettings&,uint32_t,uint32_t,int64_t,int64_t&){return send('I');}
- bool stepOriginalNames(const settings::ProviderSettings&,uint32_t,uint32_t,int64_t&){return send('O');}
- bool send(char lane){
-  if(terminal){selecting=false;return true;}
-  if(refused)return false;
-  if(scheduler.admissibleAt(cfg::Provider::kOpenLigaDb,inputs.clock.mono_s)>inputs.clock.mono_s)return false;
-  scheduler.sent(cfg::Provider::kOpenLigaDb,inputs.clock.mono_s);sent=true;trace.push_back(lane);return true;
+ RequestStep stepSelection(const settings::ProviderSettings&,uint32_t,uint32_t,int64_t,int64_t&){return send('I');}
+ RequestStep stepOriginalNames(const settings::ProviderSettings&,uint32_t,uint32_t,int64_t&){return send('O');}
+ RequestStep send(char lane){
+  if(terminal){selecting=false;return {true,false};}
+  if(refused)return {false,false};
+  if(scheduler.admissibleAt(cfg::Provider::kOpenLigaDb,inputs.clock.mono_s)>inputs.clock.mono_s)return {false,false};
+  scheduler.sent(cfg::Provider::kOpenLigaDb,inputs.clock.mono_s);trace.push_back(lane);return {true,true};
  }
  void runJob(const schedule::Job& job,const settings::ProviderSettings&,uint32_t,uint32_t,uint32_t){
   ++auto_tries;
   if(auto_refused){scheduler.finished(job,schedule::Outcome::kDeferred,inputs.clock.mono_s);return;}
-  scheduler.sent(job.provider,inputs.clock.mono_s);scheduler.finished(job,schedule::Outcome::kOk,inputs.clock.mono_s);sent=true;trace.push_back('A');
+  scheduler.sent(job.provider,inputs.clock.mono_s);scheduler.finished(job,schedule::Outcome::kOk,inputs.clock.mono_s);trace.push_back('A');
  }
  void run(unsigned loops){
   for(unsigned i=0;i<loops;++i){
@@ -89,11 +92,12 @@ int main(){
 '''.replace('INTERACTIVE_BRANCH', interactive).replace('AUTOMATIC_BRANCH', automatic)
 with tempfile.TemporaryDirectory(prefix='worker-fairness-',dir='/tmp') as directory:
     folder=Path(directory)
+    (folder/'esp_err.h').write_text('#pragma once\nusing esp_err_t=int;inline constexpr int ESP_OK=0;\n')
     unit=folder/'fairness.cpp';unit.write_text(program)
-    command=['clang++','-std=c++20','-Wall','-Wextra','-Werror','-O1','-g','-fsanitize=address,undefined','-fno-omit-frame-pointer']
+    command=['clang++','-std=c++20','-Wall','-Wextra','-Werror','-O1','-g','-fsanitize=address,undefined','-fno-omit-frame-pointer','-I'+str(folder)]
     for path in ('include','components/football/include','components/settings/include','components/timekeeping/include','components/json/include'):
         command+=['-I',str(root/path)]
-    for path in ('components/football/football_model.cpp','components/football/match_store.cpp','components/football/request_scheduler.cpp','components/football/store_views.cpp','components/football/matchday.cpp','components/timekeeping/civil_time.cpp','components/settings/settings_model.cpp','components/settings/settings_record.cpp','components/settings/screen_policy.cpp','components/network/wifi_policy.cpp'):
+    for path in ('components/football/source_index.cpp','components/football/football_model.cpp','components/football/match_store.cpp','components/football/request_scheduler.cpp','components/football/store_views.cpp','components/football/matchday.cpp','components/timekeeping/civil_time.cpp','components/settings/settings_model.cpp','components/settings/settings_record.cpp','components/settings/screen_policy.cpp','components/network/wifi_policy.cpp'):
         command.append(str(root/path))
     command+=['-I',str(root/'components/network/include'),str(unit),'-o',str(folder/'check')]
     subprocess.run(command,check=True,cwd=root)

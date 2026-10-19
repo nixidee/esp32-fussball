@@ -67,6 +67,13 @@ struct Selection {
   }
 };
 
+enum class OwnMode : uint8_t { kReplace, kAppend };
+
+struct OwnFixture {
+  uint32_t id = 0, kickoff = 0;
+};
+using OwnFixtures = std::array<OwnFixture, cfg::kRetainedOwnFixtures>;
+
 class Index {
  public:
   Index(uint32_t club, int64_t utc, DateContext dates = {},
@@ -77,8 +84,12 @@ class Index {
   bool observeDay(uint32_t);
   bool observeRound(const provider::CalendarRound&);
   bool select(Selection&, MatchStore* store = nullptr,
-              uint8_t competition = 0) const;
-  bool own(Selection&) const;
+              SourceSlot source = kNoSource) const;
+  bool own(Selection&, OwnMode = OwnMode::kReplace) const;
+  bool owns(uint32_t match) const;
+  // Combine bounded candidates from earlier responses through the same policy.
+  void seedOwn(uint32_t club, const OwnFixtures&);
+  bool ownCandidates(uint32_t club, OwnFixtures&) const;
 
  private:
   struct Round {
@@ -86,12 +97,9 @@ class Index {
     uint16_t count = 0;
     uint32_t first = 0, last = 0, upcoming = 0;
   };
-  struct Own {
-    uint32_t id = 0, kickoff = 0;
-  };
   struct Club {
     uint32_t id = 0;
-    std::array<Own, cfg::kRetainedOwnFixtures> fixtures{};
+    OwnFixtures fixtures{};
   };
   struct Calendar {
     std::array<uint32_t, cfg::kProviderCalendarDays> days{};
@@ -110,6 +118,7 @@ class Index {
   uint8_t count_ = 0;
   bool complete_ = true, rounds_complete_ = true;
   bool use_calendar_ = false;
-  bool selectCalendar(Selection&, MatchStore*, uint8_t competition) const;
+  void retainOwn(OwnFixtures&, OwnFixture) const;
+  bool selectCalendar(Selection&, MatchStore*, SourceSlot source) const;
 };
 }  // namespace football::retention

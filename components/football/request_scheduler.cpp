@@ -45,43 +45,35 @@ void addWindow(Activity& a, uint32_t start, uint32_t end, int64_t utc,
   }
 }
 
-Activity activity(const MatchStore& store, uint8_t competition, uint32_t match,
-                  int64_t utc, int64_t day_end) {
+Activity activity(const MatchStore& store,
+                  std::array<MatchIndex, cfg::kStoreMatches>& order,
+                  SourceId source, uint32_t match, int64_t utc,
+                  int64_t day_end) {
+  static_assert(cfg::kStoreMatches < kNoMatch);
   Activity a;
+  std::size_t count = 0;
+  for (std::size_t i = 0; i < store.matchCount(); ++i) {
+    const auto& m = store.match(i);
+    if (store.sourceId(m.source) != source || (match && m.id != match))
+      continue;
+    uint32_t start = 0, end = 0;
+    if (liveWindow(m, start, end)) order[count++] = static_cast<MatchIndex>(i);
+  }
+  // Known and unknown kickoffs share one ordering of their actual windows.
+  // Stable index ties preserve the former enumeration exactly. std::sort has
+  // O(N log N) comparisons and uses no allocation for this bounded index.
+  const auto before = [&store](MatchIndex left, MatchIndex right) {
+    uint32_t a = 0, b = 0, end = 0;
+    liveWindow(store.match(left), a, end);
+    liveWindow(store.match(right), b, end);
+    return a < b || (a == b && left < right);
+  };
+  std::sort(order.begin(), order.begin() + count, before);
   bool open = false;
   uint32_t first = 0, last = 0;
-  // Unknown kickoffs are stored after known ones, but their observation
-  // windows can start first. Select by (window start, store index) without
-  // retaining another row array; equal starts and overlap chains merge once.
-  bool previous = false;
-  uint32_t previous_start = 0;
-  std::size_t previous_index = 0;
-  for (;;) {
-    bool found = false;
+  for (std::size_t i = 0; i < count; ++i) {
     uint32_t start = 0, end = 0;
-    std::size_t selected = 0;
-    for (std::size_t i = 0; i < store.matchCount(); ++i) {
-      const auto& m = store.match(i);
-      if (m.competition != competition || (match != 0 && m.id != match))
-        continue;
-      uint32_t candidate_start = 0, candidate_end = 0;
-      if (!liveWindow(m, candidate_start, candidate_end)) continue;
-      if (previous &&
-          (candidate_start < previous_start ||
-           (candidate_start == previous_start && i <= previous_index)))
-        continue;
-      if (found && (candidate_start > start ||
-                    (candidate_start == start && i >= selected)))
-        continue;
-      found = true;
-      start = candidate_start;
-      end = candidate_end;
-      selected = i;
-    }
-    if (!found) break;
-    previous = true;
-    previous_start = start;
-    previous_index = selected;
+    liveWindow(store.match(order[i]), start, end);
     if (open && start <= last) {
       last = std::max(last, end);
       continue;
@@ -188,8 +180,8 @@ void Scheduler::reset() {
   last_.fill(kNotStarted);
   failures_.fill(0);
   pending_.reset();
-  ids_.fill(0);
-  event_ids_.fill(0);
+  keys_.fill({});
+  event_ids_.fill({});
   for (auto& w : windows_) w.set(0, 0);
   global_window_.set(0, 0);
   paused_until_.fill(0);
@@ -226,12 +218,13 @@ Decision Scheduler::next(const Inputs& in) {
 
   configure(plans, in.global);
 
-  std::array<Activity, cfg::kCompetitionMax> live{}, own{}, events{};
-  for (uint8_t slot = 0; slot < cfg::kCompetitionMax; ++slot) {
-    const auto& wanted = in.competitions[slot];
-    if (ids_[slot] != wanted.id) {
+  std::array<Activity, cfg::kRequestScopes> live{};
+  std::array<Activity, cfg::kStoreSources> own{};
+  for (uint8_t slot = 0; slot < cfg::kRequestScopes; ++slot) {
+    const auto& wanted = in.scopes[slot];
+    if (keys_[slot] != wanted.key) {
       clear(slot);
-      ids_[slot] = wanted.id;
+      keys_[slot] = wanted.key;
     }
     if (event_ids_[slot] != wanted.event_match) {
       const auto event = index(slot, cfg::DataType::kEvents);
@@ -240,14 +233,15 @@ Decision Scheduler::next(const Inputs& in) {
       pending_.reset(event);
       event_ids_[slot] = wanted.event_match;
     }
-    if (wanted.id == 0 || in.store == nullptr) continue;
-    live[slot] = activity(*in.store, wanted.id, 0, utc, day_end);
-    if (wanted.priority_match != 0)
-      own[slot] =
-          activity(*in.store, wanted.id, wanted.priority_match, utc, day_end);
-    if (wanted.event_match != 0)
-      events[slot] =
-          activity(*in.store, wanted.id, wanted.event_match, utc, day_end);
+    if (!wanted.key.valid() || in.store == nullptr) continue;
+    const auto source =
+        wanted.key.source ? wanted.key.source : wanted.event_match.source;
+    live[slot] =
+        activity(*in.store, activity_order_, source,
+                 wanted.key.source ? 0 : wanted.event_match.id, utc, day_end);
+    if (slot < own.size() && wanted.priority_match != 0)
+      own[slot] = activity(*in.store, activity_order_, source,
+                           wanted.priority_match, utc, day_end);
   }
 
   // Expected requests until the end of the UTC day per daily cap and class.
@@ -255,14 +249,16 @@ Decision Scheduler::next(const Inputs& in) {
   std::array<Demand, cfg::kProviderCount> provider_demand{};
   Demand global_demand{};
   const auto each = [&](auto&& visit) {
-    for (uint8_t slot = 0; slot < cfg::kCompetitionMax; ++slot) {
-      const auto& wanted = in.competitions[slot];
-      if (wanted.id == 0) continue;
+    for (uint8_t slot = 0; slot < cfg::kRequestScopes; ++slot) {
+      const auto& wanted = in.scopes[slot];
+      if (!wanted.key.valid()) continue;
       for (std::size_t t = 0; t < cfg::kDataTypeCount; ++t)
         if (wanted.types & (1u << t)) {
           Job job;
           job.slot = slot;
-          job.competition = wanted.id;
+          job.key = wanted.key;
+          job.competition = wanted.competition;
+          job.route = wanted.route;
           job.type = static_cast<cfg::DataType>(t);
           job.provider = wanted.provider;
           job.event_match = wanted.event_match;
@@ -277,10 +273,10 @@ Decision Scheduler::next(const Inputs& in) {
         1, plans[p].interval_s[static_cast<std::size_t>(job.type)]);
     const auto i = index(job.slot, job.type);
     const uint32_t cost = std::max<uint8_t>(
-        1, in.competitions[job.slot].cost[static_cast<std::size_t>(job.type)]);
+        1, in.scopes[job.slot].cost[static_cast<std::size_t>(job.type)]);
     Demand demand{};
     const auto& l = live[job.slot];
-    const auto& o = own[job.slot];
+    const auto o = job.slot < own.size() ? own[job.slot] : Activity{};
     switch (job.type) {
       case cfg::DataType::kLive: {
         demand[static_cast<std::size_t>(Class::kOwn)] =
@@ -295,13 +291,13 @@ Decision Scheduler::next(const Inputs& in) {
             windowDemand(l.seconds, l.windows, interval);
         break;
       case cfg::DataType::kEvents: {
-        const auto& e = events[job.slot];
+        const auto& e = live[job.slot];
         demand[static_cast<std::size_t>(
             classOf(job.type, false, job.event_priority))] =
             windowDemand(e.seconds, e.windows, interval);
         // A newly selected held result needs one initial summary as well.
-        if (in.competitions[job.slot].event_match != 0 &&
-            !(in.competitions[job.slot].held &
+        if (in.scopes[job.slot].event_match.valid() &&
+            !(in.scopes[job.slot].held &
               (1u << static_cast<unsigned>(job.type))) &&
             last_[i] == kNotStarted)
           demand[static_cast<std::size_t>(
@@ -373,13 +369,13 @@ Decision Scheduler::next(const Inputs& in) {
   uint32_t best_due = 0;
   Wait blocked_why = Wait::kIdle;
   each([&](const Job& job) {
-    if (in.competitions[job.slot].held &
-        (1u << static_cast<unsigned>(job.type)))
+    if (in.scopes[job.slot].held & (1u << static_cast<unsigned>(job.type)))
       return;
     const auto p = static_cast<std::size_t>(job.provider);
     const auto i = index(job.slot, job.type);
     const Class cls =
-        classOf(job.type, own[job.slot].active, job.event_priority);
+        classOf(job.type, (job.slot < own.size() && own[job.slot].active),
+                job.event_priority);
     const uint8_t factor =
         combine(provider_factors[p][static_cast<std::size_t>(cls)],
                 global_factors[static_cast<std::size_t>(cls)]);
@@ -400,7 +396,7 @@ Decision Scheduler::next(const Inputs& in) {
     uint32_t due = 0;
     bool due_known = false;
     if (pending || (job.type == cfg::DataType::kEvents &&
-                    job.event_match != 0 && last == kNotStarted)) {
+                    job.event_match.valid() && last == kNotStarted)) {
       due = now;
       due_known = true;
     } else if (!isLive(job.type)) {
@@ -408,8 +404,7 @@ Decision Scheduler::next(const Inputs& in) {
           last == kNotStarted ? now : dueS(last + static_cast<int64_t>(retry));
       due_known = true;
     } else {
-      const auto& a = job.type == cfg::DataType::kEvents ? events[job.slot]
-                                                         : live[job.slot];
+      const auto& a = live[job.slot];
       if (a.active) {
         due = last == kNotStarted || last < int64_t{mono(a.start)}
                   ? now
@@ -476,10 +471,10 @@ void Scheduler::refresh() {
   failures_.fill(0);
 }
 void Scheduler::forget(uint8_t slot) {
-  if (slot < cfg::kCompetitionMax) ids_[slot] = 0;
+  if (slot < cfg::kRequestScopes) keys_[slot] = {};
 }
 void Scheduler::clear(uint8_t slot) {
-  event_ids_[slot] = 0;
+  event_ids_[slot] = {};
   for (std::size_t t = 0; t < cfg::kDataTypeCount; ++t) {
     const auto i = index(slot, static_cast<cfg::DataType>(t));
     last_[i] = kNotStarted;
@@ -525,6 +520,15 @@ void Scheduler::sent(cfg::Provider provider, uint32_t now_s) {
   global_window_.record(now_s);
 }
 
+void Scheduler::restartFixtures(uint16_t sources) {
+  for (SourceSlot slot = 0; slot < cfg::kStoreSources; ++slot)
+    if (sources & (uint16_t{1} << slot)) {
+      const auto fixture = index(slot, cfg::DataType::kFixtures);
+      last_[fixture] = kNotStarted;
+      failures_[fixture] = 0;
+      pending_.reset(fixture);
+    }
+}
 void Scheduler::finished(const Job& job, Outcome outcome, uint32_t at_s,
                          bool more) {
   if (outcome == Outcome::kDeferred) {
@@ -533,8 +537,7 @@ void Scheduler::finished(const Job& job, Outcome outcome, uint32_t at_s,
     deferred_until_ = std::max(deferred_until_, clampS(uint64_t{at_s} + kGapS));
     return;
   }
-  if (job.slot >= cfg::kCompetitionMax || ids_[job.slot] != job.competition)
-    return;
+  if (job.slot >= cfg::kRequestScopes || keys_[job.slot] != job.key) return;
   const auto i = index(job.slot, job.type);
   // The table and the live table are the same request: a start, a success
   // or a failure of one is one of the other (OQ-263 amendment).
@@ -584,49 +587,30 @@ Factors degrade(const std::array<uint32_t, kClassCount>& demand,
 }
 
 bool liveWindow(const StoredMatch& m, uint32_t& start, uint32_t& end) {
-  switch (m.phase) {
-    case Phase::kPostponed:
-    case Phase::kCancelled:
-    case Phase::kAbandoned: return false;
-    default: break;
-  }
-  const bool suspended = m.phase == Phase::kSuspended;
-  if (suspended && m.first_live_observed_utc == 0) return false;
+  const auto timing = matchTiming(m);
+  if (!timing.valid) return false;
   const uint32_t lead = cfg::kLiveLeadMinutes * 60;
-  const uint32_t kickoff_start = m.kickoff > lead ? m.kickoff - lead : 0;
-  if (m.phase == Phase::kFinished) {
-    if (m.finished_at == 0) return false;
-    // A reported result can have no usable kickoff. Its final-whistle
-    // boundary still admits the scheduler's one final request.
-    start = m.kickoff != 0 ? kickoff_start : m.finished_at;
-    end = std::max(m.finished_at, start);
-    return true;
-  }
-  const bool reported_running =
-      running(m.phase) && !(m.estimated & kEstimatedPhase);
-  const uint32_t basis = m.kickoff != 0 ? m.kickoff : m.first_live_observed_utc;
-  if (basis == 0 || (m.kickoff == 0 && !reported_running && !suspended))
-    return false;
-  // Match the canonical selector's time basis; an observation is never a
-  // fabricated kickoff or a reason to extend an already known kickoff.
-  start = m.kickoff != 0 ? kickoff_start : basis;
-  end = basis + (reported_running || suspended ? cfg::kUnknownMatchEndMinutes
-                                               : cfg::kExpectedMatchMinutes) *
-                    60u;
+  start = m.kickoff != 0 ? (m.kickoff > lead ? m.kickoff - lead : 0)
+                         : static_cast<uint32_t>(timing.basis);
+  // A final whistle still admits one final fetch, even with no kickoff or
+  // a provider-corrected finish before the polling lead boundary.
+  end = static_cast<uint32_t>(timing.end);
+  if (timing.finished) end = std::max(end, start);
   return true;
 }
 
 bool datasetStale(const MatchStore& store, uint8_t competition,
                   MatchStore::Dataset dataset, int64_t utc, int64_t now_ms,
                   cfg::Provider provider) {
-  const auto status = store.datasetStatus(competition, dataset);
+  const auto status = store.viewDatasetStatus(competition, dataset);
   if (status.cause != Cause::kNone || status.state == DatasetState::kPartial)
     return true;
   if (dataset != MatchStore::Dataset::kFixtures || utc == 0) return false;
   for (std::size_t i = 0; i < store.matchCount(); ++i) {
     const auto& match = store.match(i);
     uint32_t start = 0, end = 0;
-    if (match.competition == competition && match.provider == provider &&
+    if (store.includes(competition, match.source) &&
+        store.provider(match.source) == provider &&
         liveWindow(match, start, end) && utc >= start && utc <= end)
       return status.last_success_ms == 0 ||
              now_ms - status.last_success_ms > cfg::kDataStaleS * 1000LL;

@@ -1,32 +1,13 @@
 #include "matchday.h"
 
+#include "app_config.h"
 #include "civil_time.h"
 
 namespace football::matchday {
-namespace {
-
-// Local date (days since 1970-01-01) of 'utc' at 'offset'.
-int64_t localDay(int64_t utc, int32_t offset) {
-  const int64_t t = utc + offset;
-  return t >= 0 ? t / timekeeping::kSecondsPerDay
-                : (t - 86399) / timekeeping::kSecondsPerDay;
-}
-
-}  // namespace
-
 bool starts(uint32_t previous, uint32_t next) {
   return next - previous >= cfg::kMatchdayGapHours * 3600u;
 }
 
-bool over(uint32_t last_kickoff, int64_t utc, int32_t local_offset_s) {
-  return localDay(utc, local_offset_s) >=
-         localDay(last_kickoff, local_offset_s) + 1;
-}
-
-bool passed(uint32_t last_kickoff, int64_t utc, int32_t local_offset_s) {
-  return localDay(utc, local_offset_s) >=
-         localDay(last_kickoff, local_offset_s) + 2;
-}
 std::size_t retainedDays(const uint32_t* days, std::size_t count, int64_t utc,
                          uint32_t* out, std::size_t capacity, bool* complete) {
   const auto last = [&](std::size_t first) {

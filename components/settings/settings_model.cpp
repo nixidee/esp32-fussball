@@ -121,11 +121,50 @@ bool isValidTeamId(std::string_view value) noexcept {
   return value.empty() || values::positiveUint32(value) != 0;
 }
 
+ProviderRequirements providerRequirements(cfg::Provider provider) noexcept {
+  switch (provider) {
+    case cfg::Provider::kOpenLigaDb:
+      return {ProviderAccess::kOpen, 0, true, false, true};
+    case cfg::Provider::kApiFootball:
+      return {ProviderAccess::kApiFootballKey, 4, false, true, true};
+    case cfg::Provider::kEspn:
+      return {ProviderAccess::kEspnOptIn, 4, false, false, false};
+    case cfg::Provider::kFootballData:
+      return {ProviderAccess::kFootballDataKey, 4, false, false, false};
+  }
+  return {};
+}
+uint8_t selectionFields(cfg::Provider provider, bool teams) noexcept {
+  const auto rules = providerRequirements(provider);
+  return kSelectionSearch |
+         (teams ? kSelectionCompetition | kSelectionSeason
+                : (rules.list_season ? kSelectionSeason : 0) |
+                      (rules.list_country ? kSelectionCountry : 0));
+}
 bool isValidSeason(cfg::Provider provider, std::string_view season) noexcept {
+  const auto digits = providerRequirements(provider).season_digits;
   return season.empty() ||
-         ((provider == cfg::Provider::kOpenLigaDb || season.size() == 4) &&
+         ((!digits || season.size() == digits) &&
           std::all_of(season.begin(), season.end(),
                       [](char c) { return c >= '0' && c <= '9'; }));
+}
+bool validateSelection(cfg::Provider provider, bool teams,
+                       std::string_view competition, std::string_view season,
+                       Violation* why) noexcept {
+  const char* field = nullptr;
+  Reason reason = Reason::kInvalid;
+  if (static_cast<unsigned>(provider) >= cfg::kProviderCount)
+    field = "provider";
+  else if (!isValidIdentifier(competition))
+    field = "competition";
+  else if (!isValidSeason(provider, season))
+    field = "season";
+  else if (teams && competition.empty()) {
+    field = "competition";
+    reason = Reason::kRequired;
+  }
+  if (field && why) why->set(FieldPath().key(field), reason);
+  return field == nullptr;
 }
 
 const char* dataTypeName(cfg::DataType type) noexcept {

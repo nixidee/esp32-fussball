@@ -34,9 +34,7 @@ football::view::List conferenceMembers(const NavigationContext& context,
   const auto& store = context.data.store;
   for (std::size_t i = 0; i < store.matchCount(); ++i) {
     const auto& match = store.match(i);
-    if (match.competition != competition ||
-        match.provider != c->primary.provider)
-      continue;
+    if (!store.includes(competition, match.source)) continue;
     auto window = football::selection::window(context.selection, *c, match);
     bool active = window.active;
     // A kickoff block stays complete while one of its games is in-window.
@@ -48,8 +46,8 @@ football::view::List conferenceMembers(const NavigationContext& context,
         match.phase != football::Phase::kAbandoned)
       for (std::size_t j = 0; !active && j < store.matchCount(); ++j) {
         const auto& other = store.match(j);
-        if (other.competition == competition &&
-            other.provider == match.provider && other.kickoff == match.kickoff)
+        if (store.includes(competition, other.source) &&
+            other.source == match.source && other.kickoff == match.kickoff)
           active =
               football::selection::window(context.selection, *c, other).active;
       }
@@ -106,11 +104,13 @@ sequence::Content content(const sequence::Entry& entry, Mode mode,
 const PreparedContent& NavigationContext::prepare(const sequence::Entry& entry,
                                                   Mode mode,
                                                   uint16_t visible_page) {
-  const auto status =
-      data.store.datasetStatus(entry.competition, contentDataset(entry.type));
-  const uint32_t proofs = static_cast<uint32_t>(status.state) |
-                          static_cast<uint32_t>(status.cause) << 8 |
-                          uint32_t{data.store.notices(entry.competition)} << 16;
+  const auto status = data.store.viewDatasetStatus(entry.competition,
+                                                   contentDataset(entry.type));
+  const uint32_t proofs =
+      static_cast<uint32_t>(status.state) |
+      static_cast<uint32_t>(status.cause) << 8 |
+      uint32_t{data.store.notices(data.store.currentSource(entry.competition))}
+          << 16;
   if (prepared_.valid && prepared_.entry == entry && prepared_.mode == mode &&
       prepared_.page == visible_page &&
       match_count_ == data.store.matchCount() &&
@@ -137,7 +137,7 @@ const PreparedContent& NavigationContext::prepare(const sequence::Entry& entry,
   if (entry.type == Type::kLiveSingle) {
     if (context.policy.only_one_own_single &&
         context.selected.phase == settings::screen_policy::Phase::kOwn &&
-        context.selected.focus.competition != entry.competition)
+        context.selected.competition != entry.competition)
       return out;
     const auto single =
         football::selection::single(context.selection, context.selected, *c);
@@ -148,8 +148,8 @@ const PreparedContent& NavigationContext::prepare(const sequence::Entry& entry,
     if (mode == Mode::kAutomatic && members.count == 1 &&
         context.selected.phase == settings::screen_policy::Phase::kOwn) {
       const auto& only = context.data.store.match(members.index[0]);
-      if (only.id == context.selected.focus.id &&
-          only.competition == context.selected.focus.competition)
+      if (data.store.key(only) == context.selected.focus &&
+          entry.competition == context.selected.competition)
         for (unsigned i = 0; i < context.program->count; ++i) {
           const auto& row = context.program->entries[i];
           if (row.type == Type::kLiveSingle &&
@@ -158,6 +158,7 @@ const PreparedContent& NavigationContext::prepare(const sequence::Entry& entry,
         }
     }
     football::ConferenceRequest request;
+    request.competition = entry.competition;
     request.mode = policy.conference_mode;
     request.pin_own = policy.pin_own_match;
     request.manual = mode == Mode::kManualHeld;
@@ -169,7 +170,8 @@ const PreparedContent& NavigationContext::prepare(const sequence::Entry& entry,
     out.total = members.count;
     if (members.count == 1) out.single = &data.store.match(members.index[0]);
     for (unsigned i = 0; i < members.count; ++i)
-      if (data.store.isOwn(data.store.match(members.index[i]))) {
+      if (data.store.isOwn(entry.competition,
+                           data.store.match(members.index[i]))) {
         out.own = members.index[i];
         break;
       }
@@ -183,9 +185,11 @@ const PreparedContent& NavigationContext::prepare(const sequence::Entry& entry,
       int pinned = -1;
       if (context.policy.pin_own_match)
         for (unsigned i = 0; i < members.count && pinned < 0; ++i)
-          if (data.store.isOwn(data.store.match(members.index[i])))
+          if (data.store.isOwn(entry.competition,
+                               data.store.match(members.index[i])))
             pinned = members.index[i];
       football::ConferenceRequest held;
+      held.competition = entry.competition;
       held.pin_own = context.policy.pin_own_match;
       held.per_page = context.policy.visible_matches;
       for (unsigned row = 0; row < automatic.row_count; ++row) {

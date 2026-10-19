@@ -84,14 +84,15 @@ void badge(ViewModel& m, unsigned lines, bool bottom) {
 }
 void tableCases(int scale, unsigned lines, bool bottom, unsigned side) {
   ViewModel m;
+  m.setLayout(Layout::kTable);
   badge(m, lines, bottom);
-  m.row_count = 9;
+  m.table.count = 9;
   std::strcpy(m.caption, "Gruppe B · Bundesliga");
-  std::strcpy(m.columns[0], "Pkt");
-  std::strcpy(m.columns[1], "Diff");
-  std::strcpy(m.columns[2], "Sp");
-  for (unsigned i = 0; i < m.row_count; ++i) {
-    auto& r = m.table[i];
+  std::strcpy(m.table.columns[0], "Pkt");
+  std::strcpy(m.table.columns[1], "Diff");
+  std::strcpy(m.table.columns[2], "Sp");
+  for (unsigned i = 0; i < m.table.count; ++i) {
+    auto& r = m.table.rows[i];
     std::strcpy(r.name, "Borussia Mönchengladbach");
     std::strcpy(r.name_short, "BMG");
     std::snprintf(r.position, sizeof(r.position), "%u", i + 1);
@@ -114,6 +115,7 @@ void tableCases(int scale, unsigned lines, bool bottom, unsigned side) {
 }
 void otherCases(int scale, unsigned lines, bool bottom, unsigned side) {
   ViewModel m;
+  m.setLayout(Layout::kOwnMatch);
   badge(m, lines, bottom);
   std::strcpy(m.caption, "Pokal · Finale");
   std::strcpy(m.own.home, "Borussia Mönchengladbach");
@@ -151,11 +153,12 @@ void otherCases(int scale, unsigned lines, bool bottom, unsigned side) {
   m.own.shootout = {};
   scenario = "Single normal added time";
   run(m, ownMatch, scale, side);
+  m.setLayout(Layout::kConference);
   m.pages = 511;
   m.page = 510;
-  m.slots = 5;
-  m.row_count = 4;
-  for (auto& r : m.matches) {
+  m.conference.slots = 5;
+  m.conference.count = 4;
+  for (auto& r : m.conference.rows) {
     std::strcpy(r.home, "Borussia Mönchengladbach");
     std::strcpy(r.home_short, "BMG");
     std::strcpy(r.away, "FC Bayern München");
@@ -167,15 +170,17 @@ void otherCases(int scale, unsigned lines, bool bottom, unsigned side) {
   auto text = run(m, conference, scale, side);
   require(std::count(text.begin(), text.end(), "511 / 511") == 1,
           "exact large page position lost");
-  m.row_count = 5;
+  m.conference.count = 5;
   scenario = "Conference growth/Matchday layout";
   run(m, conference, scale, side);
+  m.setLayout(Layout::kCard);
   m.card.line_count = m.card.hint_count = 2;
   std::strcpy(m.card.title, "Providerfehler");
   for (auto& r : m.card.lines) std::strcpy(r, "Netzwerk prüfen · E10");
   for (auto& r : m.card.hints) std::strcpy(r, "Neuer Versuch in 30 s");
   scenario = "status/start cards";
   run(m, card, scale, side);
+  m.setLayout(Layout::kImage);
   scenario = "Crest/Images overlays";
   run(m, crest, scale, side);
 }

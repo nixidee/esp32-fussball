@@ -1919,3 +1919,28 @@ The approved aggregate configuration cutover supersedes those APIs: broad
 Model copy/save and separate section setters are removed. Diagnostics use the
 actual current snapshot/Apply; runtime logging uses a172-B projection. Current
 AppConfig and resource values are documented in CONFIGURATION/ARCHITECTURE.
+
+
+## ADR-045 — Alpha-only OTA reserve exception · Accepted 2026-10-18
+
+**Context.** After the whole-product consolidation measurement, the firmware
+binary is1,745,536B in the unchanged1,835,008-B OTA slot:89,472B free. It exceeds
+the standard85% limit1,559,756B by185,780B. The owner had requested a reserve
+decision only after consolidation and has now explicitly accepted the current
+functionality/budget for further alpha device testing with that smaller reserve.
+
+**Decision.** Suspend the85% application-slot occupancy criterion for this
+alpha. This is a specific acceptance-policy exception, not a passing85%
+measurement or a permanent replacement of the standard target. The measured
+candidate SHA256 is a49173a55e7f9a7b616addfaa69d171eed6a9f9228bd92a3d17e98d4ed15a90c.
+No firmware, version, partition, quota, security or runtime budget changes.
+
+**Consequences.** Device screenshots/input/PWM/network, actual storage and power
+interruption, runtime heap/largestblock/all-task usable stack/CPU/longrun and
+OTA upload/trial/rollback still need evidence. The owner flashes; this decision
+authorizes no upload by the agent. The existing device checker retains its
+strict numeric85% predicate and may therefore report that criterion as FAIL;
+record this alpha exception beside it and assess every other failure normally.
+The decision/documentation changes0B static RAM, heap, stack, Flash, NVS and
+LittleFS. This resolves ADR-044's post-consolidation reserve decision without
+claiming whole-product acceptance.

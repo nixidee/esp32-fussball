@@ -17,6 +17,9 @@
 #include <type_traits>
 
 #include "app_config.h"
+#include "application_config.h"
+#include "application_original_names.h"
+#include "application_reset.h"
 #include "command_json.h"
 #include "config_json.h"
 #include "correlation_id.h"
@@ -37,6 +40,7 @@
 #include "json_stream.h"
 #include "lwip/sockets.h"
 #include "network_service.h"
+#include "operation_admission.h"
 #include "original_names_channel.h"
 #include "ota_service.h"
 #include "provider_client.h"
@@ -621,7 +625,7 @@ esp_err_t getConfig(httpd_req_t* req) {
 }
 esp_err_t getAdoptedNames(httpd_req_t* req) {
   Request request(req);
-  network::HeavyGuard guard;
+  operations::Guard guard;
   if (!guard) return error(req, fault::kBusy);
   football::names::AdoptedExport names;
   const auto prepared = names.prepare();
@@ -643,80 +647,62 @@ esp_err_t applyConfig(httpd_req_t* req) {
     return error(req, *fault);
   if (const auto* fault = checkJsonBody(req, cfg::kConfigBodyMaxBytes))
     return error(req, *fault);
-  network::HeavyGuard guard;
-  if (!guard) return error(req, fault::kBusy);
-  auto config = std::unique_ptr<settings::AppConfig>(new (std::nothrow)
-                                                         settings::AppConfig);
-  if (!config) return failed(req, ESP_ERR_NO_MEM);
-  settings::snapshot(*config);
-  const auto old_password = config->model.admin_password;
-  struct NamesDraft {
-    football::names::files::Candidate candidate;
-    esp_err_t error = ESP_OK;
-  } names;
+  application::ApplySession session;
+  if (!session.admitted()) return error(req, fault::kBusy);
+  const auto prepared = session.prepare();
+  if (prepared != ESP_OK) return failed(req, prepared);
+  auto& config = session.draft();
+  const auto old_password = config.model.admin_password;
   JsonBody body(req);
-  ApplyRequest application;
+  ApplyRequest intent;
   settings::Violation why;
   const auto decoded = readApply(
-      body.input(), *config, application, why,
-      [](::json::Reader& input, const ::json::Token& token, void* raw,
+      body.input(), config, intent, why,
+      [](json::Reader& reader, const json::Token& token, void* raw,
          settings::Violation& invalid) {
-        auto& names = *static_cast<NamesDraft*>(raw);
-        names.error = football::names::begin(names.candidate, true);
-        if (names.error != ESP_OK) return SettingsDecode::kSyntax;
-        switch (football::names::readAdoptedJson(input, token, names.candidate,
-                                                 invalid)) {
+        auto& session = *static_cast<application::ApplySession*>(raw);
+        switch (session.stageNames(reader, token, invalid)) {
           case football::names::Decode::kOk: return SettingsDecode::kOk;
           case football::names::Decode::kViolation:
             return SettingsDecode::kViolation;
-          case football::names::Decode::kNoMemory:
-            names.error = ESP_ERR_NO_MEM;
-            break;
-          case football::names::Decode::kStorageFull:
-            names.error = files::kStorageFull;
-            break;
-          case football::names::Decode::kIo: names.error = ESP_FAIL; break;
-          case football::names::Decode::kSyntax: break;
+          default: return SettingsDecode::kSyntax;
         }
-        return SettingsDecode::kSyntax;
       },
-      &names, settings::limits());
-  if (names.error != ESP_OK) return failed(req, names.error, "adopted_names");
+      &session, settings::limits());
+  if (session.namesError() != ESP_OK)
+    return failed(req, session.namesError(), "adopted_names");
   if (decoded == SettingsDecode::kViolation) return rejected(req, why);
   if (decoded != SettingsDecode::kOk)
     return error(req, body_broken ? fault::kBodyIncomplete : fault::kJson,
                  nullptr, body.diagnostic());
   if (!body.complete()) return error(req, fault::kBodyIncomplete);
-  if (settings::generation() != application.expected_revision)
+  const auto applied =
+      session.publish(intent.expected_revision, intent.names_changed, why);
+  if (applied.stage == application::ApplyStage::kRevision)
     return error(req, fault::kSettingsChanged);
-  settings::screen_policy::Error policy_error;
-  settings::NamesChange names_change;
-  if (application.names_changed) {
-    const auto prepared =
-        football::names::prepareChange(names.candidate, names_change);
-    if (prepared != ESP_OK) return failed(req, prepared, "adopted_names");
-  }
-  const auto err = settings::apply(
-      *config, application.expected_revision, &why, &policy_error,
-      application.names_changed ? &names_change : nullptr);
-  if (settings::origin() == settings::Origin::kOutcomeUnknown)
+  if (applied.stage == application::ApplyStage::kUncertain)
     return error(req, "503 Service Unavailable", "outcome_unknown",
                  "configuration may be durable; do not repeat Apply; restart "
                  "and read the configuration");
-  if (err == ESP_ERR_INVALID_ARG) {
-    if (policy_error.reason != settings::screen_policy::Reason::kNone)
-      screenPolicyViolation(policy_error, why);
+  if (applied.stage == application::ApplyStage::kValidation) {
+    if (applied.policy.reason != settings::screen_policy::Reason::kNone)
+      screenPolicyViolation(applied.policy, why);
     return rejected(req, why);
   }
-  if (err != ESP_OK) return failed(req, err);
-  if (!(old_password == config->model.admin_password)) {
+  if (applied.error != ESP_OK)
+    return failed(req, applied.error,
+                  applied.stage == application::ApplyStage::kNames
+                      ? "adopted_names"
+                      : nullptr);
+  if (!(old_password == config.model.admin_password)) {
     SessionLock lock;
     sessions.closeOthers(who);
   }
-  return streamJson(req, [&](::json::Writer& out) {
-    return out.key("ok") && out.boolean(true) && configJson(out, *config);
+  return streamJson(req, [&](json::Writer& out) {
+    return out.key("ok") && out.boolean(true) && configJson(out, config);
   });
 }
+
 settings::screen_policy::Limits screenLimits() {
   const auto& limits = settings::limits();
   return {limits.visible_matches_max, limits.table_window_max};
@@ -885,12 +871,6 @@ esp_err_t getStatus(httpd_req_t* req) {
     if (!out.field("fs_used", usage.used_bytes)) return false;
     if (!out.field("trial", ota::trial())) return false;
     if (!out.field("settings_source", settings::originName(settings::origin())))
-      return false;
-    if (!out.field("competitions_source",
-                   settings::originName(settings::competitionsOrigin())))
-      return false;
-    if (!out.field("screen_policy_source",
-                   settings::originName(settings::screenPolicyOrigin())))
       return false;
     if (!out.field("football_paused", settings::footballPaused())) return false;
     if (!out.field("provider_started", data.started)) return false;
@@ -1146,7 +1126,7 @@ esp_err_t queryOriginalNames(httpd_req_t* req) {
     return invalid(req, Reason::kRange, "competition rejected", "competition");
   uint32_t query = 0;
   const auto err =
-      football::beginOriginalNames(static_cast<uint8_t>(competition), query);
+      application::beginOriginalNames(static_cast<uint8_t>(competition), query);
   if (err == ESP_ERR_NOT_FINISHED || err == ESP_ERR_INVALID_STATE)
     return error(req, fault::kBusy);
   if (err != ESP_OK) return failed(req, err, "competition");
@@ -1190,7 +1170,7 @@ esp_err_t queryOriginalNames(httpd_req_t* req) {
 // with the existing bounded writer; reading it never adopts any club labels.
 esp_err_t getTeamNamesPreset(httpd_req_t* req) {
   Request request(req);
-  network::HeavyGuard guard;
+  operations::Guard guard;
   if (!guard) return error(req, fault::kBusy);
   httpd_resp_set_type(req, "application/json");
   httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -1350,8 +1330,8 @@ esp_err_t logout(httpd_req_t* req) {
 // ---- Settings --------------------------------------------------------------
 esp_err_t exportSettings(httpd_req_t* req) {
   Request request(req);
-  network::HeavyGuard guard;
-  if (!guard) return error(req, fault::kBusy);
+  application::ConfigExportSession session;
+  if (!session.admitted()) return error(req, fault::kBusy);
   if (const auto* f = admitSession(req)) return error(req, *f);
   if (const auto* f = checkJsonBody(req)) return error(req, *f);
   JsonBody body(req);
@@ -1363,25 +1343,19 @@ esp_err_t exportSettings(httpd_req_t* req) {
     return error(req, body_broken ? fault::kBodyIncomplete : fault::kJson,
                  nullptr, body.diagnostic());
   if (!body.complete()) return error(req, fault::kBodyIncomplete);
-  // Export one coherent application snapshot. Adopted-name publication shares
-  // this heavy-operation guard, so the referenced immutable file stays stable.
-  auto config = std::unique_ptr<settings::AppConfig>(new (std::nothrow)
-                                                         settings::AppConfig);
-  if (!config) return failed(req, ESP_ERR_NO_MEM);
-  settings::snapshot(*config);
-  football::names::AdoptedExport names;
-  const auto prepared = names.prepare();
+  const auto prepared = session.prepare();
   if (prepared != ESP_OK) return failed(req, prepared);
-  return streamJson(req, [&](::json::Writer& out) {
-    return out.key("version") && out.integer(cfg::kAppConfigFormatVersion) &&
-           out.key("desired") && out.object() && out.key("settings") &&
-           out.object() && settingsJson(out, config->model, secrets) &&
-           out.end() && competitionsJson(out, config->competitions) &&
-           out.key("screens") && out.object() &&
-           screenPolicyJson(out, config->screens) && out.end() && out.end() &&
-           out.key("adopted_names") && names.write(out) == ESP_OK;
+  return streamJson(req, [&](json::Writer& out) {
+    return exportJson(
+        out, session.config(), secrets,
+        [](json::Writer& writer, void* raw) {
+          return static_cast<application::ConfigExportSession*>(raw)
+                     ->writeNames(writer) == ESP_OK;
+        },
+        &session);
   });
 }
+
 esp_err_t reboot(httpd_req_t* req) {
   Request request(req);
   if (const auto* fault = admitSession(req)) return error(req, *fault);
@@ -1390,15 +1364,23 @@ esp_err_t reboot(httpd_req_t* req) {
   ota::reboot();
   return success(req);
 }
-struct ResetProgress {
-  bool settings = false, counters = false, adopted_names = false;
-  bool images = false, format = false;
-  ::images::DeleteAllResult image_files;
-};
-esp_err_t resetFailed(httpd_req_t* req, esp_err_t err, const char* stage,
-                      const ResetProgress& progress) {
+const char* resetStageKey(application::ResetStage stage) {
+  using application::ResetStage;
+  switch (stage) {
+    case ResetStage::kSettings: return "settings";
+    case ResetStage::kCounters: return "counters";
+    case ResetStage::kNames: return "adopted_names";
+    case ResetStage::kImages: return "images";
+    case ResetStage::kFormat: return "format";
+    default: return "";
+  }
+}
+esp_err_t resetFailed(httpd_req_t* req,
+                      const application::ResetResult& result) {
+  const auto stage = resetStageKey(result.stage);
+  const auto& progress = result.progress;
   ESP_LOGW("web", "factory reset incomplete at %s: %s", stage,
-           esp_err_to_name(err));
+           esp_err_to_name(result.error));
   httpd_resp_set_status(req, "500 Internal Server Error");
   return streamJson(req, [&](::json::Writer& out) {
     return out.key("code") && out.string("reset_partial") && out.key("error") &&
@@ -1424,50 +1406,16 @@ esp_err_t reset(httpd_req_t* req) {
   ResetRequest command;
   esp_err_t reply;
   if (!readCommand(req, command, readReset, reply)) return reply;
-  const bool delete_images = command.images,
-             format_storage = command.format_storage;
-  network::HeavyGuard guard;
-  if (!guard) return error(req, fault::kBusy);
-  const auto fenced = football::beginReset();
-  if (fenced != ESP_OK) return failed(req, fenced);
-  struct ResetFence {
-    bool release = true;
-    ~ResetFence() {
-      if (release) {
-        football::names::invalidate();
-        football::endReset();
-      }
-    }
-  } fence;
-  ResetProgress progress;
-  // Reset authority first. The heavy token prevents the worker from writing
-  // another counter during the following checked deletion/format.
-  auto err = settings::reset();
-  if (err != ESP_OK) return resetFailed(req, err, "settings", progress);
-  progress.settings = true;
-  err = football::budget::erase();
-  if (err != ESP_OK) return resetFailed(req, err, "counters", progress);
-  progress.counters = true;
-  if (format_storage) {
-    // This is the explicitly authorized deletion even if storage cannot mount.
-    err = images::format();
-    if (err != ESP_OK) return resetFailed(req, err, "format", progress);
-    progress.format = progress.adopted_names = progress.images = true;
-  } else {
-    err = football::names::erase();
-    if (err != ESP_OK) return resetFailed(req, err, "adopted_names", progress);
-    progress.adopted_names = true;
-    if (delete_images) {
-      err = images::removeAll(&progress.image_files);
-      if (err != ESP_OK) return resetFailed(req, err, "images", progress);
-      progress.images = true;
-    }
-  }
-  // Keep publication fenced until the scheduled reboot after a complete reset.
-  fence.release = false;
-  ota::reboot();
+  const auto result =
+      application::reset({command.images, command.format_storage});
+  if (result.stage == application::ResetStage::kBusy)
+    return error(req, fault::kBusy);
+  if (result.stage == application::ResetStage::kAdmission)
+    return failed(req, result.error);
+  if (result.error != ESP_OK) return resetFailed(req, result);
   return success(req);
 }
+
 // ---- Network, provider data, display --------------------------------------
 esp_err_t wifiScan(httpd_req_t* req) {
   Request request(req);
@@ -1597,7 +1545,7 @@ esp_err_t deleteImage(httpd_req_t* req) {
   uint8_t id = 0;
   esp_err_t reply;
   if (!readCommand(req, id, readImageId, reply)) return reply;
-  network::HeavyGuard guard;
+  operations::Guard guard;
   if (!guard) return error(req, fault::kBusy);
   images::DeleteResult result;
   const auto err = images::remove(id, &result);
@@ -1624,7 +1572,7 @@ esp_err_t postImageRole(httpd_req_t* req) {
   ImageRoleRequest command;
   esp_err_t reply;
   if (!readCommand(req, command, readImageRole, reply)) return reply;
-  network::HeavyGuard guard;
+  operations::Guard guard;
   if (!guard) return error(req, fault::kBusy);
   const auto role = static_cast<cfg::StockImage>(command.role);
   const auto err = command.copy ? images::copyToRole(command.id, role)
@@ -1639,7 +1587,7 @@ esp_err_t upload(httpd_req_t* req, bool firmware) {
   if (!origin(req)) return error(req, fault::kOrigin);
   if (!firmware && ota::trial()) return error(req, fault::kTrial);
   if (!authenticate(req)) return error(req, fault::kSession);
-  network::HeavyGuard guard;
+  operations::Guard guard;
   if (!guard) return error(req, fault::kBusy);
   // Automatic uploads skip stored references and the browser's reserved ids.
   // X-Image-Id replaces/restores that id; X-Image-Role replaces a role.
@@ -1972,7 +1920,7 @@ esp_err_t postScreenshot(httpd_req_t* req) {
   if (const auto* fault = admitSession(req)) return error(req, *fault);
   esp_err_t reply;
   if (!readEmptyCommand(req, reply)) return reply;
-  network::HeavyGuard guard;
+  operations::Guard guard;
   if (!guard) return error(req, fault::kBusy);
   request_deadline = std::min(request_deadline, timekeeping::monotonicMs() +
                                                     cfg::kScreenshotDeadlineMs);
@@ -2069,7 +2017,7 @@ esp_err_t init() {
     if (err != ESP_OK) return fail(err);
     server = nullptr;
   }
-  network::HeavyGuard guard;
+  operations::Guard guard;
   if (!guard) return ESP_ERR_NOT_FINISHED;
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.stack_size = cfg::kHttpStackBytes;

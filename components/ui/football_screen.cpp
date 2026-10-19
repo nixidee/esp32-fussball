@@ -641,8 +641,9 @@ void ownMatch() {
 
 void conference() {
   const auto& m = *f.m;
-  const int rows = m.row_count;
-  const int slots = m.pages > 1 ? std::max<int>(m.slots, rows) : rows;
+  const int rows = m.conference.count;
+  const int slots =
+      m.pages > 1 ? std::max<int>(m.conference.slots, rows) : rows;
   const auto height = [&] {
     return captionHeight() + 2 * f.g + slots * (line(f.body) + 2 * f.g) + f.g +
            (m.pages > 1 ? line(f.cap) + f.g : 0) + statusHeight();
@@ -657,17 +658,17 @@ void conference() {
   // the column so that at least its caption-size text fits.
   int score_w = std::max(width(f.body, "10:10"), width(f.body, "00:00"));
   for (int i = 0; i < rows; ++i)
-    score_w = std::max(score_w, width(f.cap, m.matches[i].centre));
+    score_w = std::max(score_w, width(f.cap, m.conference.rows[i].centre));
   const int half = bandSpan(rows_top, slots * pitch).width / 2;
   const int name_w = half - score_w / 2 - 2 * g;
   uint8_t font = f.body;
   for (int i = 0; i < rows; ++i)
-    if (width(f.body, m.matches[i].home) > name_w ||
-        width(f.body, m.matches[i].away) > name_w)
+    if (width(f.body, m.conference.rows[i].home) > name_w ||
+        width(f.body, m.conference.rows[i].away) > name_w)
       font = f.cap;
   int y = rows_top;
   for (int i = 0; i < rows; ++i) {
-    const auto& row = m.matches[i];
+    const auto& row = m.conference.rows[i];
     if (row.goal)
       pill(f.cx - half, y, 2 * half, pitch - g, f.accent, LV_OPA_COVER);
     else if (row.own)
@@ -695,7 +696,7 @@ void conference() {
 
 void table() {
   const auto& m = *f.m;
-  const int rows = m.row_count;
+  const int rows = m.table.count;
   fitHeight([&] {
     return captionHeight() + f.g + line(f.body) + f.g +
            rows * (line(f.body) + (rows <= 5 ? 2 * f.g : 0)) + f.g +
@@ -725,10 +726,11 @@ void table() {
     left = span.x + g;
     right = span.x + span.width - g;
     pos_w = width(number_font, "#");
-    for (int c = 0; c < 3; ++c) widths[c] = width(number_font, m.columns[c]);
+    for (int c = 0; c < 3; ++c)
+      widths[c] = width(number_font, m.table.columns[c]);
     int short_w = width(0, kEllipsis);
     for (int i = 0; i < rows; ++i) {
-      const auto& row = m.table[i];
+      const auto& row = m.table.rows[i];
       pos_w = std::max(pos_w, width(number_font, row.position));
       short_w = std::max(short_w, width(0, row.name_short));
       const char* values[3] = {row.points, row.difference, row.played};
@@ -758,18 +760,19 @@ void table() {
   if (aligned) {
     label(header_y, "#", {number_font}, f.dim, Align::kRight, left, pos_w);
     for (int c = 0; c < 3; ++c)
-      label(header_y, m.columns[c], {number_font}, f.dim, Align::kRight,
+      label(header_y, m.table.columns[c], {number_font}, f.dim, Align::kRight,
             column_x[c] - g, widths[c] + g);
   } else {
     // Complete legend in the same left-to-right order as the row values.
-    char legend[sizeof(m.columns) + 16];
-    values::formatText(legend, sizeof(legend), "# · %s · %s · %s", m.columns[2],
-                       m.columns[1], m.columns[0]);
+    char legend[sizeof(m.table.columns) + 16];
+    values::formatText(legend, sizeof(legend), "# · %s · %s · %s",
+                       m.table.columns[2], m.table.columns[1],
+                       m.table.columns[0]);
     label(header_y, legend, {number_font}, f.dim);
   }
   int y = rows_top;
   for (int i = 0; i < rows; ++i) {
-    const auto& row = m.table[i];
+    const auto& row = m.table.rows[i];
     if (row.own)
       pill(left - g, y, right - left + 2 * g, pitch - g / 2, f.accent,
            LV_OPA_COVER);
@@ -926,7 +929,7 @@ bool render(const ViewModel& m, const geometry::SafeArea& area) {
   overflow = false;
   // The rim first: its items keep their slots when texts come and go.
   rim();
-  switch (m.layout) {
+  switch (m.layout()) {
     case Layout::kOwnMatch: ownMatch(); break;
     case Layout::kConference: conference(); break;
     case Layout::kTable: table(); break;

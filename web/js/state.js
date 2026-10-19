@@ -1,7 +1,17 @@
 // The single application state, shared value helpers and page/field metadata.
-const $ = id => document.getElementById(id), clone = o => o === undefined ? undefined : JSON.parse(JSON.stringify(o)), eq = (a, b) => JSON.stringify(a) === JSON.stringify(b), bytes = s => new TextEncoder().encode(s).length, esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({
+const $ = id => document.getElementById(id), clone = o => o === undefined ? undefined : JSON.parse(JSON.stringify(o)), bytes = s => new TextEncoder().encode(s).length, esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
 }[c]));
+function sameObject(a, b) {
+    if (a === b)
+        return true;
+    if (!a || !b || typeof a !== "object" || typeof b !== "object" || Array.isArray(a) !== Array.isArray(b))
+        return false;
+    if (Array.isArray(a))
+        return a.length === b.length && a.every((v, i) => sameObject(v, b[i]));
+    const keys = Object.keys(a);
+    return keys.length === Object.keys(b).length && keys.every(k => Object.prototype.hasOwnProperty.call(b, k) && sameObject(a[k], b[k]));
+}
 const S = {
     page: 'overview', schema: null, saved: null, draft: null, status: null, images: null, token: '', session: null, sec: {}, tried: false, server: null, expanded: false, saving: false, confirm: null, scan: null, editor: null, ota: null, screenshot: false, errors: {}, loading: {}, jobs: new Set(), socket: null, open: null
 };
@@ -23,6 +33,13 @@ const parts = p => p.replace(/\[(\d+)\]/g, '.$1').split('.'), get = (o, p) => pa
 // Provider team identity has one numeric domain from the firmware contract.
 function validClubId(value) {
     return Number.isInteger(value) && value > 0 && value <= S.schema.team_id_max;
+}
+// Raw controls and typed model values have separate contracts. Match the
+// firmware's decimal-only positive integer adapter, including leading zeros.
+function decimalIdInput(raw, maximum) {
+    if (typeof raw !== 'string' || !/^[0-9]+$/.test(raw)) return 0;
+    const value = Number(raw);
+    return Number.isInteger(value) && value > 0 && value <= maximum ? value : 0;
 }
 function pageOf(p) {
     if (/^(demo|overview_screenshot|browser_debug|debug_status_log|debug_status_interval_s)$/.test(p))

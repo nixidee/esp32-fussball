@@ -1,5 +1,5 @@
 'use strict';
-const {readWebSource, autonomousBoundary, productionFunctions}=require('./web_source.cjs');
+const {readWebSource, autonomousBoundary, productionFunctions, productionFeature}=require('./web_source.cjs');
 
 // Production dialog/name functions with controlled DOM and pending HTTP.
 // Native cancel follows the browser's default close unless prevented. This is
@@ -7,9 +7,9 @@ const {readWebSource, autonomousBoundary, productionFunctions}=require('./web_so
 // Run: node scripts/tests/test_web_names_close.cjs [optional HTML snapshot]
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict'),crypto=require('node:crypto');
 const {html,script}=readWebSource(process.argv[2]||path.resolve(__dirname,'../../web/index.html'));
-const functionNames=['validClubId','button','confirmAction','dialog','openNames','loadNames','drawNames','nameProviders','adoptedPrefix','adoptedShortPrefix','shortAdoptionPreview','expandNamesWire','validateAdoptedNames','keepNamesDraft','namesAdoptionChanges','editorNameTeams'];
+const functionNames=['validClubId','button','confirmAction','dialog','nameProviders','adoptedPrefix','adoptedShortPrefix','shortAdoptionPreview','expandNamesWire','validateAdoptedNames','keepNamesDraft','namesAdoptionChanges','editorNameTeams','originalClubMatch','adoptOriginalName','cloneNamesCollection','packAdoptedNames','downloadJson'];
 const firmwareSchema=require('./web_config_harness.cjs').fixture().schema;
-const source=productionFunctions(script,functionNames);
+const source=productionFunctions(script,functionNames) + '\n' + productionFeature(script,'NamesEditor');
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no});return{promise,resolve,reject};};
 const rows=name=>({items:[{provider:0,id:42,name,short_name:'ABC'}]});
 const adopted=()=>({names_ref:{},adopted_names:{format:'football-team-names',version:1,clubs:[{key:'club',de:'Adopted',short:'',ids:{openligadb:[42]},aliases:[]}],exceptions:[]}});
@@ -26,11 +26,11 @@ function setup(){
   querySelector:node,querySelectorAll(selector){return [...nodes.values()].filter(el=>selector==='[data-name-inherit]'?'nameInherit'in el.dataset:selector==='[data-name-field]'?'nameField'in el.dataset:false);}
  };
  const context={S:{schema:{...firmwareSchema,short_name_max:3,names_name_max:26,names_key_max:63,names_format:'football-team-names',names_source_version:1,names_wire_version:2,provider_keys:['openligadb','api-football','espn','football-data']},saved:{_namesRef:{}},pendingNames:null},PROVIDERS:['OL','AF','ESPN','FD'],TextEncoder,TextDecoder,structuredClone,bytes:x=>new TextEncoder().encode(x).length,
-  t:x=>x,tf:(x,v)=>x.replace('%',v),ht:x=>x,esc:x=>String(x??''),button:()=>'<button data-act="close">Close</button>',compName:c=>c.competition_name,clone:structuredClone,sameObject:(a,b)=>JSON.stringify(a)===JSON.stringify(b),screenConflict:()=>Error('changed'),renderBar(){},
+  t:x=>x,tf:(x,v)=>x.replace('%',v),ht:x=>x,esc:x=>String(x??''),button:()=>'<button data-act="close">Close</button>',compName:c=>c.competition_name,clone:structuredClone,sameObject:(a,b)=>JSON.stringify(a)===JSON.stringify(b),screenConflict:()=>Error('changed'),renderBar(){}, mutate(){throw Error('Unexpected provider mutation in dialog-close fixture');},
   $:id=>id==='dialog'?dialog:node(id),
   settingsRead(url){const request={url,...deferred()};if(url==='team-names')nameReads.push(request);else{request.names=nameReads.shift();pending.push(request);}return request.promise;}
  };
- vm.createContext(context);vm.runInContext('let names=null;'+source+';globalThis.UI={openNames,pending:()=>S.pendingNames};',context,{filename:'production name/dialog functions'});
+ vm.createContext(context);vm.runInContext(source+';globalThis.UI={openNames,pending:()=>S.pendingNames};',context,{filename:'production name/dialog functions'});
  return{dialog,pending,node,draft:()=>context.UI.pending(),
   open(id=1){return context.UI.openNames({id,competition_name:'Competition '+id});},
   failTeams(){pending[0].names.resolve(adopted());pending[0].reject(Error('runtime teams unavailable'));},

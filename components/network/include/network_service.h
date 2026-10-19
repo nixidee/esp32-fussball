@@ -93,18 +93,4 @@ std::size_t scanResults(AccessPoint* out, std::size_t capacity,
                         ScanStatus* status = nullptr);
 bool ready();
 bool healthy();
-// Heavy operations use one nonblocking admission token; no waiting queue.
-bool tryHeavy();
-void releaseHeavy();
-class HeavyGuard {
- public:
-  HeavyGuard() : held_(tryHeavy()) {}
-  ~HeavyGuard() {
-    if (held_) releaseHeavy();
-  }
-  explicit operator bool() const { return held_; }
-
- private:
-  bool held_;
-};
 }  // namespace network

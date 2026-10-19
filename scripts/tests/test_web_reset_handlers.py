@@ -24,11 +24,13 @@ PRELUDE = r'''
 #include <vector>
 #include "request_json.h"
 #include "json_stream.h"
+#include "application_reset.h"
+#include "operation_admission.h"
+#include <type_traits>
+static_assert(!std::is_copy_constructible_v<operations::Guard> && !std::is_copy_assignable_v<operations::Guard>);
 using web::ResetRequest;
 using web::readReset;
 using namespace ArduinoJson;
-using esp_err_t = int;
-constexpr esp_err_t ESP_OK=0, ESP_FAIL=-1;
 struct httpd_req_t {};
 struct Request { explicit Request(httpd_req_t*) {} };
 struct Doc { JsonDocument doc; };
@@ -90,13 +92,9 @@ esp_err_t streamJson(httpd_req_t*,Write write){
  check(out.object()&&write(out)&&out.end()&&out.finish(),"actual streamed response encoder");
  check(!deserializeJson(response,bytes),"response oracle JSON");return ESP_OK;
 }
-namespace network {
-struct HeavyGuard {
-  bool held=heavy_available;
-  HeavyGuard(){calls.emplace_back("heavy_begin");}
-  ~HeavyGuard(){if(held)calls.emplace_back("heavy_end");}
-  explicit operator bool()const{return held;}
-};
+namespace operations {
+Guard::Guard() noexcept:held_(heavy_available){calls.emplace_back("heavy_begin");}
+Guard::~Guard(){if(held_)calls.emplace_back("heavy_end");}
 }
 namespace football {
 esp_err_t beginReset(){
@@ -116,7 +114,6 @@ namespace images {
 esp_err_t format(){
   const auto err=call("format");if(err==ESP_OK)mounted=true;return err;
 }
-struct DeleteAllResult { uint8_t deleted=0,already_missing=0; };
 esp_err_t removeAll(DeleteAllResult* result){
  const auto error=call("images");
  if(result)*result={uint8_t(error==ESP_OK?2:1),3};
@@ -194,7 +191,7 @@ def main():
     root = Path(__file__).resolve().parents[2]
     source = (root / "components/web/web_service.cpp").read_text()
     assert 'HTTP_POST, repairImages' not in source, "retired repair route has no destructive handler"
-    start = source.index("struct ResetProgress {")
+    start = source.index("const char* resetStageKey(")
     end = source.index("\n// ---- Network, provider data, display", start)
     handlers = source[start:end]
     compiler = shutil.which("clang++")
@@ -204,6 +201,7 @@ def main():
         folder = Path(temporary)
         main_file = folder / "reset.cpp"
         main_file.write_text(PRELUDE + handlers + MAIN)
+        (folder / "esp_err.h").write_text("#pragma once\nusing esp_err_t=int;\ninline constexpr int ESP_OK=0,ESP_FAIL=-1,ESP_ERR_NOT_FINISHED=1;\n")
         # Compile the real command helper/reset decoder without unrelated Demo
         # and provider-selection functions or an alternative validation model.
         codec = (root / "components/web/request_json.cpp").read_text()
@@ -213,13 +211,16 @@ def main():
         subprocess.run([
             compiler, "-std=c++20", "-O1", "-g", "-Wall", "-Wextra",
             "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+            "-I" + str(folder),
+            *["-I" + str(path) for path in sorted((root / "components").glob("*/include"))],
             "-I" + str(root / ".pio/libdeps/native/ArduinoJson/src"),
             "-I" + str(root / "include"),
             "-I" + str(root / "components/web"),
             "-I" + str(root / "components/settings/include"),
             "-I" + str(root / "components/football/include"),
             "-I" + str(root / "components/json/include"),
-            str(main_file), str(root / "components/json/json_stream.cpp"),
+            str(main_file), str(root / "components/application/reset.cpp"),
+            str(root / "components/json/json_stream.cpp"),
             str(folder / "request.cpp"), "-o", str(binary),
         ], cwd=root, check=True)
         environment = dict(os.environ)

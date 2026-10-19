@@ -35,10 +35,8 @@ function imageFailure(s, english = S.draft?.language === 1) {
     };
 }
 const SOURCE = {
+    outcome_unknown: 'Speicherergebnis unklar. Nicht erneut speichern. Status prüfen; bei unklarem Speicherzustand Gerät neu starten.',
     rejected: 'Gespeicherte Einstellungen waren ungültig. Das Gerät nutzt Startwerte; Speichern überschreibt die gespeicherten Einstellungen.', damaged: 'Gespeicherte Einstellungen sind beschädigt. Das Gerät nutzt Startwerte; Speichern überschreibt die gespeicherten Einstellungen.', outdated: 'Einstellungen stammen aus einer älteren Firmware und wurden verworfen. Bitte neu einrichten.', unreadable: 'Gespeicherte Einstellungen konnten nicht gelesen werden. Das Gerät nutzt Startwerte; Speichern ist bis zum Zurücksetzen gesperrt.', no_storage: 'Einstellungsspeicher nicht verfügbar. Das Gerät nutzt Startwerte; Änderungen werden nicht gespeichert.'
-};
-const COMP_SOURCE = {
-    rejected: 'Gespeicherte Wettbewerbe waren ungültig. Das Gerät nutzt Startwerte; Speichern überschreibt die gespeicherten Wettbewerbe.', damaged: 'Gespeicherte Wettbewerbe sind beschädigt. Das Gerät nutzt Startwerte; Speichern überschreibt die gespeicherten Wettbewerbe.', outdated: 'Wettbewerbe stammen aus einer älteren Firmware und wurden verworfen. Bitte neu einrichten.', unreadable: 'Gespeicherte Wettbewerbe konnten nicht gelesen werden. Das Gerät nutzt Startwerte; Speichern ist bis zum Zurücksetzen gesperrt.', no_storage: SOURCE.no_storage
 };
 // Cause and what to do per failure key of the REST API (docs/API.md "Error codes").
 const CAUSE = {

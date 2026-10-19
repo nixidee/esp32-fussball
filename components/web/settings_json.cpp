@@ -435,6 +435,9 @@ bool schemaJson(json::Writer& out, const settings::Limits& limits,
       !out.boolean(backlight) || !integer("image_max", cfg::kImageMaxBytes) ||
       !integer("selection_entries", cfg::kSelectionEntries) ||
       !integer("team_id_max", UINT32_MAX) ||
+      !integer("competition_id_max",
+               std::numeric_limits<
+                   decltype(settings::CompetitionRoute::id)>::max()) ||
       !out.key("selection_country_default") ||
       !out.string(cfg::kSelectionCountryDefault) ||
       !integer("image_quota", cfg::kImageTotalBytes) ||
@@ -451,6 +454,30 @@ bool schemaJson(json::Writer& out, const settings::Limits& limits,
     if (!out.string(
             football::providerName(static_cast<cfg::Provider>(provider))))
       return false;
+  if (!out.end() || !out.key("provider_setup") || !out.array()) return false;
+  for (unsigned i = 0; i < cfg::kProviderCount; ++i) {
+    const auto rules =
+        settings::providerRequirements(static_cast<cfg::Provider>(i));
+    const char* enabled_by = "";
+    switch (rules.access) {
+      case settings::ProviderAccess::kOpen: break;
+      case settings::ProviderAccess::kApiFootballKey:
+        enabled_by = "api_football_key_set";
+        break;
+      case settings::ProviderAccess::kEspnOptIn:
+        enabled_by = "espn_opt_in";
+        break;
+      case settings::ProviderAccess::kFootballDataKey:
+        enabled_by = "football_data_key_set";
+        break;
+    }
+    if (!out.object() || !out.field("enabled_by", enabled_by) ||
+        !out.field("season_digits", rules.season_digits) ||
+        !out.field("list_season", rules.list_season) ||
+        !out.field("list_country", rules.list_country) ||
+        !out.field("discover_teams", rules.discover_teams) || !out.end())
+      return false;
+  }
   if (!out.end() || !out.key("competition_defaults") ||
       !competitionValueJson(out, settings::Competition{}) ||
       !out.key("defaults") || !out.object() ||

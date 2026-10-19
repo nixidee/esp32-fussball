@@ -79,21 +79,7 @@ bool Index::observe(const provider::Fixture& fixture) {
   for (auto& club : clubs_) {
     if (!club.id) break;
     if (fixture.home.id != club.id && fixture.away.id != club.id) continue;
-    auto& own = club.fixtures;
-    if (kickoff < utc_) {
-      if (!own[0].id || kickoff > own[0].kickoff ||
-          (kickoff == own[0].kickoff && fixture.facts.id < own[0].id))
-        own[0] = {fixture.facts.id, kickoff};
-    } else {
-      Own next{fixture.facts.id, kickoff};
-      for (std::size_t i = 1; i < own.size(); ++i) {
-        if (own[i].id == next.id) break;
-        if (!own[i].id || next.kickoff < own[i].kickoff ||
-            (next.kickoff == own[i].kickoff && next.id < own[i].id))
-          std::swap(own[i], next);
-        if (!next.id) break;
-      }
-    }
+    retainOwn(club.fixtures, {fixture.facts.id, kickoff});
   }
   // Explicit team schedules need no round keys. Their only authoritative
   // result is the closest four own identities, consumed through own().
@@ -126,21 +112,79 @@ bool Index::observe(const provider::Fixture& fixture) {
     round->upcoming = kickoff;
   return true;
 }
-bool Index::own(Selection& out) const {
+void Index::retainOwn(OwnFixtures& own, OwnFixture next) const {
+  for (std::size_t i = 0; i < own.size(); ++i)
+    if (own[i].id == next.id) {
+      if (own[i].kickoff == next.kickoff) return;
+      if (i == 0)
+        own[0] = {};
+      else {
+        std::move(own.begin() + i + 1, own.end(), own.begin() + i);
+        own.back() = {};
+      }
+      break;
+    }
+  if (next.kickoff < utc_) {
+    if (!own[0].id || next.kickoff > own[0].kickoff ||
+        (next.kickoff == own[0].kickoff && next.id < own[0].id))
+      own[0] = next;
+    return;
+  }
+  for (std::size_t i = 1; i < own.size(); ++i) {
+    if (!own[i].id || next.kickoff < own[i].kickoff ||
+        (next.kickoff == own[i].kickoff && next.id < own[i].id))
+      std::swap(own[i], next);
+    if (!next.id) break;
+  }
+}
+void Index::seedOwn(uint32_t club, const OwnFixtures& candidates) {
+  for (auto& entry : clubs_)
+    if (club && entry.id == club) {
+      for (const auto& candidate : candidates) {
+        if (!candidate.id && !candidate.kickoff) continue;
+        if (!candidate.id || !candidate.kickoff) {
+          complete_ = false;
+          return;
+        }
+        retainOwn(entry.fixtures, candidate);
+      }
+      return;
+    }
+  complete_ = false;
+}
+bool Index::ownCandidates(uint32_t club, OwnFixtures& out) const {
   if (!complete_ || utc_ <= 0) return false;
-  out.own = {};
-  auto next = out.own.begin();
+  for (const auto& entry : clubs_)
+    if (club && entry.id == club) {
+      out = entry.fixtures;
+      return true;
+    }
+  return false;
+}
+bool Index::owns(uint32_t match) const {
+  if (match)
+    for (const auto& club : clubs_)
+      for (const auto& fixture : club.fixtures)
+        if (fixture.id == match) return true;
+  return false;
+}
+bool Index::own(Selection& out, OwnMode mode) const {
+  if (!complete_ || utc_ <= 0) return false;
+  auto proposed = mode == OwnMode::kAppend ? out.own : decltype(out.own){};
+  auto next = std::find(proposed.begin(), proposed.end(), 0);
   for (const auto& club : clubs_) {
     if (!club.id) break;
     for (const auto& match : club.fixtures)
-      if (match.id && std::find(out.own.begin(), next, match.id) == next)
+      if (match.id && std::find(proposed.begin(), next, match.id) == next) {
+        if (next == proposed.end()) return false;
         *next++ = match.id;
+      }
   }
+  out.own = proposed;
   return true;
 }
-bool Index::select(Selection& out, MatchStore* store,
-                   uint8_t competition) const {
-  if (use_calendar_) return selectCalendar(out, store, competition);
+bool Index::select(Selection& out, MatchStore* store, SourceSlot source) const {
+  if (use_calendar_) return selectCalendar(out, store, source);
   if (!complete_ || !rounds_complete_ || utc_ <= 0) return false;
   out.clear();
   if (!own(out)) return false;
@@ -189,7 +233,7 @@ bool Index::select(Selection& out, MatchStore* store,
   return true;
 }
 bool Index::selectCalendar(Selection& out, MatchStore* store,
-                           uint8_t competition) const {
+                           SourceSlot source) const {
   if (!complete_ || utc_ <= 0) return false;
   out.clear(true);
   const auto& calendar = calendar_;
@@ -211,9 +255,14 @@ bool Index::selectCalendar(Selection& out, MatchStore* store,
     selected.from = stage.from;
     selected.to = stage.to;
     selected.number = stage.number;
-    if (store && competition) {
+    if (store && store->sourceId(source)) {
       selected.label = store->label(stage.label.data);
-      store->roundResult(competition, stage.number, selected.label, 0, false);
+      if (!stage.label.empty() && selected.label == kNoIndex) {
+        store->flag(source, kNoticeMatches, true);
+        return false;
+      }
+      store->roundResult(source, stage.number, selected.label, 0, false,
+                         stage.from, stage.to, RoundKind::kCalendar);
     }
   }
   for (uint16_t i = 0; i < calendar.count; ++i) {

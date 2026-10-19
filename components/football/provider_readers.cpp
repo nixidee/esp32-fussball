@@ -9,6 +9,7 @@
 
 #include "civil_time.h"
 #include "provider_adapter.h"
+#include "settings_model.h"
 
 namespace football::provider {
 namespace {
@@ -315,6 +316,7 @@ class Parser {
   bool fdRow(const Token&, TableRow&);
   bool root(const Token&);
   bool apiMetadata(int, const Token&);
+  bool apiCurrentSeason(const Token&);
   bool fdMetadata(int, const Token&);
 };
 
@@ -487,6 +489,10 @@ bool Parser::olgFixture(const Token& token) {
                  equal(value, request.source.season);
         if (!value.truncated && !value.contains_nul &&
             (value.kind == Kind::kString || value.kind == Kind::kNumber)) {
+          if (request.operation == Operation::kCurrentSeason &&
+              !result.metadata.season.empty() &&
+              std::string_view{result.metadata.season.data} != value.text)
+            result.metadata.invalid = true;
           result.metadata.season.assign(value.text);
         }
         break;
@@ -502,6 +508,8 @@ bool Parser::olgFixture(const Token& token) {
     fixture.fields |= kShootout;
   }
   fixture.source_matches = league && season;
+  if (request.operation == Operation::kCurrentSeason)
+    result.metadata.source_matches &= fixture.source_matches;
   fixture.scope_matches =
       !request.round || fixture.facts.round == request.round;
   fixture.time_definite = fixture.facts.kickoff != 0;
@@ -982,8 +990,10 @@ bool Parser::afFixture(const Token& token) {
         else if (f == 1)
           season =
               request.source.season.empty() || equal(v, request.source.season);
-        else
+        else {
           label(v, fixture.round_label);
+          if (!fixture.round_label.empty()) fixture.fields |= kRoundLabel;
+        }
         return true;
       });
     }
@@ -1222,9 +1232,79 @@ bool Parser::fdTable(const Token& token) {
   return ok;
 }
 
+bool Parser::apiCurrentSeason(const Token& token) {
+  uint32_t league = 0;
+  values::Bytes<cfg::kSeasonMaxBytes> selected;
+  uint8_t current_count = 0;
+  const char* const names[] = {"league", "seasons"};
+  const bool ok = object(token, names, [&](int field, const Token& value) {
+    if (!field) {
+      const char* const fields[] = {"id"};
+      return object(value, fields, [&](int, const Token& item) {
+        league = id(item);
+        return true;
+      });
+    }
+    return array(value, [&](const Token& season, std::size_t) {
+      values::Bytes<cfg::kSeasonMaxBytes> year;
+      bool current = false;
+      const char* const fields[] = {"year", "current"};
+      const bool parsed =
+          object(season, fields, [&](int member, const Token& item) {
+            if (!member) {
+              if (item.contains_nul || item.truncated ||
+                  (item.kind != Kind::kNumber && item.kind != Kind::kString) ||
+                  !year.assign(item.text))
+                result.metadata.invalid = true;
+            } else {
+              if (item.kind != Kind::kTrue && item.kind != Kind::kFalse)
+                result.metadata.invalid = true;
+              current = boolean(item);
+            }
+            return true;
+          });
+      if (current) {
+        if (current_count ||
+            !settings::isValidSeason(request.source.provider, year.view()))
+          result.metadata.invalid = true;
+        current_count = 1;
+        selected = year;
+      }
+      return parsed;
+    });
+  });
+  ++result.rows;
+  if (!league || league != values::positiveUint32(request.source.competition) ||
+      current_count != 1 || selected.empty())
+    result.metadata.invalid = true;
+  if (!result.metadata.invalid) result.metadata.season.assign(selected.view());
+  return ok;
+}
+
 bool Parser::apiMetadata(int field, const Token& value) {
   auto& meta = result.metadata;
   if (field == 1) {
+    if (request.operation == Operation::kCurrentSeason) {
+      uint8_t seen = 0;
+      bool league = false, current = false;
+      const char* const keys[] = {"id", "current"};
+      const bool ok = object(
+          value, keys,
+          [&](int member, const Token& item) {
+            seen |= 1u << member;
+            if (!member)
+              league = equal(item, request.source.competition);
+            else
+              current =
+                  !item.contains_nul && !item.truncated &&
+                  (item.kind == Kind::kString || item.kind == Kind::kTrue) &&
+                  item.text == "true";
+            return true;
+          },
+          true);
+      meta.source_matches = seen == 3 && league && current;
+      return ok;
+    }
     const bool full_season = !request.from && !request.to;
     bool league = false, season = false, from = full_season, to = full_season;
     const char* const keys[] = {"league", "season", "from", "to"};
@@ -1370,11 +1450,11 @@ bool Parser::root(const Token& token) {
     }
     result.primary_seen = token.kind == Kind::kArray;
     if (table && !emitGroup()) return false;
+    result.metadata.source_matches = true;
     const bool ok = array(token, [&](const Token& value, std::size_t) {
       return table ? olgRow(value) : olgFixture(value);
     });
     result.metadata.metadata_complete = true;
-    result.metadata.source_matches = true;
     return ok;
   }
   if (request.source.provider == cfg::Provider::kEspn) {
@@ -1412,8 +1492,7 @@ bool Parser::root(const Token& token) {
       if (!result.metadata.metadata_complete) result.metadata.invalid = true;
       return ok;
     }
-    if (operation == Operation::kCalendarDays ||
-        operation == Operation::kSeasonCalendar) {
+    if (operation == Operation::kCalendarDays) {
       bool type = false, season = false;
       const auto dates = [&](const Token& value) {
         if (result.primary_seen) result.metadata.duplicate = true;
@@ -1581,28 +1660,21 @@ bool Parser::root(const Token& token) {
       result.primary_seen = value.kind == Kind::kArray;
       if (operation == Operation::kCurrentSeason)
         return array(value, [&](const Token& v, std::size_t) {
-          const char* const names[] = {"seasons"};
-          return object(v, names, [&](int, const Token& item) {
-            return array(item, [&](const Token& season, std::size_t) {
-              Id year;
-              bool current = false;
-              const char* const inner[] = {"year", "current"};
-              const bool parsed =
-                  object(season, inner, [&](int f, const Token& n) {
-                    if (!f && !n.truncated && !n.contains_nul)
-                      year.assign(n.text);
-                    else if (f == 1)
-                      current = boolean(n);
-                    return true;
-                  });
-              if (current) result.metadata.season = year;
-              return parsed;
-            });
-          });
+          return apiCurrentSeason(v);
         });
       return array(value,
                    [&](const Token& v, std::size_t) { return afFixture(v); });
     });
+    if (operation == Operation::kCurrentSeason) {
+      result.metadata.source_matches &= !result.metadata.invalid;
+      result.metadata.metadata_complete =
+          result.metadata.source_matches && metadata_seen == 30 &&
+          result.rows == 1 && !result.metadata.season.empty() &&
+          result.metadata.current_page == 1 &&
+          result.metadata.total_pages == 1 &&
+          result.metadata.expected_rows_present &&
+          result.metadata.expected_rows == result.rows;
+    }
     if (operation == Operation::kFixtures)
       result.metadata.metadata_complete &=
           metadata_seen == 30 && result.metadata.current_page == 1 &&

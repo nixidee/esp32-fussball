@@ -23,10 +23,11 @@ namespace detail {
 template <class Values>
 bool providerUsableFields(cfg::Provider provider,
                           const Values& settings) noexcept {
-  switch (provider) {
-    case cfg::Provider::kEspn: return settings.espn_opt_in;
-    case cfg::Provider::kApiFootball: return !settings.api_football_key.empty();
-    case cfg::Provider::kFootballData:
+  switch (providerRequirements(provider).access) {
+    case ProviderAccess::kEspnOptIn: return settings.espn_opt_in;
+    case ProviderAccess::kApiFootballKey:
+      return !settings.api_football_key.empty();
+    case ProviderAccess::kFootballDataKey:
       return !settings.football_data_key.empty();
     default: return true;
   }

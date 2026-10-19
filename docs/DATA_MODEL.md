@@ -42,18 +42,18 @@ worker owner and source binding in RAM, independently of display-store rows. No 
 | Application configuration | general Model, competition list, policy, exact NamesRef, revision and last-apply ID | one service AppConfig and one NVS `settings/app_config` blob | 2,704 B RAM; record at most 2,618 B |
 | Competition list | up to 8 entries: stable id and service-owned incarnation, active flag, one source, display names | AppConfig competition section (one NVS envelope), persistent | 1,708 B section in RAM, encoded payload up to 1,678 B ([CONFIGURATION.md](CONFIGURATION.md)) |
 | Screen policy | five phases, six ordered types, shared rules and field-wise competition overrides, appearance and frame settings | AppConfig policy section (one NVS envelope), persistent | 260 B global policy, 216 B payload; competition overrides are attached to competition entries |
-| Match store | matches, tables, original team fallback directory, round labels, shared details/events and notices | RAM, one static store; reacquired from providers after boot | 45,968 B (C6 compiler layout), included in current174,172 B linked static RAM |
+| Match store | matches, tables, original team fallback directory, round labels, shared details/events and notices | RAM, one static store; reacquired from providers after boot | 48,576 B (C6 compiler layout); included in the linked RAM total in [CONFIGURATION.md](CONFIGURATION.md#resources-and-acceptance) |
 | Adopted club names | both languages, short code, stable keys, provider bindings, aliases, league metadata and explicit ID exceptions | one selected immutable LittleFS version, exact AppConfig reference, until explicit factory reset | complete file at most 16 KiB; no global saved-club/legacy RAM table |
 | Club-name source catalogue | retained German/English/short names, aliases and verified provider-ID lists for 147 clubs | repository `include/team_names.json`, embedded read-only in the running app; streamed at `/api/v1/team-names/preset` | 47,451 source bytes; 12,767 B constant payload plus fingerprint/code/alignment; no retained RAM, heap or filesystem copy |
 | Selection page | one page of a provider's competition or club list for the setup wizard | RAM, per request | 64 mutually exclusive typed entries, 8,448-B pool (competition131B / team72B, each slot132B) |
-| Display view model | what one screen shows, copied from the store | RAM, one static owned model; a full copy would need its own storage | 2,044 B |
+| Display view model | one active layout's presentation data plus common scene metadata | RAM, one static owned model; layout payloads are mutually exclusive | 980 B |
 | REST overview | own match and per-competition state, computed from the store | per request | – |
 
 ## 2. Definitions
 
 | Term | Meaning |
 |---|---|
-| Competition | one entry of the competition list: a league, cup or tournament at one provider; each competition has exactly one source. Its stable id (1–255) is used by the store and the REST interface. |
+| Competition | one entry of the competition list: a league, cup or tournament at one provider; each competition has exactly one source. Its stable id (1–255) identifies the configured view and REST context, not shared sporting facts. |
 | Tracked club / own club | the numeric team id in the competition entry's separate ClubPreference. An entry without a preferred club shows the competition only. |
 | Own match | a match of the tracked club. The Own match screen shows the one in its window, else the one with the kickoff nearest to now. |
 | Screen rules | per-phase enable, automatic participation and visit time, inherited field by field or overridden directly on a competition entry. |
@@ -66,7 +66,9 @@ worker owner and source binding in RAM, independently of display-store rows. No 
 
 ## 3. Identity and values
 
-- A match uses its competition, provider and positive numeric provider id.
+- A match uses its exact runtime SourceId and positive provider match id.
+  SourceId resolves to provider, competition and actual season; configured
+  competition IDs and selected clubs are independent bindings.
   The shared team directory uses provider and positive numeric team id.
   Configured club id0 means no tracked club; positive values through
   4,294,967,295 identify a club. Invalid values are rejected at the boundary.
@@ -112,9 +114,10 @@ played/difference/points. Shared EventFacts contains every visible event value;
 StoredEvent adds the pool slot. The canonical event remains80B. C6 parser and
 response-detail payloads shrink384B each without changing any store capacity.
 
-Own membership has one source preference and is computed from the directory
-team identity. Matches and rows retain no independent own flag. Changing the
-club preserves source facts and rebalances only detail/event capacity banks.
+Own membership uses each configured view's club and the source directory
+identity; protected storage uses the union of applicable clubs. Matches and rows retain no independent own flag. Changing the
+club preserves source facts, rebalances detail/event banks and queues a new
+complete fixture union for that source without resetting other data jobs.
 Source lookup checks existing identities before reusing a free slot, so deleting
 one competition cannot hide another competition's dataset status.
 
@@ -129,12 +132,14 @@ one competition cannot hide another competition's dataset status.
 | Match details | 16 (`kStoreDetailMatches`): 8 protected own slots and 8 ordinary slots | 20 B | match identity and up to 12 highlight indices; all team labels resolve through the directory; ordinary slots require an explicitly selected identity |
 | Events | 96 (`kStoreEvents`): 48 protected own events and 48 ordinary events | 80 B | section 4.4; one mechanism with separate capacity banks |
 | Shared labels | 128 (`kStoreRoundLabels`) | 32 B | round and table-group display text; staged and resident references are retained during collection |
-| Source dataset status | 8 sources ×3 datasets | 24 B per dataset; 80 B per source | current selected provider/team once per source; actual HTTP attempt/success times, cause/HTTP and complete/partial state; no per-row own bits |
-| Round references | 64 (`kStoreRounds`) | 12 B | competition, reported round number/label, observed count, checked time, complete/partial state |
-| Table groups | 32 resident and 32 staged (`kStoreTableGroups`) | 3 B | competition, provider-order ordinal and shared label index; no duplicated name arrays |
-| Notices | one per competition | 3 B | a match, table row, team or event did not fit (E19), plus the bits noted in the running refresh |
+| Source dataset status | 16 sources ×3 datasets | 24 B per dataset; 80 B per source | attempt/success times, cause/HTTP, completeness, season-resolution time, view-reference and notice masks |
+| Configured bindings | 8 views | 56 B | configured ID/incarnation, club, current source and actual season-resolution outcome and exact requested-summary target/outcome; previous sources retain reference masks |
+| Exact source index | 16 sources | 900 B total | full provider/competition/resolved-season keys and monotonic runtime IDs |
+| Round references | 64 (`kStoreRounds`) | 16 B | source, kind, reported number/label, from/to, observed count and completeness |
+| Table groups | 32 resident and 32 staged (`kStoreTableGroups`) | 3 B | source, provider-order ordinal and shared label index; no duplicated name arrays |
+| Notices | per source, inside its status | included above | a match, table row, team or event did not fit (E19), plus current-refresh bits |
 
-The current C6 compiler layout is 45,968 B: 12,184 B above the previous
+The current C6 compiler layout is 48,576 B: 14,792 B above the previous
 33,784-B store with 224 matches and 240 teams. Removing unused retained fields
 first reduced that store by 2,816 B. Capacity now covers four 36-team and four
 20-team competitions with three rounds (336 games), plus 32 previous/next own
@@ -163,7 +168,7 @@ allocate more working rows.
 
 | Field | Meaning | OL | ES | AF | FD | Shown / used |
 |---|---|---|---|---|---|---|
-| `competition`, `provider`, `id` | identity | ✓ | ✓ | ✓ | ✓ | updates |
+| `source`, `id` | compact source slot and provider match identity | ✓ | ✓ | ✓ | ✓ | updates |
 | `home`, `away` | team directory indices | ✓ | ✓ | ✓ | ✓ | Own match, Konferenz, REST |
 | `round` | round number | ✓ | reported calendar stage when supplied | ✗ | ✓ `matchday` | Single caption "N. Spieltag" when no label; Konferenz matchday |
 | `label` | round text (pool index) | ✓ `groupName` | reported calendar stage when supplied | ✓ `league.round` | ✓ `stage` | Single caption (preferred over the number) |
@@ -176,7 +181,7 @@ allocate more working rows.
 | `principal` | ordinary goals | ✓ | ✓ | ✓ | ✓ | score centre, Konferenz, REST, goal flash |
 | `shootout` | shootout tally | ✓ (derived) | ✓ | ✓ | ✓ | pill "i.E. 4 : 2" |
 | `score_changed` | last principal score change | – | – | – | – | Konferenz goal flash (120 s), page order |
-| `flags` | event loss and active fixture refresh only | – | – | – | – | visible loss warning; own match/row membership is derived from current selected source team |
+| `flags` | event loss and active fixture refresh only | – | – | – | – | visible loss warning; membership is derived from each configured view's club |
 | `estimated` | estimated bit per value (phase, minute, final whistle) | – | – | – | – | `~` minute |
 | `detail` | optional shared event-detail slot | – | – | – | – | exact selected own or ordinary Single |
 
@@ -193,7 +198,7 @@ allocate more working rows.
 | `identity` | supplied id or deterministic hash | – | – | – | – | updates in place and removal detection |
 | `ordinal` | reported order among shootout attempts | – | ✓ | – | – | stable attempt order, independent of the highlight list |
 
-### 4.5 Table row (12 B)
+### 4.5 Table row (10 B)
 
 | Field | OL | ES | AF | FD | Shown |
 |---|---|---|---|---|---|
@@ -202,7 +207,7 @@ allocate more working rows.
 | `played` | ✓ | ✓ | ✓ | ✓ | Table "Sp" |
 | `points` | ✓ | ✓ | ✓ | ✓ | Table "Pkt" |
 | `difference` | ✓ | ✓ | ✓ | ✓ | Table "Diff" |
-| own flag | – | – | – | – | Table accent row, scroll position |
+| derived own membership | – | – | – | – | Per-view table accent and scroll position; no stored own flag |
 | `group` | ✓ | ✓ | ✓ | ✓ | exact provider table ordinal; groups never flatten into one ranking |
 
 ### 4.6 Store rules
@@ -633,10 +638,9 @@ LittleFS metadata behavior, power cuts, NVS garbage collection, heap/stack
 reserves or slow WiFi timing. The former impossible compile-probe fence and
 future-unused-image-quota charge are retired.
 
-Club membership and home/away emphasis share MatchStore's one provider/team
-preference. The visibility projection holds only competition/provider pairs
-(Source2B, Shown17B) and cannot retain a conflicting club ID. Presenter sport
-helpers receive final selected facts without a second visibility/club snapshot.
+Club membership and home/away emphasis use the configured view's binding in
+MatchStore. Shown retains only configured IDs (9B total), not another provider
+or club snapshot. Canonical SourceKey alone owns provider/competition/season.
 
 A complete provider transfer does not prove complete retained data. Each
 dataset's capacity bits gate its Complete state independently; successful
@@ -646,8 +650,8 @@ pool preserves previous proofs and marks the rejected scope Partial/E19; it
 never silently replaces another round. Updating an existing round still works
 at capacity. Normal complete recovery clears only the affected notices.
 
-Round proof records occupy6B. They retain identity/count/completeness without
-a replacement timestamp: full capacity refuses a new scope explicitly, and
+Round proof records retain identity/count/completeness and calendar bounds
+without a replacement timestamp: full capacity refuses a new scope explicitly, and
 only authoritative retention removes obsolete rounds. DatasetStatus alone owns
 request success/failure times. No record is stored to flash.
 
@@ -659,37 +663,94 @@ for the second typed callback. No names/original conversion passes through a
 text team identity. Application readers reject the wrong type and preserve the
 caller output. HTTP and browser consume the same numeric identity contract.
 
-## Resolved-source cutover status — 2026-10-18
+## Resolved-source integration — 2026-10-18
 
-The approved identity is provider, competition and actually resolved season.
-Automatic and explicit equal seasons must share facts; a new season creates a
-new source while needed prior results stay in RAM. SourceKey and its exact,
-bounded SourceIndex are implemented and directly tested (51B/900B on C6).
-SourceId4B remains distinct from configured IDs and reusable physical slots.
-The production MatchStore/planner/read consumers still use configured-ID keys;
-that cutover is unfinished. No deduplication or rollover acceptance is implied
-by the new foundation. Existing record descriptions above describe that current
-implementation until the consumer cutover replaces them.
+Store, Planner, Scheduler, worker, mapper, selection and readers now use the
+actual resolved season. Equal automatic and explicit seasons share one set of
+matches/tables/rounds and data jobs. Configured views retain separate clubs,
+focus, captions, table markers and ordinary-detail interests. A rollover creates
+a new logical source; needed old results remain visible and schedulable. Source
+release/reset never reuses a logical ID in the same boot. Capacity exhaustion is
+explicit, not eviction. A source-specific failure cannot be cleared by another
+dataset or by a second configured view.
 
-The retention selector now supports eight club preferences for one complete
-source response. It keeps each club's previous and next three identities,
-then emits their unique union (at most32). The same configured request source's
-full-season Planner index gathers active club preferences. ESPN's explicit team
-schedule still traverses one club per configured route until shared-source jobs
-are wired. Store ownership/read projections are still pending; this preparation
-does not deduplicate facts across configured route IDs. C6 Selection244B,
-SourceState344B, Planner5032B; the single transient Index3392B is256B larger.
-Reset reconstructs source state in place instead of building an array on stack.
+One244B fixture selection is shared across pending acquisitions; each144B
+source state keeps transport days, marks and progress rather than another full
+selection. The transient Index remains bounded. Up to eight clubs contribute
+previous/next-three identities; ESPN traverses distinct applicable club schedules
+and merges their unique identities. Binding changes preserve facts and queue
+only a new source fixture union; limits and other dataset jobs keep their state.
 
-The planned Store contract keeps configured competition/club bindings separate
-from source facts. A per-view club decides visible ownership; any applicable
-club decides protected detail storage. Ordinary detail requesters also need
-independent binding ownership so one screen target cannot erase another's
-events. Internal source-slot reuse must not recycle a logical SourceId during
-the same boot, including store reset. These consumers are not implemented yet.
+Actual Store/mapper/selection/views/Demo, recorded306-fixture OpenLigaDB and
+current public ESPN parser/Planner/Scheduler replays check shared-source unions,
+independent clubs, incomplete acquisition, empty results, memory refusal and
+recovery. Source retirement and reused physical slots cannot revive a stale
+logical match key. Explicit season admission clears a resolved capacity failure;
+other dataset failures remain independent. Per-view metadata jobs reject stale
+incarnations before request preparation. Current linked totals and unmet device/
+resource criteria are listed in the [README](../README.md). Keyed-provider live
+responses, physical screens and runtime acceptance remain separate.
 
-A C6 compiler layout probe of that target, including round ranges/kind, gives
-48,224B Store versus45,968B current (+2,256B). It preserves Match40B, MatchKey8B,
-Selection12B, DatasetStatus24B and MatchDetails20B. It is a planning prototype,
-not the production model, functional evidence or runtime acceptance. Separate
-Planner/Scheduler factoring and final linked measurements remain required.
+Each configured view owns the result of its exact requested summary (MatchKey
+plus DatasetStatus,32B per view). A new valid target resets only that result;
+stale completions are ignored. Same-target views share the actual request and
+event records, but each interested view receives its result. Capacity notices
+still prevent Complete after HTTP success. Planner prepares target context under
+the repository mutex; UI code does not select targets or own provider outcomes.
+
+Removing a view preserves the explicit batch collection boundary.
+Coverage evidence owns one compact proof per exact provider/competition/resolved
+season. Up to16current/adjacent keys are shared by active views; equal automatic
+and explicit seasons and overlapping year preferences do not duplicate requests
+or proofs. Extra discovery traverses those exact keys once, using the existing
+send budgets and durable request credits. Assessment borrows every active view's
+resolved source; missing, stale, partial or unverifiable evidence stays unknown.
+Normal provider rows can invalidate affected season proofs before display-store
+admission; a different season's success cannot restore the lost proof. The
+proof array is1216B (formerly768B), with64B temporary requirement references.
+No football persistence or new NVS format is introduced. Focused source/worker/
+provider/credit checks pass; full provider/device/runtime acceptance remains open.
+
+Demand preparation borrows the controller's coherent phase selection when
+available. Otherwise the planner derives it once with the same selector and
+break-coverage input, then uses it for both shared-source and per-view jobs.
+This preserves phase-specific table demand for either call form; it adds no
+second selection policy or persistent data.
+
+An exact-season live refresh without a known round updates retained identities
+in one response. It cannot certify a new round or a complete fixture selection.
+The planner reports preservation of the existing proof to the worker. A
+successful request still advances its success timestamp independently of
+whether the retained dataset is Partial or Complete. Automatic OpenLigaDB
+season resolution requires matching league provenance for every response row
+and one consistent season; foreign or mixed responses cannot create a source.
+
+Calendar round identity is source, reported number, label and kind. Corrected
+provider dates update that round's range. A nonempty round label that cannot
+fit is a visible capacity failure: mapper admission preserves the prior match,
+and calendar selection cannot publish a proof without its required label.
+The effective context/provider label is resolved once before new facts publish.
+
+A corrected own-fixture kickoff replaces the prior candidate for that match ID
+before nearest-game selection. This also applies when the earlier candidate
+came from another response. Overlapping past/future lists therefore produce
+one previous/next3 set; missing required admission IDs preserve prior facts
+and fail the refresh instead of certifying an incomplete replacement.
+
+### Shared match timing
+
+`matchTiming(StoredMatch)` is the pure owner of eligible timing, confirmed versus
+estimated running state, justified interruption, kickoff/observation basis and
+expected/hard end. Display policy adds its configured before/after buffers and
+own-game midpoint. Request policy adds polling lead and the one final fetch.
+These consumers deliberately have different windows; neither reclassifies the
+canonical timing facts. The result is local, with no retained state or allocation.
+
+### Provider setup and round labels
+
+`settings::providerRequirements` is the pure contract for access, season format,
+list fields and automatic team-season discovery. Settings, adapters, HTTP
+validation and the exported Web schema consume it. Labels remain in the views.
+Parsers distinguish a sporting round label from a generic stage using a
+canonical flag; selectors never infer that meaning from provider identity.
+Missing labels in partial updates preserve their previous meaning.

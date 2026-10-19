@@ -64,6 +64,9 @@ An uncertain configuration write sets `outcome_unknown:true` and skips unlink.
 Reload/reboot to establish the durable state before another mutation; never
 automatically resend that deletion. Read-only inventory reconciliation is safe.
 
+The application reset service owns operation ordering and its typed receipt.
+HTTP authentication/confirmation and the response fields remain unchanged.
+
 Reset partial-failure responses also include `image_files_deleted` and
 `image_files_already_missing`, counting confirmed per-file outcomes before the
 first failure. They do not imply that the whole reset completed.
@@ -345,7 +348,10 @@ items carry positive uint32 numeric `id` and textual `name`; they have no
 competition-season field. The query owns this result kind. Wrong-kind internal
 reads are refused before accessing result storage. The schema's `team_id_max`
 is derived from uint32; all browser club-ID validators use that one contract.
-Textual club IDs are not an alternative current API format. Confirmed empty
+Textual club IDs are not an alternative current API format. Manual browser
+entry accepts decimal digits, normalizes leading zeros and converts once to
+the numeric model before Next is enabled; empty, zero, overflow, signs,
+fractional/exponential notation and surrounding whitespace are rejected. Confirmed empty
 results contain an explicit empty items array; malformed/missing arrays fail.
 
 While busy, `wait`/`wait_s` describe a window limit or provider pause. Matching
@@ -525,19 +531,24 @@ used to judge the running image's occupancy.
 
 The integration acceptance limits are at least 40,960 B free-heap minimum,
 32,768 B largest free block, 25% free of each task's usable stack capacity,
-and at most 85% application-slot occupancy. Interval/unavailable heap minima,
-unknown stack capacity or unknown image length do not establish acceptance.
+and normally at most85% application-slot occupancy. The owner explicitly
+suspended only the occupancy criterion for the current alpha
+([ADR-045](DECISIONS.md#adr-045--alpha-only-ota-reserve-exception--accepted-2026-10-18)).
+The checker continues reporting its strict numeric85% result; the exception is
+recorded separately and does not waive any other failure. Interval/unavailable
+heap minima, unknown stack capacity or unknown image length do not establish acceptance.
 Largest-block point samples cover only their observation times, not an
 unobserved continuous minimum. Exposing these fields does not prove that the
 limits hold under the required device workload.
 
-`settings_source`, `competitions_source` and `screen_policy_source` report the
-same aggregate configuration owner: `stored` (the stored record or last save),
+`settings_source` reports the one aggregate configuration owner: `stored` (the stored record or last save),
 `initial` (no record, or after reset), `outdated` (an unsupported record version),
 `rejected` (a decoded value outside its limits), `damaged` (wrong length or not
 decodable), `unreadable` (NVS read error or no memory), `no_storage` (NVS unusable)
 or `outcome_unknown` (a mutation may already be durable). There are no separate
-competition or screen records and no older-record fallback.
+competition or screen records and no older-record fallback. The former
+`competitions_source` and `screen_policy_source` mirrors are removed; clients
+read the one `settings_source` for all sections.
 Except for `stored` and `outcome_unknown`, these states use initial values.
 An `outdated`, `rejected` or `damaged` record can be replaced by the next save;
 `unreadable` and `no_storage` refuse saving until reset/recovery.
@@ -766,3 +777,35 @@ A candidate must be fully written, synchronized, closed and content-checked
 before publication. Image rename runs behind the LVGL reader barrier; names
 activation uses the exact NVS reference. A cleanup failure never replaces the
 primary operation cause. No journal or additional API write sequence is required.
+
+### Shared-season status context
+
+Configured competitions may share one resolved provider season and its sporting
+facts. Overview counts and own-club emphasis remain per configured view. Exact
+summary requests retain per-view target/outcome state: another view's summary
+success cannot erase its failure, while identical targets share one provider
+request. Dataset availability, retained-data completeness and actual request
+success/failure remain independent. No new wire field or persistent record is
+introduced by this runtime source integration.
+
+Overview match provider provenance comes from the exact stored season source,
+including when one team's directory metadata is missing. Missing team names/IDs
+remain unknown independently; they do not replace the provider with a default.
+
+The schema includes `competition_id_max`, derived from the configured entry-ID
+type, alongside `team_id_max`. The Web draft validator consumes these limits.
+These are configuration-entry identities, independent of provider competition
+IDs. Current-version import requests new device-local entry IDs/incarnations;
+provider/club identities and attached display preferences remain in each entry.
+Import confirmation changes the draft only; common Save publishes it.
+
+### Provider setup schema
+
+`provider_setup` in `/schema` has one entry per provider in `providers` order.
+`enabled_by` names the redacted saved-settings flag (empty means no prerequisite),
+`season_digits` is the fixed digit count (0 means variable-length digits),
+`list_season`/`list_country` identify relevant competition-list fields and
+`discover_teams` identifies automatic season discovery before a team list.
+`POST /data/select` permits an empty team season; the domain adapter resolves it
+where needed. Optional irrelevant fields retain stale-form ignore semantics;
+relevant fields still receive strict type, UTF-8, capacity and domain checks.

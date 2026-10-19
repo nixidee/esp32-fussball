@@ -9,7 +9,7 @@
 #include <new>
 
 #include "file_service.h"
-#include "network_service.h"
+#include "operation_admission.h"
 #include "ota_service.h"
 #include "settings_store.h"
 
@@ -95,7 +95,7 @@ esp_err_t resolveVisible(Targets& targets, uint8_t language,
   if (!missing)
     return settings::generation() == config_revision ? ESP_OK
                                                      : ESP_ERR_INVALID_STATE;
-  network::HeavyGuard guard;
+  operations::Guard guard;
   if (!guard) return ESP_ERR_NOT_FINISHED;
   Lookup lookup;
   const auto opened = lookup.open();

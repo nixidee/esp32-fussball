@@ -26,10 +26,8 @@ enum class Operation : uint8_t {
   kOwnFixtures,
   kTable,
   kCurrentSeason,
-  kCurrentRound,
   kLastChange,
   kCalendarDays,
-  kSeasonCalendar,
   kSummary,
   kCompetitions,
   kTeams,
@@ -42,11 +40,27 @@ struct Capabilities {
 };
 Capabilities capabilities(cfg::Provider) noexcept;
 
+enum class FixtureFlow : uint8_t { kSeason, kCalendar };
+enum class LiveFlow : uint8_t { kDate, kRoundChange, kCalendarDay };
+// Provider semantics, consumed by the common demand/retention coordinator.
+// Returned by value; no per-source copy or response state is retained.
+struct Profile {
+  Capabilities available;
+  FixtureFlow fixtures = FixtureFlow::kSeason;
+  LiveFlow live = LiveFlow::kDate;
+  Operation resolution = Operation::kCurrentSeason;
+  bool separate_events = false;
+};
+Profile profile(cfg::Provider) noexcept;
+uint32_t accessFingerprint(cfg::Provider,
+                           const settings::ProviderSettings&) noexcept;
+
 struct RequestSpec {
   SourceInput source;
   Operation operation = Operation::kFixtures;
   uint32_t from = 0, to = 0, match = 0, team = 0;
   uint16_t round = 0;
+  bool upcoming = false;  // own schedule: future fixtures rather than results
   std::string_view country;
 };
 struct SelectionPlan {
@@ -59,7 +73,7 @@ bool prepareSelection(const SourceInput&, Operation, int64_t utc,
                       SelectionPlan&) noexcept;
 
 struct HttpRequest {
-  char url[320]{};
+  char url[cfg::kProviderUrlBytes]{};
   std::size_t body_limit = cfg::kProviderBodyBytes;
 };
 bool buildRequest(const RequestSpec& request, HttpRequest& out) noexcept;
@@ -84,7 +98,8 @@ enum MatchField : uint16_t {
   kPeriod = 1 << 4,
   kPrincipal = 1 << 5,
   kShootout = 1 << 6,
-  kRound = 1 << 7
+  kRound = 1 << 7,
+  kRoundLabel = 1 << 8  // nonempty round_label denotes a round, not a stage
 };
 // Only reported values cross the adapter boundary. Store-owned observation
 // timestamps, directory indices, competition slots and detail refs never do.

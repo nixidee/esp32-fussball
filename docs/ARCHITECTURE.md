@@ -9,18 +9,32 @@ Two immutable names slots cover atomic activation and uncertain NVS recovery.
 No legacy migration, football cache, all-team name projection or worker name
 fence belongs to this design.
 
+Boundary consolidation is still incomplete: round-label meaning is interpreted
+using provider identity in screen selection, setup-field relevance is repeated
+in HTTP and browser code, and common Apply/export orchestration partly lives in
+HTTP handlers. The football worker also assembles the original-name JSON
+envelope. Display selection and polling separately implement shared match-timing
+facts. The ownership rules below remain the target; these remaining boundaries
+must not be represented as a fully completed separation.
+
 `components/json` owns the strict pull grammar and checked writer. Web commands,
 including display actions, share typed field/scalar decoding and one complete
 HTTP command-body/diagnostic path. Domain actions run only after that succeeds.
 Configuration, status and exports use typed codecs without a JSON document.
 All provider sporting, selection and full-original readers use the same grammar. Typed
 Web helpers own field/array/scalar validation; provider adapters own their data
-semantics. Transport owns body limits, deadlines and real send admission.
+semantics. Provider Profile maps availability, fixture/live acquisition, metadata
+resolution and separate-summary semantics once. Planner uses those protocols
+without provider identity branches; transport access fingerprints derive adapter
+authentication/usability. Transport owns body limits, deadlines and real send admission.
 
-The configuration owns each competition's SourceKey, separate ClubPreference,
-explicit group membership and attached display preferences. Runtime ownership
-still keys facts by configured competition: equal sources can retain duplicate
-fixtures. The shared-source runtime cutover remains incomplete. A compact effective
+Configuration owns each view's provider/competition/season preference and
+separate club/group/display settings. Runtime SourceKey uses the actually
+resolved season; equal auto/explicit selections share canonical facts and
+source jobs. Incarnation-aware bindings preserve independent clubs and needed
+prior-season sources. MatchKey uses SourceId plus provider match ID; physical
+slots and configured IDs cannot alias its lifetime. The source worker shares
+one fixture-selection run instead of retaining16full selections. A compact effective
 current-phase Program is derived once for the controller. It replaces broad UI
 Model/Policy copies and independently synchronized association identities.
 The controller supplies immutable PresentationFacts (selected sequence view,
@@ -29,6 +43,10 @@ resolver or service context. The controller prepares per-instant offsets and
 as-of/retry instants before presentation, including timezone transitions.
 Presenter has no navigation state or
 content-probe access; it formats the borrowed facts and competition captions.
+The view model activates exactly one Own/Conference/Table/Card payload. Its
+layout tag is read-only outside activation; name targets are discarded before
+reusing payload storage. Common scene metadata survives activation, and the
+renderer reads only the matching payload. All text/row/attempt capacities remain.
 The presenter emits labels; renderer owns geometry/fonts;
 the controller owns situation/navigation/visit timing. One action FIFO serves
 physical and Web input. Software night rendering is removed; only a real PWM
@@ -51,7 +69,8 @@ ownership and resource contracts below govern new changes.
 ```text
 Browser: Overview / Competitions / Display / Images / Settings / Debug / System
     | current typed HTTP commands and one shared draft/Apply
-Web adapters ----> settings (one AppConfig / NVS) <---- runtime projections
+Web adapters ----> application reset (typed sequence)
+    +------------> settings (one AppConfig / NVS) <---- runtime projections
     |                  | exact names reference
     |             adopted names (bounded LittleFS collection)
     | commands
@@ -87,6 +106,12 @@ main.cpp composes owners and passes narrow settings; there is no core catchall.
 | UI controller | Admit typed actions, own programme/visit/navigation state and request final presentation | Input hardware, provider parsing |
 | Status presenter | Supply final status labels, priorities and visibility duration to the ViewModel | LVGL, network or file I/O |
 
+The application reset service composes existing domain operations. Its typed
+result reports stage and confirmed partial effects. The HTTP handler owns
+authentication, command decoding and response encoding; it does not sequence
+settings/counter/name/image deletion or reboot. A successful reset retains the
+publication fence through the scheduled reboot. Failure releases it.
+
 ## Threading and data ownership
 ### Current ownership
 
@@ -95,7 +120,7 @@ main.cpp composes owners and passes narrow settings; there is no core catchall.
   under `display::lock()`. LVGL's own worker renders under the same recursive
   lock. Views only render supplied data; provider and navigation logic stay
   outside the view.
-- The UI controller owns one narrow UiConfig (448 B) and one view model (2,044 B), the input
+- The UI controller owns one narrow UiConfig (448 B) and one view model (980 B), the input
   queue and the presentation cadence. Pure navigation policy owns screen,
   row/page and competition-cycle state; separate football and status
   presenters borrow those objects during a repository callback. They retain
@@ -117,7 +142,7 @@ main.cpp composes owners and passes narrow settings; there is no core catchall.
   under the active LVGL screen. The fixed application draw list and text
   arena do not replace LVGL's temporary draw-task allocations.
 - One provider worker owns all fetches, parsing, the match store and
-  publication. The store (45,968 B in the current C6 compiler layout,
+  publication. The store (48,576 B in the current C6 compiler layout,
   512 matches/256 teams) is one static object; the worker writes
   each response element into it under a mutex and publishes after every
   request. `football::read()` holds that mutex while the presenter builds
@@ -410,8 +435,11 @@ free was 2,464/1,940 B in that run.
   Parsing skips segment contents/checksum calculation and does not rehash or
   independently verify the image. Existing `/schema` `ota_max` remains the
   actual inactive-slot capacity; both supported layouts use equal app slots.
-  The acceptance limit is at most 85% of that capacity. No second slot-size
-  constant or external firmware-size metadata is introduced.
+  The standard acceptance limit is at most85% of that capacity. The owner
+  explicitly suspended only this occupancy criterion for the current alpha
+  ([ADR-045](DECISIONS.md#adr-045--alpha-only-ota-reserve-exception--accepted-2026-10-18));
+  numeric reporting and all other resource/OTA checks remain unchanged.
+  No second slot-size constant or external firmware-size metadata is introduced.
 - **SDK correction:** `scripts/heap_monitor_patch.py` and `.cmake` replace
   only the heap source in the build with a local corrected copy. Exact
   ESP-IDF 6.1.0 and original-source hash checks fail closed on upgrades; the
@@ -642,7 +670,7 @@ components/
   network/                   WiFi policy, antenna, DNS, mDNS, SNTP, admission
   football/                  compact match store + row mappers, request
                              scheduler, provider request plans, matchday
-                             rules (gap, over, passed, selection), views from
+                             acquisition-day grouping/retention, views from
                              the store, provider worker, client, budget and
                              temporary original-name query channel
   names/                     immutable catalogue, adopted collection/JSON/file
@@ -661,6 +689,14 @@ test/                        portable owner-behaviour and regression suites
 scripts/                     configuration guards, native selection, heap patch,
                              formatting, asset/font/web builders, release guard
 ```
+
+The Web header, full team-name header and project-local heap patch share
+`scripts/generated_file.py` for build-file publication. It compares bytes,
+preserves unchanged timestamps and replaces changed output through a sibling
+temporary file. Failed writes/replacements leave the previous output intact;
+temporary files are cleaned up. Each generator retains its own rendering,
+validation, size accounting and CLI/PlatformIO entry. This host-only helper
+does not change generated payloads or device resource use.
 
 
 ## Current configuration and codec resource ownership
@@ -687,25 +723,19 @@ All JSON consumers use the common strict reader/writer. Fixed HTTP chunk/read
 buffers remain512/128 B; common Apply may allocate one2704-B candidate and one
 bounded names-import arena when names change. There is no 24-KiB JSON DOM.
 Per-dataset status copies add576 B transiently to `/status`; they preserve table
-and details failures independently of successful fixtures. The final matching
-C6 build measures1,734,276 B linked Flash and173,256 B static RAM. Binary
-1,735,040 B and Webgzip90,284 B match the same source manifest; the earlier
-checkpoints describe only their own snapshots. Against the preserved baseline:
-−32,022 B linked Flash, +12,244 B static RAM, −32,016 B binary, +10,097 B gzip.
-The required canonical store is45,968 B versus33,784 B (+12,184 B); all other
-static changes net+60 B. Initialized-data moves only save Flash, not total RAM.
+and details failures independently of successful fixtures. The current canonical
+store is48,576 B, including exact resolved-source identities and independent
+configured bindings. Initialized-data retirement can save Flash but does not
+by itself reduce total static RAM. Current matched binary totals, temporary
+working-set layouts and the explicit alpha-only85% exception are maintained in
+[CONFIGURATION.md](CONFIGURATION.md#resources-and-acceptance).
 
-The unchanged OTA slot leaves99,968 B free; the85%target still fails by
-175,284 B and has not been waived. Provider staging is allocated only for actual events or buffered table groups
-(maximum7,680 B). Metadata and empty answers use none. With the mutually
-exclusive retention index3,144 B or event detail7,296 B, requested payload is
-10,824/14,976 B before allocator overhead and TLS/SDK.
-Names Apply requests2704+32880 B before releasing the arena ahead of the2618-B
-NVS wire allocation. Export grouping is request-only and below16KiB. Heavy
-admission serializes these paths with image validation/screenshot/OTA; ordinary
-status and normal LVGL JPEG can overlap TLS. No allocation cap is a measured
-peak. Physical TLS/JPEG/heap/largest-block/all-task stack/CPU/OTA acceptance is
-still required; the85%Flash and physical gates remain open.
+Common Apply releases its optional names-import arena before the NVS wire
+allocation. The system operation Guard serializes TLS/parser admission with
+names, image validation, screenshot and OTA operations. Ordinary status reads
+and LVGL JPEG rendering can still overlap provider traffic. Allocation bounds
+and isolated compiler frames do not prove available device reserves. Physical
+TLS/JPEG heap/largest-block, all-task stack, CPU and OTA evidence remain required.
 
 
 The configuration service alone coordinates changed-name Apply. The names
@@ -740,3 +770,127 @@ The common raw-byte value is values::Bytes, imported unchanged by settings.
 It keeps exact length and alias-safe assignment, including NUL/invalid-UTF8 SSID
 bytes. Domain identities and display labels retain separate validation rules.
 No settings-owned duplicate byte implementation remains.
+
+## Canonical source and presentation ownership
+
+MatchStore owns exact provider/competition/resolved-season identities and
+configured view bindings; the selected club never enters SourceKey. Planner
+shares source-level acquisition and preserves independently requested summary
+outcomes. The adapter Profile owns provider acquisition semantics, authentication
+and capabilities; Planner consumes semantic fixture/live flows rather than
+branching on provider identity. No new task, football persistence or NVS format
+was introduced. Current C6 layouts are Store48,576B, Planner5,032B,
+SourceState144B, Scheduler2,532B and request Inputs1,016B. Read projections carry
+SourceId so a delayed logical identity cannot alias a reused physical slot.
+
+Focused actual-source checks cover source lifetime/capacity/recovery, old-season
+live refresh, shared multi-club retention, all four parser boundaries and
+independent summaries. Current public OLDB/ESPN responses provide separate
+league/cup evidence; synthetic keyed-provider faults do not establish current
+AF/FD availability or live-state acceptance.
+
+Each configured view owns the result of its exact requested summary (MatchKey
+plus DatasetStatus,32B per view). A new valid target resets only that result;
+stale completions are ignored. Same-target views share the actual request and
+event records, but each interested view receives its result. Capacity notices
+still prevent Complete after HTTP success. Planner prepares target context under
+the repository mutex; UI code does not select targets or own provider outcomes.
+
+Removing a view preserves the explicit batch collection boundary.
+Coverage evidence owns one compact proof per exact provider/competition/resolved
+season. Up to16current/adjacent keys are shared by active views; equal automatic
+and explicit seasons and overlapping year preferences do not duplicate requests
+or proofs. Extra discovery traverses those exact keys once, using the existing
+send budgets and durable request credits. Assessment borrows every active view's
+resolved source; missing, stale, partial or unverifiable evidence stays unknown.
+Normal provider rows can invalidate affected season proofs before display-store
+admission; a different season's success cannot restore the lost proof. The
+proof array is1216B (formerly768B), with64B temporary requirement references.
+No football persistence or new NVS format is introduced. Focused source/worker/
+provider/credit checks pass; full provider/device/runtime acceptance remains open.
+
+The platform operation-admission owner provides one nonblocking scoped Guard
+for TLS/parsing, file/name/image work, screenshot/OTA and their existing
+completion scopes. Its one private atomic flag has no queue, task or heap.
+Guards cannot be copied or transferred. Provider calls borrow an outer guard
+or own a request-local guard; early returns release only their own admission.
+Network readiness, names and images are consumers of this platform primitive;
+network does not own it. Rendering JPEG inside LVGL remains a separate overlap
+that requires device measurement.
+
+
+Application reset is a typed use case in components/application. It owns
+admission, the provider publication fence, domain operation order, partial
+progress and reboot scheduling. Web authenticates/decodes one command and
+serializes its typed receipt. Settings, names, images and counters retain their
+own I/O. The internal15-component/56-edge dependency graph is acyclic.
+
+The presenter owns formatting and semantic content. ViewModel activates only
+one layout payload; common image/style/status metadata stays outside that union.
+Name targets are cleared before payload reuse and resolved after the repository
+read lock. The renderer reads only the active payload and emits hardware source
+acceptance; it performs no match selection, provider request or config mutation.
+The980-B model replaces the former2044-B combined payload without reducing
+text, rows, pages or shootout attempts. Physical round-screen acceptance remains
+separate from actual-font geometry and presenter checks.
+
+### Request completion ownership
+
+Each provider request returns its parser facts together with a typed status
+(code, cause, HTTP status, actual-send flag and send instant). First-send hooks
+borrow this local status; counters, planner completion, dataset publication and
+interactive fairness consume that same result. Local refusals need only the
+16-byte status, not an unused parser payload. No last-request outcome globals
+or code-to-global-error pairing are required. Interactive steps explicitly
+report whether they progressed and whether they sent a request.
+
+Transport waits and the JSON byte stream borrow one request validity context
+(generation, network epoch, absolute deadline and cancellation consumer).
+Buffered parsing checks at most64bytes apart and checks immediately around
+refills and before completion. The first-send frame gate remains a separate
+admission rule; no full response or validity snapshot is retained globally.
+
+Scheduler activity enumeration uses one fixed1024-byte index workspace owned
+by the existing Scheduler. It sorts indices by canonical polling-window start
+and stable Store index, merges overlap chains once and never reorders or
+caches canonical matches. There is no extra heap allocation or persisted data.
+
+Original-name export uses dependency inversion at the existing application
+boundary: a process-lifetime export function invokes a synchronous typed
+producer on the provider worker. Its encoder state stays on that call stack;
+only encoded bytes cross the existing bounded channel to HTTP. The worker
+owns provider/season/budget work and never constructs the REST document.
+Cancellation and channel release retain the worker-completion handshake.
+
+Apply and settings-backup export use bounded application sessions. A session
+owns admission, one config snapshot and its names candidate or export lease;
+member order releases storage resources before admission. Apply publishes once
+through settings, preserving typed validation and uncertain-write results. HTTP
+authenticates, decodes and checks complete bodies, maps errors and revokes other
+password sessions after success. Config reads and backup output share one desired
+document codec. No additional retained config copy or task is introduced.
+
+Web field rendering consumes prepared descriptors rather than reading the
+application draft. A common decoder adapts raw controls; pure draft transitions
+copy changed branches and preserve the saved baseline. Policy controls carry
+nullable-boolean kinds and visit bounds directly, without rewriting HTML. The
+event table dispatches actions; it does not reorder or edit domain arrays.
+
+Selection, names and image-editor visits own their transient mutable state
+inside private closures. Each accepts selected configuration ports and ordinary
+function dependencies, and exports its user actions. The one application draft
+and Apply remain shared. Closing a visit invalidates its outstanding work;
+image cleanup and busy state are accessed through the editor interface.
+
+The canonical screen selector owns sporting round navigation and membership;
+the acquisition calendar exposes only gap/retained-date helpers. Football
+publications expose dataset states directly, without redundant loaded masks.
+One aggregate settings origin is emitted and rendered once. Browser structural
+equality ignores object key order while preserving ordered arrays and distinct
+null, missing and explicit values.
+
+Wizard, adopted-name and image-editor markup functions take prepared display
+values. Controllers retain lifecycle state, prepare provider/source availability
+and bind actions separately. Rendering is checked with immutable view inputs
+and without access to global config models; model edits and requests remain
+controller/application operations.

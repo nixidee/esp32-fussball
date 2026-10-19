@@ -408,21 +408,6 @@ uint32_t dataGeneration() {
   return data_generation_counter.load(std::memory_order_acquire);
 }
 
-std::size_t competitionCount() {
-  xSemaphoreTake(model_mutex, portMAX_DELAY);
-  const std::size_t count = current_config.competitions.entries.size();
-  xSemaphoreGive(model_mutex);
-  return count;
-}
-
-bool competitionAt(std::size_t index, Competition& out) {
-  xSemaphoreTake(model_mutex, portMAX_DELAY);
-  const bool found = index < current_config.competitions.entries.size();
-  if (found) out = current_config.competitions.entries[index];
-  xSemaphoreGive(model_mutex);
-  return found;
-}
-
 bool competitionById(uint8_t id, Competition& out) {
   xSemaphoreTake(model_mutex, portMAX_DELAY);
   const Competition* entry =
@@ -435,30 +420,6 @@ bool competitionById(uint8_t id, Competition& out) {
 void competitions(Competitions& out) {
   xSemaphoreTake(model_mutex, portMAX_DELAY);
   out = current_config.competitions;
-  xSemaphoreGive(model_mutex);
-}
-
-uint8_t competitionId(std::size_t index) {
-  xSemaphoreTake(model_mutex, portMAX_DELAY);
-  const uint8_t id = index < current_config.competitions.entries.size()
-                         ? current_config.competitions.entries[index].id
-                         : 0;
-  xSemaphoreGive(model_mutex);
-  return id;
-}
-
-Origin competitionsOrigin() {
-  xSemaphoreTake(model_mutex, portMAX_DELAY);
-  const Origin from = current_source;
-  xSemaphoreGive(model_mutex);
-  return from;
-}
-
-void screenPolicy(screen_policy::Policy& out, uint32_t* out_generation) {
-  xSemaphoreTake(model_mutex, portMAX_DELAY);
-  out = current_config.screens;
-  if (out_generation != nullptr)
-    *out_generation = generation_counter.load(std::memory_order_acquire);
   xSemaphoreGive(model_mutex);
 }
 
@@ -524,13 +485,6 @@ const cfg::TimeZone& clockZone() {
   xSemaphoreGive(model_mutex);
   // Validation guarantees a known label, including initial/default values.
   return *zone;
-}
-
-Origin screenPolicyOrigin() {
-  xSemaphoreTake(model_mutex, portMAX_DELAY);
-  const auto result = current_source;
-  xSemaphoreGive(model_mutex);
-  return result;
 }
 
 bool footballPaused() {

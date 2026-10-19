@@ -21,7 +21,6 @@ namespace football::view {
 // MatchStore; screen eligibility belongs only to screen policy.
 struct Source {
   uint8_t competition = 0;
-  cfg::Provider provider = cfg::Provider::kOpenLigaDb;
 };
 
 // The shown source of every active competition: its provider's matches.
@@ -33,7 +32,7 @@ class Shown {
   // Adds a source directly (demo).
   void add(const Source& source);
   const Source* source(uint8_t competition) const;
-  bool shows(const StoredMatch& match) const;
+  bool shows(const MatchStore&, const StoredMatch& match) const;
   std::size_t count() const { return count_; }
   const Source& at(std::size_t i) const { return sources_[i]; }
 
@@ -66,7 +65,12 @@ int conferencePageOf(const MatchStore& store, const List& list,
 
 // The own match of the Web UI overview: a running one first, else the one
 // with the kickoff closest to 'utc' (unknown kickoffs last); -1 when none.
-int ownForOverview(const MatchStore& store, const Shown& shown, int64_t utc);
+struct OverviewMatch {
+  MatchIndex index = kNoMatch;
+  uint8_t competition = 0;
+};
+OverviewMatch ownForOverview(const MatchStore& store, const Shown& shown,
+                             int64_t utc);
 // Shown matches of 'competition'.
 uint16_t matchCount(const MatchStore& store, const Shown& shown,
                     uint8_t competition);

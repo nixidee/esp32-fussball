@@ -99,6 +99,14 @@ int main() {
        R"({"provider":0,"teams":true,"competition":"bl1\u0000"})",
        R"({"provider":0,"teams":true,"competition":"bl1","search":"ok"}garbage)"})
     reject<football::SelectionRequest>(text, web::readSelection);
+  for (auto text :
+       {R"({"provider":1,"teams":true,"competition":"39","season":""})",
+        R"({"provider":1,"teams":true,"competition":"39","season":"2026"})"}) {
+    Source source{text};
+    football::SelectionRequest query;
+    assert(web::readSelection(source.input(), query, why) ==
+           web::SettingsDecode::kOk);
+  }
   for (auto text : {R"({"query":"ffffffffffffffff"})",
                     R"({"\u0071uery":"0000000100000001"})"}) {
     Source source{text};

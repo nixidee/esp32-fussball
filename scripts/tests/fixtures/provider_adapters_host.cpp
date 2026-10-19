@@ -10,6 +10,7 @@
 
 #include "provider_adapter.h"
 #include "provider_plan.h"
+#include "screen_selection.h"
 #include "store_mappers.h"
 #include "store_views.h"
 namespace allocation_probe {
@@ -61,10 +62,12 @@ struct Harness {
   Harness(cfg::Provider provider, const char* competition, const char* season,
           uint32_t club = 0) {
     request.source = {provider, competition, season};
-    map.provider = provider;
-    map.competition = 1;
-    map.club = club;
     map.clock = {parseUtc("2026-10-17T14:00:00Z"), 100};
+    assert(store.bind(1, 1, club, map.clock));
+    SourceKey key;
+    assert(key.assign(provider, competition, season));
+    map.source = store.sourceSlot(store.resolve(1, key, map.clock));
+    assert(map.source != kNoSource);
   }
   provider::ParseResult parse(std::string_view bytes) {
     Body input{bytes};
@@ -92,7 +95,8 @@ struct Harness {
       ++h.rows;
       return storeTableRow(row, h.store, h.map);
     };
-    if (request.operation == provider::Operation::kTable) store.beginTable(1);
+    if (request.operation == provider::Operation::kTable)
+      store.beginTable(map.source);
     auto result = provider::readResponse(reader, request, sink);
     if (request.operation == provider::Operation::kTable)
       store.commitTable(result.status == provider::Status::kOk &&
@@ -122,7 +126,7 @@ void actual(const char* root) {
   Harness cup(cfg::Provider::kEspn, "ger.dfb_pokal", "2026", 269);
   result = cup.parse(file(root, "espn-cup.json"));
   assert(result.status == provider::Status::kOk);
-  const auto* match = cup.store.find(1, cfg::Provider::kEspn, 401875180);
+  const auto* match = cup.store.find(cup.map.source, 401875180);
   assert(match);
   assert(match->period == Period::kShootout);
   const auto attempts = view::shootout(cup.store, *match);
@@ -155,6 +159,14 @@ void calendar(const char* root) {
   job.competition = 1;
   job.provider = cfg::Provider::kEspn;
   job.type = cfg::DataType::kFixtures;
+  settings::CompetitionRoutes routes;
+  assert(routes.entries.push(entry));
+  settings::screen_policy::Eligibility eligibility;
+  planner.context(routes, eligibility);
+  planner.synchronize(h.store, h.map.clock);
+  job.key.competition = entry.id;
+  job.key.incarnation = entry.incarnation;
+  job.slot = cfg::kStoreSources;
   plan::Request request;
   assert(planner.request(job, entry, h.store, h.map.clock, request));
   auto bytes = file(root, "espn-calendar.json");
@@ -172,17 +184,29 @@ void calendar(const char* root) {
   assert(parsed.status == provider::Status::kOk && parsed.primary_seen &&
          parsed.rows == 56);
   assert(planner.response(parsed));
-  assert(planner.finish(true, h.map.clock) == plan::Step::kMore);
-  const auto& state = planner.state(0);
-  assert(state.fixtures.count == 9);
-  assert(state.fixtures.calendar_data.days[0] == parseUtc("2026-10-09T07:00Z"));
-  assert(state.fixtures.calendar_data.days[8] == parseUtc("2026-10-25T07:00Z"));
+  assert(planner.finish(true, h.map.clock) == plan::Step::kDone);
+  // Resolution finishes the view scope; the shared-source fixture acquisition
+  // remains pending and must begin with the first retained scoreboard day.
+  schedule::Inputs demand;
+  planner.prepareDemand(h.store, h.map.clock, demand);
+  const auto source = h.store.currentSource(entry.id);
+  assert(demand.scopes[source].key.source == h.store.sourceId(source));
+  auto continuation = job;
+  continuation.key = demand.scopes[source].key;
+  continuation.slot = source;
+  plan::Request fixtures;
+  assert(planner.request(continuation, entry, h.store, h.map.clock, fixtures));
+  assert(fixtures.spec.from == parseUtc("2026-10-09T07:00Z"));
+  planner.release();
+  const auto& state = planner.state(h.store.currentSource(entry.id));
+  assert(state.day_count == 9);
+  assert(state.days[0] == parseUtc("2026-10-09T07:00Z"));
+  assert(state.days[8] == parseUtc("2026-10-25T07:00Z"));
   // A capacity-bound window never silently becomes a complete list.
   uint32_t output[8]{};
   bool complete = true;
-  assert(plan::matchdayDays(state.fixtures.calendar_data.days.data(),
-                            state.fixtures.count, h.map.clock.utc, output, 8,
-                            &complete) == 8 &&
+  assert(plan::matchdayDays(state.days.data(), state.day_count, h.map.clock.utc,
+                            output, 8, &complete) == 8 &&
          !complete);
   std::printf(
       "PASS real ESPN calendar %zuB/56 dates: previous/current/next complete "
@@ -190,17 +214,69 @@ void calendar(const char* root) {
       bytes.size());
 }
 
+void normalized_round_meaning() {
+  for (const auto provider :
+       {cfg::Provider::kApiFootball, cfg::Provider::kFootballData}) {
+    Harness h(provider, "39", "2026");
+    const auto body =
+        provider == cfg::Provider::kApiFootball
+            ? R"({"response":[{"fixture":{"id":1,"date":"2026-10-17T18:00:00Z"},"league":{"id":39,"season":2026,"round":"Quarterfinals"},"teams":{"home":{"id":5},"away":{"id":8}}}]})"
+            : R"({"matches":[{"id":1,"utcDate":"2026-10-17T18:00:00Z","stage":"REGULAR_SEASON","homeTeam":{"id":5},"awayTeam":{"id":8}}]})";
+    assert(h.parse(body).status == provider::Status::kOk);
+    settings::CompetitionRoutes routes;
+    routes.entries.count = 1;
+    auto& route = routes.entries[0];
+    route.id = 1;
+    route.incarnation = 1;
+    route.active = true;
+    route.primary.provider = provider;
+    route.primary.competition.assign("39");
+    route.primary.season.assign("2026");
+    const selection::Input input{settings::screen_policy::Options{}, routes,
+                                 h.store, h.map.clock};
+    const auto selected = selection::phasePeriod(input, route);
+    assert(selected.valid());
+    assert(selected.verified == (provider == cfg::Provider::kApiFootball));
+    // Missing label in a later partial response does not erase its meaning.
+    assert(h.parse(provider == cfg::Provider::kApiFootball
+                       ? R"({"response":[{"fixture":{"id":1}}]})"
+                       : R"({"matches":[{"id":1}]})")
+               .status == provider::Status::kOk);
+    assert(selection::phasePeriod(input, route).verified == selected.verified);
+  }
+  provider::SelectionPlan plan;
+  for (unsigned i = 0; i < cfg::kProviderCount; ++i) {
+    const auto p = static_cast<cfg::Provider>(i);
+    const auto requirements = settings::providerRequirements(p);
+    for (const auto operation :
+         {provider::Operation::kCompetitions, provider::Operation::kTeams,
+          provider::Operation::kOriginalNames}) {
+      assert(provider::prepareSelection({p, "39", "2026"}, operation,
+                                        parseUtc("2026-10-18T12:00:00Z"),
+                                        plan));
+      assert(!plan.discover && std::string_view(plan.season.data) == "2026");
+      assert(provider::prepareSelection(
+          {p, "39", ""}, operation, parseUtc("2026-10-18T12:00:00Z"), plan));
+      assert(plan.discover ==
+             (operation != provider::Operation::kCompetitions &&
+              requirements.discover_teams));
+    }
+  }
+  std::puts(
+      "PASS actual AF round/FD stage normalization through selection, partial "
+      "preservation and all-provider automatic/explicit setup");
+}
 void partial() {
   Harness h(cfg::Provider::kFootballData, "BL1", "2026", 5);
   const char* complete =
       R"({"matches":[{"id":1,"utcDate":"2026-10-17T13:30:00Z","status":"IN_PLAY","homeTeam":{"id":5,"name":"Bayern"},"awayTeam":{"id":8,"name":"Other"},"score":{"duration":"REGULAR","fullTime":{"home":2,"away":1}}}]})";
   assert(h.parse(complete).status == provider::Status::kOk);
-  auto before = *h.store.find(1, h.map.provider, 1);
+  auto before = *h.store.find(h.map.source, 1);
   auto result = h.parse(
       R"({"matches":[{"id":1,"score":{"fullTime":{"home":null,"away":null}}},{"id":2}")");
   assert(result.status == provider::Status::kBadResponse &&
          !result.document_complete);
-  const auto* match = h.store.find(1, h.map.provider, 1);
+  const auto* match = h.store.find(h.map.source, 1);
   assert(match && match->principal == before.principal &&
          match->home == before.home && match->kickoff == before.kickoff &&
          match->phase == before.phase);
@@ -231,12 +307,12 @@ void tables() {
           .status == provider::Status::kBadResponse);
   assert(h.store.rowCount() == 2 && h.store.row(0).team == old.team &&
          h.store.groupCount() == 2 &&
-         h.store.tableState(1) == DatasetState::kPartial);
+         h.store.tableState(h.map.source) == DatasetState::kPartial);
   assert(h.parse("{}").status == provider::Status::kMissing);
   assert(h.store.rowCount() == 2);
   assert(h.parse(R"({"standings":[]})").status == provider::Status::kOk);
   assert(!h.store.rowCount() && !h.store.groupCount() &&
-         h.store.tableState(1) == DatasetState::kComplete);
+         h.store.tableState(h.map.source) == DatasetState::kComplete);
   Harness af(cfg::Provider::kApiFootball, "39", "2026");
   af.request.operation = provider::Operation::kTable;
   assert(
@@ -264,7 +340,7 @@ void attempts() {
     return s + "]}]}]}";
   };
   assert(h.parse(body(false)).status == provider::Status::kOk);
-  auto* match = h.store.find(1, h.map.provider, 1);
+  auto* match = h.store.find(h.map.source, 1);
   assert(match);
   auto shots = view::shootout(h.store, *match);
   assert(shots.count == 18);
@@ -329,30 +405,29 @@ void full_team_directory_rejects_a_changed_opponent_with_its_score() {
   for (const auto& [provider, body] : cases) {
     Harness h(provider, "league", "2026", 1);
     for (uint32_t id = 1; id <= cfg::kStoreTeams; ++id)
-      assert(h.store.team(1, provider, id, "Original", "ORG") != kNoTeam);
+      assert(h.store.team(h.map.source, id, "Original", "ORG") != kNoTeam);
     StoredMatch old;
     old.id = 1;
-    old.competition = 1;
-    old.provider = provider;
+    old.source = h.map.source;
     old.home = 0;
     old.away = 1;
     old.principal = {2, 1};
     old.phase = Phase::kLive;
-    h.store.selectClub(1, provider, 1, h.map.clock);
+    h.store.bind(1, 1, 1, h.map.clock);
     assert(h.store.upsert(old, h.map.clock));
     const auto result = h.parse(body);
     assert(result.status == provider::Status::kRejected &&
            !result.document_complete);
-    const auto* kept = h.store.find(1, provider, 1);
+    const auto* kept = h.store.find(h.map.source, 1);
     assert(kept && kept->home == old.home && kept->away == old.away &&
            kept->principal == old.principal && kept->phase == old.phase);
-    assert(h.store.datasetNotice(1, MatchStore::Dataset::kFixtures,
+    assert(h.store.datasetNotice(h.map.source, MatchStore::Dataset::kFixtures,
                                  h.map.clock.utc) == Cause::kStoreFull);
     assert(h.store.teamCount() == 256 &&
            std::string_view(view::teamName(h.store, *kept, false)) ==
                "Original");
-    h.store.selectClub(1, provider, 2, h.map.clock);
-    kept = h.store.find(1, provider, 1);
+    h.store.bind(1, 1, 2, h.map.clock);
+    kept = h.store.find(h.map.source, 1);
     assert(kept && h.store.isOwn(*kept) && kept->principal == old.principal &&
            std::string_view(view::teamName(h.store, *kept, false)) ==
                "Original");
@@ -379,7 +454,8 @@ void workspace_is_allocated_only_for_required_staging() {
     allocation_probe::reset(fail);
     parsed = empty.parse("[]");
     assert(parsed.status == provider::Status::kOk &&
-           empty.store.tableState(1) == DatasetState::kComplete &&
+           empty.store.tableState(empty.map.source) ==
+               DatasetState::kComplete &&
            allocation_probe::calls == 0);
   }
   Harness events(cfg::Provider::kOpenLigaDb, "bl1", "2026");
@@ -404,9 +480,9 @@ void workspace_is_allocated_only_for_required_staging() {
   for (const auto& [provider, body] : tables) {
     Harness table(provider, "league", "2026");
     table.request.operation = provider::Operation::kTable;
-    table.store.beginTable(1);
+    table.store.beginTable(table.map.source);
     StoredRow old;
-    old.team = table.store.team(1, provider, 1, "Old club");
+    old.team = table.store.team(table.map.source, 1, "Old club");
     old.points = 13;
     assert(table.store.appendRow(old) && table.store.commitTable(true));
     allocation_probe::reset(true);
@@ -431,6 +507,7 @@ int main(int argc, char** argv) {
   workspace_is_allocated_only_for_required_staging();
   actual(argv[1]);
   calendar(argv[1]);
+  normalized_round_meaning();
   partial();
   tables();
   attempts();

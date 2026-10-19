@@ -2,7 +2,7 @@
 
 #include <algorithm>
 #include <bitset>
-#include <new>
+#include <utility>
 
 #include "civil_time.h"
 #include "fixture_retention.h"
@@ -45,6 +45,16 @@ constexpr uint8_t noticeKinds(MatchStore::Dataset dataset) {
   }
   return 0;
 }
+void summarize(DatasetSummary& out, const DatasetStatus& dataset) {
+  out.last_success_ms = std::max(out.last_success_ms, dataset.last_success_ms);
+  if (dataset.cause != Cause::kNone &&
+      (out.cause == Cause::kNone ||
+       dataset.last_attempt_ms > out.failed_attempt_ms)) {
+    out.failed_attempt_ms = dataset.last_attempt_ms;
+    out.cause = dataset.cause;
+    out.http = dataset.http;
+  }
+}
 
 // A match first seen finished gets 'clock.utc' as estimated final whistle,
 // or the expected end when it was never seen running.
@@ -64,6 +74,32 @@ void markFinished(StoredMatch& m, bool seen_running, const Clock& clock) {
 bool running(Phase p) {
   return p == Phase::kLive || p == Phase::kHalfTime || p == Phase::kExtraTime ||
          p == Phase::kPenalties;
+}
+
+MatchTiming matchTiming(const StoredMatch& m) {
+  MatchTiming out;
+  if (m.phase == Phase::kPostponed || m.phase == Phase::kCancelled ||
+      m.phase == Phase::kAbandoned)
+    return out;
+  const bool suspended = m.phase == Phase::kSuspended;
+  if (suspended && m.first_live_observed_utc == 0) return out;
+  out.finished = m.phase == Phase::kFinished;
+  if (out.finished) {
+    if (m.finished_at == 0) return out;
+    out.basis = m.kickoff != 0 ? m.kickoff : m.finished_at;
+    out.end = m.finished_at;
+  } else {
+    out.reported_running =
+        (running(m.phase) && !(m.estimated & kEstimatedPhase)) || suspended;
+    out.basis = m.kickoff != 0 ? m.kickoff : m.first_live_observed_utc;
+    if (out.basis == 0 || (m.kickoff == 0 && !out.reported_running)) return out;
+    out.end =
+        out.basis + int64_t{out.reported_running ? cfg::kUnknownMatchEndMinutes
+                                                 : cfg::kExpectedMatchMinutes} *
+                        60;
+  }
+  out.valid = true;
+  return out;
 }
 
 int32_t civilDay(int64_t utc, const DateContext& dates) {
@@ -108,14 +144,38 @@ MatchStore::MatchStore() = default;
 
 // Rebuilt in place: never put a temporary complete store on the stack.
 void MatchStore::clear() {
-  this->~MatchStore();
-  new (this) MatchStore();
+  // Clear in place: no store-sized stack temporary, and delayed logical IDs
+  // must never alias a later source in the same boot.
+  source_index_.clear();
+  matches_.fill({});
+  teams_.fill({});
+  rows_.fill({});
+  stage_.fill({});
+  details_.fill({});
+  events_.fill({});
+  labels_.fill({});
+  rounds_.fill({});
+  groups_.fill({});
+  stage_groups_.fill({});
+  sources_.fill({});
+  bindings_.fill({});
+  fixture_changes_ = 0;
+  round_count_ = group_count_ = staged_groups_ = 0;
+  pending_utc_ = 0;
+  pending_.fill(0);
+  pending_shots_.fill(0);
+  pending_shot_order_ = pending_count_ = 0;
+  pending_slot_ = kNoIndex;
+  pending_cut_ = pending_pool_ = pending_detail_ = false;
+  table_source_ = kNoSource;
+  table_cut_ = false;
+  match_count_ = row_count_ = staged_rows_ = 0;
 }
 
-TeamIndex MatchStore::team(uint8_t competition, cfg::Provider provider,
-                           uint32_t id, std::string_view name,
-                           std::string_view short_name) {
-  if (id == 0) return kNoTeam;
+TeamIndex MatchStore::team(SourceSlot source_slot, uint32_t id,
+                           std::string_view name, std::string_view short_name) {
+  if (id == 0 || !sourceId(source_slot)) return kNoTeam;
+  const auto provider = this->provider(source_slot);
   int free = -1;
   for (std::size_t i = 0; i < teams_.size(); ++i) {
     auto& t = teams_[i];
@@ -127,8 +187,8 @@ TeamIndex MatchStore::team(uint8_t competition, cfg::Provider provider,
     if (t.id == 0 && free < 0) free = static_cast<int>(i);
   }
   if (free < 0) {
-    note(competition, table_competition_ == competition ? kNoticeTableTeams
-                                                        : kNoticeMatchTeams);
+    note(source_slot,
+         table_source_ == source_slot ? kNoticeTableTeams : kNoticeMatchTeams);
     return kNoTeam;
   }
   auto& value = teams_[free];
@@ -139,50 +199,147 @@ TeamIndex MatchStore::team(uint8_t competition, cfg::Provider provider,
   return static_cast<TeamIndex>(free);
 }
 
-MatchStore::SourceStatus* MatchStore::source(uint8_t competition) {
-  if (!competition) return nullptr;
-  SourceStatus* free = nullptr;
-  for (auto& item : sources_) {
-    if (item.competition == competition) return &item;
-    if (!item.competition && !free) free = &item;
-  }
-  if (free) free->competition = competition;
-  return free;
+MatchStore::Binding* MatchStore::binding(uint8_t competition) {
+  return const_cast<Binding*>(std::as_const(*this).binding(competition));
 }
-const MatchStore::SourceStatus* MatchStore::source(uint8_t competition) const {
+const MatchStore::Binding* MatchStore::binding(uint8_t competition) const {
   if (competition)
-    for (const auto& item : sources_)
+    for (const auto& item : bindings_)
       if (item.competition == competition) return &item;
   return nullptr;
 }
-bool MatchStore::selected(const SourceStatus& current, TeamIndex team) const {
-  return current.club && team < teams_.size() &&
-         teams_[team].id == current.club &&
-         teams_[team].provider == current.provider;
+uint8_t MatchStore::bindingMask(uint8_t competition) const {
+  const auto* item = binding(competition);
+  return item ? static_cast<uint8_t>(1u << (item - bindings_.data())) : 0;
 }
-void MatchStore::ownSides(const StoredMatch& match, bool& home,
-                          bool& away) const {
-  const auto* current = source(match.competition);
-  const bool matches = current && current->provider == match.provider;
-  home = matches && selected(*current, match.home);
-  away = matches && selected(*current, match.away);
+cfg::Provider MatchStore::provider(SourceSlot slot) const {
+  const auto* key = sourceKey(slot);
+  return key ? key->provider : cfg::kProviderDefault;
 }
-bool MatchStore::isOwn(const StoredMatch& match) const {
+SourceSlot MatchStore::currentSource(uint8_t competition) const {
+  const auto* item = binding(competition);
+  return item ? item->current : kNoSource;
+}
+bool MatchStore::includes(uint8_t competition, SourceSlot slot) const {
+  return slot < sources_.size() && sourceId(slot) &&
+         (sources_[slot].bindings & bindingMask(competition));
+}
+bool MatchStore::selected(const Binding& current, SourceSlot slot,
+                          TeamIndex team) const {
+  return current.club && includes(current.competition, slot) &&
+         team < teams_.size() && teams_[team].id == current.club &&
+         teams_[team].provider == provider(slot);
+}
+void MatchStore::ownSides(uint8_t competition, const StoredMatch& match,
+                          bool& home, bool& away) const {
+  const auto* current = binding(competition);
+  home = current && selected(*current, match.source, match.home);
+  away = current && selected(*current, match.source, match.away);
+}
+bool MatchStore::isOwn(uint8_t competition, const StoredMatch& match) const {
   bool home, away;
-  ownSides(match, home, away);
+  ownSides(competition, match, home, away);
   return home || away;
 }
-bool MatchStore::isOwn(const StoredRow& row) const {
-  const auto* current = source(row.competition);
-  return current && selected(*current, row.team);
+bool MatchStore::isOwn(uint8_t competition, const StoredRow& row) const {
+  const auto* current = binding(competition);
+  return current && selected(*current, row.source, row.team);
 }
-void MatchStore::selectClub(uint8_t competition, cfg::Provider provider,
-                            uint32_t club, const Clock& clock) {
-  auto* current = source(competition);
-  if (!current || (current->provider == provider && current->club == club))
-    return;
-  current->provider = provider;
-  current->club = club;
+bool MatchStore::isOwn(const StoredMatch& match) const {
+  for (const auto& current : bindings_)
+    if (current.competition && isOwn(current.competition, match)) return true;
+  return false;
+}
+bool MatchStore::bind(uint8_t competition, uint32_t incarnation, uint32_t club,
+                      const Clock& clock) {
+  if (!competition) return false;
+  auto* current = binding(competition);
+  if (current && current->incarnation != incarnation) {
+    unbind(competition, clock);
+    current = nullptr;
+  }
+  if (!current)
+    for (auto& item : bindings_)
+      if (!item.competition) {
+        item = {};
+        item.incarnation = incarnation;
+        item.club = club;
+        item.competition = competition;
+        return true;
+      }
+  if (!current) return false;
+  if (current->club != club) {
+    current->club = club;
+    if (current->current != kNoSource) {
+      fixture_changes_ |= uint16_t{1} << current->current;
+      datasetResult(current->current, Dataset::kFixtures, false);
+    }
+    reconcileDetails(clock);
+  }
+  return true;
+}
+SourceId MatchStore::resolve(uint8_t competition, const SourceKey& key,
+                             const Clock& clock) {
+  auto* current = binding(competition);
+  if (!current) return {};
+  const auto id = source_index_.intern(key);
+  if (!id) return {};
+  const auto slot = sourceSlot(id);
+  if (current->current == slot && includes(competition, slot)) return id;
+  const bool covered = std::any_of(
+      bindings_.begin(), bindings_.end(), [&](const Binding& other) {
+        return other.competition && other.club == current->club &&
+               includes(other.competition, slot);
+      });
+  sources_[slot].bindings |= bindingMask(competition);
+  if (current->club && !covered) {
+    fixture_changes_ |= uint16_t{1} << slot;
+    datasetResult(slot, Dataset::kFixtures, false);
+  }
+  current->current = slot;
+  reconcileDetails(clock);
+  return id;
+}
+uint32_t MatchStore::resolvedAt(SourceSlot slot) const {
+  const auto* source = status(slot);
+  return source ? source->resolved_utc : 0;
+}
+void MatchStore::resolvedAt(SourceSlot slot, uint32_t utc) {
+  if (auto* source = status(slot)) source->resolved_utc = utc;
+}
+bool MatchStore::retire(SourceId id) {
+  const auto slot = sourceSlot(id);
+  if (slot == kNoSource) return false;
+  for (const auto& view : bindings_)
+    if (view.competition && view.current == slot) return false;
+  sources_[slot].bindings = 0;
+  for (auto& view : bindings_)
+    if (view.summary_target.source == id) {
+      view.summary_target = {};
+      view.summary = {};
+    }
+  releaseSource(id);
+  collect();
+  return true;
+}
+void MatchStore::unbind(uint8_t competition, const Clock& clock) {
+  auto* current = binding(competition);
+  if (!current) return;
+  const auto mask = bindingMask(competition);
+  for (auto& source : sources_) source.bindings &= ~mask;
+  for (auto& detail : details_) detail.requesters &= ~mask;
+  *current = {};
+  reconcileDetails(clock);
+  for (SourceSlot slot = 0; slot < sources_.size(); ++slot)
+    if (!sources_[slot].bindings) releaseSource(sourceId(slot));
+}
+MatchStore::SourceStatus* MatchStore::status(SourceSlot slot) {
+  return slot < sources_.size() && sourceId(slot) ? &sources_[slot] : nullptr;
+}
+const MatchStore::SourceStatus* MatchStore::status(SourceSlot slot) const {
+  return slot < sources_.size() && sourceId(slot) ? &sources_[slot] : nullptr;
+}
+void MatchStore::reconcileDetails(const Clock& clock) {
   const auto misplaced = [&](uint8_t slot) {
     const auto* match = detailRow(slot);
     return match && (slot < cfg::kStoreOwnMatches) != isOwn(*match);
@@ -227,7 +384,8 @@ void MatchStore::selectClub(uint8_t competition, cfg::Provider provider,
         break;
       }
     if (target == kNoIndex)
-      target = detailSlot(*match, clock.utc, !isOwn(*match));
+      target = detailSlot(*match, clock.utc,
+                          isOwn(*match) ? 0 : details_[slot].requesters);
     if (target != kNoIndex)
       exchange(slot, target);
     else {
@@ -276,15 +434,13 @@ void MatchStore::selectClub(uint8_t competition, cfg::Provider provider,
       events_[i] = {};
       if (auto* match = detailRow(slot))
         match->flags |= kMatchEventsTruncated | kMatchEventsPoolCut;
-      note(detail.competition, kNoticeEvents);
+      note(detail.source, kNoticeEvents);
     }
   }
   for (std::size_t i = 0; i < match_count_; ++i) {
     auto& match = matches_[i];
-    if (match.competition != competition || match.provider != provider ||
-        !isOwn(match) || match.detail != kNoIndex)
-      continue;
-    ensureDetail(competition, provider, match.id, clock);
+    if (!isOwn(match) || match.detail != kNoIndex) continue;
+    ensureDetail(key(match), 0, clock);
   }
 }
 
@@ -302,20 +458,19 @@ uint8_t MatchStore::label(std::string_view text) {
   return static_cast<uint8_t>(free);
 }
 
-int MatchStore::matchIndex(uint8_t competition, cfg::Provider provider,
-                           uint32_t id) const {
-  for (std::size_t i = 0; i < match_count_; ++i) {
-    const auto& m = matches_[i];
-    if (m.id == id && m.competition == competition && m.provider == provider)
+int MatchStore::matchIndex(SourceSlot source, uint32_t id) const {
+  if (!id || !sourceId(source)) return -1;
+  for (std::size_t i = 0; i < match_count_; ++i)
+    if (matches_[i].id == id && matches_[i].source == source)
       return static_cast<int>(i);
-  }
   return -1;
 }
-
-const StoredMatch* MatchStore::find(uint8_t competition, cfg::Provider provider,
-                                    uint32_t id) const {
-  const int i = matchIndex(competition, provider, id);
+const StoredMatch* MatchStore::find(SourceSlot source, uint32_t id) const {
+  const int i = matchIndex(source, id);
   return i < 0 ? nullptr : &matches_[i];
+}
+const StoredMatch* MatchStore::find(MatchKey match) const {
+  return find(sourceSlot(match.source), match.id);
 }
 
 void MatchStore::freeSlot(uint8_t slot) {
@@ -339,14 +494,14 @@ std::size_t MatchStore::sortedPosition(const StoredMatch& m) const {
 }
 
 uint8_t MatchStore::detailSlot(const StoredMatch& m, int64_t utc,
-                               bool requested) {
+                               uint8_t requesters) {
   const std::size_t first = isOwn(m) ? 0 : cfg::kStoreOwnMatches;
   const std::size_t end = isOwn(m) ? cfg::kStoreOwnMatches : details_.size();
-  // An ordinary Single has one explicit target per competition. Replacing
-  // that target must not displace another competition's requested Single.
+  // A configured view owns its interest, even when several views share one
+  // source or detail. Never displace another view's requested Single.
   int victim = -1, victim_row = -1;
   uint64_t farthest = 0;
-  bool same_competition = false;
+  bool same_source_slot = false;
   int free = -1;
   for (std::size_t i = first; i < end; ++i) {
     int row = -1;
@@ -357,19 +512,21 @@ uint8_t MatchStore::detailSlot(const StoredMatch& m, int64_t utc,
       if (free < 0) free = static_cast<int>(i);
       continue;
     }
+    if (!isOwn(m) && (details_[i].requesters & ~requesters)) continue;
     const auto d = distance(matches_[row], utc);
     const bool same =
-        requested && !isOwn(m) && matches_[row].competition == m.competition;
-    if (victim < 0 || (same && !same_competition) ||
-        (same == same_competition && d > farthest)) {
+        requesters && !isOwn(m) && (details_[i].requesters & ~requesters) == 0;
+    if (victim < 0 || (same && !same_source_slot) ||
+        (same == same_source_slot && d > farthest)) {
       victim = static_cast<int>(i);
       victim_row = row;
       farthest = d;
-      same_competition = same;
+      same_source_slot = same;
     }
   }
-  if (!same_competition && free >= 0) return static_cast<uint8_t>(free);
-  if (victim < 0 || (!requested && (utc == 0 || distance(m, utc) >= farthest)))
+  if (!same_source_slot && free >= 0) return static_cast<uint8_t>(free);
+  if (requesters && !same_source_slot && free < 0) return kNoIndex;
+  if (victim < 0 || (!requesters && (utc == 0 || distance(m, utc) >= farthest)))
     return kNoIndex;
   auto& row = matches_[victim_row];
   row.detail = kNoIndex;
@@ -382,34 +539,42 @@ bool MatchStore::hasDetail(const StoredMatch& m) const {
   return m.detail < details_.size() &&
          (m.detail < cfg::kStoreOwnMatches) == isOwn(m) &&
          details_[m.detail].match == m.id &&
-         details_[m.detail].competition == m.competition;
+         details_[m.detail].source == m.source;
 }
 
-StoredMatch* MatchStore::ensureDetail(uint8_t competition,
-                                      cfg::Provider provider, uint32_t id,
+StoredMatch* MatchStore::ensureDetail(MatchKey match, uint8_t competition,
                                       const Clock& clock) {
-  const int at = matchIndex(competition, provider, id);
-  if (at < 0) return nullptr;
+  const auto source = sourceSlot(match.source);
+  const int at = matchIndex(source, match.id);
+  if (at < 0 || (competition && !includes(competition, source))) return nullptr;
   auto& m = matches_[at];
+  const uint8_t requester = bindingMask(competition);
+  if (!isOwn(m) && !requester) return nullptr;
   if (!hasDetail(m)) {
-    m.detail = detailSlot(m, clock.utc, !isOwn(m));
+    m.detail = detailSlot(m, clock.utc, isOwn(m) ? 0 : requester);
     if (m.detail == kNoIndex) return nullptr;
   }
+  // Publish a new target only after it has a slot. Never clear another view.
+  if (requester)
+    for (auto& detail : details_)
+      if (detail.match != m.id || detail.source != m.source)
+        detail.requesters &= ~requester;
   auto& detail = details_[m.detail];
   detail.match = m.id;
-  detail.competition = m.competition;
+  detail.source = m.source;
+  detail.requesters |= requester;
   return &m;
 }
 
 StoredMatch* MatchStore::upsert(const StoredMatch& incoming,
                                 const Clock& clock) {
-  if (incoming.id == 0) return nullptr;
+  if (incoming.id == 0 || !sourceId(incoming.source)) return nullptr;
   StoredMatch m = incoming;
   m.detail = kNoIndex;
   m.flags &= ~(kMatchEventsTruncated | kMatchEventsPoolCut);
   uint8_t slot = kNoIndex;
   bool seen_running = false;
-  const int at = matchIndex(m.competition, m.provider, m.id);
+  const int at = matchIndex(m.source, m.id);
   if (at >= 0) {
     auto& prior = matches_[at];
     m.score_changed = prior.score_changed;
@@ -463,23 +628,21 @@ StoredMatch* MatchStore::upsert(const StoredMatch& incoming,
     if (clock.utc == 0 || victim < 0 ||
         (!isOwn(m) && distance(m, clock.utc) >= farthest)) {
       freeSlot(slot);
-      note(m.competition, kNoticeMatches);
+      note(m.source, kNoticeMatches);
       return nullptr;
     }
-    note(matches_[victim].competition, kNoticeMatches);
+    note(matches_[victim].source, kNoticeMatches);
     removeMatch(static_cast<std::size_t>(victim));
   }
-  // Ownership changes cannot move an ordinary target into the protected own
-  // bank or leave a former own target there.
-  if (slot != kNoIndex && (slot < cfg::kStoreOwnMatches) != isOwn(m)) {
-    freeSlot(slot);
-    slot = kNoIndex;
-  }
+  // A provider correction can change club membership too. Preserve existing
+  // requesters/events and let the sole bank reconciler move them after publish.
+  const bool moved =
+      slot != kNoIndex && (slot < cfg::kStoreOwnMatches) != isOwn(m);
   if (isOwn(m) && slot == kNoIndex) slot = detailSlot(m, clock.utc, false);
   if (slot != kNoIndex) {
     auto& detail = details_[slot];
     detail.match = m.id;
-    detail.competition = m.competition;
+    detail.source = m.source;
   }
   m.detail = slot;
   if (slot == kNoIndex)
@@ -489,6 +652,7 @@ StoredMatch* MatchStore::upsert(const StoredMatch& incoming,
     matches_[j] = matches_[j - 1];
   matches_[pos] = m;
   ++match_count_;
+  if (moved) reconcileDetails(clock);
   return &matches_[pos];
 }
 
@@ -504,10 +668,10 @@ StoredMatch* MatchStore::place(StoredMatch m, std::size_t from) {
   return &matches_[pos];
 }
 
-bool MatchStore::unmaintained(uint8_t competition, int64_t utc) const {
+bool MatchStore::unmaintained(SourceSlot source_slot, int64_t utc) const {
   for (std::size_t i = 0; i < match_count_; ++i) {
     const auto& m = matches_[i];
-    if (m.competition != competition || m.kickoff == 0 ||
+    if (m.source != source_slot || m.kickoff == 0 ||
         utc - m.kickoff <= cfg::kUnmaintainedAfterS || m.principal.valid())
       continue;
     if (m.phase == Phase::kFinished || m.phase == Phase::kPostponed ||
@@ -522,19 +686,21 @@ void MatchStore::estimateAll(int64_t utc) {
   for (std::size_t i = 0; i < match_count_; ++i) estimate(matches_[i], utc);
 }
 
-void MatchStore::removeCompetition(uint8_t competition) {
+void MatchStore::releaseSource(SourceId id) {
+  const auto slot = sourceSlot(id);
+  if (slot == kNoSource || sources_[slot].bindings) return;
+  if (table_source_ == slot) commitTable(false);
   for (std::size_t i = match_count_; i-- > 0;)
-    if (matches_[i].competition == competition) removeMatch(i);
-  dropRows(competition);
-  dropGroups(competition);
-  for (auto& source : sources_)
-    if (source.competition == competition) source = {};
+    if (matches_[i].source == slot) removeMatch(i);
+  dropRows(slot);
+  dropGroups(slot);
   std::size_t kept = 0;
   for (std::size_t i = 0; i < round_count_; ++i)
-    if (rounds_[i].competition != competition) rounds_[kept++] = rounds_[i];
+    if (rounds_[i].source != slot) rounds_[kept++] = rounds_[i];
   round_count_ = static_cast<uint8_t>(kept);
-  for (auto& n : notices_)
-    if (n.competition == competition) n = {};
+  sources_[slot] = {};
+  fixture_changes_ &= ~(uint16_t{1} << slot);
+  source_index_.release(id);
 }
 
 void MatchStore::collect() {
@@ -549,7 +715,7 @@ void MatchStore::collect() {
   for (std::size_t i = 0; i < row_count_; ++i)
     if (rows_[i].team < teams.size()) teams.set(rows_[i].team);
   // A table being staged keeps its teams until commitTable().
-  for (std::size_t i = 0; table_competition_ != 0 && i < staged_rows_; ++i)
+  for (std::size_t i = 0; table_source_ != kNoSource && i < staged_rows_; ++i)
     if (stage_[i].team < teams.size()) teams.set(stage_[i].team);
   for (std::size_t i = 0; i < teams_.size(); ++i)
     if (!teams.test(i)) teams_[i] = {};
@@ -557,86 +723,86 @@ void MatchStore::collect() {
     if (rounds_[i].label < labels.size()) labels.set(rounds_[i].label);
   for (std::size_t i = 0; i < group_count_; ++i)
     if (groups_[i].label < labels.size()) labels.set(groups_[i].label);
-  for (std::size_t i = 0; table_competition_ && i < staged_groups_; ++i)
+  for (std::size_t i = 0; table_source_ != kNoSource && i < staged_groups_; ++i)
     if (stage_groups_[i].label < labels.size())
       labels.set(stage_groups_[i].label);
   for (std::size_t i = 0; i < labels_.size(); ++i)
     if (!labels.test(i)) labels_[i] = {};
   // Events notices of own matches that left the store.
-  for (const auto& n : notices_)
-    if (n.bits & kNoticeEvents) settleEvents(n.competition);
+  for (SourceSlot slot = 0; slot < sources_.size(); ++slot)
+    if (sources_[slot].bits & kNoticeEvents) settleEvents(slot);
 }
 
-void MatchStore::dropRows(uint8_t competition) {
+void MatchStore::dropRows(SourceSlot source_slot) {
   std::size_t kept = 0;
   for (std::size_t i = 0; i < row_count_; ++i)
-    if (rows_[i].competition != competition) rows_[kept++] = rows_[i];
+    if (rows_[i].source != source_slot) rows_[kept++] = rows_[i];
   for (std::size_t i = kept; i < row_count_; ++i) rows_[i] = {};
   row_count_ = static_cast<uint16_t>(kept);
 }
 
-void MatchStore::beginTable(uint8_t competition) {
-  beginRun(competition, kNoticeTable | kNoticeTableTeams);
+void MatchStore::beginTable(SourceSlot source_slot) {
+  beginRun(source_slot, kNoticeTable | kNoticeTableTeams);
   staged_rows_ = 0;
   staged_groups_ = 0;
-  table_competition_ = competition;
+  table_source_ = source_slot;
   table_cut_ = false;
 }
 
 bool MatchStore::appendRow(const StoredRow& row) {
-  if (table_competition_ == 0) return false;
+  if (table_source_ == kNoSource) return false;
   if (staged_rows_ == stage_.size()) {
     table_cut_ = true;
-    note(table_competition_, kNoticeTable);
+    note(table_source_, kNoticeTable);
     return false;
   }
   stage_[staged_rows_] = row;
-  stage_[staged_rows_].competition = table_competition_;
+  stage_[staged_rows_].source = table_source_;
   if (row.group == kNoIndex && staged_groups_)
     stage_[staged_rows_].group = staged_groups_ - 1;
   ++staged_rows_;
   return true;
 }
 
-void MatchStore::dropGroups(uint8_t competition) {
+void MatchStore::dropGroups(SourceSlot source_slot) {
   std::size_t kept = 0;
   for (std::size_t i = 0; i < group_count_; ++i)
-    if (groups_[i].competition != competition) groups_[kept++] = groups_[i];
+    if (groups_[i].source != source_slot) groups_[kept++] = groups_[i];
   group_count_ = static_cast<uint8_t>(kept);
 }
 bool MatchStore::appendGroup(std::string_view key, std::string_view caption,
                              uint8_t ordinal) {
-  if (!table_competition_) return false;
+  if (table_source_ == kNoSource) return false;
   if (ordinal == kNoIndex) ordinal = staged_groups_;
   if (ordinal > staged_groups_ || ordinal >= stage_groups_.size()) {
     table_cut_ = true;
-    note(table_competition_, kNoticeTable);
+    note(table_source_, kNoticeTable);
     return false;
   }
   auto& group = stage_groups_[ordinal];
   group = {};
-  group.competition = table_competition_;
+  group.source = table_source_;
   group.ordinal = ordinal;
   if (ordinal == staged_groups_) ++staged_groups_;
   group.label = label(caption.empty() ? key : caption);
   if (!(caption.empty() && key.empty()) && group.label == kNoIndex) {
     table_cut_ = true;
-    note(table_competition_, kNoticeTable);
+    note(table_source_, kNoticeTable);
     return false;
   }
   return true;
 }
-void MatchStore::datasetResult(uint8_t competition, Dataset dataset,
+void MatchStore::datasetResult(SourceSlot source_slot, Dataset dataset,
                                bool complete) {
-  if (auto* item = source(competition))
+  if (auto* item = status(source_slot))
     item->datasets[static_cast<unsigned>(dataset)].state =
-        complete && !(notices(competition) & noticeKinds(dataset))
+        complete && !(notices(source_slot) & noticeKinds(dataset))
             ? DatasetState::kComplete
             : DatasetState::kPartial;
 }
-void MatchStore::datasetAvailable(uint8_t competition, Dataset dataset,
+void MatchStore::datasetAvailable(SourceSlot source_slot, Dataset dataset,
                                   bool available) {
-  if (auto* item = source(competition)) {
+  if (auto* item = status(source_slot)) {
     auto& status = item->datasets[static_cast<unsigned>(dataset)];
     if (!available) {
       status = {};
@@ -646,50 +812,142 @@ void MatchStore::datasetAvailable(uint8_t competition, Dataset dataset,
     }
   }
 }
-DatasetState MatchStore::datasetState(uint8_t competition,
+DatasetState MatchStore::datasetState(SourceSlot source_slot,
                                       Dataset dataset) const {
-  return datasetStatus(competition, dataset).state;
+  return datasetStatus(source_slot, dataset).state;
 }
-DatasetStatus MatchStore::datasetStatus(uint8_t competition,
+DatasetStatus MatchStore::datasetStatus(SourceSlot source_slot,
                                         Dataset dataset) const {
-  const auto* item = source(competition);
+  const auto* item = status(source_slot);
   return item ? item->datasets[static_cast<unsigned>(dataset)]
               : DatasetStatus{};
 }
-Cause MatchStore::datasetNotice(uint8_t competition, Dataset dataset,
+Cause MatchStore::datasetNotice(SourceSlot source_slot, Dataset dataset,
                                 int64_t utc) const {
-  if (dataset == Dataset::kFixtures && unmaintained(competition, utc))
+  if (dataset == Dataset::kFixtures && unmaintained(source_slot, utc))
     return Cause::kUnmaintained;
-  return notices(competition) & noticeKinds(dataset) ? Cause::kStoreFull
+  return notices(source_slot) & noticeKinds(dataset) ? Cause::kStoreFull
                                                      : Cause::kNone;
 }
-DatasetSummary MatchStore::datasetSummary(uint8_t competition) const {
-  if (!competition) return {};
+DatasetSummary MatchStore::datasetSummary(SourceSlot slot) const {
   DatasetSummary out;
-  for (const auto& source : sources_)
-    if (source.competition == competition) {
-      for (const auto& status : source.datasets) {
-        out.last_success_ms =
-            std::max(out.last_success_ms, status.last_success_ms);
-        if (status.cause != Cause::kNone &&
-            (out.cause == Cause::kNone ||
-             status.last_attempt_ms > out.failed_attempt_ms)) {
-          out.failed_attempt_ms = status.last_attempt_ms;
-          out.cause = status.cause;
-          out.http = status.http;
-        }
-      }
-    }
+  if (const auto* source = status(slot))
+    for (const auto& dataset : source->datasets) summarize(out, dataset);
   return out;
 }
-void MatchStore::recordDataset(uint8_t competition, Dataset dataset,
+bool MatchStore::recordResolution(uint8_t competition, int64_t attempt_ms,
+                                  Cause cause, uint16_t http) {
+  if (auto* view = binding(competition)) {
+    const auto status = cause == Cause::kNone ? uint16_t{0} : http;
+    const bool changed =
+        (attempt_ms > 0 && view->resolution_attempt_ms != attempt_ms) ||
+        view->resolution_cause != cause || view->resolution_http != status;
+    if (attempt_ms > 0) view->resolution_attempt_ms = attempt_ms;
+    view->resolution_cause = cause;
+    view->resolution_http = status;
+    return changed;
+  }
+  return false;
+}
+bool MatchStore::summaryTarget(uint8_t competition, MatchKey target) {
+  auto* view = binding(competition);
+  if (!view || !target.valid() || target == view->summary_target ||
+      !includes(competition, sourceSlot(target.source)))
+    return false;
+  view->summary_target = target;
+  view->summary = {};
+  return true;
+}
+void MatchStore::recordSummary(uint8_t competition, MatchKey expected,
                                int64_t attempt_ms, int64_t completed_ms,
                                bool complete, Cause cause, uint16_t http) {
-  auto* item = source(competition);
+  auto* view = binding(competition);
+  if (!view || !expected.valid() || view->summary_target != expected) return;
+  auto& status = view->summary;
+  if (attempt_ms > 0) status.last_attempt_ms = attempt_ms;
+  status.state =
+      complete && !(notices(sourceSlot(expected.source)) & kNoticeEvents)
+          ? DatasetState::kComplete
+          : DatasetState::kPartial;
+  if (complete) status.last_success_ms = completed_ms;
+  status.cause = complete ? Cause::kNone : cause;
+  status.http = complete || cause == Cause::kNone ? 0 : http;
+}
+DatasetStatus MatchStore::viewDatasetStatus(uint8_t competition,
+                                            Dataset dataset) const {
+  const auto* view = binding(competition);
+  if (!view) return {};
+  auto out = dataset == Dataset::kEvents && view->summary_target.valid()
+                 ? view->summary
+                 : datasetStatus(view->current, dataset);
+  int64_t failure_at = out.cause == Cause::kNone ? 0 : out.last_attempt_ms;
+  if (dataset != Dataset::kTable)
+    for (SourceSlot slot = 0; slot < sources_.size(); ++slot) {
+      if (!includes(competition, slot) ||
+          (slot == view->current &&
+           !(dataset == Dataset::kEvents && view->summary_target.valid())))
+        continue;
+      const auto old = datasetStatus(slot, dataset);
+      out.last_success_ms = std::max(out.last_success_ms, old.last_success_ms);
+      if (old.cause != Cause::kNone &&
+          (out.cause == Cause::kNone || old.last_attempt_ms > failure_at)) {
+        out.cause = old.cause;
+        out.http = old.http;
+        failure_at = old.last_attempt_ms;
+      }
+      out.last_attempt_ms = std::max(out.last_attempt_ms, old.last_attempt_ms);
+      if (old.state == DatasetState::kPartial &&
+          out.state == DatasetState::kComplete)
+        out.state = DatasetState::kPartial;
+    }
+  if (dataset == Dataset::kFixtures && view->resolution_cause != Cause::kNone) {
+    out.cause = view->resolution_cause;
+    out.http = view->resolution_http;
+    out.last_attempt_ms =
+        std::max(out.last_attempt_ms, view->resolution_attempt_ms);
+  }
+  return out;
+}
+Cause MatchStore::viewDatasetNotice(uint8_t competition, Dataset dataset,
+                                    int64_t utc) const {
+  Cause out = Cause::kNone;
+  for (SourceSlot slot = 0; slot < sources_.size(); ++slot) {
+    if (!includes(competition, slot) ||
+        (dataset == Dataset::kTable && slot != currentSource(competition)))
+      continue;
+    const auto notice = datasetNotice(slot, dataset, utc);
+    if (notice == Cause::kStoreFull) return notice;
+    if (notice != Cause::kNone) out = notice;
+  }
+  return out;
+}
+DatasetSummary MatchStore::viewSummary(uint8_t competition) const {
+  DatasetSummary out;
+  const auto* view = binding(competition);
+  if (!view) return out;
+  for (SourceSlot slot = 0; slot < sources_.size(); ++slot) {
+    if (!includes(competition, slot)) continue;
+    for (const auto dataset :
+         {Dataset::kFixtures, Dataset::kTable, Dataset::kEvents})
+      if (dataset != Dataset::kTable || slot == view->current)
+        summarize(out, sources_[slot].datasets[static_cast<unsigned>(dataset)]);
+  }
+  summarize(out, view->summary);
+  DatasetStatus resolution;
+  resolution.last_attempt_ms = view->resolution_attempt_ms;
+  resolution.cause = view->resolution_cause;
+  resolution.http = view->resolution_http;
+  summarize(out, resolution);
+  return out;
+}
+void MatchStore::recordDataset(SourceSlot source_slot, Dataset dataset,
+                               int64_t attempt_ms, int64_t completed_ms,
+                               bool complete, Cause cause, uint16_t http) {
+  auto* item = status(source_slot);
   if (!item) return;
   auto& status = item->datasets[static_cast<unsigned>(dataset)];
   if (attempt_ms > 0) status.last_attempt_ms = attempt_ms;
-  if (complete) {
+  if (complete || (completed_ms > 0 && cause == Cause::kNone)) {
     status.last_success_ms = completed_ms;
     status.cause = Cause::kNone;
     status.http = 0;
@@ -699,39 +957,46 @@ void MatchStore::recordDataset(uint8_t competition, Dataset dataset,
       status.http = http;
     }
   }
-  datasetResult(competition, dataset, complete);
+  datasetResult(source_slot, dataset, complete);
 }
 
-DatasetState MatchStore::tableState(uint8_t competition) const {
-  return datasetState(competition, Dataset::kTable);
+DatasetState MatchStore::tableState(SourceSlot source_slot) const {
+  return datasetState(source_slot, Dataset::kTable);
 }
-void MatchStore::roundResult(uint8_t competition, uint8_t number, uint8_t label,
-                             uint16_t matches, bool complete) {
-  if (!competition || (!number && label == kNoIndex)) return;
+void MatchStore::roundResult(SourceSlot source_slot, uint8_t number,
+                             uint8_t label, uint16_t matches, bool complete,
+                             uint32_t from, uint32_t to, RoundKind kind) {
+  if (!sourceId(source_slot) || (!number && label == kNoIndex)) return;
   StoredRound* destination = nullptr;
   for (std::size_t i = 0; i < round_count_; ++i)
-    if (rounds_[i].competition == competition && rounds_[i].number == number &&
-        rounds_[i].label == label)
+    if (rounds_[i].source == source_slot && rounds_[i].number == number &&
+        rounds_[i].label == label && rounds_[i].kind == kind)
       destination = &rounds_[i];
   if (!destination) {
     if (round_count_ < rounds_.size())
       destination = &rounds_[round_count_++];
     else {
       // A new scope cannot erase an unrelated verified round silently.
-      note(competition, kNoticeMatches);
-      datasetResult(competition, Dataset::kFixtures, false);
+      note(source_slot, kNoticeMatches);
+      datasetResult(source_slot, Dataset::kFixtures, false);
       return;
     }
   }
-  *destination = {matches, competition, number, label,
-                  complete ? DatasetState::kComplete : DatasetState::kPartial};
+  *destination = {from,
+                  to,
+                  matches,
+                  source_slot,
+                  number,
+                  label,
+                  complete ? DatasetState::kComplete : DatasetState::kPartial,
+                  kind};
 }
-void MatchStore::retain(uint8_t competition,
+void MatchStore::retain(SourceSlot source_slot,
                         const retention::Selection& selected, int64_t utc,
                         DateContext dates) {
   for (std::size_t i = match_count_; i-- > 0;) {
     const auto& match = matches_[i];
-    if (match.competition != competition) continue;
+    if (match.source != source_slot) continue;
     const auto label = match.label < labels_.size()
                            ? std::string_view(labels_[match.label].data)
                            : std::string_view{};
@@ -744,7 +1009,7 @@ void MatchStore::retain(uint8_t competition,
   uint8_t kept = 0;
   for (uint8_t i = 0; i < round_count_; ++i) {
     auto round = rounds_[i];
-    if (round.competition != competition) {
+    if (round.source != source_slot) {
       rounds_[kept++] = round;
       continue;
     }
@@ -757,7 +1022,7 @@ void MatchStore::retain(uint8_t competition,
     }
     uint16_t retained = 0;
     for (std::size_t m = 0; m < match_count_; ++m)
-      if (matches_[m].competition == competition &&
+      if (matches_[m].source == source_slot &&
           matches_[m].round == round.number && matches_[m].label == round.label)
         ++retained;
     if (retained) {
@@ -768,49 +1033,47 @@ void MatchStore::retain(uint8_t competition,
   }
   round_count_ = kept;
 }
-void MatchStore::beginFixtureRun(uint8_t competition) {
+void MatchStore::beginFixtureRun(SourceSlot source_slot) {
   for (std::size_t i = 0; i < match_count_; ++i)
-    if (matches_[i].competition == competition)
-      matches_[i].flags &= ~kMatchRefresh;
-  beginRun(competition, kNoticeFixtures);
+    if (matches_[i].source == source_slot) matches_[i].flags &= ~kMatchRefresh;
+  beginRun(source_slot, kNoticeFixtures);
 }
-void MatchStore::markFixture(uint8_t competition, cfg::Provider provider,
-                             uint32_t match) {
-  const int index = matchIndex(competition, provider, match);
+void MatchStore::markFixture(SourceSlot source_slot, uint32_t match) {
+  const int index = matchIndex(source_slot, match);
   if (index >= 0) matches_[index].flags |= kMatchRefresh;
 }
 bool MatchStore::commitTable(bool complete) {
-  const uint8_t competition = table_competition_;
+  const SourceSlot source_slot = table_source_;
   const std::size_t staged = staged_rows_, staged_groups = staged_groups_;
-  table_competition_ = 0;
+  table_source_ = kNoSource;
   staged_rows_ = 0;
   staged_groups_ = 0;
-  if (!competition) return false;
+  if (!sourceId(source_slot)) return false;
   if (complete || staged || staged_groups || table_cut_)
-    datasetResult(competition, Dataset::kTable, false);
+    datasetResult(source_slot, Dataset::kTable, false);
   if (!complete || table_cut_) return false;
   const auto stored = static_cast<std::size_t>(std::count_if(
       rows_.begin(), rows_.begin() + row_count_,
-      [&](const StoredRow& r) { return r.competition == competition; }));
+      [&](const StoredRow& r) { return r.source == source_slot; }));
   const auto old_groups = static_cast<std::size_t>(
       std::count_if(groups_.begin(), groups_.begin() + group_count_,
                     [&](const StoredTableGroup& group) {
-                      return group.competition == competition;
+                      return group.source == source_slot;
                     }));
   if (row_count_ - stored + staged > rows_.size() ||
       group_count_ - old_groups + staged_groups > groups_.size()) {
-    note(competition, kNoticeTable);
+    note(source_slot, kNoticeTable);
     return false;
   }
-  dropRows(competition);
-  dropGroups(competition);
+  dropRows(source_slot);
+  dropGroups(source_slot);
   std::copy_n(stage_.begin(), staged, rows_.begin() + row_count_);
   row_count_ = static_cast<uint16_t>(row_count_ + staged);
   std::copy_n(stage_groups_.begin(), staged_groups,
               groups_.begin() + group_count_);
   group_count_ = static_cast<uint8_t>(group_count_ + staged_groups);
-  settleRun(competition, kNoticeTable | kNoticeTableTeams);
-  datasetResult(competition, Dataset::kTable, true);
+  settleRun(source_slot, kNoticeTable | kNoticeTableTeams);
+  datasetResult(source_slot, Dataset::kTable, true);
   return true;
 }
 
@@ -871,7 +1134,7 @@ void MatchStore::addEvent(const EventFacts& incoming) {
     return;
   }
   pending_cut_ = pending_pool_ = true;
-  note(details_[pending_slot_].competition, kNoticeEvents);
+  note(details_[pending_slot_].source, kNoticeEvents);
 }
 
 int MatchStore::takeEvent() {
@@ -918,7 +1181,7 @@ int MatchStore::takeEvent() {
   if (taken == kNoIndex) return -1;
   events_[taken] = {};
   victim_row->flags |= kMatchEventsTruncated | kMatchEventsPoolCut;
-  note(own.competition, kNoticeEvents);
+  note(own.source, kNoticeEvents);
   return taken;
 }
 
@@ -928,16 +1191,16 @@ StoredMatch* MatchStore::detailRow(uint8_t slot) {
   return nullptr;
 }
 
-void MatchStore::settleEvents(uint8_t competition) {
+void MatchStore::settleEvents(SourceSlot source_slot) {
   for (std::size_t i = 0; i < match_count_; ++i) {
     const auto& m = matches_[i];
-    if (m.competition == competition && m.detail < details_.size() &&
+    if (m.source == source_slot && m.detail < details_.size() &&
         (m.flags & (kMatchEventsPoolCut | kMatchEventsTruncated))) {
-      flag(competition, kNoticeEvents, true);
+      flag(source_slot, kNoticeEvents, true);
       return;
     }
   }
-  flag(competition, kNoticeEvents, false);
+  flag(source_slot, kNoticeEvents, false);
 }
 
 void MatchStore::endEvents(bool complete) {
@@ -989,7 +1252,7 @@ void MatchStore::endEvents(bool complete) {
     if (row != nullptr && (drop > 0 || pending_cut_))
       row->flags |= kMatchEventsTruncated;
     if (row != nullptr && pending_pool_) row->flags |= kMatchEventsPoolCut;
-    if (row != nullptr) settleEvents(row->competition);
+    if (row != nullptr) settleEvents(row->source);
     return;
   }
   const bool whole =
@@ -1048,46 +1311,31 @@ void MatchStore::endEvents(bool complete) {
     else
       row->flags &= ~kMatchEventsPoolCut;
   }
-  settleEvents(own.competition);
+  settleEvents(own.source);
 }
 
-void MatchStore::note(uint8_t competition, uint8_t bits) {
-  Notice* free = nullptr;
-  for (auto& n : notices_) {
-    if (n.competition == competition) {
-      n.bits |= bits;
-      n.noted |= bits;
-      return;
-    }
-    if (n.competition == 0 && free == nullptr) free = &n;
+void MatchStore::note(SourceSlot slot, uint8_t bits) {
+  if (auto* source = status(slot)) {
+    source->bits |= bits;
+    source->noted |= bits;
   }
-  if (free != nullptr) *free = {competition, bits, bits};
 }
-
-void MatchStore::beginRun(uint8_t competition, uint8_t bits) {
-  for (auto& n : notices_)
-    if (n.competition == competition) n.noted &= ~bits;
+void MatchStore::beginRun(SourceSlot slot, uint8_t bits) {
+  if (auto* source = status(slot)) source->noted &= ~bits;
 }
-
-void MatchStore::settleRun(uint8_t competition, uint8_t bits) {
-  for (auto& n : notices_)
-    if (n.competition == competition)
-      n.bits = (n.bits & ~bits) | (n.noted & bits);
+void MatchStore::settleRun(SourceSlot slot, uint8_t bits) {
+  if (auto* source = status(slot))
+    source->bits = (source->bits & ~bits) | (source->noted & bits);
 }
-
-void MatchStore::flag(uint8_t competition, uint8_t bits, bool on) {
-  if (on) {
-    note(competition, bits);
-    return;
-  }
-  for (auto& n : notices_)
-    if (n.competition == competition) n.bits &= ~bits;
+void MatchStore::flag(SourceSlot slot, uint8_t bits, bool on) {
+  if (on)
+    note(slot, bits);
+  else if (auto* source = status(slot))
+    source->bits &= ~bits;
 }
-
-uint8_t MatchStore::notices(uint8_t competition) const {
-  for (const auto& n : notices_)
-    if (n.competition == competition) return n.bits;
-  return 0;
+uint8_t MatchStore::notices(SourceSlot slot) const {
+  const auto* source = status(slot);
+  return source ? source->bits : 0;
 }
 
 std::size_t MatchStore::teamCount() const {

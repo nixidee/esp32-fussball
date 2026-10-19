@@ -206,15 +206,17 @@ esp_err_t startLoopWatchdog() {
   return probe::is("watchdog") ? ESP_FAIL : ESP_OK;
 }
 }  // namespace health
+namespace operations {
+class Guard {
+ public:
+  explicit operator bool() const { return true; }
+};
+}  // namespace operations
 namespace network {
 esp_err_t init() { return probe::is("network") ? ESP_FAIL : ESP_OK; }
 void poll() { ++probe::network_polls; }
 void applySettings() {}
 bool healthy() { return !probe::is("network"); }
-class HeavyGuard {
- public:
-  explicit operator bool() const { return true; }
-};
 void setHttpReady(bool ready) {
   probe::advertised = ready;
   if (ready)

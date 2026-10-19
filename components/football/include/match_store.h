@@ -14,10 +14,12 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string_view>
 
 #include "app_config.h"
 #include "football_model.h"
+#include "source_index.h"
 
 namespace football {
 namespace retention {
@@ -39,6 +41,8 @@ inline constexpr uint8_t kMatchEventsPoolCut = 0x04;
 // Marked only by the current authoritative fixture refresh. A failed run
 // never prunes; the next run clears these bits before receiving new facts.
 inline constexpr uint8_t kMatchRefresh = 0x08;
+// The label is a provider-reported sporting round, rather than a stage name.
+inline constexpr uint8_t kMatchRoundLabel = 0x10;
 // Bits of StoredMatch::estimated: the value was derived by the device, not
 // reported by the provider.
 inline constexpr uint8_t kEstimatedPhase = 0x01;
@@ -53,8 +57,7 @@ struct StoredMatch {
   // First confirmed provider-running observation of this live episode.
   // UTC for the current runtime; never a substitute kickoff or a checkpoint.
   uint32_t first_live_observed_utc = 0;
-  uint8_t competition = 0;  // stable competition id (1-255)
-  cfg::Provider provider = cfg::Provider::kOpenLigaDb;
+  SourceSlot source = kNoSource;
   TeamIndex home = kNoTeam, away = kNoTeam;  // team directory
   uint8_t round = 0;                         // provider round number, 0 = none
   uint8_t label = kNoIndex;                  // round label pool
@@ -66,6 +69,14 @@ struct StoredMatch {
   uint8_t detail = kNoIndex;  // common detail slot, independent of ownership
 };
 
+// Canonical timing facts shared by display and request policy. No buffer or
+// polling policy lives here. Unknown kickoff remains unknown in the match.
+struct MatchTiming {
+  int64_t basis = 0, end = 0;
+  bool valid = false, reported_running = false, finished = false;
+};
+MatchTiming matchTiming(const StoredMatch& match);
+
 struct StoredTeam {
   uint32_t id = 0;  // provider team id, 0 = free entry
   cfg::Provider provider = cfg::Provider::kOpenLigaDb;
@@ -75,7 +86,7 @@ struct StoredTeam {
 
 struct StoredRow {
   TeamIndex team = kNoTeam;
-  uint8_t competition = 0;
+  SourceSlot source = kNoSource;
   uint8_t position = kNoValue, played = kNoValue;
   uint8_t group = kNoIndex;  // ordinal within this competition table
   int16_t difference = kNoNumber, points = kNoNumber;
@@ -110,12 +121,17 @@ struct DatasetSummary {
   Cause cause = Cause::kNone;
 };
 struct StoredTableGroup {
-  uint8_t competition = 0, ordinal = 0, label = kNoIndex;
+  SourceSlot source = kNoSource;
+  uint8_t ordinal = 0, label = kNoIndex;
 };
+enum class RoundKind : uint8_t { kNative, kCalendar };
 struct StoredRound {
+  uint32_t from = 0, to = 0;
   uint16_t matches = 0;
-  uint8_t competition = 0, number = 0, label = kNoIndex;
+  SourceSlot source = kNoSource;
+  uint8_t number = 0, label = kNoIndex;
   DatasetState state = DatasetState::kUnknown;
+  RoundKind kind = RoundKind::kNative;
 };
 
 // Only the pool owner adds a slot to the shared event facts.
@@ -127,8 +143,8 @@ struct StoredEvent : EventFacts {
 // owner.
 struct MatchDetails {
   uint32_t match = 0;  // match id, 0 = free slot
-  uint8_t competition = 0;
-  uint8_t event_count = 0;
+  SourceSlot source = kNoSource;
+  uint8_t event_count = 0, requesters = 0;
   std::array<uint8_t, cfg::kMatchEvents> events{};  // event pool indices
 };
 
@@ -181,24 +197,41 @@ class MatchStore {
   // Directory index of a team, added or with prepared display labels updated;
   // kNoTeam for id 0 or a full directory (also notes kNoticeTableTeams for
   // 'competition' while its table is staged, else kNoticeMatchTeams).
-  TeamIndex team(uint8_t competition, cfg::Provider provider, uint32_t id,
-                 std::string_view name, std::string_view short_name);
+  TeamIndex team(SourceSlot source, uint32_t id, std::string_view name,
+                 std::string_view short_name);
   // Pure/demo callers without a separate provider abbreviation use the same
   // original text for both labels, clipped independently to their byte limits.
-  TeamIndex team(uint8_t competition, cfg::Provider provider, uint32_t id,
-                 std::string_view name) {
-    return team(competition, provider, id, name, name);
+  TeamIndex team(SourceSlot source, uint32_t id, std::string_view name) {
+    return team(source, id, name, name);
   }
-  // Applies a club preference to retained source facts. Scores, timing,
-  // rounds and tables stay; detail/event ownership moves between the existing
-  // banks where capacity permits. No fetch, allocation or source reset.
-  void selectClub(uint8_t competition, cfg::Provider provider, uint32_t club,
-                  const Clock& clock);
-  // Membership is derived from the current source preference and team keys.
-  // Neither matches nor table rows retain an independent ownership bit.
-  void ownSides(const StoredMatch&, bool& home, bool& away) const;
+  // Configuration bindings are views over exact resolved sources. Incarnation
+  // protects reused configured IDs; clubs never enter a canonical source key.
+  bool bind(uint8_t competition, uint32_t incarnation, uint32_t club,
+            const Clock& clock);
+  SourceId resolve(uint8_t competition, const SourceKey&, const Clock& clock);
+  void unbind(uint8_t competition, const Clock& clock);
+  // Only a no-longer-current source may retire after its consumer has proved
+  // no held, active or upcoming fact is needed. Never evict for capacity.
+  bool retire(SourceId);
+  SourceSlot currentSource(uint8_t competition) const;
+  bool includes(uint8_t competition, SourceSlot) const;
+  bool isOwn(uint8_t competition, const StoredMatch&) const;
+  bool isOwn(uint8_t competition, const StoredRow&) const;
+  void ownSides(uint8_t competition, const StoredMatch&, bool& home,
+                bool& away) const;
+  // Protected storage belongs to any binding that selects this match.
   bool isOwn(const StoredMatch&) const;
-  bool isOwn(const StoredRow&) const;
+  SourceId sourceId(SourceSlot slot) const { return source_index_.id(slot); }
+  SourceSlot sourceSlot(SourceId id) const { return source_index_.slot(id); }
+  const SourceKey* sourceKey(SourceSlot slot) const {
+    return source_index_.key(slot);
+  }
+  MatchKey key(const StoredMatch& match) const {
+    return {match.id, sourceId(match.source)};
+  }
+  cfg::Provider provider(SourceSlot slot) const;
+  uint32_t resolvedAt(SourceSlot) const;
+  void resolvedAt(SourceSlot, uint32_t utc);
   // Pool index of a round label; kNoIndex for an empty text or a full pool.
   uint8_t label(std::string_view text);
 
@@ -221,12 +254,12 @@ class MatchStore {
   // only their separate bank, preferring an older target of the same
   // competition before its farthest target. Ordinary upsert() never allocates
   // details by itself; it refreshes a slot previously requested here.
-  StoredMatch* ensureDetail(uint8_t competition, cfg::Provider provider,
-                            uint32_t id, const Clock& clock);
+  StoredMatch* ensureDetail(MatchKey match, uint8_t competition,
+                            const Clock& clock);
   // Re-estimates phase and minute of every match without a provider phase.
   void estimateAll(int64_t utc);
   // Removes every match, table row and notice of 'competition'.
-  void removeCompetition(uint8_t competition);
+  void releaseSource(SourceId);
   // Frees teams and round labels no match or row refers to.
   void collect();
 
@@ -240,36 +273,57 @@ class MatchStore {
   // that does not fit the buffer and a table that does not fit the pool note
   // kNoticeTable; a replaced table clears it. appendRow() is false when the
   // row was not staged.
-  void beginTable(uint8_t competition);
+  void beginTable(SourceSlot source);
   bool appendRow(const StoredRow& row);
   bool appendGroup(std::string_view key, std::string_view label,
                    uint8_t ordinal = kNoIndex);
   std::size_t groupCount() const { return group_count_; }
   const StoredTableGroup& group(std::size_t at) const { return groups_[at]; }
-  DatasetState tableState(uint8_t competition) const;
+  DatasetState tableState(SourceSlot source) const;
   enum class Dataset : uint8_t { kFixtures, kTable, kEvents };
-  DatasetState datasetState(uint8_t competition, Dataset dataset) const;
-  void datasetResult(uint8_t competition, Dataset dataset, bool complete);
+  DatasetState datasetState(SourceSlot source, Dataset dataset) const;
+  void datasetResult(SourceSlot source, Dataset dataset, bool complete);
   // Source capability only: unavailable carries no fabricated HTTP failure.
   // Reapplying supported capabilities preserves known facts and failures.
-  void datasetAvailable(uint8_t competition, Dataset dataset, bool available);
-  DatasetStatus datasetStatus(uint8_t competition, Dataset dataset) const;
+  void datasetAvailable(SourceSlot source, Dataset dataset, bool available);
+  DatasetStatus datasetStatus(SourceSlot source, Dataset dataset) const;
   // Existing capacity/provider-maintenance notices for this data type only.
-  Cause datasetNotice(uint8_t competition, Dataset dataset, int64_t utc) const;
-  DatasetSummary datasetSummary(uint8_t competition) const;
+  Cause datasetNotice(SourceSlot source, Dataset dataset, int64_t utc) const;
+  DatasetSummary datasetSummary(SourceSlot source) const;
+  DatasetStatus viewDatasetStatus(uint8_t competition, Dataset) const;
+  DatasetSummary viewSummary(uint8_t competition) const;
+  Cause viewDatasetNotice(uint8_t competition, Dataset, int64_t utc) const;
+  bool recordResolution(uint8_t competition, int64_t attempt_ms, Cause,
+                        uint16_t http = 0);
+  bool summaryTarget(uint8_t competition, MatchKey);
+  void recordSummary(uint8_t competition, MatchKey expected, int64_t attempt_ms,
+                     int64_t completed_ms, bool complete, Cause,
+                     uint16_t http = 0);
+  // A changed club union needs a new authoritative retention acquisition.
+  // Only the worker consumes this notification; existing facts stay intact.
+  uint16_t takeFixtureChanges() {
+    const auto result = fixture_changes_;
+    fixture_changes_ = 0;
+    return result;
+  }
+  void acknowledgeFixtureChanges(SourceSlot source) {
+    if (source < cfg::kStoreSources)
+      fixture_changes_ &= ~(uint16_t{1} << source);
+  }
   // attempt_ms is zero for requests refused before the actual HTTP send.
   // A successful intermediate request does not erase an earlier run failure.
-  void recordDataset(uint8_t competition, Dataset dataset, int64_t attempt_ms,
+  void recordDataset(SourceSlot source, Dataset dataset, int64_t attempt_ms,
                      int64_t completed_ms, bool complete, Cause cause,
                      uint16_t http = 0);
-  void roundResult(uint8_t competition, uint8_t number, uint8_t label,
-                   uint16_t matches, bool complete);
+  void roundResult(SourceSlot source, uint8_t number, uint8_t label,
+                   uint16_t matches, bool complete, uint32_t from = 0,
+                   uint32_t to = 0, RoundKind kind = RoundKind::kNative);
   // Prune only after a complete authoritative fixture acquisition. The UI
   // result hold remains available beyond this stored union.
-  void retain(uint8_t competition, const retention::Selection&, int64_t utc,
+  void retain(SourceSlot source, const retention::Selection&, int64_t utc,
               DateContext dates = {});
-  void beginFixtureRun(uint8_t competition);
-  void markFixture(uint8_t competition, cfg::Provider, uint32_t match);
+  void beginFixtureRun(SourceSlot source);
+  void markFixture(SourceSlot source, uint32_t match);
   std::size_t roundCount() const { return round_count_; }
   const StoredRound& round(std::size_t at) const { return rounds_[at]; }
   bool commitTable(bool complete);
@@ -299,8 +353,8 @@ class MatchStore {
 
   std::size_t matchCount() const { return match_count_; }
   const StoredMatch& match(std::size_t i) const { return matches_[i]; }
-  const StoredMatch* find(uint8_t competition, cfg::Provider provider,
-                          uint32_t id) const;
+  const StoredMatch* find(MatchKey) const;
+  const StoredMatch* find(SourceSlot, uint32_t id) const;
   const StoredTeam& teamAt(TeamIndex i) const { return teams_[i]; }
   StoredTeam& teamAt(TeamIndex i) { return teams_[i]; }
   const Text<31>& labelAt(uint8_t i) const { return labels_[i]; }
@@ -309,44 +363,56 @@ class MatchStore {
   bool hasDetail(const StoredMatch& match) const;
   const MatchDetails& detailAt(uint8_t i) const { return details_[i]; }
   const StoredEvent& eventAt(uint8_t i) const { return events_[i]; }
-  uint8_t notices(uint8_t competition) const;
+  uint8_t notices(SourceSlot source) const;
   // True when a match of 'competition' kicked off more than
   // cfg::kUnmaintainedAfterS before 'utc' and is neither over (finished,
   // postponed, cancelled, abandoned) nor has a result: its provider does not
   // maintain the competition (OQ-281).
-  bool unmaintained(uint8_t competition, int64_t utc) const;
+  bool unmaintained(SourceSlot source, int64_t utc) const;
   // Sets or clears notice 'bits' of 'competition'.
-  void flag(uint8_t competition, uint8_t bits, bool on);
+  void flag(SourceSlot source, uint8_t bits, bool on);
   // A run that stores every item of notice kinds 'bits' (a fixtures run:
   // kNoticeFixtures) starts; settleRun() after it completed replaces those
   // bits by the ones noted since. A run that fails does not settle: its
   // notes add to the earlier ones.
-  void beginRun(uint8_t competition, uint8_t bits);
-  void settleRun(uint8_t competition, uint8_t bits);
+  void beginRun(SourceSlot source, uint8_t bits);
+  void settleRun(SourceSlot source, uint8_t bits);
   std::size_t teamCount() const;
 
  private:
   struct SourceStatus {
-    uint32_t club = 0;
-    uint8_t competition = 0;
-    cfg::Provider provider = cfg::kProviderDefault;
     std::array<DatasetStatus, 3> datasets{};
+    uint32_t resolved_utc = 0;
+    uint8_t bits = 0, noted = 0, bindings = 0;
   };
-  SourceStatus* source(uint8_t competition);
-  const SourceStatus* source(uint8_t competition) const;
-  bool selected(const SourceStatus&, TeamIndex team) const;
-  int matchIndex(uint8_t competition, cfg::Provider provider,
-                 uint32_t id) const;
+  struct Binding {
+    DatasetStatus summary;
+    MatchKey summary_target;
+    int64_t resolution_attempt_ms = 0;
+    uint32_t incarnation = 0, club = 0;
+    uint16_t resolution_http = 0;
+    Cause resolution_cause = Cause::kNone;
+    uint8_t competition = 0;
+    SourceSlot current = kNoSource;
+  };
+  SourceStatus* status(SourceSlot);
+  const SourceStatus* status(SourceSlot) const;
+  Binding* binding(uint8_t competition);
+  const Binding* binding(uint8_t competition) const;
+  uint8_t bindingMask(uint8_t competition) const;
+  bool selected(const Binding&, SourceSlot, TeamIndex) const;
+  void reconcileDetails(const Clock&);
+  int matchIndex(SourceSlot, uint32_t id) const;
   void removeMatch(std::size_t i);
   void freeSlot(uint8_t slot);
-  uint8_t detailSlot(const StoredMatch& match, int64_t utc, bool requested);
-  void note(uint8_t competition, uint8_t bits);
+  uint8_t detailSlot(const StoredMatch& match, int64_t utc, uint8_t requesters);
+  void note(SourceSlot source, uint8_t bits);
   std::size_t sortedPosition(const StoredMatch& match) const;
-  void dropRows(uint8_t competition);
-  void dropGroups(uint8_t competition);
+  void dropRows(SourceSlot source);
+  void dropGroups(SourceSlot source);
   int takeEvent();
   StoredMatch* detailRow(uint8_t slot);
-  void settleEvents(uint8_t competition);
+  void settleEvents(SourceSlot source);
   StoredMatch* place(StoredMatch m, std::size_t from);
 
   std::array<StoredMatch, cfg::kStoreMatches> matches_{};
@@ -359,13 +425,11 @@ class MatchStore {
   std::array<StoredRound, cfg::kStoreRounds> rounds_{};
   std::array<StoredTableGroup, cfg::kStoreTableGroups> groups_{};
   std::array<StoredTableGroup, cfg::kStoreTableGroups> stage_groups_{};
-  std::array<SourceStatus, cfg::kCompetitionMax> sources_{};
+  SourceIndex source_index_;
+  std::array<SourceStatus, cfg::kStoreSources> sources_{};
+  std::array<Binding, cfg::kCompetitionMax> bindings_{};
+  uint16_t fixture_changes_ = 0;
   uint8_t round_count_ = 0, group_count_ = 0, staged_groups_ = 0;
-  struct Notice {
-    // 'noted': bits noted since beginRun().
-    uint8_t competition = 0, bits = 0, noted = 0;
-  };
-  std::array<Notice, cfg::kCompetitionMax> notices_{};
   // Event list being built between beginEvents() and endEvents().
   int64_t pending_utc_ = 0;
   std::array<uint8_t, cfg::kMatchEvents> pending_{};
@@ -376,7 +440,7 @@ class MatchStore {
   bool pending_pool_ : 1 = false;  // an event was lost to the full pool
   bool pending_detail_ : 1 = false;
   // Table being staged between beginTable() and commitTable().
-  uint8_t table_competition_ = 0;
+  SourceSlot table_source_ = kNoSource;
   bool table_cut_ = false;
   uint16_t match_count_ = 0, row_count_ = 0, staged_rows_ = 0;
 };
@@ -384,6 +448,9 @@ class MatchStore {
 // Match/team references can address every configured slot; local detail,
 // event, round-label and table-row indices remain bytes.
 static_assert(cfg::kStoreTeams < kNoTeam && cfg::kStoreMatches < kNoMatch);
+static_assert(cfg::kCompetitionMax <= std::numeric_limits<uint8_t>::digits &&
+                  cfg::kStoreSources <= std::numeric_limits<uint16_t>::digits,
+              "Binding and source-change masks must cover every slot");
 static_assert(cfg::kStoreDetailMatches < kNoIndex &&
               cfg::kStoreEvents < kNoIndex &&
               cfg::kStoreRoundLabels < kNoIndex &&

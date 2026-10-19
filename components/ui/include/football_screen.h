@@ -1,6 +1,8 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <new>
+#include <type_traits>
 
 #include "app_config.h"
 #include "safe_area.h"
@@ -73,21 +75,43 @@ struct Card {
   bool accent[2]{};
   uint8_t line_count = 0, hint_count = 0;
 };
+struct ConferenceContent {
+  std::array<MatchRow, cfg::kVisibleMatchesRange.max> rows{};
+  uint8_t count = 0, slots = 0;
+};
+struct TableContent {
+  std::array<TableRow, cfg::kTableWindowRange.max> rows{};
+  // Points, goal difference and played, in display order.
+  char columns[3][6]{};
+  uint8_t count = 0;
+};
 struct ViewModel {
+  ViewModel() noexcept : empty_(0) {}
+  Layout layout() const { return layout_; }
+  // Begin the selected payload's lifetime before any output targets refer to
+  // it. Common scene metadata survives; no other payload remains live.
+  void setLayout(Layout next) {
+    switch (next) {
+      case Layout::kOwnMatch: new (&own) OwnMatch(); break;
+      case Layout::kConference: new (&conference) ConferenceContent(); break;
+      case Layout::kTable: new (&table) TableContent(); break;
+      case Layout::kCard: new (&card) Card(); break;
+      case Layout::kImage: new (&empty_) uint8_t{0}; break;
+    }
+    layout_ = next;
+  }
   screen::Type screen = screen::Type::kCrest;
   settings::ScreenStyle style;
-  Layout layout = Layout::kImage;
   // Own match: competition · round; Konferenz: title with page; table:
   // competition name.
   char caption[80]{};
-  OwnMatch own;
-  std::array<MatchRow, cfg::kVisibleMatchesRange.max> matches{};
-  std::array<TableRow, cfg::kTableWindowRange.max> table{};
-  // Rows shown and, for the Konferenz, fixed row slots while paging.
-  uint8_t row_count = 0, slots = 0;
-  // Table column titles: points, goal difference, played.
-  char columns[3][6]{};
-  Card card;
+  union {
+    OwnMatch own;
+    ConferenceContent conference;
+    TableContent table;
+    Card card;
+    uint8_t empty_;
+  };
   char status[64]{};
   Tone status_tone = Tone::kText;
   // The status is a temporary pill over the bottom of the content
@@ -103,6 +127,11 @@ struct ViewModel {
   char image[64]{};
   // Image-service attempt, including fallback/retry of an unchanged file path.
   uint32_t image_revision = 0;
+
+ private:
+  Layout layout_ = Layout::kImage;
 };
+static_assert(std::is_trivially_copyable_v<ViewModel> &&
+              std::is_trivially_destructible_v<ViewModel>);
 bool render(const ViewModel& model, const geometry::SafeArea& safe_area);
 }  // namespace ui

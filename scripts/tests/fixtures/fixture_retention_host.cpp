@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cassert>
 #include <fstream>
 #include <iostream>
@@ -7,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "../../../test/source_support.h"
 #include "fixture_retention.h"
 #include "provider_plan.h"
 #include "store_mappers.h"
@@ -51,6 +53,15 @@ std::string load(const char* path) {
   assert(in);
   return {std::istreambuf_iterator<char>(in), {}};
 }
+football::SourceSlot bindSource(football::MatchStore& store, uint8_t id,
+                                uint32_t club = 0) {
+  assert(store.bind(id, id, club, {}));
+  football::SourceKey key;
+  assert(key.assign(cfg::Provider::kOpenLigaDb, "bl1", "2026"));
+  const auto slot = store.sourceSlot(store.resolve(id, key, {}));
+  assert(slot != football::kNoSource);
+  return slot;
+}
 int main(int argc, char** argv) {
   using namespace football;
   assert(argc >= 9);
@@ -83,9 +94,7 @@ int main(int argc, char** argv) {
     }
     MatchStore store;
     MapContext map;
-    map.competition = 1;
-    map.provider = request.source.provider;
-    map.club = 40;
+    map.source = bindSource(store, 1, 40);
     map.clock = {utc, 100};
     struct Target {
       MatchStore& store;
@@ -112,7 +121,7 @@ int main(int argc, char** argv) {
     for (std::size_t i = 0; i < store.matchCount(); ++i)
       assert(expected.erase(store.match(i).id) == 1);
     assert(expected.empty() && store.teamCount() == 18 &&
-           !(store.notices(1) & kNoticeMatches));
+           !(store.notices(map.source) & kNoticeMatches));
   }
   // One actual season index serves all eight configured clubs. Expected
   // identities are independently selected from the recorded response in Python.
@@ -153,8 +162,7 @@ int main(int argc, char** argv) {
     assert(own_ids.size() > cfg::kRetainedOwnFixtures);
     MatchStore merged;
     MapContext map;
-    map.competition = 1;
-    map.provider = request.source.provider;
+    map.source = bindSource(merged, 1);
     map.clock = {utc, 100};
     struct Admission {
       retention::Selection& selection;
@@ -198,7 +206,9 @@ int main(int argc, char** argv) {
   shared_planner.context(shared_routes, eligibility);
   MatchStore shared_store;
   schedule::Job shared_job;
+  shared_planner.synchronize(shared_store, {utc, 100});
   shared_job.competition = 1;
+  shared_job.key.source = shared_store.sourceId(shared_store.currentSource(1));
   shared_job.type = cfg::DataType::kFixtures;
   const auto shared_body = load(argv[1]);
   const auto shared_request = [&](uint32_t omit) {
@@ -226,14 +236,18 @@ int main(int argc, char** argv) {
         complete ? plan::Fetch::kOk : plan::Fetch::kFailed, {utc, 100});
   };
   assert(shared_request(0).more);
-  const auto& own_union = shared_planner.state(0).fixtures.own;
+  assert(!shared_request(0).more);
   std::set<uint32_t> planned_own;
-  for (const auto id : own_union)
-    if (id) assert(planned_own.insert(id).second);
+  for (std::size_t i = 0; i < shared_store.matchCount(); ++i) {
+    const auto& match = shared_store.match(i);
+    if (shared_store.isOwn(match) &&
+        std::find(expected_own.begin(), expected_own.end(), match.id) !=
+            expected_own.end())
+      assert(planned_own.insert(match.id).second);
+  }
   assert(planned_own ==
          std::set<uint32_t>(expected_own.begin(), expected_own.end()));
   assert(planned_own.size() > 8);
-  assert(!shared_request(0).more);
   std::set<uint32_t> planned_matches;
   for (std::size_t i = 0; i < shared_store.matchCount(); ++i)
     assert(planned_matches.insert(shared_store.match(i).id).second);
@@ -242,10 +256,10 @@ int main(int argc, char** argv) {
   // A syntactically complete response missing a required own fixture beyond
   // bit7 must not finish the scope or prune previously valid data.
   assert(shared_request(0).more);
-  const auto omitted = own_union[8];
+  const auto omitted = expected_own[8];
   assert(omitted);
   assert(shared_request(omitted).outcome == schedule::Outcome::kFailed);
-  assert(shared_store.find(1, cfg::Provider::kOpenLigaDb, omitted));
+  assert(shared_store.find(shared_store.currentSource(1), omitted));
   // The enlarged temporary index still has one allocation. A real refusal at
   // that boundary reports RAM failure and cannot prune the previous scope.
   const auto retained_count = shared_store.matchCount();
@@ -271,7 +285,7 @@ int main(int argc, char** argv) {
   assert(shared_planner.complete(plan::Fetch::kFailed, {utc, 100}).outcome ==
          schedule::Outcome::kFailed);
   assert(shared_store.matchCount() == retained_count &&
-         shared_store.find(1, cfg::Provider::kOpenLigaDb, omitted));
+         shared_store.find(shared_store.currentSource(1), omitted));
   // Resetting the planner reconstructs state in place; a fresh acquisition
   // must produce the same complete scope through the normal public functions.
   shared_planner.reset();
@@ -334,8 +348,14 @@ int main(int argc, char** argv) {
          cup_result.metadata.metadata_complete &&
          std::string_view(cup_result.metadata.season.data) == "2025");
   MatchStore cup_store;
+  SourceKey cup_key;
+  assert(cup_key.assign(cfg::Provider::kEspn, "ger.dfb_pokal", "2025"));
+  assert(cup_store.bind(1, 1, 0, {}));
+  const auto cup_source =
+      cup_store.sourceSlot(cup_store.resolve(1, cup_key, {}));
+  assert(cup_source != kNoSource);
   retention::Selection stages;
-  assert(calendar.select(stages, &cup_store, 1));
+  assert(calendar.select(stages, &cup_store, cup_source));
   assert(stages.count == 8 && stages.calendar_data.stage_count == 3);
   const char* expected_days[] = {"2025-12-02T08:00Z", "2025-12-03T08:00Z",
                                  "2026-02-03T08:00Z", "2026-02-04T08:00Z",
@@ -394,10 +414,12 @@ int main(int argc, char** argv) {
   route.primary.competition.assign("bl1");
   route.primary.season.assign("2026");
   route.club.team = 40;
+  settings::CompetitionRoutes routes;
+  assert(routes.entries.push(route));
+  planner.context(routes, eligibility);
   StoredMatch old;
   old.id = 999999;
-  old.competition = 1;
-  old.provider = cfg::Provider::kOpenLigaDb;
+  old.source = bindSource(runtime, 1, 40);
   old.kickoff = static_cast<uint32_t>(utc - 30 * 86400);
   old.phase = Phase::kScheduled;
   runtime.upsert(old, {utc, 100});
@@ -405,7 +427,7 @@ int main(int argc, char** argv) {
     for (uint32_t match = 0; match < 3 * 18; ++match) {
       auto row = old;
       row.id = 1000000 + competition * 1000 + match;
-      row.competition = competition;
+      row.source = test_source::source(runtime, competition);
       runtime.upsert(row, {utc, 100});
     }
   const auto other_count = 7 * 3 * 18;
@@ -413,6 +435,7 @@ int main(int argc, char** argv) {
   schedule::Job job;
   job.slot = 0;
   job.competition = 1;
+  job.key.source = runtime.sourceId(old.source);
   job.provider = cfg::Provider::kOpenLigaDb;
   job.type = cfg::DataType::kFixtures;
   const auto request_body = [&](bool truncated) {
@@ -436,15 +459,17 @@ int main(int argc, char** argv) {
   };
   assert(request_body(false).more && runtime.matchCount() == other_count + 1);
   assert(request_body(true).outcome == schedule::Outcome::kFailed);
-  assert(runtime.find(1, cfg::Provider::kOpenLigaDb, old.id));
+  assert(runtime.find(old.source, old.id));
   assert(request_body(false).more);
   assert(!request_body(false).more);
-  assert(!runtime.find(1, cfg::Provider::kOpenLigaDb, old.id));
+  assert(!runtime.find(old.source, old.id));
   assert(runtime.matchCount() ==
          other_count + static_cast<std::size_t>(argc - 8));
   assert(runtime.roundCount() == 3);
   schedule::Wanted wanted;
-  planner.wanted(0, &route, runtime, {utc, 100}, wanted);
+  schedule::Inputs demand;
+  planner.prepareDemand(runtime, {utc, 100}, demand);
+  wanted = demand.scopes[old.source];
   assert(wanted.cost[static_cast<unsigned>(cfg::DataType::kFixtures)] == 2);
   std::cout
       << "PASS real306-game season: exact union before admission, arbitrary "

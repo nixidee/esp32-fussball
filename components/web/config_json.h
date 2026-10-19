@@ -1,5 +1,5 @@
 // One application Apply envelope. Nested codecs only mutate caller-owned draft
-// storage; HTTP owns admission, complete transport and the final publication.
+// storage; application sessions own publication, HTTP owns complete transport.
 #pragma once
 #include "app_config_model.h"
 #include "correlation_id.h"
@@ -16,6 +16,9 @@ using ReadNames = SettingsDecode (*)(json::Reader&, const json::Token&, void*,
 SettingsDecode readApply(json::Input, settings::AppConfig&, ApplyRequest&,
                          settings::Violation&, ReadNames, void*,
                          const settings::Limits& = {});
+using WriteNames = bool (*)(json::Writer&, void*);
+bool exportJson(json::Writer&, const settings::AppConfig&, bool secrets,
+                WriteNames, void*);
 bool configJson(json::Writer&, const settings::AppConfig&,
                 bool secrets = false);
 }  // namespace web

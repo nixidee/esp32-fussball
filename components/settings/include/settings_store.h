@@ -102,22 +102,11 @@ Origin origin();
 // "rejected", "damaged", "unreadable", "no_storage").
 const char* originName(Origin origin) noexcept;
 
-// Competition projection. Readers copy one entry or the complete section
-// into caller-owned storage; no independently persistent competition owner.
-std::size_t competitionCount();
-// False if 'index' (list order) or 'id' does not exist; 'out' unchanged.
-bool competitionAt(std::size_t index, Competition& out);
+// Copies one competition or the complete section into caller-owned storage.
+// No independently persistent competition owner. Missing ID leaves out
+// unchanged.
 bool competitionById(uint8_t id, Competition& out);
 void competitions(Competitions& out);
-// Id of the entry at 'index', 0 if none.
-uint8_t competitionId(std::size_t index);
-// Same aggregate origin as origin().
-Origin competitionsOrigin();
-
-// Copies the complete policy into caller-owned storage, with the matching
-// UI/settings generation. No policy-sized return value or hidden stack copy.
-void screenPolicy(screen_policy::Policy& out,
-                  uint32_t* out_generation = nullptr);
 // The controller's two retained models and both matching generations, copied
 // under one model lock. Competition data are borrowed from the matching
 // football publication, rather than duplicated in another retained snapshot.
@@ -133,7 +122,6 @@ void footballSettings(
     screen_policy::Eligibility* eligibility = nullptr,
     void (*project_routes)(const ProviderSettings&, CompetitionRoutes&,
                            bool saved_competitions) = nullptr);
-Origin screenPolicyOrigin();
 
 // Immediate request-admission gate, without copying Model/Policy or locking.
 // Explicit setup-wizard queries are admitted separately by their caller.

@@ -24,6 +24,9 @@ prelude = r'''
 #include "original_names_channel.h"
 #include "provider_adapter.h"
 #include "provider_settings.h"
+#include "provider_client.h"
+#include "football_service.h"
+#include "application_original_names.h"
 int64_t esp_timer_get_time(){return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();}
 namespace settings {
 uint32_t current_generation=1,current_data=1;
@@ -46,20 +49,22 @@ struct {uint32_t generation=0,epoch=0;bool active=false;}run;
 struct {uint32_t hold=0;uint32_t admissibleAt(cfg::Provider,uint32_t now){return hold?hold:now;}}scheduler;
 enum class HttpPurpose{kSetup};
 namespace plan {enum class Fetch{kBusy,kDone};}
-plan::Fetch fetchOf(esp_err_t error){return error==ESP_ERR_NOT_FINISHED?plan::Fetch::kBusy:plan::Fetch::kDone;}
+plan::Fetch fetchOf(const RequestOutcome& result){return result.code==ESP_ERR_NOT_FINISHED?plan::Fetch::kBusy:plan::Fetch::kDone;}
 std::string response;bool busy_once=false;unsigned requests=0;
-esp_err_t get(const provider::RequestSpec&request,const settings::ProviderSettings&,uint32_t generation,
- uint32_t settings_generation,uint32_t,const provider::Sink&sink,provider::ParseResult&parsed,HttpPurpose){
+RequestOutcome get(const provider::RequestSpec&request,const settings::ProviderSettings&,uint32_t generation,
+ uint32_t settings_generation,uint32_t,const provider::Sink&sink,HttpPurpose){
+ assert(!request.upcoming&&request.source.provider==cfg::Provider::kOpenLigaDb&&request.source.competition=="bl1");
  assert(generation==original_generation&&settings_generation==original_settings_generation);
- if(busy_once){busy_once=false;return ESP_ERR_NOT_FINISHED;}++requests;
+ RequestOutcome result;
+ if(busy_once){busy_once=false;result.fail(ESP_ERR_NOT_FINISHED,Cause::kBusy);return result;}++requests;result.sent=true;
  const std::string season=R"([{"matchID":1,"leagueShortcut":"bl1","leagueSeason":2026,"team1":{"teamId":40,"teamName":"FC"},"team2":{"teamId":41,"teamName":"SV"}}])";
  const auto&body=request.operation==provider::Operation::kCurrentSeason?season:response;
  struct Input {const std::string&text;std::size_t at=0;const provider::Sink&sink;}input{body,0,sink};
  json::Reader reader({&input,[](void*p){auto&v=*static_cast<Input*>(p);
   if(v.sink.cancelled&&v.sink.cancelled(v.sink.context))return -1;
   return v.at<v.text.size()?static_cast<unsigned char>(v.text[v.at++]):-1;}});
- parsed=provider::readResponse(reader,request,sink);
- return parsed.status==provider::Status::kOk&&parsed.document_complete?ESP_OK:ESP_ERR_INVALID_RESPONSE;
+ result.parsed=provider::readResponse(reader,request,sink);
+ result.code=result.parsed.status==provider::Status::kOk&&result.parsed.document_complete?ESP_OK:ESP_ERR_INVALID_RESPONSE;return result;
 }
 '''
 tests = r'''
@@ -68,7 +73,7 @@ uint32_t start(std::string body,bool season=true){
  settings::entry.primary.provider=cfg::Provider::kOpenLigaDb;
  assert(settings::entry.primary.competition.assign("bl1"));
  if(season)assert(settings::entry.primary.season.assign("2026"));
- uint32_t id=0;assert(beginOriginalNames(7,id)==ESP_OK&&selecting&&id);return id;
+ uint32_t id=0;assert(application::beginOriginalNames(7,id)==ESP_OK&&selecting&&id);return id;
 }
 void worker(){settings::ProviderSettings model;int64_t wake=0;while(selecting){
  stepOriginalNames(model,settings::dataGeneration(),settings::generation(),wake);}}
@@ -102,7 +107,7 @@ int main(){using namespace football;
  auto before=requests;id=start("[]");originals::cancel(id);worker();assert(requests==before&&!selecting);
  id=start("[]");settings::current_generation++;worker();assert(requests==before);assert(consume(id).first==originals::State::kFailed);
  id=start("[]");busy_once=true;settings::ProviderSettings model;int64_t wake=0;
- assert(!stepOriginalNames(model,settings::dataGeneration(),settings::generation(),wake));assert(requests==before&&selecting);
+ assert(!stepOriginalNames(model,settings::dataGeneration(),settings::generation(),wake).progressed);assert(requests==before&&selecting);
  producer=std::thread(worker);auto empty=consume(id);producer.join();assert(empty.first==originals::State::kComplete&&jsonDocument(empty.second));
  // Season discovery uses the same owner before its one explicit list request.
  before=requests;id=start("[]",false);producer=std::thread(worker);empty=consume(id);producer.join();
@@ -131,12 +136,16 @@ with tempfile.TemporaryDirectory(prefix="football-original-integration-") as fol
     command = ["clang++", "-std=c++20", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
                "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-pthread"]
     command.extend("-I" + str(path) for path in includes)
-    command += [str(fixture), str(ROOT / "components/football/provider_selection.cpp"),
+    command += [str(fixture), str(ROOT / "components/application/original_names.cpp"), str(ROOT / "components/football/provider_selection.cpp"),
                 str(ROOT / "components/football/provider_adapter.cpp"),
                 str(ROOT / "components/football/provider_readers.cpp"),
                 str(ROOT / "components/football/football_model.cpp"),
                 str(ROOT / "components/timekeeping/civil_time.cpp"),
                 str(ROOT / "components/football/match_store.cpp"),
+                str(ROOT / "components/football/source_index.cpp"),
+                str(ROOT / "components/settings/settings_model.cpp"),
+                str(ROOT / "components/settings/screen_policy.cpp"),
+                str(ROOT / "components/network/wifi_policy.cpp"),
                 str(ROOT / "components/football/matchday.cpp"),
                 str(ROOT / "components/football/original_names_channel.cpp"),
                 str(ROOT / "components/json/json_stream.cpp"), "-o", str(scratch / "originals")]

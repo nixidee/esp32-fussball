@@ -366,7 +366,6 @@ inline constexpr std::size_t kApiFootballKeyMaxBytes = 96;
 inline constexpr std::size_t kFootballDataKeyMaxBytes = 64;
 inline constexpr std::size_t kCompetitionIdMaxBytes = 32;
 inline constexpr std::size_t kSeasonMaxBytes = 16;
-inline constexpr std::size_t kTeamIdMaxBytes = 32;
 inline constexpr std::size_t kDisplayNameMaxBytes = 32;
 // Provider ids of a match or team.
 inline constexpr std::size_t kIdBytes = 32;
@@ -385,6 +384,8 @@ inline constexpr std::size_t kStoreMatches = 512;
 // Current sources plus retained season-boundary sources for configured routes.
 // This is a RAM capacity, not an eviction rule; exhaustion remains explicit.
 inline constexpr std::size_t kStoreSources = 2 * kCompetitionMax;
+// Shared-source jobs plus per-view season resolution and exact summaries.
+inline constexpr std::size_t kRequestScopes = kStoreSources + kCompetitionMax;
 inline constexpr std::size_t kStoreTableRows = 224;
 // Rows a table refresh stages before it replaces the stored table (OQ-291,
 // OQ-309): the largest merged group table known (54 rows) fits; a longer
@@ -404,12 +405,17 @@ inline constexpr std::size_t kRetainedOwnFixtures = 4;  // previous + next three
 inline constexpr std::size_t kRetainedClubFixtures =
     kCompetitionMax * kRetainedOwnFixtures;
 inline constexpr std::size_t kFixtureCalendarDays = 16;
+// Initial request-cost estimate until the first calendar supplies actual days.
+inline constexpr uint8_t kFixtureCalendarEstimatedDays = 7;
+// Round/day scopes checked by one live run, including retained old seasons.
+inline constexpr std::size_t kProviderLiveItems = 3;
 inline constexpr std::size_t kProviderCalendarDays = 366;
 // Matches of one competition whose kickoffs are less than this apart form
 // one matchday (OQ-201, OQ-224).
 inline constexpr uint16_t kMatchdayGapHours = 48;
 inline constexpr std::size_t kSelectionEntries = 64;
 inline constexpr std::size_t kProviderBodyBytes = 262144;
+inline constexpr std::size_t kProviderUrlBytes = 320;
 // A complete season is streamed for coverage/retention, never retained as JSON.
 inline constexpr std::size_t kProviderSeasonBodyBytes = 1048576;
 inline constexpr std::size_t kSelectionBodyBytes = 1048576;
@@ -430,6 +436,9 @@ inline constexpr uint32_t kScreenshotDeadlineMs = 5000;
 inline constexpr uint32_t kProviderIdleTimeoutMs = 8000;
 // Transport and its pull-reader share the same bounded I/O chunk size.
 inline constexpr std::size_t kProviderReadBufferBytes = 1024;
+// Buffered parser work between request-validity checks. Refills and final
+// publication check separately; no network wait can consume this allowance.
+inline constexpr std::size_t kProviderValidityBytes = 64;
 inline constexpr std::size_t kProviderSendBufferBytes = 512;
 // Explicit provider-original queries stream to HTTP through one small ring.
 inline constexpr std::size_t kOriginalNamesBufferBytes = 256;
@@ -498,6 +507,8 @@ inline constexpr uint32_t kSeasonRecheckS = 86400;
 // smaller normal fetch never refreshes a wider proved interval.
 inline constexpr uint32_t kCoverageMaxAgeS = 86400;
 inline constexpr std::size_t kCoverageMaxSeasons = 2;
+inline constexpr std::size_t kCoverageSources =
+    kCompetitionMax * kCoverageMaxSeasons;
 inline constexpr uint32_t kCoverageRequestsPerRun = 16;
 inline constexpr uint32_t kCoverageRunsPerUtcDay = 1;
 inline constexpr char kCoverageGuardNvsKey[] = "schedule";
@@ -518,9 +529,6 @@ inline constexpr uint32_t kRequestGapMs = 2000;
 // Time buckets of a window limit (request_scheduler.h): more buckets use
 // the allowance more fully and cost 2 bytes each per limit.
 inline constexpr std::size_t kLimitWindowBuckets = 32;
-// Days before and after today of a club or date-range fixture request
-// (provider_plan.cpp).
-inline constexpr uint16_t kFixtureHorizonDays = 7;
 // Latest end of a match the provider reports as still running.
 inline constexpr uint16_t kUnknownMatchEndMinutes = 240;
 // Expected end of a match without a reported running phase or final whistle

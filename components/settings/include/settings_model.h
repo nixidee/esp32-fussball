@@ -18,6 +18,27 @@
 #include "value_utils.h"
 
 namespace settings {
+// Pure provider setup policy, shared by validation, adapter and schema. UI
+// labels and JSON decoding stay at their own boundaries.
+enum class ProviderAccess : uint8_t {
+  kOpen,
+  kApiFootballKey,
+  kEspnOptIn,
+  kFootballDataKey
+};
+struct ProviderRequirements {
+  ProviderAccess access = ProviderAccess::kOpen;
+  uint8_t season_digits = 4;  // 0: any positive-length digit sequence
+  bool list_season = false, list_country = false, discover_teams = false;
+};
+ProviderRequirements providerRequirements(cfg::Provider provider) noexcept;
+enum SelectionField : uint8_t {
+  kSelectionCompetition = 1,
+  kSelectionSeason = 2,
+  kSelectionSearch = 4,
+  kSelectionCountry = 8
+};
+uint8_t selectionFields(cfg::Provider provider, bool teams) noexcept;
 
 // The raw-byte value has one shared implementation, including alias-safe
 // assignment and lossless SSID bytes. Domain validation stays here.
@@ -260,6 +281,10 @@ bool isValidIdentifier(std::string_view value) noexcept;
 bool isValidTeamId(std::string_view value) noexcept;
 // A season: empty, or digits (exactly four unless the provider is OpenLigaDB).
 bool isValidSeason(cfg::Provider provider, std::string_view season) noexcept;
+struct Violation;
+bool validateSelection(cfg::Provider provider, bool teams,
+                       std::string_view competition, std::string_view season,
+                       Violation* why = nullptr) noexcept;
 
 // Maxima of the two settings whose range depends on the display layout
 // (OQ-85, OQ-92) and the number of inputs of the target (OQ-141). The boot

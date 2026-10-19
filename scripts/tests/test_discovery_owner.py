@@ -46,11 +46,13 @@ program = r'''
 #include "football_service.h"
 #include "provider_coverage.h"
 #include "provider_settings.h"
+#include "provider_client.h"
 #include <atomic>
 #include <cassert>
 #include <cstdio>
 #include <string>
-namespace network {struct HeavyGuard{explicit operator bool()const{return true;}};struct Status{uint32_t epoch=1;};Status status(){return {};}}
+namespace operations {struct Guard{explicit operator bool()const{return true;}};}
+namespace network {struct Status{uint32_t epoch=1;};Status status(){return {};}}
 namespace events {enum class Event{kDataUpdated};void post(Event){}}
 namespace timekeeping {int64_t monotonicMs(){return 10000;}}
 namespace football {
@@ -61,7 +63,7 @@ schedule::Scheduler scheduler;
 settings::screen_policy::Eligibility eligibility;
 coverage::EvidenceArray coverage_evidence;
 coverage::Discovery discovery;
-struct DiscoveryCursor {uint8_t route=0,season=0;};
+struct DiscoveryCursor {uint8_t source=0;};
 DiscoveryCursor discovery_progress;
 uint64_t discovery_binding=0,coverage_binding=1;
 bool discovery_retire=false,coverage_streaming=false,sent=false,demo_mode=false,configured=false;
@@ -74,17 +76,19 @@ Clock demo_clock{};
 demo::Bindings demo_bindings;
 demo::Scenario demo_scenario=demo::Scenario::kOwn;
 uint8_t demo_step=0;
-constexpr uint8_t kNoDemoCommand=255;
-std::atomic<uint8_t> demo_command=kNoDemoCommand;
+constexpr uint16_t kNoDemoCommand=UINT16_MAX;
+std::atomic<uint16_t> demo_command=kNoDemoCommand;
 std::atomic<bool> busy=false;
 Clock nowClock(){return {1792238400,10};}
+DateContext localDates(int64_t){return {};}
 void lock(){}void unlock(){}
-uint32_t routeKey(const settings::CompetitionRoute& route){return route.incarnation*8+static_cast<unsigned>(route.primary.provider);}
 bool usesAny(const settings::CompetitionRoute& route,uint8_t providers){return providers&(1u<<static_cast<unsigned>(route.primary.provider));}
 ACTUAL_SLOT
 std::array<Slot,cfg::kCompetitionMax> slots;
 ACTUAL_SLOT_LOOKUP
-ACTUAL_COVERAGE_LOOKUP
+ACTUAL_REQUIREMENTS
+ACTUAL_ASSESS
+ACTUAL_ROUTE
 ACTUAL_BIND_COVERAGE
 ACTUAL_PUBLISH
 ACTUAL_APPLY_ROUTES
@@ -96,15 +100,15 @@ enum class HttpPurpose{kDiscovery};
 unsigned sends=0;
 cfg::Provider last_provider=cfg::kProviderDefault;
 std::string last_season;
-esp_err_t get(const provider::RequestSpec& spec,const settings::ProviderSettings&,uint32_t,uint32_t,uint32_t,
-              const provider::Sink& sink,provider::ParseResult& parsed,HttpPurpose,uint8_t,const network::HeavyGuard*){
- sent=false;
- if(!reserveDiscovery(1792238400/86400)){failure_cause=Cause::kCounter;return ESP_FAIL;}
- sent=true;++sends;last_provider=spec.source.provider;last_season=spec.source.season;
+RequestOutcome get(const provider::RequestSpec& spec,const settings::ProviderSettings&,uint32_t,uint32_t,uint32_t,
+              const provider::Sink& sink,HttpPurpose,uint8_t,const operations::Guard*){
+ RequestOutcome result;
+ if(!reserveDiscovery(1792238400/86400)){result.fail(ESP_FAIL,Cause::kCounter);return result;}
+ result.sent=true;++sends;last_provider=spec.source.provider;last_season=spec.source.season;
  struct Input{std::string body;size_t at=0;static int read(void* raw){auto& in=*static_cast<Input*>(raw);return in.at<in.body.size()?static_cast<unsigned char>(in.body[in.at++]):-1;}};
  Input input{"[{\"matchID\":1,\"leagueShortcut\":\"bl1\",\"leagueSeason\":"+last_season+",\"matchDateTimeUTC\":\"2026-09-01T12:00Z\"},{\"matchID\":2,\"leagueShortcut\":\"bl1\",\"leagueSeason\":"+last_season+",\"matchDateTimeUTC\":\"2026-12-01T12:00Z\"}]"};
- json::Reader reader({&input,Input::read});parsed=provider::readResponse(reader,spec,sink);
- return parsed.status==provider::Status::kOk?ESP_OK:ESP_FAIL;
+ json::Reader reader({&input,Input::read});result.parsed=provider::readResponse(reader,spec,sink);
+ result.code=result.parsed.status==provider::Status::kOk?ESP_OK:ESP_FAIL;return result;
 }
 ACTUAL_STEP
 void reset(){
@@ -113,41 +117,41 @@ void reset(){
  discovery_progress={};discovery_binding=0;coverage_binding=1;discovery_retire=false;failure_cause=Cause::kNone;
  eligibility={};eligibility.selection.automatic_break=true;eligibility.break_days=21;
 }
-void route(cfg::Provider provider,uint8_t id){settings::CompetitionRoute value;value.id=id;value.incarnation=id;value.primary.provider=provider;value.primary.competition.assign(provider==cfg::Provider::kEspn?"aus.1":"bl1");value.primary.season.assign("2026");routes.entries.push(value);route_count=routes.entries.size();}
+void route(cfg::Provider provider,uint8_t id){settings::CompetitionRoute value;value.id=id;value.incarnation=id;value.primary.provider=provider;value.primary.competition.assign(provider==cfg::Provider::kEspn?"aus.1":"bl1");value.primary.season.assign("2026");assert(routes.entries.push(value));route_count=routes.entries.size();SourceKey key;assert(key.assign(provider,value.primary.competition.view(),"2026"));assert(store.bind(id,value.incarnation,0,nowClock()));assert(store.resolve(id,key,nowClock()));}
 }
 int main(){using namespace football;settings::ProviderSettings model;model.espn_opt_in=true;
  // Actual source application exposes unsupported separately from unknown;
  // same-source reload preserves successful and failed supported datasets.
  reset();route(cfg::Provider::kApiFootball,1);applyRoutesLocked(model,1,false);
- assert(store.datasetState(1,MatchStore::Dataset::kEvents)==DatasetState::kUnavailable);
- assert(store.datasetState(1,MatchStore::Dataset::kFixtures)==DatasetState::kUnknown);
- assert(store.datasetStatus(1,MatchStore::Dataset::kEvents).cause==Cause::kNone);
- store.recordDataset(1,MatchStore::Dataset::kTable,100,200,true,Cause::kNone);
- store.recordDataset(1,MatchStore::Dataset::kFixtures,300,400,false,Cause::kHttp,503);
+ assert(store.datasetState(store.currentSource(1),MatchStore::Dataset::kEvents)==DatasetState::kUnavailable);
+ assert(store.datasetState(store.currentSource(1),MatchStore::Dataset::kFixtures)==DatasetState::kUnknown);
+ assert(store.datasetStatus(store.currentSource(1),MatchStore::Dataset::kEvents).cause==Cause::kNone);
+ store.recordDataset(store.currentSource(1),MatchStore::Dataset::kTable,100,200,true,Cause::kNone);
+ store.recordDataset(store.currentSource(1),MatchStore::Dataset::kFixtures,300,400,false,Cause::kHttp,503);
  applyRoutesLocked(model,2,false);
- assert(store.datasetStatus(1,MatchStore::Dataset::kTable).last_success_ms==200);
- assert(store.datasetStatus(1,MatchStore::Dataset::kFixtures).http==503);
+ assert(store.datasetStatus(store.currentSource(1),MatchStore::Dataset::kTable).last_success_ms==200);
+ assert(store.datasetStatus(store.currentSource(1),MatchStore::Dataset::kFixtures).http==503);
  routes.entries[0].primary.provider=cfg::Provider::kOpenLigaDb;applyRoutesLocked(model,3,false);
- assert(store.datasetState(1,MatchStore::Dataset::kEvents)==DatasetState::kUnknown);
- assert(!store.datasetStatus(1,MatchStore::Dataset::kTable).last_success_ms);
- store.datasetResult(1,MatchStore::Dataset::kEvents,true);applyRoutesLocked(model,4,false);
- assert(store.datasetState(1,MatchStore::Dataset::kEvents)==DatasetState::kComplete);
+ assert(store.datasetState(store.currentSource(1),MatchStore::Dataset::kEvents)==DatasetState::kUnknown);
+ assert(!store.datasetStatus(store.currentSource(1),MatchStore::Dataset::kTable).last_success_ms);
+ store.datasetResult(store.currentSource(1),MatchStore::Dataset::kEvents,true);applyRoutesLocked(model,4,false);
+ assert(store.datasetState(store.currentSource(1),MatchStore::Dataset::kEvents)==DatasetState::kComplete);
  routes.entries[0].primary.provider=cfg::Provider::kFootballData;applyRoutesLocked(model,5,false);
- assert(store.datasetState(1,MatchStore::Dataset::kEvents)==DatasetState::kUnavailable);
+ assert(store.datasetState(store.currentSource(1),MatchStore::Dataset::kEvents)==DatasetState::kUnavailable);
  routes.entries[0].primary.provider=cfg::Provider::kEspn;applyRoutesLocked(model,6,false);
- assert(store.datasetState(1,MatchStore::Dataset::kEvents)==DatasetState::kUnknown);
- model.demo=true;applyRoutesLocked(model,7,true);
- assert(store.datasetState(1,MatchStore::Dataset::kEvents)==DatasetState::kComplete);model.demo=false;
+ assert(store.datasetState(store.currentSource(1),MatchStore::Dataset::kEvents)==DatasetState::kUnknown);
+ model.demo=true;demo_bindings=demo::configure(routes,demo_scenario,true);applyRoutesLocked(model,7,true);
+ assert(store.datasetState(store.currentSource(1),MatchStore::Dataset::kEvents)==DatasetState::kComplete);model.demo=false;
  // ESPN alone cannot spend an extra discovery request or claim a break.
  reset();route(cfg::Provider::kEspn,1);bindCoverage();
  assert(!stepDiscovery(model,1,1,1792238400)&&sends==0&&writes==0);
- assert(coverage::assess(coverage_evidence,routes,1792238400,21).verdict==coverage::Verdict::kUnknown);
+ assert(assessCoverage(1792238400,21).verdict==coverage::Verdict::kUnknown);
  // A following supported source still uses the same normal typed parser.
  route(cfg::Provider::kOpenLigaDb,2);bindCoverage();
  assert(stepDiscovery(model,1,1,1792238400)&&sends==1&&last_provider==cfg::Provider::kOpenLigaDb&&last_season=="2026");
- assert(discovery_progress.route==1&&discovery_progress.season==1&&durable.size()==36);
+ assert(discovery_progress.source==3&&durable.size()==36);
  const auto reserved=discovery.stored().requests.reserved;assert(reserved==cfg::kBudgetReservationRequests);
- loadDiscovery();assert(!discovery_progress.route&&!discovery_progress.season);
+ loadDiscovery();assert(!discovery_progress.source);
  assert(stepDiscovery(model,1,1,1792238400)&&sends==2&&last_season=="2026");
  assert(discovery.stored().requests.reserved>reserved); // reboot forfeits unused reservation
  // Changed inputs cannot inherit this run, even if retirement persistence fails.
@@ -177,8 +181,10 @@ slot_at = source.index("struct Slot {")
 replacements = {
     "ACTUAL_SLOT": source[slot_at:source.index("\n};", slot_at) + 3],
     "ACTUAL_SLOT_LOOKUP": function("const Slot* slotOf("),
-    "ACTUAL_COVERAGE_LOOKUP": function("coverage::Evidence* coverageOf(" + "uint8_t id) {"),
-    "ACTUAL_BIND_COVERAGE": function("void bindCoverage()"),
+    "ACTUAL_REQUIREMENTS": function("coverage::Requirements coverageRequirements()"),
+    "ACTUAL_ASSESS": function("coverage::Assessment assessCoverage(uint32_t utc, uint16_t days) {"),
+    "ACTUAL_ROUTE": function("uint8_t coverageRoute("),
+    "ACTUAL_BIND_COVERAGE": function("bool bindCoverage() {"),
     "ACTUAL_PUBLISH": function("void publish()"),
     "ACTUAL_APPLY_ROUTES": function("void applyRoutesLocked("),
     "ACTUAL_LOAD": function("void loadDiscovery()"),
@@ -200,7 +206,7 @@ with tempfile.TemporaryDirectory(prefix="discovery-owner-", dir="/tmp") as direc
                "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-I", str(folder)]
     for path in (root / "include", *sorted((root / "components").glob("*/include"))):
         command += ["-I", str(path)]
-    files = ["football/fixture_retention", "football/football_model", "football/match_store",
+    files = ["football/fixture_retention", "football/source_index", "football/football_model", "football/match_store",
              "football/matchday", "football/store_views", "football/store_mappers",
              "football/provider_plan", "football/provider_readers", "football/provider_adapter",
              "football/provider_selection", "football/provider_coverage", "football/schedule_coverage", "football/request_scheduler",

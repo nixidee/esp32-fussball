@@ -49,32 +49,34 @@ void setup(Phase phase = Phase::kLive) {
   entry.incarnation = 1;
   entry.club.team = 40;
   entry.primary.competition.assign("league");
+  entry.primary.season.assign("2026");
   entry.competition_name.assign("League");
   configured.entries.push(entry);
   routes.entries.push(static_cast<const settings::CompetitionRoute&>(entry));
   shown.add(entry);
   StoredMatch match;
   match.id = 1;
-  match.competition = 1;
-  store.selectClub(1, match.provider, 40, {});
+  assert(store.bind(1, 1, 40, {}));
+  SourceKey key;
+  assert(key.assign(entry.primary.provider, "league", "2026"));
+  assert(store.resolve(1, key, {}));
+  match.source = store.currentSource(1);
   match.phase = phase;
   match.kickoff = kNow - 5400;
   match.principal = {1, 1};
   match.minute = 90;
   match.period = Period::kSecondHalf;
-  match.home =
-      store.team(1, cfg::kProviderDefault, 40, "Home full name", "HOM");
-  match.away =
-      store.team(1, cfg::kProviderDefault, 41, "Away full name", "AWY");
+  match.home = store.team(store.currentSource(1), 40, "Home full name", "HOM");
+  match.away = store.team(store.currentSource(1), 41, "Away full name", "AWY");
   assert(store.upsert(match, {kNow, 100}));
   states[0].id = 1;
   states[0].active = true;
   states[0].fetched_ms = 1;
-  store.recordDataset(1, MatchStore::Dataset::kFixtures, 1, 1, true,
-                      Cause::kNone);
+  store.recordDataset(store.currentSource(1), MatchStore::Dataset::kFixtures, 1,
+                      1, true, Cause::kNone);
 }
 StoredMatch& match() {
-  return *const_cast<StoredMatch*>(store.find(1, cfg::kProviderDefault, 1));
+  return *const_cast<StoredMatch*>(store.find(store.currentSource(1), 1));
 }
 ui::sequence::ContentKind renderModel(int64_t now_ms = 0, int64_t utc = kNow,
                                       int64_t retry_ms = 0) {
@@ -86,8 +88,8 @@ ui::sequence::ContentKind renderModel(int64_t now_ms = 0, int64_t utc = kNow,
                             selection::select(input).phase, config);
   ui::NavigationContext context(config, facts);
   ui::sequence::synchronize(navigation, context.input(), now_ms);
-  Published published{store,    shown,  1,      0,     true, false, 1,
-                      retry_ms, states, routes, false, 1,    0,     {utc, 100}};
+  Published published{store, shown,    1,      0,      true,  false,
+                      1,     retry_ms, states, routes, false, {utc, 100}};
   ui::BindContext bind{utc, now_ms, true, true, false, &network_status};
   const auto scene = ui::presentationFacts(
       navigation, context, now_ms, published.fetched_ms, published.retry_ms);
@@ -121,7 +123,7 @@ int main() {
     phase[screen::index(screen::Type::kLiveSingle)].automatic = true;
   }
   renderModel(1000, 1792888200);
-  assert(output.layout == ui::Layout::kOwnMatch);
+  assert(output.layout() == ui::Layout::kOwnMatch);
   assert(std::strcmp(output.own.centre, "02:30") == 0);
   assert(std::strcmp(output.own.pill, "So 25.10.") == 0);
   offset_before = offset_after = 0;
@@ -142,20 +144,21 @@ int main() {
     other.kickoff += 60 * i;
     assert(store.upsert(other, {kNow, 100}));
   }
-  store.recordDataset(1, MatchStore::Dataset::kFixtures, 60000, 60000, true,
-                      Cause::kNone);
-  store.recordDataset(1, MatchStore::Dataset::kFixtures, 95000, 95000, false,
-                      Cause::kNetwork);
+  store.recordDataset(store.currentSource(1), MatchStore::Dataset::kFixtures,
+                      60000, 60000, true, Cause::kNone);
+  store.recordDataset(store.currentSource(1), MatchStore::Dataset::kFixtures,
+                      95000, 95000, false, Cause::kNetwork);
   renderModel(120000, kNow, 241000);
-  assert(output.layout == ui::Layout::kConference && output.row_count == 5);
+  assert(output.layout() == ui::Layout::kConference &&
+         output.conference.count == 5);
   assert(last_calendar_count == cfg::kVisibleMatchesRange.max + 4);
-  for (unsigned i = 0; i < output.row_count; ++i)
-    assert(std::strcmp(output.matches[i].centre, "--:--") != 0);
+  for (unsigned i = 0; i < output.conference.count; ++i)
+    assert(std::strcmp(output.conference.rows[i].centre, "--:--") != 0);
   setup();
   match().minute = 93;
   match().added = 3;
   renderModel();
-  assert(output.layout == ui::Layout::kOwnMatch);
+  assert(output.layout() == ui::Layout::kOwnMatch);
   assert(!output.rim.extra_known && output.rim.progress_degrees == 360);
   assert(output.rim.top == ui::Tone::kWarn);
   assert(std::strcmp(output.own.pill, "93+3'") == 0);
@@ -225,14 +228,15 @@ int main() {
   routes.entries[0].club.own_special = false;
   renderModel();
   assert(navigation.entry.type == screen::Type::kLiveMulti);
-  assert(output.layout == ui::Layout::kOwnMatch);
+  assert(output.layout() == ui::Layout::kOwnMatch);
   auto second = match();
   second.id = 2;
   second.flags = 0;
-  second.home = store.team(1, cfg::kProviderDefault, 42, "Third");
+  second.home = store.team(store.currentSource(1), 42, "Third");
   assert(store.upsert(second, {kNow, 100}));
   renderModel();
-  assert(output.layout == ui::Layout::kConference && output.row_count == 2);
+  assert(output.layout() == ui::Layout::kConference &&
+         output.conference.count == 2);
   // Follow actual prepare -> eligibility -> synchronize -> bind. Confirmed
   // empty Conference is skipped; unknown/failed content reaches common cards.
   for (unsigned state = 0; state < 3; ++state) {
@@ -246,7 +250,7 @@ int main() {
     if (state == 1) {
       store.clear();  // no dataset proof yet, distinct from confirmed empty
     } else {
-      store.recordDataset(1,
+      store.recordDataset(store.currentSource(1),
                           state == 0 ? MatchStore::Dataset::kTable
                                      : MatchStore::Dataset::kFixtures,
                           200, 200, false, Cause::kNetwork, 503);
@@ -255,7 +259,7 @@ int main() {
       states[0].stale = true;
     }
     const auto content = renderModel();
-    assert(output.layout == ui::Layout::kCard);
+    assert(output.layout() == ui::Layout::kCard);
     if (state == 0) {
       assert(content == ui::sequence::ContentKind::kEmpty);
       assert(!navigation.entry.valid());
@@ -277,7 +281,7 @@ int main() {
   for (auto& phase : policy.shared)
     phase[screen::index(screen::Type::kTable)].automatic = true;
   policy.table_window = 2;
-  store.beginTable(1);
+  store.beginTable(store.currentSource(1));
   assert(store.appendGroup("a", "Group A", 0));
   assert(store.appendGroup("b", "Group B", 1));
   for (unsigned group = 0; group < 2; ++group)
@@ -285,7 +289,7 @@ int main() {
       StoredRow row;
       row.group = group;
       row.position = i + 1;
-      row.team = store.team(1, cfg::kProviderDefault,
+      row.team = store.team(store.currentSource(1),
                             group == 1 && i == 3 ? 40 : 100 + 10 * group + i,
                             group ? "B Club" : "A Club");
 
@@ -293,7 +297,7 @@ int main() {
     }
   assert(store.commitTable(true));
   renderModel();
-  assert(output.layout == ui::Layout::kTable && output.row_count == 2);
+  assert(output.layout() == ui::Layout::kTable && output.table.count == 2);
   assert(std::strstr(output.caption, "Group B"));
   assert(navigation.pages == 1);
   for (unsigned step = 0; step < 3; ++step) {
@@ -306,30 +310,30 @@ int main() {
   }
   assert(navigation.paged && navigation.pages == 5);
   assert(std::strstr(output.caption, "Group A"));
-  assert(std::strcmp(output.table[0].name, "A Club") == 0);
+  assert(std::strcmp(output.table.rows[0].name, "A Club") == 0);
   offset_before = 7200;
   offset_after = 3600;
-  store.recordDataset(1, MatchStore::Dataset::kTable, 60000, 60000, true,
-                      Cause::kNone);
-  store.recordDataset(1, MatchStore::Dataset::kTable, 200000, 200000, false,
-                      Cause::kNetwork, 503);
+  store.recordDataset(store.currentSource(1), MatchStore::Dataset::kTable,
+                      60000, 60000, true, Cause::kNone);
+  store.recordDataset(store.currentSource(1), MatchStore::Dataset::kTable,
+                      200000, 200000, false, Cause::kNetwork, 503);
   renderModel(3660000, 1792891800);
   assert(std::strstr(output.status, "Stand 02:30"));
   offset_before = offset_after = 0;
   // Usable table rows survive table failure. Fixtures success cannot replace
   // the table's own last-success time or clear its warning.
   navigation = {};
-  store.recordDataset(1, MatchStore::Dataset::kTable, 60000, 60000, true,
-                      Cause::kNone);
-  store.recordDataset(1, MatchStore::Dataset::kTable, 200000, 200000, false,
-                      Cause::kNetwork, 503);
-  store.recordDataset(1, MatchStore::Dataset::kFixtures, 500000, 500000, true,
-                      Cause::kNone);
+  store.recordDataset(store.currentSource(1), MatchStore::Dataset::kTable,
+                      60000, 60000, true, Cause::kNone);
+  store.recordDataset(store.currentSource(1), MatchStore::Dataset::kTable,
+                      200000, 200000, false, Cause::kNetwork, 503);
+  store.recordDataset(store.currentSource(1), MatchStore::Dataset::kFixtures,
+                      500000, 500000, true, Cause::kNone);
   states[0].cause = Cause::kNetwork;
   states[0].stale = true;
   states[0].fetched_ms = 500000;
   renderModel(560000);
-  assert(output.layout == ui::Layout::kTable && output.row_count == 2);
+  assert(output.layout() == ui::Layout::kTable && output.table.count == 2);
   char expected_time[8];
   const time_t table_time = kNow - (560000 - 60000) / 1000;
   std::tm date{};
@@ -340,13 +344,13 @@ int main() {
   // Network failures keep the existing error tone, with usable rows retained.
   assert(output.status_tone == ui::Tone::kError);
   // A fresh table is independent of an ensuing Fixtures failure.
-  store.recordDataset(1, MatchStore::Dataset::kTable, 600000, 600000, true,
-                      Cause::kNone);
-  store.recordDataset(1, MatchStore::Dataset::kFixtures, 650000, 650000, false,
-                      Cause::kNetwork, 503);
+  store.recordDataset(store.currentSource(1), MatchStore::Dataset::kTable,
+                      600000, 600000, true, Cause::kNone);
+  store.recordDataset(store.currentSource(1), MatchStore::Dataset::kFixtures,
+                      650000, 650000, false, Cause::kNetwork, 503);
   states[0].fetched_ms = 600000;
   renderModel(700000);
-  assert(output.layout == ui::Layout::kTable && output.row_count == 2);
+  assert(output.layout() == ui::Layout::kTable && output.table.count == 2);
   assert(output.status[0] == 0);
   const auto previous_status = last_status;
   const auto previous_type = navigation.entry.type;
@@ -370,17 +374,17 @@ int main() {
   renderModel(700002);
   // The error card reports the selected dataset, even when another newer
   // dataset failure supplies the competition's aggregate warning.
-  store.beginTable(1);
+  store.beginTable(store.currentSource(1));
   assert(store.commitTable(true));
-  store.recordDataset(1, MatchStore::Dataset::kTable, 800000, 800000, false,
-                      Cause::kBadResponse, 422);
-  store.recordDataset(1, MatchStore::Dataset::kFixtures, 900000, 900000, false,
-                      Cause::kNetwork, 503);
+  store.recordDataset(store.currentSource(1), MatchStore::Dataset::kTable,
+                      800000, 800000, false, Cause::kBadResponse, 422);
+  store.recordDataset(store.currentSource(1), MatchStore::Dataset::kFixtures,
+                      900000, 900000, false, Cause::kNetwork, 503);
   states[0].cause = Cause::kNetwork;
   states[0].http = 503;
   renderModel(950000);
   assert(last_status != previous_status);  // same aggregate, new Table failure
-  assert(output.layout == ui::Layout::kCard && presentation.card_fault == 1);
+  assert(output.layout() == ui::Layout::kCard && presentation.card_fault == 1);
   char table_code[kErrorCodeBytes];
   errorCode(table_code, cfg::kProviderDefault, Cause::kBadResponse, 422);
   assert(std::strcmp(output.card.hints[0], table_code) == 0);
@@ -392,18 +396,49 @@ int main() {
   offset_before = offset_after = 0;
   // Capacity notices stay meaningful even with a different dataset's active
   // request failure. Failed staging never replaces previously usable rows.
-  store.recordDataset(1, MatchStore::Dataset::kTable, 1000000, 1000000, true,
-                      Cause::kNone);
-  store.beginTable(1);
+  store.recordDataset(store.currentSource(1), MatchStore::Dataset::kTable,
+                      1000000, 1000000, true, Cause::kNone);
+  store.beginTable(store.currentSource(1));
   StoredRow overflow_row;
   for (unsigned i = 0; i <= cfg::kStoreTableRows; ++i)
     store.appendRow(overflow_row);
   assert(!store.commitTable(false));
-  states[0].notices = store.notices(1);
+  states[0].notices = store.notices(store.currentSource(1));
   renderModel(1000001);
-  assert(output.layout == ui::Layout::kCard && presentation.card_fault == 1);
+  assert(output.layout() == ui::Layout::kCard && presentation.card_fault == 1);
   errorCode(table_code, cfg::kProviderDefault, Cause::kStoreFull, 0);
   assert(std::strcmp(output.card.hints[0], table_code) == 0);
+  // The same output becomes an image error card after repository presentation,
+  // then returns to sport data without retaining card bytes or old name
+  // targets.
+  setup();
+  policy.frame = true;
+  renderModel(1100000);
+  assert(output.layout() == ui::Layout::kImage && labels.count == 0);
+  images::Status missing;
+  missing.active = true;
+  missing.reason = images::Failure::kMissing;
+  missing.actual = images::FileSource::kNone;
+  ui::Presenter(config.device, output, config.screens, presentation, 0, nullptr,
+                nullptr, &labels, &config, "test")
+      .finishStatus(last_status, 1100000, missing);
+  assert(output.layout() == ui::Layout::kCard && labels.count == 0);
+  assert(std::strcmp(output.card.title, "Bild nicht verfügbar") == 0);
+  assert(output.card.line_count == 2 && output.card.hint_count == 2);
+  assert(std::strcmp(output.card.lines[1],
+                     images::failureCode(missing.reason)) == 0);
+  policy.frame = false;
+  for (auto& phase : policy.shared) {
+    for (auto& rule : phase) rule.automatic = false;
+    phase[screen::index(screen::Type::kLiveSingle)].automatic = true;
+  }
+  renderModel(1100100);
+  assert(output.layout() == ui::Layout::kOwnMatch && labels.count == 2);
+  assert(std::strcmp(output.own.home, "Home full name") == 0);
+  assert(std::strcmp(output.own.away, "Away full name") == 0);
+  assert(labels.entries[0].output == output.own.home &&
+         labels.entries[1].output == output.own.away);
+  assert(output.own.shootout.count == 0 && !output.own.shootout.active);
   std::puts(
       "actual Presenter: time periods, real18 attempts/windows/correction, "
       "missing data, short targets, overview layouts, group-local "

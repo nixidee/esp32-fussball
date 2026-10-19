@@ -1,6 +1,7 @@
 #include "schedule_coverage.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <limits>
 
 #include "binary_codec.h"
@@ -12,20 +13,13 @@ namespace {
 constexpr uint32_t kMaximum = std::numeric_limits<uint32_t>::max();
 
 bool validReason(Reason reason) { return reason <= Reason::kRange; }
-bool validIdentity(const Identity& key) {
-  return key.source != 0 && key.incarnation != 0 && key.id != 0 &&
-         static_cast<unsigned>(key.provider) < cfg::kProviderCount;
-}
-bool validSpan(const Span& span, cfg::Provider provider) {
-  if (span.season.length > span.season.kCapacity ||
-      !settings::isValidSeason(provider, span.season.view()) ||
-      span.completeness > Completeness::kComplete ||
+bool validSpan(const Span& span) {
+  if (span.completeness > Completeness::kComplete ||
       span.proof > Proof::kDayWhitelist || !validReason(span.reason))
     return false;
   if (span.completeness != Completeness::kComplete) return true;
-  return !span.season.empty() && span.proof != Proof::kNone &&
-         span.reason == Reason::kNone && span.checked_utc != 0 &&
-         span.from != 0 && span.from <= span.to &&
+  return span.proof != Proof::kNone && span.reason == Reason::kNone &&
+         span.checked_utc != 0 && span.from != 0 && span.from <= span.to &&
          (span.previous == 0 ||
           (span.previous >= span.from && span.previous <= span.to &&
            span.previous <= span.checked_utc)) &&
@@ -46,15 +40,17 @@ uint32_t gapFrom(const Span& span) {
 uint32_t gapTo(const Span& span) {
   return span.next == 0 ? span.to : span.next;
 }
-bool covers(const Evidence& evidence, uint32_t from, uint32_t to,
-            uint32_t now) {
+bool covers(
+    const std::array<const Evidence*, cfg::kCoverageMaxSeasons>& evidence,
+    uint32_t from, uint32_t to, uint32_t now) {
   // A season proves absence only inside its own remembered neighbour gap.
   // Another season may join adjacent calendar coverage, but cannot hide the
   // unknown remainder of an overlapping season after its next kickoff passes.
   // Partial/stale overlapping seasons are likewise not replaced by a fresh
   // proof for a different season of this competition.
-  for (unsigned i = 0; i < evidence.season_count; ++i) {
-    const auto& span = evidence.seasons[i];
+  for (const auto* proof : evidence) {
+    if (!proof || !proof->populated) continue;
+    const auto& span = proof->span;
     if (span.from == 0 || span.from > span.to) return false;
     const uint32_t first = std::max(from, span.from);
     const uint32_t last = std::min(to, span.to);
@@ -67,8 +63,9 @@ bool covers(const Evidence& evidence, uint32_t from, uint32_t to,
   bool begun = false;
   // Two passes join at most two spans, regardless of their storage order.
   for (std::size_t pass = 0; pass < cfg::kCoverageMaxSeasons; ++pass)
-    for (unsigned i = 0; i < evidence.season_count; ++i) {
-      const auto& span = evidence.seasons[i];
+    for (const auto* proof : evidence) {
+      if (!proof || !proof->populated) continue;
+      const auto& span = proof->span;
       if (usable(span, now) != Reason::kNone) continue;
       const uint32_t first = gapFrom(span), last = gapTo(span);
       if ((!begun && first <= from && last >= from) ||
@@ -85,149 +82,159 @@ bool same(const budget::Record& a, const budget::Record& b) {
 bool validArray(const EvidenceArray& evidence) {
   for (std::size_t i = 0; i < evidence.size(); ++i) {
     if (!validate(evidence[i])) return false;
-    if (evidence[i].id == 0) continue;
+    if (!evidence[i].source.valid()) continue;
     for (std::size_t j = 0; j < i; ++j)
-      if (evidence[j].id == evidence[i].id ||
-          (evidence[j].id != 0 &&
-           evidence[j].incarnation == evidence[i].incarnation))
-        return false;
+      if (evidence[j].source == evidence[i].source) return false;
   }
   return true;
+}
+bool sameFamily(const SourceKey& a, const SourceKey& b) {
+  return a.valid() && b.valid() && a.provider == b.provider &&
+         a.competition == b.competition;
+}
+bool required(const SourceKey& source,
+              std::span<const Requirement> requirements) {
+  SourceKey key;
+  for (const auto& requirement : requirements) {
+    if (!requirement.competition || !requirement.source) continue;
+    for (uint8_t season = 0; season < cfg::kCoverageMaxSeasons; ++season)
+      if (seasonSource(*requirement.source, season, key) && key == source)
+        return true;
+  }
+  return false;
+}
+auto proofPair(const EvidenceArray& evidence, const SourceKey& source) {
+  std::array<const Evidence*, cfg::kCoverageMaxSeasons> result{};
+  SourceKey key;
+  for (uint8_t i = 0; i < result.size(); ++i)
+    if (seasonSource(source, i, key)) result[i] = find(evidence, key);
+  return result;
 }
 }  // namespace
 
-uint64_t sourceHash(const settings::Source& source) noexcept {
-  uint64_t hash = UINT64_C(14695981039346656037);
-  const auto byte = [&](uint8_t value) {
-    hash = (hash ^ value) * UINT64_C(1099511628211);
-  };
-  byte(static_cast<uint8_t>(source.provider));
-  const auto text = [&](std::string_view value) {
-    byte(static_cast<uint8_t>(value.size()));
-    for (const unsigned char c : value) byte(c);
-  };
-  text(source.competition.view());
-  text(source.season.view());
-  return hash == 0 ? 1 : hash;
-}
-
-Identity identity(const settings::CompetitionRoute& competition) noexcept {
-  return {sourceHash(competition.primary), competition.incarnation,
-          competition.id, competition.primary.provider};
-}
-
-void bind(Evidence& evidence, const Identity& source) noexcept {
-  evidence.source = source.source;
-  evidence.incarnation = source.incarnation;
-  evidence.id = source.id;
-  evidence.provider = source.provider;
-  evidence.season_count = 0;
-  evidence.blocked = Reason::kUnknown;
-  for (auto& span : evidence.seasons) span = {};
-}
-
-bool matches(const Evidence& evidence, const Identity& source) noexcept {
-  return evidence.source == source.source &&
-         evidence.incarnation == source.incarnation &&
-         evidence.id == source.id && evidence.provider == source.provider;
-}
-
-bool validate(const Evidence& evidence) noexcept {
-  if (!validReason(evidence.blocked) ||
-      evidence.season_count > cfg::kCoverageMaxSeasons)
-    return false;
-  if (evidence.id == 0) {
-    if (evidence.source != 0 || evidence.incarnation != 0 ||
-        evidence.season_count != 0 ||
-        evidence.provider != cfg::kProviderDefault ||
-        evidence.blocked != Reason::kUnknown)
-      return false;
-  } else if (!validIdentity({evidence.source, evidence.incarnation, evidence.id,
-                             evidence.provider})) {
-    return false;
-  }
-  for (unsigned i = 0; i < evidence.seasons.size(); ++i) {
-    const auto& span = evidence.seasons[i];
-    if (i >= evidence.season_count) {
-      if (!(span == Span{})) return false;
-      continue;
-    }
-    if (!validSpan(span, evidence.provider)) return false;
-    for (unsigned j = 0; j < i; ++j)
-      if (evidence.seasons[j].season == span.season) return false;
-  }
-  return true;
-}
-
-Reason accept(Evidence& evidence, const Identity& source,
-              const Span& span) noexcept {
-  if (!validIdentity(source) || !matches(evidence, source))
-    return Reason::kIdentity;
-  if (!validate(evidence)) return Reason::kRange;
-  if (!validSpan(span, source.provider)) return Reason::kRange;
-  if (span.season.empty()) {
-    // Missing metadata is a failure of this refresh, not a third anonymous
-    // season consuming the bounded slots beside useful diagnostic evidence.
-    invalidate(evidence, span.reason == Reason::kNone ? Reason::kMissingMetadata
-                                                      : span.reason);
-    return Reason::kNone;
-  }
-  unsigned slot = 0;
-  while (slot < evidence.season_count &&
-         !(evidence.seasons[slot].season == span.season))
-    ++slot;
-  if (slot >= cfg::kCoverageMaxSeasons) return Reason::kSeasonLimit;
-  evidence.seasons[slot] = span;
-  if (slot == evidence.season_count) ++evidence.season_count;
-  evidence.blocked = span.completeness == Completeness::kComplete
-                         ? Reason::kNone
-                     : span.reason == Reason::kNone ? Reason::kPartialResponse
-                                                    : span.reason;
-  return Reason::kNone;
-}
-
-void invalidate(Evidence& evidence, Reason reason) noexcept {
-  evidence.blocked = reason == Reason::kNone ? Reason::kUnknown : reason;
-  // A later success for another season may clear the global block. It must
-  // not re-certify an older proof contradicted by normal data or a failed
-  // refresh whose season could not be established. Keep each lost proof
-  // partial until that particular season is successfully collected again.
-  for (auto& span : evidence.seasons)
-    if (span.completeness == Completeness::kComplete) {
-      span.completeness = Completeness::kPartial;
-      span.reason = evidence.blocked;
-    }
-}
-
-bool observeNormal(Evidence& evidence, const Identity& source, uint32_t kickoff,
-                   bool definite) noexcept {
-  Reason why = Reason::kNone;
-  if (!validate(evidence)) {
-    invalidate(evidence, Reason::kRange);
+bool seasonSource(const SourceKey& source, uint8_t index,
+                  SourceKey& out) noexcept {
+  if (!source.valid() || index >= cfg::kCoverageMaxSeasons) return false;
+  if (!index) {
+    out = source;
     return true;
   }
-  if (!matches(evidence, source))
-    why = Reason::kIdentity;
-  else if (kickoff == 0 || !definite)
-    why = Reason::kUndatedFixture;
-  else
-    for (unsigned i = 0; i < evidence.season_count; ++i) {
-      const auto& span = evidence.seasons[i];
-      if (span.completeness == Completeness::kComplete &&
-          (span.previous ? kickoff > span.previous : kickoff >= span.from) &&
-          (span.next ? kickoff < span.next : kickoff <= span.to)) {
-        why = Reason::kTimingChanged;
-        break;
-      }
+  const auto season = source.season.view();
+  const auto year = values::positiveUint32(season);
+  if (season.size() != 4 || !year || year >= 9999) return false;
+  char next[5];
+  std::snprintf(next, sizeof(next), "%04u", unsigned(year + 1));
+  return out.assign(source.provider, source.competition.view(), next);
+}
+Evidence* find(EvidenceArray& evidence, const SourceKey& source) noexcept {
+  if (!source.valid()) return nullptr;
+  for (auto& proof : evidence)
+    if (proof.source == source) return &proof;
+  return nullptr;
+}
+const Evidence* find(const EvidenceArray& evidence,
+                     const SourceKey& source) noexcept {
+  if (!source.valid()) return nullptr;
+  for (const auto& proof : evidence)
+    if (proof.source == source) return &proof;
+  return nullptr;
+}
+bool synchronize(EvidenceArray& evidence,
+                 std::span<const Requirement> requirements) noexcept {
+  bool changed = false;
+  for (auto& proof : evidence)
+    if (proof.source.valid() && !required(proof.source, requirements)) {
+      proof = {};
+      changed = true;
     }
+  SourceKey key;
+  for (const auto& requirement : requirements) {
+    if (!requirement.competition || !requirement.source) continue;
+    for (uint8_t season = 0; season < cfg::kCoverageMaxSeasons; ++season) {
+      if (!seasonSource(*requirement.source, season, key) ||
+          find(evidence, key))
+        continue;
+      for (auto& proof : evidence)
+        if (!proof.source.valid()) {
+          bind(proof, key);
+          changed = true;
+          break;
+        }
+    }
+  }
+  return changed;
+}
+void bind(Evidence& evidence, const SourceKey& source) noexcept {
+  evidence = {};
+  if (source.valid()) evidence.source = source;
+}
+bool matches(const Evidence& evidence, const SourceKey& source) noexcept {
+  return source.valid() && evidence.source == source;
+}
+bool validate(const Evidence& evidence) noexcept {
+  if (!evidence.source.valid())
+    return evidence.source == SourceKey{} && !evidence.populated &&
+           evidence.span == Span{};
+  return evidence.populated ? validSpan(evidence.span)
+                            : evidence.span == Span{};
+}
+Reason accept(Evidence& evidence, const SourceKey& source,
+              const Span& span) noexcept {
+  if (!matches(evidence, source)) return Reason::kIdentity;
+  if (!validate(evidence) || !validSpan(span)) return Reason::kRange;
+  evidence.span = span;
+  evidence.populated = true;
+  return Reason::kNone;
+}
+Reason accept(EvidenceArray& evidence, const SourceKey& source,
+              const Span& span) noexcept {
+  auto* proof = find(evidence, source);
+  if (!proof) return Reason::kIdentity;
+  if (span.reason == Reason::kIdentity ||
+      span.reason == Reason::kMissingMetadata)
+    invalidateFamily(evidence, source, span.reason);
+  return accept(*proof, source, span);
+}
+void invalidate(Evidence& evidence, Reason reason) noexcept {
+  if (!evidence.source.valid()) return;
+  evidence.populated = true;
+  evidence.span.completeness = Completeness::kPartial;
+  evidence.span.reason = reason == Reason::kNone ? Reason::kUnknown : reason;
+}
+void invalidateFamily(EvidenceArray& evidence, const SourceKey& source,
+                      Reason reason) noexcept {
+  for (auto& proof : evidence)
+    if (sameFamily(proof.source, source)) invalidate(proof, reason);
+}
+bool observeNormal(EvidenceArray& evidence, const SourceKey& source,
+                   uint32_t kickoff, bool definite) noexcept {
+  Reason why = Reason::kNone;
+  for (const auto& proof : evidence) {
+    if (!sameFamily(proof.source, source)) continue;
+    if (!validate(proof)) {
+      why = Reason::kRange;
+      break;
+    }
+    if (!kickoff || !definite) {
+      why = Reason::kUndatedFixture;
+      break;
+    }
+    if (!proof.populated || proof.span.completeness != Completeness::kComplete)
+      continue;
+    const auto& span = proof.span;
+    if ((span.previous ? kickoff > span.previous : kickoff >= span.from) &&
+        (span.next ? kickoff < span.next : kickoff <= span.to)) {
+      why = Reason::kTimingChanged;
+      break;
+    }
+  }
   if (why == Reason::kNone) return false;
-  invalidate(evidence, why);
+  invalidateFamily(evidence, source, why);
   return true;
 }
 
-void Collector::begin(const Identity& source, std::string_view season,
-                      uint32_t from, uint32_t to, uint32_t anchor_utc,
-                      Proof proof) noexcept {
+void Collector::begin(const SourceKey& source, uint32_t from, uint32_t to,
+                      uint32_t anchor_utc, Proof proof) noexcept {
   source_ = source;
   span_ = {};
   span_.completeness = Completeness::kPartial;
@@ -237,9 +244,8 @@ void Collector::begin(const Identity& source, std::string_view season,
   span_.to = to;
   anchor_ = anchor_utc;
   rows_ = first_ = last_ = 0;
-  if (!validIdentity(source)) failed(Reason::kIdentity);
-  if (!span_.season.assign(season) ||
-      !settings::isValidSeason(source.provider, season))
+  if (!source.valid()) failed(Reason::kIdentity);
+  if (!settings::isValidSeason(source.provider, source.season.view()))
     failed(Reason::kRange);
 }
 
@@ -276,7 +282,7 @@ const Span& Collector::finish(uint32_t checked_utc,
                               const Integrity& integrity) noexcept {
   span_.checked_utc = checked_utc;
   if (!integrity.response_complete) failed(Reason::kPartialResponse);
-  if (!integrity.metadata_verified || span_.season.empty() ||
+  if (!integrity.metadata_verified || !source_.valid() ||
       span_.proof == Proof::kNone)
     failed(Reason::kMissingMetadata);
   if (!integrity.pages_complete ||
@@ -288,51 +294,41 @@ const Span& Collector::finish(uint32_t checked_utc,
     failed(Reason::kUncovered);
   if (span_.reason == Reason::kNone) {
     span_.completeness = Completeness::kComplete;
-    if (!validSpan(span_, source_.provider)) failed(Reason::kRange);
+    if (!validSpan(span_)) failed(Reason::kRange);
   }
   return span_;
 }
 
 Assessment assess(const EvidenceArray& evidence,
-                  const settings::CompetitionRoutes& competitions,
-                  uint32_t now_utc, uint16_t threshold_days) noexcept {
+                  std::span<const Requirement> requirements, uint32_t now_utc,
+                  uint16_t threshold_days) noexcept {
   Assessment out;
-  if (now_utc == 0) {
+  if (!now_utc) {
     out.reason = Reason::kClock;
     return out;
   }
   if (!cfg::kScreenBreakDaysRange.contains(threshold_days) ||
-      competitions.entries.count > cfg::kCompetitionMax ||
-      !validArray(evidence)) {
+      requirements.size() > cfg::kCompetitionMax || !validArray(evidence)) {
     out.reason = Reason::kRange;
     return out;
   }
-  const auto find =
-      [&](const settings::CompetitionRoute& entry) -> const Evidence* {
-    for (const auto& row : evidence)
-      if (row.id == entry.id) return &row;
-    return nullptr;
-  };
-  for (const auto& entry : competitions.entries) {
-    if (!entry.active) continue;
-    out.competition = entry.id;
-    const auto* row = find(entry);
-    if (row == nullptr) {
+  for (const auto& requirement : requirements) {
+    if (!requirement.competition) continue;
+    out.competition = requirement.competition;
+    if (!requirement.source || !requirement.source->valid()) {
       out.reason = Reason::kMissingMetadata;
       return out;
     }
-    if (!matches(*row, identity(entry))) {
+    const auto pair = proofPair(evidence, *requirement.source);
+    if (!pair[0]) {
       out.reason = Reason::kIdentity;
-      return out;
-    }
-    if (row->blocked != Reason::kNone) {
-      out.reason = row->blocked;
       return out;
     }
     bool any = false;
     Reason why = Reason::kMissingMetadata;
-    for (unsigned i = 0; i < row->season_count; ++i) {
-      const auto& span = row->seasons[i];
+    for (const auto* proof : pair) {
+      if (!proof || !proof->populated) continue;
+      const auto& span = proof->span;
       const auto reason = usable(span, now_utc);
       if (reason != Reason::kNone) {
         why = reason;
@@ -340,10 +336,10 @@ Assessment assess(const EvidenceArray& evidence,
       }
       any = true;
       for (const auto kickoff : {span.previous, span.next}) {
-        if (kickoff == 0) continue;
+        if (!kickoff) continue;
         if (kickoff <= now_utc)
           out.previous = std::max(out.previous, kickoff);
-        else if (out.next == 0 || kickoff < out.next)
+        else if (!out.next || kickoff < out.next)
           out.next = kickoff;
       }
     }
@@ -352,14 +348,15 @@ Assessment assess(const EvidenceArray& evidence,
       return out;
     }
   }
-  if (out.previous == 0 || out.next == 0) {
+  if (!out.previous || !out.next) {
     out.reason = Reason::kMissingNeighbours;
     return out;
   }
-  for (const auto& entry : competitions.entries) {
-    if (!entry.active) continue;
-    if (!covers(*find(entry), out.previous, out.next, now_utc)) {
-      out.competition = entry.id;
+  for (const auto& requirement : requirements) {
+    if (!requirement.competition) continue;
+    if (!covers(proofPair(evidence, *requirement.source), out.previous,
+                out.next, now_utc)) {
+      out.competition = requirement.competition;
       out.reason = Reason::kUncovered;
       return out;
     }

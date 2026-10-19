@@ -28,9 +28,9 @@ inline football::DatasetStatus contentStatus(const football::MatchStore& store,
                                              uint8_t competition,
                                              screen::Type type, int64_t utc) {
   const auto dataset = contentDataset(type);
-  auto status = store.datasetStatus(competition, dataset);
+  auto status = store.viewDatasetStatus(competition, dataset);
   if (status.cause == football::Cause::kNone)
-    status.cause = store.datasetNotice(competition, dataset, utc);
+    status.cause = store.viewDatasetNotice(competition, dataset, utc);
   return status;
 }
 sequence::Content content(const sequence::Entry& entry, sequence::PageMode mode,

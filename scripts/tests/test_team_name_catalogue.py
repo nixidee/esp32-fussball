@@ -7,10 +7,12 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
 SPEC = importlib.util.spec_from_file_location(
     "embed_team_names", ROOT / "scripts/embed_team_names.py")
 ASSET = importlib.util.module_from_spec(SPEC)

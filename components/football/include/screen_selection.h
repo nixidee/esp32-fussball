@@ -15,13 +15,7 @@ namespace football::selection {
 
 using ScreenPhase = settings::screen_policy::Phase;
 
-struct MatchKey {
-  uint32_t id = 0;
-  uint8_t competition = 0;
-  cfg::Provider provider = cfg::Provider::kOpenLigaDb;
-  bool valid() const { return id != 0 && competition != 0; }
-  bool operator==(const MatchKey&) const = default;
-};
+using ::football::MatchKey;
 
 struct Input {
   settings::screen_policy::SelectionRules rules;
@@ -50,6 +44,7 @@ struct Input {
 
 struct Selection {
   ScreenPhase phase = ScreenPhase::kIdle;
+  uint8_t competition = 0;  // configured focus; independent of shared facts
   MatchKey focus;  // only the focused special own match, otherwise empty
 };
 

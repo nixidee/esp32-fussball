@@ -197,10 +197,12 @@ SettingsDecode readSelection(json::Input input, football::SelectionRequest& out,
         });
         if (result != SettingsDecode::kOk) return result;
         value.provider = static_cast<cfg::Provider>(provider);
-        const bool openliga = value.provider == cfg::Provider::kOpenLigaDb;
-        const bool used[] = {
-            value.teams, value.teams || openliga, true,
-            !value.teams && value.provider == cfg::Provider::kApiFootball};
+        const auto fields =
+            settings::selectionFields(value.provider, value.teams);
+        const bool used[] = {bool(fields & settings::kSelectionCompetition),
+                             bool(fields & settings::kSelectionSeason),
+                             bool(fields & settings::kSelectionSearch),
+                             bool(fields & settings::kSelectionCountry)};
         for (unsigned i = 0; i < 4; ++i) {
           if (!used[i] || text[i].kind == Kind::kNull) continue;
           const auto* key = keys[i + 3];
@@ -227,15 +229,10 @@ SettingsDecode readSelection(json::Input input, football::SelectionRequest& out,
         if (!assign(value.competition, 0) || !assign(value.season, 1) ||
             !assign(value.search, 2) || !assign(value.country, 3))
           return d.result;
-        if (!settings::isValidIdentifier(value.competition.data))
-          d.reject("competition", Reason::kInvalid);
-        else if (!settings::isValidSeason(value.provider, value.season.data))
-          d.reject("season", Reason::kInvalid);
-        else if (value.teams && value.competition.empty())
-          d.reject("competition", Reason::kRequired);
-        else if (value.teams && value.provider == cfg::Provider::kApiFootball &&
-                 value.season.empty())
-          d.reject("season", Reason::kRequired);
+        if (!settings::validateSelection(value.provider, value.teams,
+                                         value.competition.data,
+                                         value.season.data, d.violation))
+          return SettingsDecode::kViolation;
         return d.result;
       });
 }

@@ -2,10 +2,12 @@
 // selection boundaries and grouping, not current provider/device behavior.
 #include <unity.h>
 
+#include "../source_support.h"
 #include "screen_selection.h"
 
 namespace {
 using namespace football;
+namespace source_test = football::test_source;
 namespace sel = football::selection;
 namespace policy = settings::screen_policy;
 MatchStore store;
@@ -34,16 +36,14 @@ StoredMatch& match(uint8_t competition, uint32_t id, int64_t kickoff,
                    uint8_t round = 0, int64_t seen = 0) {
   StoredMatch m;
   m.id = id;
-  m.competition = competition;
-  m.provider = competitions.find(competition)->primary.provider;
+  m.source = source_test::source(
+      store, competition, competitions.find(competition)->primary.provider,
+      competitions.find(competition)->club.team, {seen, 1});
   m.kickoff = kickoff;
   m.phase = phase;
   m.round = round;
-  m.home =
-      store.team(competition, m.provider, own ? 40 : 1000000 + id * 2, "Home");
-  m.away = store.team(competition, m.provider, 1000001 + id * 2, "Away");
-  store.selectClub(competition, m.provider,
-                   competitions.find(competition)->club.team, {seen, 1});
+  m.home = store.team(m.source, own ? 40 : 1000000 + id * 2, "Home");
+  m.away = store.team(m.source, 1000001 + id * 2, "Away");
   auto* out = store.upsert(m, {seen, 1});
   TEST_ASSERT_NOT_NULL(out);
   return *out;
@@ -92,7 +92,7 @@ void test_own_special_off_is_an_ordinary_single_without_losing_ownership() {
   const auto selected = sel::select(in);
   TEST_ASSERT_EQUAL(policy::Phase::kOtherGames, selected.phase);
   TEST_ASSERT_EQUAL_UINT32(10, sel::single(in, selected, c).match.id);
-  TEST_ASSERT_TRUE(store.isOwn(*store.find(1, kProvider, 10)));
+  TEST_ASSERT_TRUE(store.isOwn(*store.find(source_test::source(store, 1), 10)));
 }
 
 void test_unique_reported_live_beats_prewindow_and_multiple_live_use_club_static() {
@@ -136,25 +136,26 @@ void test_unfinished_estimate_and_reported_live_release_at_110_and_240() {
   TEST_ASSERT_FALSE(sel::window(input(kickoff + 240 * 60), c, reported).active);
   TEST_ASSERT_NOT_EQUAL(policy::Phase::kOwn,
                         sel::select(input(kickoff + 240 * 60)).phase);
-  TEST_ASSERT_EQUAL(Phase::kLive, store.find(1, kProvider, 10)->phase);
+  TEST_ASSERT_EQUAL(Phase::kLive,
+                    store.find(source_test::source(store, 1), 10)->phase);
 }
 
 void test_unknown_kickoff_and_interruption_keep_the_original_bounded_slot() {
   const auto& c = competition(1, true);
   const auto observed = at("2026-10-17T14:00:00Z");
   match(1, 10, 0, Phase::kLive, true, 0, observed);
-  auto suspended = *store.find(1, kProvider, 10);
+  auto suspended = *store.find(source_test::source(store, 1), 10);
   suspended.phase = Phase::kSuspended;
   store.upsert(suspended, {observed + 60, 2});
-  const auto& m = *store.find(1, kProvider, 10);
+  const auto& m = *store.find(source_test::source(store, 1), 10);
   TEST_ASSERT_TRUE(sel::window(input(observed + 240 * 60 - 1), c, m).active);
   TEST_ASSERT_FALSE(sel::window(input(observed + 240 * 60), c, m).active);
   TEST_ASSERT_EQUAL_UINT32(0, m.kickoff);
   TEST_ASSERT_EQUAL_UINT32(0, m.finished_at);
   match(1, 11, 0, Phase::kSuspended, true, 0, observed);
-  TEST_ASSERT_FALSE(
-      sel::window(input(observed + 60), c, *store.find(1, kProvider, 11))
-          .active);
+  TEST_ASSERT_FALSE(sel::window(input(observed + 60), c,
+                                *store.find(source_test::source(store, 1), 11))
+                        .active);
 }
 
 void test_overlapping_own_buffers_handoff_at_clamped_midpoint() {
@@ -186,10 +187,10 @@ void test_verified_round_clusters_split_but_content_keeps_the_complete_round() {
   const auto period = sel::phasePeriod(in, c);
   TEST_ASSERT_TRUE(period.valid());
   TEST_ASSERT_TRUE(period.verified);
-  TEST_ASSERT_TRUE(
-      sel::roundContains(in, period, *store.find(1, kProvider, 12)));
-  TEST_ASSERT_FALSE(
-      sel::roundContains(in, period, *store.find(1, kProvider, 13)));
+  TEST_ASSERT_TRUE(sel::roundContains(
+      in, period, *store.find(source_test::source(store, 1), 12)));
+  TEST_ASSERT_FALSE(sel::roundContains(
+      in, period, *store.find(source_test::source(store, 1), 13)));
   TEST_ASSERT_FALSE(
       sel::phasePeriod(input(at("2026-10-20T00:00:00Z")), c).valid());
   TEST_ASSERT_EQUAL(policy::Phase::kMatchday, sel::select(in).phase);
@@ -204,10 +205,10 @@ void test_fallback_has_four_inclusive_dates_and_one_free_intermediate_day() {
   const auto in = input(at("2026-10-17T00:00:00Z"));
   const auto first = sel::round(in, c, cfg::MatchdayMode::kCurrent);
   TEST_ASSERT_FALSE(first.verified);
-  TEST_ASSERT_TRUE(
-      sel::roundContains(in, first, *store.find(1, kProvider, 12)));
-  TEST_ASSERT_FALSE(
-      sel::roundContains(in, first, *store.find(1, kProvider, 13)));
+  TEST_ASSERT_TRUE(sel::roundContains(
+      in, first, *store.find(source_test::source(store, 1), 12)));
+  TEST_ASSERT_FALSE(sel::roundContains(
+      in, first, *store.find(source_test::source(store, 1), 13)));
   store.clear();
   match(1, 10, at("2026-10-16T18:00:00Z"));
   match(1, 11, at("2026-10-19T18:00:00Z"));
@@ -215,7 +216,7 @@ void test_fallback_has_four_inclusive_dates_and_one_free_intermediate_day() {
       sel::phasePeriod(input(at("2026-10-17T00:00:00Z")), c).valid());
 }
 
-void test_only_provider_round_provenance_can_verify_a_label() {
+void test_only_normalized_round_provenance_can_verify_a_label() {
   auto& c = competition(1);
   c.primary.provider = cfg::Provider::kFootballData;
   auto& fd = match(1, 10, at("2026-10-17T18:00:00Z"));
@@ -226,8 +227,21 @@ void test_only_provider_round_provenance_can_verify_a_label() {
   c.primary.provider = cfg::Provider::kApiFootball;
   auto& api = match(1, 20, at("2026-10-17T18:00:00Z"));
   api.label = store.label("Regular Season - 5");
+  api.flags |= kMatchRoundLabel;
   TEST_ASSERT_TRUE(
       sel::phasePeriod(input(at("2026-10-17T12:00:00Z")), c).verified);
+  // Provider identity cannot repair missing normalization or invalidate facts.
+  for (unsigned provider = 0; provider < cfg::kProviderCount; ++provider) {
+    store.clear();
+    c.primary.provider = static_cast<cfg::Provider>(provider);
+    auto& normalized = match(1, 30, at("2026-10-17T18:00:00Z"));
+    normalized.label = store.label("Quarterfinals");
+    TEST_ASSERT_FALSE(
+        sel::phasePeriod(input(at("2026-10-17T12:00:00Z")), c).verified);
+    normalized.flags |= kMatchRoundLabel;
+    TEST_ASSERT_TRUE(
+        sel::phasePeriod(input(at("2026-10-17T12:00:00Z")), c).verified);
+  }
 }
 
 void test_matchday_current_holds_but_next_never_uses_a_held_only_group() {
@@ -319,7 +333,7 @@ int main() {
       test_verified_round_clusters_split_but_content_keeps_the_complete_round);
   RUN_TEST(
       test_fallback_has_four_inclusive_dates_and_one_free_intermediate_day);
-  RUN_TEST(test_only_provider_round_provenance_can_verify_a_label);
+  RUN_TEST(test_only_normalized_round_provenance_can_verify_a_label);
   RUN_TEST(test_matchday_current_holds_but_next_never_uses_a_held_only_group);
   RUN_TEST(
       test_static_result_uses_finish_day_then_preview_even_after_dst_change);

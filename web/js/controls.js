@@ -56,30 +56,26 @@ function confirmAction(title, message, run, word = 'Übernehmen', extra = '') {
     };
 }
 function opts(rows, value) {
-    return rows.map(([v, n]) => `<option value="${esc(v)}" ${eq(v, value) ? 'selected' : ''}>${esc(n)}</option>`).join('');
+    return rows.map(([v, n]) => `<option value="${esc(v)}" ${sameObject(v, value) ? 'selected' : ''}>${esc(n)}</option>`).join('');
 }
 function helpButton(text, path = '') {
     return text ? `<button type="button" class="btn ghost policy-help" data-act="policyHelp" data-path="${esc(path)}" data-help="${ht(text)}" aria-label="${ht('Hilfe')}">?</button>` : '';
 }
 
-function F(path, type = 'text', help = '', options = null, disabled = false, label = null) {
-    disabled = disabled || S.saving;
-    const value = get(S.draft, path), ssid = path === 'wifi_ssid' ? ssidEditor(value) : null, id = 'f-' + path.replace(/[^\w-]/g, '-'), name = t(label || LABEL[parts(path).at(-1)] || path) + (ssid?.base64 ? ' (Base64)' : ''), bound = type === 'number' ? /^(screen_policy\.|competitions\[\d+\]\.display\.)/.test(path) ? screenBound(path) : S.schema.bounds[path] || S.schema.bounds[path.replace(/\[\d+\]$/, '')] || S.schema.bounds[parts(path).at(-1)] || (/text_scale$/.test(path) ? S.schema.text_scale : null) : null;
+// Rendering receives a complete field description, never the application state.
+function F(field) {
+    const {path, type, help, options, disabled, value, kind, bound, maximum, unit, name, hint} = field;
+    const id = 'f-' + path.replace(/[^\w-]/g, '-');
     let control;
     if (type === 'switch')
-        control = `<label class="switch"><input id="${id}" type="checkbox" data-path="${path}" data-refresh ${value ? 'checked' : ''} ${disabled ? 'disabled' : ''}><span class="track"></span><span>${esc(name)}</span></label>`;
+        control = `<label class="switch"><input id="${id}" type="checkbox" data-path="${path}" data-kind="bool" data-refresh ${value ? 'checked' : ''} ${disabled ? 'disabled' : ''}><span class="track"></span><span>${esc(name)}</span></label>`;
     else if (type === 'select')
-        control = `<select id="${id}" data-path="${path}" data-kind="${typeof value === 'number' ? 'num' : 'str'}" data-refresh class="w-m" ${disabled ? 'disabled' : ''}>${opts(options || [], value)}</select>`;
+        control = `<select id="${id}" data-path="${path}" data-kind="${kind}" data-refresh class="w-m" ${disabled ? 'disabled' : ''}>${opts(options || [], value)}</select>`;
     else if (type === 'colour')
-        control = `<input id="${id}" type="color" data-path="${path}" data-kind="colour" value="${colour(value)}" ${disabled ? 'disabled' : ''}>`;
-    else {
-        const max = ssid?.base64 ? 44 : S.schema.text[path], v = ssid?.base64 ? ssid.value : type === 'time' && Number.isInteger(value) ? String(Math.floor(value / 60)).padStart(2, '0') + ':' + String(value % 60).padStart(2, '0') : value;
-        control = `<input id="${id}" type="${type === 'number' ? 'number' : type === 'time' ? 'time' : 'text'}" class="${type === 'number' || type === 'time' ? 'w-s' : 'w-l'}" data-path="${path}" data-kind="${ssid?.base64 ? 'ssid-base64' : type === 'number' ? 'num' : type === 'time' ? 'time' : 'str'}" value="${esc(v)}" ${bound ? `min="${bound[0]}" max="${bound[1]}" step="1"` : ''} ${max ? `maxlength="${max}"` : ''} ${disabled ? 'disabled' : ''}>`;
-    }
-    const hint = [
-        bound ? t('Erlaubter Bereich') + ': ' + bound.join('–') : '', ssid?.base64 ? t('WLAN-Name als Base64: höchstens 32 Originalbytes. Base64 direkt bearbeiten oder ein gefundenes Netzwerk auswählen.') : S.schema.text[path] ? tf('Höchstens % Byte UTF-8', S.schema.text[path]) : ''
-    ].filter(Boolean).join(' ');
-    return `<div class="field ${disabled ? 'off' : ''}" data-field="${path}">${type === 'switch' ? '' : `<div class="field-label"><label for="${id}">${esc(name)}</label>${helpButton(help, path)}</div>`}<div class="ctl">${control}${type === 'switch' ? helpButton(help, path) : ''}${type === 'number' ? `<span class="unit">${/brightness|text_scale/.test(path) ? '%' : /_min$/.test(path) ? 'min' : /scroll_repeat_ms/.test(path) ? 'ms' : (/_s(\[\d+\])?$/.test(path) || /^screen_policy\.(phases|competitions).*\[2\]$/.test(path)) ? 's' : ''}</span>` : ''}</div>${hint ? `<div class="help">${esc(hint)}</div>` : ''}<div class="field-error" data-error="${path}"></div></div>`;
+        control = `<input id="${id}" type="color" data-path="${path}" data-kind="${kind}" value="${colour(value)}" ${disabled ? 'disabled' : ''}>`;
+    else
+        control = `<input id="${id}" type="${type === 'number' ? 'number' : type === 'time' ? 'time' : 'text'}" class="${type === 'number' || type === 'time' ? 'w-s' : 'w-l'}" data-path="${path}" data-kind="${kind}" value="${esc(value)}" ${bound ? `min="${bound[0]}" max="${bound[1]}" step="1"` : ''} ${maximum ? `maxlength="${maximum}"` : ''} ${disabled ? 'disabled' : ''}>`;
+    return `<div class="field ${disabled ? 'off' : ''}" data-field="${path}">${type === 'switch' ? '' : `<div class="field-label"><label for="${id}">${esc(name)}</label>${helpButton(help, path)}</div>`}<div class="ctl">${control}${type === 'switch' ? helpButton(help, path) : ''}${type === 'number' ? `<span class="unit">${esc(unit)}</span>` : ''}</div>${hint ? `<div class="help">${esc(hint)}</div>` : ''}<div class="field-error" data-error="${path}"></div></div>`;
 }
 function SEC(key, help = '') {
     const state = secretMode(key), field = state.mode === 'change' ? `<div class="ctl"><input type="password" id="f-${key}" class="w-l" data-secret="${key}" value="${esc(state.value)}" autocomplete="new-password"></div><p class="help">${ht('Leeres Feld behält den gespeicherten Wert.')}</p>` : '';
